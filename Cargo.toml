@@ -28,6 +28,7 @@ name = "lgs"
 path = "src/bin/lgs.rs"
 
 [dependencies]
+libc = "0.2"
 anyhow = "1.0"
 base64 = "0.22"
 bs58 = "0.5"
