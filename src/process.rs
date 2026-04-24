@@ -593,8 +593,12 @@ pub(crate) fn spawn_to_log(cmd: &mut Command, log_path: &Path) -> DynResult<u32>
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(|| {
-            // Create a new session — detaches from controlling terminal
-            libc::setsid();
+            // Create a new session — detaches from controlling terminal.
+            // setsid() returns -1 on failure (e.g. process is already a group leader).
+            let ret = libc::setsid();
+            if ret == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
             Ok(())
         });
     }
