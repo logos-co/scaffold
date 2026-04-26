@@ -1646,6 +1646,32 @@ fn deploy_continues_and_summarizes_mixed_results() {
 }
 
 #[test]
+fn deploy_preflight_targets_localnet_port_when_wallet_omits_sequencer_addr() {
+    let temp = tempdir().expect("tempdir");
+    let lez_path = temp.path().join("lez");
+    fs::create_dir_all(&lez_path).expect("create lez path");
+    write_wallet_stub(&lez_path);
+    let port = unused_local_port();
+    write_scaffold_toml_with_localnet(temp.path(), &lez_path, Some(port), Some(true));
+    write_wallet_config(temp.path(), None);
+    write_guest_program(temp.path(), "hello");
+    write_guest_binary(temp.path(), "hello");
+
+    let url = format!("http://127.0.0.1:{port}");
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("deploy")
+        .arg("hello")
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("cannot deploy programs")
+                .and(predicate::str::contains(&url))
+                .and(predicate::str::contains("sequencer appears unavailable")),
+        );
+}
+
+#[test]
 fn deploy_shows_hint_when_sequencer_is_unreachable_with_configured_addr() {
     let temp = tempdir().expect("tempdir");
     setup_wallet_project(temp.path(), Some("http://127.0.0.1:65535"));
