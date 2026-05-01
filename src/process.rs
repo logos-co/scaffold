@@ -519,6 +519,26 @@ mod logged_tests {
         assert!(parts[2].chars().all(|c| c.is_ascii_digit()));
         assert_eq!(parts[3], "install");
     }
+
+    #[test]
+    #[cfg(unix)]
+    fn daemonized_process_is_own_session_leader() {
+        use tempfile::tempdir;
+        let temp = tempdir().expect("tempdir");
+        let log_path = temp.path().join("test.log");
+
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("30");
+        let child_pid = spawn_to_log(&mut cmd, &log_path).expect("spawn failed");
+
+        let sid = unsafe { libc::getsid(child_pid as libc::pid_t) };
+        assert_eq!(
+            sid as u32, child_pid,
+            "spawned process should be own session leader (SID={sid}, PID={child_pid})"
+        );
+
+        unsafe { libc::kill(child_pid as libc::pid_t, libc::SIGTERM) };
+    }
 }
 
 pub(crate) fn run_capture(cmd: &mut Command, label: &str) -> DynResult<Captured> {

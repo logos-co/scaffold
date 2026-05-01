@@ -273,6 +273,7 @@ If the scenario begins with localnet stopped, run `"$SCAFFOLD_BIN" localnet star
 - `doctor --json` returns parseable JSON with at least `status`, `summary`, `checks`, and `next_steps`.
 - `localnet logs --tail 200` returns useful recent log lines when logs exist.
 - `localnet stop` succeeds cleanly and subsequent status reflects the stopped state.
+- The sequencer survives shell/tmux closure: after `localnet start`, detaching the terminal or tmux session should not kill the sequencer. Verify with `localnet status` from a new shell — `running=true` confirms daemon behavior.
 
 ### Failure Signals / Common Pitfalls
 
