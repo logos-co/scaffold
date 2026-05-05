@@ -29,7 +29,7 @@ use crate::constants::{
 };
 use crate::model::{
     BasecampConfig, Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, ModuleEntry,
-    ModuleRole, RepoBuild, RepoRef, RunConfig,
+    ModuleRole, RepoBuild, RepoRef, RunConfig, RunProfile,
 };
 use crate::DynResult;
 
@@ -93,15 +93,52 @@ pub(crate) fn parse_config(text: &str) -> DynResult<Config> {
     })
 }
 
-/// Parse the `[run]` section. Branch-1 surface is the inline `post_deploy`
-/// only — string (single hook) or array (multiple). `[run.profiles.*]`,
-/// `default_profile`, and `reset` arrive in later branches.
 fn parse_run(doc: &DocumentMut) -> DynResult<RunConfig> {
     let Some(run_table) = doc.get("run").and_then(Item::as_table) else {
         return Ok(RunConfig::default());
     };
-    let post_deploy = parse_post_deploy(run_table.get("post_deploy"))?;
-    Ok(RunConfig { post_deploy })
+
+    let default_profile = read_string(run_table, "default_profile");
+    let inline_reset = run_table
+        .get("reset")
+        .and_then(Item::as_value)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let inline_post_deploy = parse_post_deploy(run_table.get("post_deploy"))?;
+
+    let mut profiles: std::collections::BTreeMap<String, RunProfile> =
+        std::collections::BTreeMap::new();
+    if let Some(profiles_table) = run_table.get("profiles").and_then(Item::as_table) {
+        for (name, item) in profiles_table.iter() {
+            let table = item.as_table().ok_or_else(|| {
+                anyhow!("invalid scaffold.toml: [run.profiles.{name}] is not a table")
+            })?;
+            let reset = table
+                .get("reset")
+                .and_then(Item::as_value)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let post_deploy = parse_post_deploy(table.get("post_deploy"))?;
+            profiles.insert(name.to_string(), RunProfile { reset, post_deploy });
+        }
+    }
+
+    if let Some(name) = &default_profile {
+        if !profiles.contains_key(name) {
+            bail!(
+                "invalid scaffold.toml: [run].default_profile = {name:?} but no [run.profiles.{name}] section"
+            );
+        }
+    }
+
+    Ok(RunConfig {
+        default_profile,
+        inline: RunProfile {
+            reset: inline_reset,
+            post_deploy: inline_post_deploy,
+        },
+        profiles,
+    })
 }
 
 fn parse_post_deploy(item: Option<&Item>) -> DynResult<Vec<String>> {
@@ -478,15 +515,52 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
 }
 
 fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
-    if run.post_deploy.is_empty() {
+    let has_inline = run.inline.reset || !run.inline.post_deploy.is_empty();
+    let has_default_profile = run.default_profile.is_some();
+    let has_profiles = !run.profiles.is_empty();
+    if !has_inline && !has_default_profile && !has_profiles {
         return Ok(());
     }
-    for hook in &run.post_deploy {
-        check_toml_value("run.post_deploy", hook)?;
-    }
+
     let run_item = doc.entry("run").or_insert(Item::Table(Table::new()));
     let run_table = run_item.as_table_mut().expect("run table");
-    run_table["post_deploy"] = post_deploy_value(&run.post_deploy);
+    if let Some(name) = &run.default_profile {
+        check_toml_value("run.default_profile", name)?;
+        run_table["default_profile"] = value(name);
+    }
+    if run.inline.reset {
+        run_table["reset"] = value(true);
+    }
+    if !run.inline.post_deploy.is_empty() {
+        for hook in &run.inline.post_deploy {
+            check_toml_value("run.post_deploy", hook)?;
+        }
+        run_table["post_deploy"] = post_deploy_value(&run.inline.post_deploy);
+    }
+
+    if has_profiles {
+        for (name, profile) in &run.profiles {
+            check_toml_value(&format!("run.profiles.{name}"), name)?;
+            for hook in &profile.post_deploy {
+                check_toml_value(&format!("run.profiles.{name}.post_deploy"), hook)?;
+            }
+            let table = ensure_subtable(doc, "run", "profiles");
+            // ensure_subtable returns the `profiles` table; we need a
+            // sub-sub-table keyed by `name`.
+            table.set_implicit(true);
+            let profile_table = table
+                .entry(name)
+                .or_insert(Item::Table(Table::new()))
+                .as_table_mut()
+                .expect("profile table");
+            if profile.reset {
+                profile_table["reset"] = value(true);
+            }
+            if !profile.post_deploy.is_empty() {
+                profile_table["post_deploy"] = post_deploy_value(&profile.post_deploy);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -619,6 +693,10 @@ pub(crate) fn default_lgpm_repo(pin: &str) -> RepoRef {
 mod tests {
     use super::*;
     use crate::constants::{DEFAULT_BASECAMP_PIN, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL};
+
+    fn base_config() -> Config {
+        parse_config(&minimal_v0_2_0()).expect("parse minimal v0.2.0")
+    }
 
     fn minimal_v0_2_0() -> String {
         format!(
@@ -917,5 +995,99 @@ role = "project"
         );
         let cfg = parse_config(&toml).expect("parse");
         assert_eq!(cfg.lez.path, "/abs/lez");
+    }
+
+    #[test]
+    fn parse_config_with_run_profile_subsection() {
+        let toml = minimal_v0_2_0()
+            + "[run.profiles.e2e]\nreset = true\npost_deploy = [\"scripts/e2e.sh\"]\n";
+        let cfg = parse_config(&toml).expect("parse");
+        let prof = cfg.run.profiles.get("e2e").expect("e2e present");
+        assert!(prof.reset);
+        assert_eq!(prof.post_deploy, vec!["scripts/e2e.sh".to_string()]);
+    }
+
+    #[test]
+    fn parse_config_default_profile_must_exist() {
+        let toml = minimal_v0_2_0() + "[run]\ndefault_profile = \"missing\"\n";
+        let err = parse_config(&toml).unwrap_err();
+        assert!(
+            err.to_string().contains("missing")
+                && err.to_string().contains("[run.profiles.missing]"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn parse_config_default_profile_resolves() {
+        let toml = minimal_v0_2_0()
+            + "[run]\ndefault_profile = \"play\"\n[run.profiles.play]\npost_deploy = \"echo play\"\n";
+        let cfg = parse_config(&toml).expect("parse");
+        assert_eq!(cfg.run.default_profile.as_deref(), Some("play"));
+        let resolved = cfg.run.resolve_profile(None).expect("resolve");
+        assert_eq!(resolved.post_deploy, vec!["echo play".to_string()]);
+    }
+
+    #[test]
+    fn resolve_profile_explicit_selector_wins() {
+        let toml = minimal_v0_2_0()
+            + "[run]\npost_deploy = [\"echo inline\"]\ndefault_profile = \"play\"\n[run.profiles.play]\npost_deploy = \"echo play\"\n[run.profiles.e2e]\npost_deploy = \"echo e2e\"\n";
+        let cfg = parse_config(&toml).expect("parse");
+        let r = cfg.run.resolve_profile(Some("e2e")).expect("resolve");
+        assert_eq!(r.post_deploy, vec!["echo e2e".to_string()]);
+    }
+
+    #[test]
+    fn resolve_profile_unknown_name_errors_with_known_list() {
+        let toml = minimal_v0_2_0()
+            + "[run.profiles.play]\npost_deploy = \"echo play\"\n[run.profiles.e2e]\npost_deploy = \"echo e2e\"\n";
+        let cfg = parse_config(&toml).expect("parse");
+        let err = cfg.run.resolve_profile(Some("missing")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("missing"), "{msg}");
+        assert!(msg.contains("play") && msg.contains("e2e"), "{msg}");
+    }
+
+    #[test]
+    fn resolve_profile_falls_back_to_inline_when_no_default() {
+        let toml = minimal_v0_2_0() + "[run]\nreset = true\n";
+        let cfg = parse_config(&toml).expect("parse");
+        let r = cfg.run.resolve_profile(None).expect("resolve");
+        assert!(r.reset);
+        assert!(r.post_deploy.is_empty());
+    }
+
+    #[test]
+    fn run_profiles_round_trip_through_parse_serialize() {
+        let toml = minimal_v0_2_0()
+            + "[run]\ndefault_profile = \"dev\"\n[run.profiles.dev]\npost_deploy = [\"echo dev\"]\n[run.profiles.e2e]\nreset = true\npost_deploy = [\"echo e2e\"]\n";
+        let cfg1 = parse_config(&toml).expect("parse");
+        let serialized = serialize_config(&cfg1).expect("serialize");
+        let cfg2 = parse_config(&serialized).expect("re-parse");
+        assert_eq!(cfg2.run.default_profile.as_deref(), Some("dev"));
+        assert_eq!(cfg2.run.profiles.len(), 2);
+        let e2e = cfg2.run.profiles.get("e2e").expect("e2e");
+        assert!(e2e.reset);
+        assert_eq!(e2e.post_deploy, vec!["echo e2e".to_string()]);
+    }
+
+    #[test]
+    fn serialize_rejects_newline_in_profile_post_deploy() {
+        let mut cfg = base_config();
+        let mut profiles = std::collections::BTreeMap::new();
+        profiles.insert(
+            "dev".to_string(),
+            RunProfile {
+                reset: false,
+                post_deploy: vec!["echo a\n[run.profiles.evil]".to_string()],
+            },
+        );
+        cfg.run = RunConfig {
+            profiles,
+            ..RunConfig::default()
+        };
+        let err = serialize_config(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("post_deploy") && msg.contains("dev"), "{msg}");
     }
 }
