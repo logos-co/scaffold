@@ -157,13 +157,29 @@ pub(crate) fn check_port_warn(name: &str, addr: &str, remediation: &str) -> Chec
 /// - `LOGOS_BLOCKCHAIN_CIRCUITS` is set to a path that exists and is a directory, or
 /// - `$HOME/.logos-blockchain-circuits/` exists and is a directory.
 ///
-/// An empty / missing-path env var must NOT mask the home-dir probe.
+/// A set-but-invalid env var (empty, nonexistent path, or non-directory)
+/// is reported distinctly from "unset" in the failure detail — the user
+/// otherwise sees "unset" when their typo'd env var is the actual cause.
+/// In either case, the home-dir probe still runs as a fallback.
 pub(crate) fn check_logos_blockchain_circuits() -> CheckRow {
-    let env_dir = std::env::var_os("LOGOS_BLOCKCHAIN_CIRCUITS")
+    let env_raw = std::env::var_os("LOGOS_BLOCKCHAIN_CIRCUITS")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let home_dir = std::env::var_os("HOME")
         .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty() && p.is_dir());
+        .map(|h| h.join(".logos-blockchain-circuits"));
+    check_logos_blockchain_circuits_with(env_raw.as_deref(), home_dir.as_deref())
+}
 
-    if let Some(path) = env_dir {
+/// Pure helper: takes the resolved env-var path (or `None` when unset/empty)
+/// and the resolved `~/.logos-blockchain-circuits` path (or `None` when
+/// `$HOME` is missing), returns the `CheckRow`. Split out so the row
+/// shaping is testable without process-global env mutation.
+fn check_logos_blockchain_circuits_with(
+    env_path: Option<&Path>,
+    home_dir: Option<&Path>,
+) -> CheckRow {
+    if let Some(path) = env_path.filter(|p| p.is_dir()) {
         return CheckRow {
             status: CheckStatus::Pass,
             name: "logos-blockchain-circuits".to_string(),
@@ -172,11 +188,7 @@ pub(crate) fn check_logos_blockchain_circuits() -> CheckRow {
         };
     }
 
-    let home_dir = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|h| h.join(".logos-blockchain-circuits"));
-
-    if let Some(path) = home_dir.as_ref().filter(|p| p.is_dir()) {
+    if let Some(path) = home_dir.filter(|p| p.is_dir()) {
         return CheckRow {
             status: CheckStatus::Pass,
             name: "logos-blockchain-circuits".to_string(),
@@ -186,20 +198,23 @@ pub(crate) fn check_logos_blockchain_circuits() -> CheckRow {
     }
 
     let home_hint = home_dir
-        .as_ref()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "~/.logos-blockchain-circuits".to_string());
+
+    let env_status = match env_path {
+        None => "unset".to_string(),
+        Some(p) if !p.exists() => format!("set to nonexistent path `{}`", p.display()),
+        Some(p) => format!("set to non-directory `{}`", p.display()),
+    };
 
     CheckRow {
         status: CheckStatus::Fail,
         name: "logos-blockchain-circuits".to_string(),
         detail: format!(
-            "not found: $LOGOS_BLOCKCHAIN_CIRCUITS unset and {} is missing",
-            home_hint
+            "not found: $LOGOS_BLOCKCHAIN_CIRCUITS {env_status} and {home_hint} is missing"
         ),
         remediation: Some(format!(
-            "Obtain the logos-blockchain-circuits release and either set LOGOS_BLOCKCHAIN_CIRCUITS=<path> or place it at {}",
-            home_hint
+            "Obtain the logos-blockchain-circuits release and either set LOGOS_BLOCKCHAIN_CIRCUITS=<path> or place it at {home_hint}"
         )),
     }
 }
@@ -263,8 +278,10 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::model::CheckStatus;
+    use std::fs;
+    use tempfile::tempdir;
 
-    use super::container_runtime_row;
+    use super::{check_logos_blockchain_circuits_with, container_runtime_row};
 
     #[test]
     fn container_runtime_row_prefers_docker() {
@@ -289,5 +306,78 @@ mod tests {
         assert_eq!(row.status, CheckStatus::Warn);
         assert!(row.detail.contains("neither docker nor podman"));
         assert!(row.remediation.is_some());
+    }
+
+    #[test]
+    fn circuits_check_passes_via_env_var() {
+        let tmp = tempdir().expect("tempdir");
+        let row = check_logos_blockchain_circuits_with(Some(tmp.path()), None);
+        assert_eq!(row.status, CheckStatus::Pass);
+        assert!(
+            row.detail.contains("$LOGOS_BLOCKCHAIN_CIRCUITS"),
+            "detail must credit the env var, got: {}",
+            row.detail
+        );
+    }
+
+    #[test]
+    fn circuits_check_passes_via_home_dir_when_env_var_unset() {
+        let tmp = tempdir().expect("tempdir");
+        let home_path = tmp.path().join(".logos-blockchain-circuits");
+        fs::create_dir(&home_path).expect("mkdir home circuits");
+        let row = check_logos_blockchain_circuits_with(None, Some(&home_path));
+        assert_eq!(row.status, CheckStatus::Pass);
+        assert!(row.detail.contains(home_path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn circuits_check_fails_with_unset_marker_when_env_unset_and_home_missing() {
+        let tmp = tempdir().expect("tempdir");
+        let missing_home = tmp.path().join(".logos-blockchain-circuits"); // not created
+        let row = check_logos_blockchain_circuits_with(None, Some(&missing_home));
+        assert_eq!(row.status, CheckStatus::Fail);
+        assert!(
+            row.detail.contains("unset"),
+            "unset case must say 'unset', got: {}",
+            row.detail
+        );
+        assert!(row.remediation.is_some());
+    }
+
+    #[test]
+    fn circuits_check_fail_distinguishes_set_but_nonexistent_path() {
+        // R-Copilot-2: when the env var is set to a path that does NOT
+        // exist, the detail must surface that — saying "unset" misleads
+        // a user with a typo'd LOGOS_BLOCKCHAIN_CIRCUITS.
+        let tmp = tempdir().expect("tempdir");
+        let bogus = tmp.path().join("nonexistent");
+        let missing_home = tmp.path().join(".logos-blockchain-circuits");
+        let row = check_logos_blockchain_circuits_with(Some(&bogus), Some(&missing_home));
+        assert_eq!(row.status, CheckStatus::Fail);
+        assert!(
+            row.detail.contains("set to nonexistent path"),
+            "must distinguish nonexistent path, got: {}",
+            row.detail
+        );
+        assert!(row.detail.contains(bogus.to_str().unwrap()));
+        assert!(!row.detail.contains("unset"));
+    }
+
+    #[test]
+    fn circuits_check_fail_distinguishes_set_to_non_directory() {
+        // Env var pointing at a regular file (not a directory) is the
+        // other "set but invalid" shape — also must not say "unset".
+        let tmp = tempdir().expect("tempdir");
+        let file_path = tmp.path().join("a-file");
+        fs::write(&file_path, "not a directory").expect("write file");
+        let missing_home = tmp.path().join(".logos-blockchain-circuits");
+        let row = check_logos_blockchain_circuits_with(Some(&file_path), Some(&missing_home));
+        assert_eq!(row.status, CheckStatus::Fail);
+        assert!(
+            row.detail.contains("set to non-directory"),
+            "must distinguish non-directory, got: {}",
+            row.detail
+        );
+        assert!(!row.detail.contains("unset"));
     }
 }
