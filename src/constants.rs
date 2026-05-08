@@ -55,6 +55,11 @@ pub(crate) const METHODS_DIR: &str = "methods";
 pub(crate) const SEQUENCER_CONFIG_REL_PATH: &str =
     "sequencer/service/configs/debug/sequencer_config.json";
 pub(crate) const SPEL_BIN_REL_PATH: &str = "target/release/spel";
+/// Default seconds to wait for the sequencer to become ready when `lgs run`
+/// has to start localnet itself. Cold first runs (fresh repo clone, cold
+/// nix/cargo caches) routinely overshoot the previous 20s ceiling. Override
+/// per invocation with `lgs run --localnet-timeout <SECS>`.
+pub(crate) const DEFAULT_RUN_LOCALNET_TIMEOUT_SEC: u64 = 120;
 /// Default `source` for `[repos.basecamp]`. Built via `nix build .#app`,
 /// hence `BASECAMP_ATTR = "app"`.
 pub(crate) const BASECAMP_SOURCE: &str = "https://github.com/logos-co/logos-basecamp.git";

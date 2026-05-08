@@ -75,6 +75,7 @@ The `lgs` binary is a short alias for `logos-scaffold` produced by the same crat
 | D4 | `default` | Core | Wallet management, default-address behavior, and passthrough UX | `wallet list`, `wallet default set`, `wallet topup --dry-run`, `wallet topup`, `wallet -- ...` |
 | D5 | `default` | Advanced | Diagnostics bundle and support artifact hygiene | `report`, `report --out`, `report --tail` |
 | D6 | `default` | Core | Example runner interaction and account state verification | `cargo run --bin run_hello_world`, `cargo run --bin run_hello_world_with_move_function`, `wallet -- account get` |
+| D7 | `default` | Core | One-step `run` pipeline and post-deploy hooks | `run`, `run --post-deploy`, `run --no-post-deploy`, `[run]` config |
 | L1 | `lez-framework` | Core | Fresh LEZ project bootstrap to ready state | `new --template lez-framework`, `setup`, `localnet start`, `doctor`, `build` |
 | L2 | `lez-framework` | Core | LEZ IDL regeneration | `build idl` |
 | L3 | `lez-framework` | Advanced | LEZ client generation from current IDL | `build client` |
@@ -439,6 +440,70 @@ The first runner (`run_hello_world`) submits a basic public transaction. The sec
 - `NSSA_WALLET_HOME_DIR` must be set for runners that initialize `WalletCore::from_env()`. The scaffold wallet commands set this automatically, but direct `cargo run` does not.
 - Use the fresh public account created in the preconditions rather than reusing accounts from other scenarios. This avoids confusion about pre-existing state.
 - If additional runners are available (e.g., `run_hello_world_private`, `run_hello_world_through_tail_call`), exercising them is valuable but not required for this scenario.
+
+## D7. `run` Pipeline and Post-Deploy Hooks
+
+### Goal
+
+Validate that `lgs run` collapses the build → IDL → localnet → topup → deploy chain into a single command, fires `[run].post_deploy` hooks with the documented environment, and that `--post-deploy` / `--no-post-deploy` flags override the configured hooks correctly.
+
+### Preconditions
+
+- A default-template project exists at `$SCRATCH_ROOT/dogfood-default` with `setup` already complete.
+- No existing scaffold localnet running on the configured port (the scenario will start one). If one exists from a prior scenario, stop it first.
+- `wallet topup` has worked at least once for this project (D1 or D4 covers this).
+
+### Commands / Actions
+
+From the project root, exercise the bare pipeline:
+
+```bash
+"$SCAFFOLD_BIN" run
+```
+
+Then add a `[run]` section to `scaffold.toml` and re-run with hooks:
+
+```toml
+[run]
+post_deploy = [
+  "echo 'sequencer:' $SEQUENCER_URL",
+  "echo 'idl:' $SCAFFOLD_IDL_DIR",
+  "echo 'project root:' $SCAFFOLD_PROJECT_ROOT",
+  "echo 'wallet home:' $NSSA_WALLET_HOME_DIR",
+  "echo 'program id:' ${SCAFFOLD_PROGRAM_ID:-unavailable}",
+  "echo 'guest bin:' ${SCAFFOLD_GUEST_BIN:-unavailable}",
+]
+```
+
+```bash
+"$SCAFFOLD_BIN" run
+"$SCAFFOLD_BIN" run --post-deploy "echo override"    # one-shot override
+"$SCAFFOLD_BIN" run --no-post-deploy                 # skip hooks
+"$SCAFFOLD_BIN" run --post-deploy "x" --no-post-deploy  # expect clap conflict error
+```
+
+### Expected Success Signals
+
+- The first `run` (no hooks configured) prints a numbered step header for each phase (`[1/5] Building...` through `[5/5] Deploying...`) and ends with a deployed-programs summary.
+- A second `run` reuses the running localnet (`localnet already running (sequencer pid=...)`) instead of starting a new sequencer.
+- After adding the `[run]` block, `run` reports `[6/6] Running N post-deploy hook(s)` and each hook prints a non-empty value for its env var. `cwd` for each hook is the project root (verifiable with a `pwd` hook). For a single-program project, `$SCAFFOLD_PROGRAM_ID` is the deployed program's risc0 image ID and `$SCAFFOLD_GUEST_BIN` is the absolute path to the guest binary.
+- `--post-deploy "echo override"` ignores `[run].post_deploy` and runs only the override.
+- `--no-post-deploy` skips the post-deploy step entirely; the run prints the deployed-programs summary instead.
+- `--post-deploy` with `--no-post-deploy` errors at clap parse time with a `cannot be used with` message; exit code is non-zero.
+- A non-zero hook exit aborts the run with a clear `post-deploy hook exited with status N` message.
+
+### Failure Signals / Common Pitfalls
+
+- A `run` invocation that restarts the sequencer when one is already running healthy is a regression in the localnet-reuse path.
+- Hooks running with `cwd` somewhere other than the project root, or missing any of `SEQUENCER_URL` / `NSSA_WALLET_HOME_DIR` / `SCAFFOLD_PROJECT_ROOT` / `SCAFFOLD_IDL_DIR`, is a regression in the env contract.
+- `$SCAFFOLD_PROGRAM_ID` unset after a successful deploy on a single-program project with a vendored `spel` binary is a regression. Hint: `lgs setup` builds the spel binary; if it's missing, `program_id: unavailable` will also appear in the deploy summary.
+
+### Evidence to Capture
+
+- Console output of the first `run` showing the step headers and the deployed-programs summary.
+- Output of `run` after the `[run]` block is added, showing the `===> post_deploy[i/n]:` markers and the resolved env values.
+- Output of `run --post-deploy "echo override"` showing only the override hook fires.
+- Output of `run --no-post-deploy` showing the deployed-programs summary instead of hooks.
 
 ## L1. LEZ Template Bootstrap
 
@@ -1030,6 +1095,7 @@ ls .scaffold/basecamp/portable 2>/dev/null || find .scaffold -maxdepth 4 -name '
 - Changes to wallet flows or wallet-related defaults: rerun `D4`.
 - Changes to diagnostics, report contents, or redaction logic: rerun `D5`.
 - Changes to example runner binaries or template `src/bin/*` code: rerun `D6`.
+- Changes to `run` step ordering, post-deploy env vars, post-deploy CLI override flag handling, or `[run]` config parsing: rerun `D7`.
 - Changes to LEZ template scaffolding or generated outputs: rerun `L1`, `L2`, `L3`, and `L4`.
 - Changes to CLI argument parsing, help text, or error messages: rerun `E1`.
 - Changes to `create`/`new` flags or template selection logic: rerun `E2`.

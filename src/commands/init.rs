@@ -14,7 +14,7 @@ use crate::constants::{
     SCAFFOLD_TOML_SCHEMA_VERSION,
 };
 use crate::migrate::migrate_to_v0_2_0;
-use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig};
+use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RunConfig};
 use crate::state::write_text;
 use crate::template::project::ensure_scaffold_in_gitignore;
 use crate::DynResult;
@@ -104,6 +104,7 @@ fn fresh_default_config() -> Config {
         localnet: LocalnetConfig::default(),
         modules: std::collections::BTreeMap::new(),
         basecamp: None,
+        run: RunConfig::default(),
     }
 }
 

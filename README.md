@@ -71,6 +71,7 @@ logos-scaffold wallet topup [<address> | --address <address-ref>] [--dry-run]
 logos-scaffold wallet default set <address-ref>
 logos-scaffold wallet default set --address <address-ref>
 logos-scaffold wallet -- <wallet-command...>
+logos-scaffold run [--post-deploy <cmd>...] [--no-post-deploy]
 logos-scaffold spel -- <spel-command...>
 logos-scaffold basecamp setup
 logos-scaffold basecamp modules [--path PATH]... [--flake REF]... [--show]
@@ -97,6 +98,7 @@ logos-scaffold help
 - `wallet topup` checks account state first (`wallet account get --account-id ...`), runs `wallet auth-transfer init --account-id ...` only when the destination is uninitialized, then performs Piñata faucet claim (`wallet pinata claim --to ...`). If address is omitted, scaffold uses project default wallet from `.scaffold/state/wallet.state`.
 - `wallet default set` stores a project-scoped default wallet address in `.scaffold/state/wallet.state`.
 - `wallet -- ...` forwards raw wallet CLI arguments to the project-local wallet binary while preserving project wallet environment.
+- `run` combines build, IDL build, localnet start, wallet topup, and deploy into a single command. If a `[run]` section with `post_deploy` is present in `scaffold.toml`, each hook is executed after deploy via `sh -c` (cwd = project root) with `SEQUENCER_URL`, `NSSA_WALLET_HOME_DIR`, `SCAFFOLD_PROJECT_ROOT`, and `SCAFFOLD_IDL_DIR` env vars; when the project has exactly one deployable program, `SCAFFOLD_PROGRAM_ID` and `SCAFFOLD_GUEST_BIN` are also set. If a localnet is already running it is reused; otherwise it is started. `--post-deploy <cmd>` (repeatable) overrides the configured hooks; `--no-post-deploy` skips them entirely.
 - `spel -- ...` forwards raw spel CLI arguments to the project-vendored `spel` binary so any spel subcommand (`inspect`, `pda`, `generate-idl`, …) runs against the project's pinned version without a global install.
 - `basecamp setup` pins basecamp + `lgpm` (read from `[repos.basecamp]` / `[repos.lgpm]` — both `build = "nix-flake"`), builds both (logged to `.scaffold/logs/<timestamp>-setup-*.log`), and seeds per-profile XDG directories for `alice` and `bob` under `.scaffold/basecamp/profiles/`. Runtime config (`port_base`, `port_stride`) is in `[basecamp]`.
 - `basecamp modules` is the sole writer of the captured module set, which lives in top-level `[modules.<name>]` sections (each with `flake` and `role = "project" | "dependency"`). Modules aren't basecamp's property — they're the project's Logos modules, which basecamp happens to be one consumer of. Zero-arg runs auto-discovery: walks project flakes (root `.#lgx` first, else immediate sub-flakes), derives a `module_name` per source (from `metadata.json.name` for local paths; heuristic from the github repo slug for remote refs, with a one-line assumption note you can correct in `scaffold.toml`), then resolves each declared dep name by: (1) already keyed in `[modules]`, (2) basecamp preinstall list, (3) the source's own `flake.lock`, (4) scaffold-default pin. Unresolved deps **fail fast** — no silent skip. `--flake <ref>` / `--path <file>` capture explicit project sources; `--show` prints the current set without mutating. Re-runs are idempotent: existing `[modules]` entries are preserved so hand-edits survive. Project contract: see [docs/basecamp-module-requirements.md](./docs/basecamp-module-requirements.md).
@@ -149,7 +151,63 @@ lgs setup   # picks up the new section
 
 Existing fields are preserved verbatim.
 
-`setup` automatically seeds `.scaffold/state/wallet.state` with the first preconfigured public account when no default is present.
+### One-step build + deploy with `run`
+
+Or use `run` to do build → IDL → localnet → topup → deploy in one step:
+
+```bash
+lgs new my-app
+cd my-app
+lgs run
+```
+
+To run one or more post-deploy hooks automatically (e.g. submit a transaction
+with [spel](https://github.com/logos-co/spel)), add a `[run]` section to
+`scaffold.toml`. `post_deploy` is a list of shell commands executed in order;
+the run aborts at the first non-zero exit:
+
+```toml
+[run]
+post_deploy = [
+  "lgs spel -- --idl $SCAFFOLD_IDL_DIR/counter.json -p $SCAFFOLD_GUEST_BIN init",
+  "lgs spel -- --idl $SCAFFOLD_IDL_DIR/counter.json -p $SCAFFOLD_GUEST_BIN increment --by 5",
+]
+```
+
+The `lgs spel --` passthrough invokes the project-vendored `spel` binary
+so hooks pick up the same pinned version `deploy` used.
+
+A single command may also be written as a plain string for brevity:
+`post_deploy = "echo done"`.
+
+Each hook runs via `sh -c` with cwd set to the project root and these
+environment variables pre-set:
+
+| Variable | Value |
+|---|---|
+| `SEQUENCER_URL` | `http://127.0.0.1:<port>` (from `scaffold.toml`) |
+| `NSSA_WALLET_HOME_DIR` | Absolute path to project wallet directory |
+| `SCAFFOLD_PROJECT_ROOT` | Absolute path to project root |
+| `SCAFFOLD_IDL_DIR` | Absolute path to IDL output directory |
+| `SCAFFOLD_PROGRAM_ID` | risc0 image ID (hex) of the deployed program. Set only when the project has exactly one deployable program; unset if `spel inspect` cannot extract the ID |
+| `SCAFFOLD_GUEST_BIN` | Absolute path to the guest `.bin`. Set only when the project has exactly one deployable program |
+
+`SCAFFOLD_PROGRAM_ID` and `SCAFFOLD_GUEST_BIN` are unset for
+multi-program projects so hooks fail loudly rather than silently
+picking up the wrong program.
+
+#### One-off override / skip
+
+To run a different hook without editing `scaffold.toml`:
+
+```bash
+lgs run --post-deploy "scripts/smoke.sh"
+lgs run --post-deploy "step-a" --post-deploy "step-b"   # repeatable
+lgs run --no-post-deploy                                 # skip all hooks
+```
+
+`--post-deploy` and `--no-post-deploy` conflict with each other and
+both override whatever `[run].post_deploy` defines.
 
 Checkpoint commands:
 

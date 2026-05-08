@@ -9,6 +9,7 @@ pub(crate) mod init;
 pub(crate) mod localnet;
 pub(crate) mod new;
 pub(crate) mod report;
+pub(crate) mod run;
 pub(crate) mod self_test;
 pub(crate) mod setup;
 pub(crate) mod spel;

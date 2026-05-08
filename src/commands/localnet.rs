@@ -633,7 +633,7 @@ mod tests {
     use crate::commands::wallet_support::wallet_state_path;
     use crate::error::ResetError;
     use crate::model::{
-        Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, Project, RepoRef,
+        Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, Project, RepoRef, RunConfig,
     };
 
     fn make_test_project(temp: &tempfile::TempDir) -> (Project, PathBuf) {
@@ -672,6 +672,7 @@ mod tests {
             },
             modules: std::collections::BTreeMap::new(),
             basecamp: None,
+            run: RunConfig::default(),
         };
 
         let project = Project {

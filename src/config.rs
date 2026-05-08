@@ -29,7 +29,7 @@ use crate::constants::{
 };
 use crate::model::{
     BasecampConfig, Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, ModuleEntry,
-    ModuleRole, RepoBuild, RepoRef,
+    ModuleRole, RepoBuild, RepoRef, RunConfig,
 };
 use crate::DynResult;
 
@@ -68,6 +68,7 @@ pub(crate) fn parse_config(text: &str) -> DynResult<Config> {
 
     let modules = parse_modules(&doc)?;
     let basecamp = parse_basecamp_runtime(&doc)?;
+    let run = parse_run(&doc)?;
     let framework = parse_framework(&doc);
     let localnet = parse_localnet(&doc)?;
     let wallet_home_dir = doc
@@ -88,7 +89,43 @@ pub(crate) fn parse_config(text: &str) -> DynResult<Config> {
         localnet,
         modules,
         basecamp,
+        run,
     })
+}
+
+/// Parse the `[run]` section. Branch-1 surface is the inline `post_deploy`
+/// only — string (single hook) or array (multiple). `[run.profiles.*]`,
+/// `default_profile`, and `reset` arrive in later branches.
+fn parse_run(doc: &DocumentMut) -> DynResult<RunConfig> {
+    let Some(run_table) = doc.get("run").and_then(Item::as_table) else {
+        return Ok(RunConfig::default());
+    };
+    let post_deploy = parse_post_deploy(run_table.get("post_deploy"))?;
+    Ok(RunConfig { post_deploy })
+}
+
+fn parse_post_deploy(item: Option<&Item>) -> DynResult<Vec<String>> {
+    let Some(item) = item else {
+        return Ok(Vec::new());
+    };
+    if let Some(s) = item.as_str() {
+        return Ok(if s.is_empty() {
+            Vec::new()
+        } else {
+            vec![s.to_string()]
+        });
+    }
+    if let Some(arr) = item.as_array() {
+        let mut out = Vec::with_capacity(arr.len());
+        for v in arr.iter() {
+            let s = v.as_str().ok_or_else(|| {
+                anyhow!("invalid scaffold.toml: post_deploy entries must be strings")
+            })?;
+            out.push(s.to_string());
+        }
+        return Ok(out);
+    }
+    bail!("invalid scaffold.toml: post_deploy must be a string or array of strings")
 }
 
 /// Reject pre-0.2.0 schemas with a targeted error naming the section that's
@@ -387,7 +424,35 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
         basecamp_table["port_stride"] = value(i64::from(bc.port_stride));
     }
 
+    // [run] — only emit when non-default to keep fresh scaffold.toml minimal.
+    write_run_config(&mut doc, &cfg.run)?;
+
     Ok(doc.to_string())
+}
+
+fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
+    if run.post_deploy.is_empty() {
+        return Ok(());
+    }
+    for hook in &run.post_deploy {
+        check_toml_value("run.post_deploy", hook)?;
+    }
+    let run_item = doc.entry("run").or_insert(Item::Table(Table::new()));
+    let run_table = run_item.as_table_mut().expect("run table");
+    run_table["post_deploy"] = post_deploy_value(&run.post_deploy);
+    Ok(())
+}
+
+fn post_deploy_value(hooks: &[String]) -> Item {
+    if hooks.len() == 1 {
+        value(&hooks[0])
+    } else {
+        let mut arr = toml_edit::Array::new();
+        for h in hooks {
+            arr.push(h.as_str());
+        }
+        value(arr)
+    }
 }
 
 fn write_repo_ref(doc: &mut DocumentMut, name: &str, repo: &RepoRef) -> DynResult<()> {
