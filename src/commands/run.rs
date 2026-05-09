@@ -88,8 +88,6 @@ fn run_pipeline_once(
             run_post_deploy_hook(project, hook, single_program.as_ref())?;
             println!("<=== post_deploy[{}/{n}] OK", i + 1);
         }
-    } else {
-        print_deploy_summary(project)?;
     }
 
     Ok(())
