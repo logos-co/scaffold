@@ -24,7 +24,6 @@ use super::wallet_support::{
 /// this constant is the same project-relative directory that `build.rs`
 /// compiles via `crate::constants::METHODS_DIR`; keep them in sync.
 const GUEST_BIN_SEARCH_ROOTS: &[&str] = &["target/riscv-guest", "methods/target"];
-const DEFAULT_SEQUENCER_ADDR: &str = "http://127.0.0.1:3040";
 
 /// `spel inspect` line prefix that carries the risc0 image ID — the value the
 /// sequencer uses as the on-chain program ID. Format is whitespace-tolerant:
@@ -43,10 +42,7 @@ pub(crate) fn cmd_deploy(
     let spel_bin =
         resolve_repo_path(&project, &project.config.spel, "spel")?.join(SPEL_BIN_REL_PATH);
 
-    let sequencer_addr = wallet
-        .sequencer_addr
-        .clone()
-        .unwrap_or_else(|| DEFAULT_SEQUENCER_ADDR.to_string());
+    let sequencer_addr = wallet.sequencer_addr.clone();
 
     // --program-path: deploy a single custom ELF directly, skip auto-discovery
     if let Some(custom_path) = program_path {

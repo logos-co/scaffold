@@ -18,7 +18,18 @@ pub(crate) const WALLET_CONFIG_FALLBACK: &str = "config.json";
 pub(crate) struct WalletRuntimeContext {
     pub(crate) wallet_home: PathBuf,
     pub(crate) wallet_binary: PathBuf,
-    pub(crate) sequencer_addr: Option<String>,
+    /// Resolved sequencer RPC URL. Taken from `wallet_config.json#sequencer_addr`
+    /// when present; otherwise derived from `[localnet] port` in `scaffold.toml`
+    /// (default 3040). The fallback ensures projects on a non-default localnet
+    /// port still hit their own sequencer rather than a hardcoded 3040.
+    pub(crate) sequencer_addr: String,
+}
+
+/// Default sequencer RPC URL for a project when `wallet_config.json` does not
+/// specify `sequencer_addr`. Matches the URL the project's own localnet listens
+/// on (`[localnet] port`, default 3040).
+pub(crate) fn default_sequencer_addr_for_project(project: &Project) -> String {
+    format!("http://127.0.0.1:{}", project.config.localnet.port)
 }
 
 pub(crate) fn load_wallet_runtime(project: &Project) -> DynResult<WalletRuntimeContext> {
@@ -43,7 +54,8 @@ pub(crate) fn load_wallet_runtime(project: &Project) -> DynResult<WalletRuntimeC
     let sequencer_addr = wallet_config
         .get("sequencer_addr")
         .and_then(Value::as_str)
-        .map(ToString::to_string);
+        .map(ToString::to_string)
+        .unwrap_or_else(|| default_sequencer_addr_for_project(project));
 
     Ok(WalletRuntimeContext {
         wallet_home,
@@ -223,6 +235,14 @@ fn invalid_address_message(raw: &str) -> String {
     )
 }
 
+// Classify a wallet/RPC output as a connectivity failure. The needles are
+// transport-error tokens only — `connection refused`, `tcp connect error`,
+// etc. — never bare sequencer addresses. Coupling the heuristic to a literal
+// `127.0.0.1:3040` / `localhost:3040` was both wrong on non-default localnet
+// ports (the configured URL embeds whatever port is in scaffold.toml) and
+// would misclassify any genuine functional failure that echoed the URL in
+// its error context (RPC rejection, signature mismatch, malformed payload)
+// as a transient connectivity error.
 pub(crate) fn is_connectivity_failure(text: &str) -> bool {
     let lower = text.to_lowercase();
     [
@@ -233,8 +253,6 @@ pub(crate) fn is_connectivity_failure(text: &str) -> bool {
         "network is unreachable",
         "error sending request",
         "http error",
-        "127.0.0.1:3040",
-        "localhost:3040",
     ]
     .iter()
     .any(|needle| lower.contains(needle))
@@ -801,5 +819,104 @@ details: [1, 2, 3]
     fn detects_already_initialized_failure_output() {
         let combined = "Error: Account must be uninitialized";
         assert!(is_already_initialized_failure(combined));
+    }
+
+    #[test]
+    fn connectivity_failure_triggers_on_transport_error_tokens() {
+        // All retained tokens must continue to classify their corresponding
+        // error shape as a connectivity failure; otherwise wallet/deploy
+        // would lose the friendly "start localnet" remediation they emit on
+        // a refused/unreachable sequencer.
+        for needle in [
+            "connection refused",
+            "ConnectError",
+            "failed to connect",
+            "tcp connect error",
+            "network is unreachable",
+            "error sending request",
+            "http error",
+        ] {
+            assert!(
+                super::is_connectivity_failure(needle),
+                "expected `{needle}` to classify as connectivity failure"
+            );
+        }
+    }
+
+    #[test]
+    fn connectivity_failure_does_not_trigger_on_bare_sequencer_address() {
+        // Mentioning the sequencer URL alone is not a connectivity failure —
+        // wallet binaries routinely echo it in unrelated error contexts
+        // (RPC rejection, signature mismatch, malformed payload). The
+        // address-literal needles were also wrong on non-default localnet
+        // ports because the address itself embeds the configured port.
+        let stderr =
+            "Error: rpc call to http://127.0.0.1:3040/ failed: signature mismatch for sender 0xab";
+        assert!(!super::is_connectivity_failure(stderr));
+
+        let stderr_alt =
+            "POST http://localhost:3040/ -> 400 Bad Request: invalid abi-encoded calldata";
+        assert!(!super::is_connectivity_failure(stderr_alt));
+    }
+
+    #[test]
+    fn default_sequencer_addr_uses_configured_localnet_port() {
+        use crate::model::{
+            Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, Project, RepoRef,
+            RunConfig,
+        };
+        use std::path::PathBuf;
+
+        fn make_project_with_port(port: u16) -> Project {
+            Project {
+                root: PathBuf::from("/tmp/scaffold-test"),
+                config: Config {
+                    version: "0.2.0".to_string(),
+                    cache_root: ".scaffold/cache".to_string(),
+                    lez: RepoRef {
+                        source: "lez".to_string(),
+                        path: "lez".to_string(),
+                        pin: "abc123".to_string(),
+                        ..Default::default()
+                    },
+                    spel: RepoRef {
+                        source: "spel".to_string(),
+                        path: "spel".to_string(),
+                        pin: "def456".to_string(),
+                        ..Default::default()
+                    },
+                    basecamp_repo: None,
+                    lgpm_repo: None,
+                    wallet_home_dir: ".scaffold/wallet".to_string(),
+                    framework: FrameworkConfig {
+                        kind: "default".to_string(),
+                        version: "0.1.0".to_string(),
+                        idl: FrameworkIdlConfig {
+                            spec: "lssa-idl/0.1.0".to_string(),
+                            path: "idl".to_string(),
+                        },
+                    },
+                    localnet: LocalnetConfig {
+                        port,
+                        risc0_dev_mode: true,
+                    },
+                    modules: std::collections::BTreeMap::new(),
+                    run: RunConfig::default(),
+                    basecamp: None,
+                },
+            }
+        }
+
+        let default = make_project_with_port(3040);
+        assert_eq!(
+            super::default_sequencer_addr_for_project(&default),
+            "http://127.0.0.1:3040"
+        );
+
+        let nonstandard = make_project_with_port(14321);
+        assert_eq!(
+            super::default_sequencer_addr_for_project(&nonstandard),
+            "http://127.0.0.1:14321"
+        );
     }
 }

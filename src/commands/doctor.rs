@@ -230,35 +230,10 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
         });
     }
 
-    let wallet_cfg = wallet_home.join(WALLET_CONFIG_PRIMARY);
-    if wallet_cfg.exists() {
-        let cfg_text = fs::read_to_string(&wallet_cfg)?;
-        if cfg_text.contains("127.0.0.1:3040") || cfg_text.contains("localhost:3040") {
-            rows.push(CheckRow {
-                status: CheckStatus::Pass,
-                name: "wallet network config".to_string(),
-                detail: "wallet points to local sequencer".to_string(),
-                remediation: None,
-            });
-        } else {
-            rows.push(CheckRow {
-                status: CheckStatus::Warn,
-                name: "wallet network config".to_string(),
-                detail: "wallet may point to non-local sequencer".to_string(),
-                remediation: Some(
-                    "Set .scaffold/wallet/wallet_config.json sequencer_addr=http://127.0.0.1:3040"
-                        .to_string(),
-                ),
-            });
-        }
-    } else {
-        rows.push(CheckRow {
-            status: CheckStatus::Warn,
-            name: "wallet network config".to_string(),
-            detail: "missing .scaffold/wallet/wallet_config.json".to_string(),
-            remediation: Some("Run `logos-scaffold setup`".to_string()),
-        });
-    }
+    rows.push(check_wallet_network_config(
+        &wallet_home.join(WALLET_CONFIG_PRIMARY),
+        project.config.localnet.port,
+    ));
 
     if wallet_binary_path.exists() {
         let mut version_cmd = Command::new(&wallet_binary_path);
@@ -454,6 +429,138 @@ fn check_spel_lez_alignment(spel_path: &std::path::Path) -> CheckRow {
     }
 }
 
+/// Classify whether `wallet_config.json` points the wallet at this project's
+/// own localnet sequencer. Parses the file as JSON and inspects the
+/// `sequencer_addr` field explicitly — the previous implementation
+/// substring-matched the raw file text against `127.0.0.1:3040` /
+/// `localhost:3040`, which both ignored `[localnet] port` overrides (no
+/// non-3040 project ever matched) and was brittle to whitespace/formatting
+/// (a literal embedded in an unrelated key would falsely match).
+///
+/// Rules:
+/// - File missing → `Warn` with a `setup` remediation.
+/// - File present but unparseable JSON → `Warn` with a parse-error detail.
+/// - `sequencer_addr` absent → `Pass`. `load_wallet_runtime` will fall back
+///   to `http://127.0.0.1:<localnet.port>`, which is the local sequencer.
+/// - `sequencer_addr` present, parses as `http://{127.0.0.1|localhost}:<port>`
+///   where `<port>` equals `[localnet] port` → `Pass`.
+/// - Anything else → `Warn` with a remediation that names the expected URL
+///   for this project's localnet port.
+fn check_wallet_network_config(wallet_cfg: &std::path::Path, localnet_port: u16) -> CheckRow {
+    let expected_url = format!("http://127.0.0.1:{localnet_port}");
+    let remediation_set = format!(
+        "Set .scaffold/wallet/wallet_config.json sequencer_addr={expected_url} \
+         (or remove the field to fall back to the configured [localnet] port)"
+    );
+
+    if !wallet_cfg.exists() {
+        return CheckRow {
+            status: CheckStatus::Warn,
+            name: "wallet network config".to_string(),
+            detail: format!("missing {}", wallet_cfg.display()),
+            remediation: Some("Run `logos-scaffold setup`".to_string()),
+        };
+    }
+
+    let cfg_text = match fs::read_to_string(wallet_cfg) {
+        Ok(text) => text,
+        Err(err) => {
+            return CheckRow {
+                status: CheckStatus::Warn,
+                name: "wallet network config".to_string(),
+                detail: format!("failed to read {}: {err}", wallet_cfg.display()),
+                remediation: Some("Run `logos-scaffold setup`".to_string()),
+            };
+        }
+    };
+
+    let cfg_json: serde_json::Value = match serde_json::from_str(&cfg_text) {
+        Ok(value) => value,
+        Err(err) => {
+            return CheckRow {
+                status: CheckStatus::Warn,
+                name: "wallet network config".to_string(),
+                detail: format!("failed to parse {}: {err}", wallet_cfg.display()),
+                remediation: Some(format!(
+                    "Recreate the file with `logos-scaffold setup` or set sequencer_addr={expected_url}"
+                )),
+            };
+        }
+    };
+
+    let Some(field) = cfg_json.get("sequencer_addr") else {
+        return CheckRow {
+            status: CheckStatus::Pass,
+            name: "wallet network config".to_string(),
+            detail: format!(
+                "sequencer_addr unset; will default to {expected_url} via [localnet] port"
+            ),
+            remediation: None,
+        };
+    };
+
+    let Some(addr) = field.as_str() else {
+        return CheckRow {
+            status: CheckStatus::Warn,
+            name: "wallet network config".to_string(),
+            detail: "sequencer_addr is present but not a string".to_string(),
+            remediation: Some(remediation_set),
+        };
+    };
+
+    if sequencer_addr_targets_local_port(addr, localnet_port) {
+        CheckRow {
+            status: CheckStatus::Pass,
+            name: "wallet network config".to_string(),
+            detail: format!("wallet sequencer_addr={addr} matches local sequencer"),
+            remediation: None,
+        }
+    } else {
+        CheckRow {
+            status: CheckStatus::Warn,
+            name: "wallet network config".to_string(),
+            detail: format!(
+                "wallet sequencer_addr={addr} does not target local sequencer at {expected_url}"
+            ),
+            remediation: Some(remediation_set),
+        }
+    }
+}
+
+/// Check whether `sequencer_addr` is an http(s) URL whose host is
+/// `127.0.0.1` or `localhost` and whose port is the configured localnet port.
+/// Deliberately permissive about scheme (`http` and `https` both accepted) and
+/// trailing path/slash. Used by `check_wallet_network_config`; pulled out so
+/// it is straightforward to unit-test on URL string shapes.
+fn sequencer_addr_targets_local_port(addr: &str, localnet_port: u16) -> bool {
+    let trimmed = addr.trim();
+    let after_scheme = match trimmed
+        .strip_prefix("http://")
+        .or_else(|| trimmed.strip_prefix("https://"))
+    {
+        Some(rest) => rest,
+        None => return false,
+    };
+
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+
+    let (host, port_str) = match authority.rsplit_once(':') {
+        Some((h, p)) => (h, p),
+        None => return false,
+    };
+
+    let host_ok = host.eq_ignore_ascii_case("127.0.0.1") || host.eq_ignore_ascii_case("localhost");
+    let port_ok = port_str
+        .parse::<u16>()
+        .map(|p| p == localnet_port)
+        .unwrap_or(false);
+
+    host_ok && port_ok
+}
+
 fn is_localnet_connectivity_failure(stdout: &str, stderr: &str) -> bool {
     let text = format!("{stdout}\n{stderr}").to_lowercase();
     text.contains("connection refused")
@@ -571,5 +678,151 @@ mod tests {
         let row = check_spel_lez_alignment(tmp.path());
         assert_eq!(row.status, CheckStatus::Pass);
         assert!(row.detail.contains("skipped"));
+    }
+
+    fn write_wallet_cfg(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+        let path = dir.join("wallet_config.json");
+        fs::write(&path, body).expect("write wallet_config.json");
+        path
+    }
+
+    #[test]
+    fn wallet_network_config_passes_when_addr_matches_localnet_port() {
+        let tmp = tempdir().expect("tempdir");
+        let cfg = write_wallet_cfg(
+            tmp.path(),
+            r#"{ "sequencer_addr": "http://127.0.0.1:3040" }"#,
+        );
+        let row = check_wallet_network_config(&cfg, 3040);
+        assert_eq!(row.status, CheckStatus::Pass, "got: {row:?}");
+        assert!(row.detail.contains("http://127.0.0.1:3040"));
+    }
+
+    #[test]
+    fn wallet_network_config_passes_on_localhost_alias_with_matching_port() {
+        let tmp = tempdir().expect("tempdir");
+        let cfg = write_wallet_cfg(
+            tmp.path(),
+            r#"{ "sequencer_addr": "http://localhost:14321" }"#,
+        );
+        let row = check_wallet_network_config(&cfg, 14321);
+        assert_eq!(row.status, CheckStatus::Pass, "got: {row:?}");
+    }
+
+    #[test]
+    fn wallet_network_config_warns_when_addr_uses_default_port_but_project_overrides() {
+        // This is the exact regression issue #118 calls out: a project on a
+        // non-default localnet port whose wallet still points at 3040.
+        // Substring-based detection silently classified this as "points to
+        // local sequencer" (it matched the `127.0.0.1:3040` literal). With
+        // the JSON-parsing check it must surface as Warn.
+        let tmp = tempdir().expect("tempdir");
+        let cfg = write_wallet_cfg(
+            tmp.path(),
+            r#"{ "sequencer_addr": "http://127.0.0.1:3040" }"#,
+        );
+        let row = check_wallet_network_config(&cfg, 14321);
+        assert_eq!(row.status, CheckStatus::Warn, "got: {row:?}");
+        assert!(
+            row.remediation
+                .as_deref()
+                .unwrap_or("")
+                .contains("http://127.0.0.1:14321"),
+            "remediation must name the expected localnet URL: {row:?}"
+        );
+    }
+
+    #[test]
+    fn wallet_network_config_passes_when_addr_field_is_absent() {
+        // No sequencer_addr ⇒ load_wallet_runtime falls back to the
+        // configured localnet port, which is the local sequencer. The check
+        // must Pass; previously it produced a false Warn because the file
+        // text contained no `127.0.0.1:3040` literal.
+        let tmp = tempdir().expect("tempdir");
+        let cfg = write_wallet_cfg(tmp.path(), r#"{ "initial_accounts": [] }"#);
+        let row = check_wallet_network_config(&cfg, 3040);
+        assert_eq!(row.status, CheckStatus::Pass, "got: {row:?}");
+        assert!(
+            row.detail.contains("sequencer_addr unset"),
+            "detail must explain the fallback: {row:?}"
+        );
+    }
+
+    #[test]
+    fn wallet_network_config_warns_when_addr_points_to_remote_host() {
+        let tmp = tempdir().expect("tempdir");
+        let cfg = write_wallet_cfg(
+            tmp.path(),
+            r#"{ "sequencer_addr": "https://sequencer.example.com:8443" }"#,
+        );
+        let row = check_wallet_network_config(&cfg, 3040);
+        assert_eq!(row.status, CheckStatus::Warn);
+        assert!(row.detail.contains("https://sequencer.example.com:8443"));
+    }
+
+    #[test]
+    fn wallet_network_config_warns_on_malformed_json() {
+        let tmp = tempdir().expect("tempdir");
+        let cfg = write_wallet_cfg(tmp.path(), "{ this is not json");
+        let row = check_wallet_network_config(&cfg, 3040);
+        assert_eq!(row.status, CheckStatus::Warn);
+        assert!(row.detail.contains("failed to parse"));
+    }
+
+    #[test]
+    fn wallet_network_config_warns_when_file_missing() {
+        let tmp = tempdir().expect("tempdir");
+        let missing = tmp.path().join("wallet_config.json");
+        let row = check_wallet_network_config(&missing, 3040);
+        assert_eq!(row.status, CheckStatus::Warn);
+        assert!(row.detail.contains("missing"));
+    }
+
+    #[test]
+    fn wallet_network_config_warns_when_sequencer_addr_is_not_a_string() {
+        let tmp = tempdir().expect("tempdir");
+        let cfg = write_wallet_cfg(tmp.path(), r#"{ "sequencer_addr": 3040 }"#);
+        let row = check_wallet_network_config(&cfg, 3040);
+        assert_eq!(row.status, CheckStatus::Warn);
+        assert!(row.detail.contains("not a string"));
+    }
+
+    #[test]
+    fn sequencer_addr_local_port_matcher_accepts_expected_forms() {
+        assert!(sequencer_addr_targets_local_port(
+            "http://127.0.0.1:3040",
+            3040
+        ));
+        assert!(sequencer_addr_targets_local_port(
+            "http://localhost:3040/",
+            3040
+        ));
+        assert!(sequencer_addr_targets_local_port(
+            "https://127.0.0.1:14321/rpc",
+            14321
+        ));
+        // Case-insensitive host comparison.
+        assert!(sequencer_addr_targets_local_port(
+            "http://LOCALHOST:3040",
+            3040
+        ));
+    }
+
+    #[test]
+    fn sequencer_addr_local_port_matcher_rejects_mismatched_or_remote() {
+        // Port mismatch.
+        assert!(!sequencer_addr_targets_local_port(
+            "http://127.0.0.1:3040",
+            14321
+        ));
+        // Remote host.
+        assert!(!sequencer_addr_targets_local_port(
+            "https://sequencer.example.com:3040",
+            3040
+        ));
+        // Missing scheme.
+        assert!(!sequencer_addr_targets_local_port("127.0.0.1:3040", 3040));
+        // Missing port.
+        assert!(!sequencer_addr_targets_local_port("http://127.0.0.1", 3040));
     }
 }

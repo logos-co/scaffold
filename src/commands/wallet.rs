@@ -114,10 +114,7 @@ pub(crate) fn cmd_wallet_topup_inner(
     let wallet = load_wallet_runtime(project)?;
     let default_address = read_default_wallet_address(&project.root)?;
     let resolved_to = resolve_wallet_address(address.as_deref(), default_address.as_deref())?;
-    let sequencer_addr = wallet
-        .sequencer_addr
-        .clone()
-        .unwrap_or_else(|| "http://127.0.0.1:3040".to_string());
+    let sequencer_addr = wallet.sequencer_addr.clone();
     let wallet_home = wallet.wallet_home.as_os_str().to_string_lossy().to_string();
     let password_input = format!("{}\n", wallet_password());
 
