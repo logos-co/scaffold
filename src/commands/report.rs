@@ -1040,7 +1040,10 @@ fn sanitize_text(raw: &str, sanitize_ctx: &SanitizeContext) -> SanitizedText {
         let (redacted_urls, url_replacements) = redact_url_credentials(&redacted_kv);
         replacements += url_replacements;
 
-        output_lines.push(redacted_urls);
+        let (redacted_tokens, token_replacements) = redact_high_entropy_tokens(&redacted_urls);
+        replacements += token_replacements;
+
+        output_lines.push(redacted_tokens);
     }
 
     let mut text = output_lines.join("\n");
@@ -1086,24 +1089,19 @@ fn redact_sensitive_line(line: &str) -> (String, usize) {
         return (redacted_line_marker(line), 1);
     }
 
-    let key_value_keywords = [
-        "password",
-        "secret",
-        "token",
-        "api_key",
-        "private_key",
-        "mnemonic",
-        "seed",
-    ];
-    if !key_value_keywords
+    let normalized = normalize_for_keyword_match(&lower);
+    if !SENSITIVE_KEYWORDS
         .iter()
-        .any(|needle| lower.contains(needle))
+        .any(|needle| normalized.contains(needle))
     {
         return (line.to_string(), 0);
     }
 
     let Some(eq_idx) = line.find('=') else {
-        // Let URL-specific redaction handle embedded credentials in URL-like lines.
+        // URL-shaped lines defer to URL-specific redaction below, which now
+        // handles both userinfo (`user:pass@host`) and sensitive query
+        // parameters (`?token=...`). Collapsing the whole line via the `:` path
+        // here would clobber legitimate URLs with no embedded secret.
         if line.contains("://") {
             return (line.to_string(), 0);
         }
@@ -1121,6 +1119,32 @@ fn redact_sensitive_line(line: &str) -> (String, usize) {
         return (format!("{}{}", &line[..=colon_idx], replacement), 1);
     };
 
+    // If the `=` we matched lies inside a URL token (between `://` and the next
+    // whitespace/quote), defer to URL-aware redaction below. Otherwise the k/v
+    // path would collapse the whole URL — including its `?token=...` query —
+    // into a single `[REDACTED]`, which both over-redacts and prevents the
+    // structured query-param redaction from running.
+    if let Some(scheme_idx) = line.find("://") {
+        let after_scheme_start = scheme_idx + 3;
+        if after_scheme_start <= line.len() {
+            let after_scheme = &line[after_scheme_start..];
+            let url_len = after_scheme
+                .char_indices()
+                .find_map(|(idx, ch)| {
+                    if ch.is_ascii_whitespace() || matches!(ch, '"' | '\'' | ')' | ']' | '>') {
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(after_scheme.len());
+            let url_end = after_scheme_start + url_len;
+            if eq_idx > scheme_idx && eq_idx < url_end {
+                return (line.to_string(), 0);
+            }
+        }
+    }
+
     let trailing_comment = line[eq_idx + 1..]
         .find('#')
         .map(|idx| line[eq_idx + 1 + idx..].to_string());
@@ -1132,6 +1156,36 @@ fn redact_sensitive_line(line: &str) -> (String, usize) {
     }
 
     (out, 1)
+}
+
+/// Sensitive keyword set used for k/v line redaction. Matched as substrings
+/// against the line after [`normalize_for_keyword_match`] strips non-alphanumeric
+/// characters so that variants like `api-key`, `api_key`, `apiKey`, and `"apikey"`
+/// all reduce to `apikey`.
+const SENSITIVE_KEYWORDS: &[&str] = &[
+    "password",
+    "passphrase",
+    "secret",
+    "token",
+    "apikey",
+    "accesstoken",
+    "authtoken",
+    "bearer",
+    "privatekey",
+    "signingkey",
+    "walletkey",
+    "credential",
+    "mnemonic",
+    "seed",
+    "cookie",
+    "sessionkey",
+];
+
+fn normalize_for_keyword_match(lowered: &str) -> String {
+    lowered
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect()
 }
 
 fn redact_url_credentials(line: &str) -> (String, usize) {
@@ -1156,14 +1210,24 @@ fn redact_url_credentials(line: &str) -> (String, usize) {
             .unwrap_or(after_scheme.len());
 
         let url_slice = &after_scheme[..end];
+        let authority_end = url_slice
+            .find(|c: char| matches!(c, '/' | '?' | '#'))
+            .unwrap_or(url_slice.len());
+        let authority = &url_slice[..authority_end];
+        let path_and_query = &url_slice[authority_end..];
 
-        if let Some(at_idx) = url_slice.find('@') {
-            output.push_str("[REDACTED]@");
-            output.push_str(&url_slice[at_idx + 1..]);
-            replacements += 1;
-        } else {
-            output.push_str(url_slice);
+        match authority.find('@') {
+            Some(at_idx) => {
+                output.push_str("[REDACTED]@");
+                output.push_str(&authority[at_idx + 1..]);
+                replacements += 1;
+            }
+            None => output.push_str(authority),
         }
+
+        let (rewritten_tail, query_replacements) = redact_sensitive_query_params(path_and_query);
+        replacements += query_replacements;
+        output.push_str(&rewritten_tail);
 
         rest = &after_scheme[end..];
     }
@@ -1175,6 +1239,154 @@ fn redact_url_credentials(line: &str) -> (String, usize) {
     } else {
         (output, replacements)
     }
+}
+
+/// Sensitive query-parameter names (after normalization to lowercase alphanumeric).
+/// Only the value of an exactly-matching parameter is redacted, so generic words like
+/// `?author=foo` are preserved.
+const SENSITIVE_QUERY_PARAM_NAMES: &[&str] = &[
+    "token",
+    "key",
+    "secret",
+    "password",
+    "passwd",
+    "pwd",
+    "accesstoken",
+    "auth",
+    "authorization",
+    "apikey",
+    "session",
+    "sessionid",
+    "sessionkey",
+    "signature",
+    "sig",
+    "credential",
+    "credentials",
+    "privatekey",
+    "signingkey",
+    "walletkey",
+    "mnemonic",
+    "seed",
+    "passphrase",
+    "bearer",
+];
+
+fn redact_sensitive_query_params(path_and_query: &str) -> (String, usize) {
+    let Some(q_idx) = path_and_query.find('?') else {
+        return (path_and_query.to_string(), 0);
+    };
+
+    let (path_part, query_with_q) = path_and_query.split_at(q_idx);
+    let query_body = &query_with_q[1..];
+    let (q_only, fragment) = match query_body.find('#') {
+        Some(frag_idx) => (&query_body[..frag_idx], &query_body[frag_idx..]),
+        None => (query_body, ""),
+    };
+
+    let mut replacements = 0;
+    let mut rewritten_params: Vec<String> = Vec::new();
+    for param in q_only.split('&') {
+        if let Some(eq_idx) = param.find('=') {
+            let name = &param[..eq_idx];
+            let normalized = normalize_for_keyword_match(&name.to_ascii_lowercase());
+            if SENSITIVE_QUERY_PARAM_NAMES
+                .iter()
+                .any(|sensitive| sensitive == &normalized.as_str())
+            {
+                rewritten_params.push(format!("{name}=[REDACTED]"));
+                replacements += 1;
+                continue;
+            }
+        }
+        rewritten_params.push(param.to_string());
+    }
+
+    if replacements == 0 {
+        return (path_and_query.to_string(), 0);
+    }
+
+    let new_query = rewritten_params.join("&");
+    (format!("{path_part}?{new_query}{fragment}"), replacements)
+}
+
+/// High-entropy token fallback: catches secret-shaped substrings even when no
+/// nearby keyword triggers k/v redaction. Two patterns are honored:
+///
+/// 1. `0x[0-9a-fA-F]{40,}` — Ethereum/hex-shaped private keys and large hashes.
+///    Always redacted; the `0x` prefix is a strong tell that distinguishes these
+///    from plain log identifiers.
+/// 2. `[A-Za-z0-9+/=._-]{32,}` runs that contain at least one uppercase letter,
+///    one lowercase letter, and one digit. This catches base64/base58 secrets
+///    and JWT segments while preserving:
+///    - all-lowercase hex SHAs (git `HEAD`),
+///    - long lowercase-only paths/identifiers (registry image names, dotted
+///      hostnames), because they lack uppercase characters.
+fn redact_high_entropy_tokens(line: &str) -> (String, usize) {
+    let mut out = String::with_capacity(line.len());
+    let mut buffer = String::new();
+    let mut replacements = 0;
+
+    for ch in line.chars() {
+        if is_token_char(ch) {
+            buffer.push(ch);
+        } else {
+            flush_token_buffer(&mut buffer, &mut out, &mut replacements);
+            out.push(ch);
+        }
+    }
+    flush_token_buffer(&mut buffer, &mut out, &mut replacements);
+
+    if replacements == 0 {
+        (line.to_string(), 0)
+    } else {
+        (out, replacements)
+    }
+}
+
+fn is_token_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '+' | '/' | '=' | '_' | '-' | '.')
+}
+
+fn flush_token_buffer(buffer: &mut String, out: &mut String, replacements: &mut usize) {
+    if buffer.is_empty() {
+        return;
+    }
+    if should_redact_high_entropy(buffer) {
+        out.push_str("[REDACTED_TOKEN]");
+        *replacements += 1;
+    } else {
+        out.push_str(buffer);
+    }
+    buffer.clear();
+}
+
+fn should_redact_high_entropy(span: &str) -> bool {
+    let bytes = span.as_bytes();
+
+    // Pattern 1: 0x followed by 40+ hex chars.
+    if bytes.len() >= 42 && (bytes[0] == b'0') && (bytes[1] == b'x' || bytes[1] == b'X') {
+        let tail = &bytes[2..];
+        if tail.len() >= 40 && tail.iter().all(|b| b.is_ascii_hexdigit()) {
+            return true;
+        }
+    }
+
+    if span.len() < 32 {
+        return false;
+    }
+
+    let mut has_upper = false;
+    let mut has_lower = false;
+    let mut has_digit = false;
+    for &b in bytes {
+        match b {
+            b'A'..=b'Z' => has_upper = true,
+            b'a'..=b'z' => has_lower = true,
+            b'0'..=b'9' => has_digit = true,
+            _ => {}
+        }
+    }
+    has_upper && has_lower && has_digit
 }
 
 fn contains_high_risk_content(text: &str) -> bool {
@@ -1215,14 +1427,45 @@ fn pack_staging_dir(staging_dir: &Path, output_path: &Path) -> DynResult<()> {
     let encoder = GzEncoder::new(output_file, Compression::default());
     let mut archive = tar::Builder::new(encoder);
 
-    archive
-        .append_dir_all("report", staging_dir)
-        .with_context(|| {
+    // Defense in depth: never follow symlinks when packaging the staging area.
+    // The staging dir is freshly created by this command and contains only files
+    // written via `write_text`, so symlinks would only appear under a TOCTOU
+    // swap or hostile concurrent writer. We skip such entries entirely rather
+    // than recording a symlink (which would leak the target path).
+    archive.follow_symlinks(false);
+
+    for entry in walkdir::WalkDir::new(staging_dir)
+        .follow_links(false)
+        .min_depth(1)
+    {
+        let entry = entry.with_context(|| {
             format!(
-                "failed to package staging directory {}",
+                "failed to enumerate staging directory {}",
                 staging_dir.display()
             )
         })?;
+        let path = entry.path();
+        let file_type = entry.file_type();
+        if file_type.is_symlink() {
+            continue;
+        }
+        let rel = match path.strip_prefix(staging_dir) {
+            Ok(rel) => rel,
+            Err(_) => continue,
+        };
+        let archive_path = Path::new("report").join(rel);
+        if file_type.is_dir() {
+            archive
+                .append_dir(&archive_path, path)
+                .with_context(|| format!("failed to append directory {}", path.display()))?;
+        } else if file_type.is_file() {
+            let mut file = File::open(path)
+                .with_context(|| format!("failed to open {} for archiving", path.display()))?;
+            archive
+                .append_file(&archive_path, &mut file)
+                .with_context(|| format!("failed to append file {}", path.display()))?;
+        }
+    }
 
     let encoder = archive.into_inner()?;
     let _ = encoder.finish()?;
@@ -1271,7 +1514,17 @@ struct BuildEvidenceReport {
 mod tests {
     use std::collections::HashMap;
 
-    use super::resolve_home_dir_from_env_like;
+    use super::{
+        redact_high_entropy_tokens, redact_sensitive_line, redact_url_credentials,
+        resolve_home_dir_from_env_like, sanitize_text, SanitizeContext,
+    };
+
+    fn empty_ctx() -> SanitizeContext {
+        SanitizeContext {
+            project_root: String::new(),
+            home_dir: None,
+        }
+    }
 
     #[test]
     fn resolve_home_dir_prefers_home() {
@@ -1309,5 +1562,217 @@ mod tests {
 
         let home = resolve_home_dir_from_env_like(|key| vars.get(key).cloned());
         assert!(home.is_none());
+    }
+
+    fn assert_redacts(input: &str, must_not_contain: &[&str]) {
+        let sanitized = sanitize_text(input, &empty_ctx());
+        for needle in must_not_contain {
+            assert!(
+                !sanitized.text.contains(needle),
+                "expected sanitized output to redact {needle:?}, but it was present in\n{}",
+                sanitized.text
+            );
+        }
+    }
+
+    #[test]
+    fn redacts_wallet_key_with_uppercase_env_style_name() {
+        // Issue 112 (1): "WALLET_KEY=0xabc123..." used to slip through because `key`
+        // wasn't an explicit keyword.
+        let line = "WALLET_KEY=0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let (out, replacements) = redact_sensitive_line(line);
+        assert!(replacements >= 1, "expected k/v redaction to fire");
+        assert!(
+            !out.contains("0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+            "wallet hex secret leaked through: {out}"
+        );
+        assert!(out.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redacts_signing_key_in_json() {
+        // Issue 112 (1): JSON-style `"signing_key": "..."` used to slip through entirely.
+        let line = "{\"signing_key\": \"AbCdEf0123XyZ7890\"}";
+        let (out, replacements) = redact_sensitive_line(line);
+        assert!(replacements >= 1, "expected k/v redaction to fire");
+        assert!(
+            !out.contains("AbCdEf0123XyZ7890"),
+            "signing_key value leaked: {out}"
+        );
+    }
+
+    #[test]
+    fn redacts_apikey_camelcase_and_dashed_variants() {
+        // Issue 112 (2): `apikey`, `apiKey`, `api-key` were not all covered by `api_key`.
+        for line in [
+            "apikey=topsecretvalue",
+            "apiKey=topsecretvalue",
+            "api-key=topsecretvalue",
+            "API_KEY=topsecretvalue",
+            "\"apiKey\": \"topsecretvalue\"",
+        ] {
+            let (out, replacements) = redact_sensitive_line(line);
+            assert!(replacements >= 1, "expected redaction for {line:?}");
+            assert!(
+                !out.contains("topsecretvalue"),
+                "secret leaked for {line:?}: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn redacts_bearer_token_header() {
+        // Issue 112 (2): `bearer` variants were not in the keyword list.
+        let line = "Authorization: Bearer eyJzZWNyZXQiOiJhYmMxMjMifQ";
+        let (out, replacements) = redact_sensitive_line(line);
+        assert!(replacements >= 1);
+        assert!(
+            !out.contains("eyJzZWNyZXQiOiJhYmMxMjMifQ"),
+            "bearer token leaked: {out}"
+        );
+    }
+
+    #[test]
+    fn redacts_sensitive_line_url_with_query_token() {
+        // Issue 112 (3): a line containing a sensitive keyword and a `://` URL
+        // with `?token=...` used to leak the token because the k/v path
+        // short-circuited on `://` and `redact_url_credentials` only handled
+        // userinfo. The full pipeline (k/v → URL → high-entropy) must now
+        // strip the query secret.
+        let line =
+            "auth_token https://internal.example/feed?token=abc123def456789xyz0&user=alice";
+        let sanitized = sanitize_text(line, &empty_ctx());
+        assert!(
+            !sanitized.text.contains("abc123def456789xyz0"),
+            "query-string token leaked: {}",
+            sanitized.text
+        );
+        assert!(
+            sanitized.text.contains("user=alice"),
+            "non-sensitive param wrongly redacted: {}",
+            sanitized.text
+        );
+    }
+
+    #[test]
+    fn redacts_url_query_param_secrets() {
+        // Issue 112 (3): query-string secrets like `?token=abc123` were untouched
+        // because `redact_url_credentials` only handled user:pass@host userinfo.
+        let line = "ping https://internal.example/feed?token=abc123def456&user=alice";
+        let (out, replacements) = redact_url_credentials(line);
+        assert!(replacements >= 1);
+        assert!(out.contains("token=[REDACTED]"), "expected token redacted: {out}");
+        assert!(
+            out.contains("user=alice"),
+            "non-sensitive param `user` should be preserved: {out}"
+        );
+        assert!(!out.contains("abc123def456"));
+    }
+
+    #[test]
+    fn redacts_url_userinfo_and_query_param_together() {
+        let line = "GET https://alice:hunter2@host/path?api_key=zzz";
+        let (out, replacements) = redact_url_credentials(line);
+        assert!(replacements >= 2);
+        assert!(out.contains("[REDACTED]@host"), "userinfo not redacted: {out}");
+        assert!(out.contains("api_key=[REDACTED]"), "query secret not redacted: {out}");
+        assert!(!out.contains("hunter2"));
+        assert!(!out.contains("zzz"));
+    }
+
+    #[test]
+    fn preserves_non_sensitive_query_params() {
+        // Confirm we don't over-redact harmless params just because their name
+        // contains a sensitive substring (`author` contains `auth`).
+        let line = "fetch https://example.com/api?author=alice&page=3";
+        let (out, replacements) = redact_url_credentials(line);
+        assert_eq!(replacements, 0, "no redaction expected, got: {out}");
+        assert_eq!(out, line);
+    }
+
+    #[test]
+    fn redacts_0x_prefixed_hex_secret_without_keyword() {
+        // Issue 112 (1): "Short hex secrets without a redact-keyword on the
+        // same line." A 0x-prefixed 64-hex-char value should always be flagged.
+        let line =
+            "transaction emitted: 0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let (out, replacements) = redact_high_entropy_tokens(line);
+        assert!(replacements >= 1);
+        assert!(
+            !out.contains("0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"),
+            "0x-hex secret leaked: {out}"
+        );
+        assert!(out.contains("[REDACTED_TOKEN]"));
+    }
+
+    #[test]
+    fn preserves_lowercase_hex_git_sha() {
+        // 40-char lowercase hex SHA (e.g. `git rev-parse HEAD`) must remain
+        // visible — otherwise the diagnostics bundle becomes useless for
+        // pinpointing the user's commit.
+        let line = "HEAD: 4c1f7560abcdef0123456789abcdef0123456789";
+        let (out, _replacements) = redact_high_entropy_tokens(line);
+        assert!(
+            out.contains("4c1f7560abcdef0123456789abcdef0123456789"),
+            "git SHA was over-redacted: {out}"
+        );
+    }
+
+    #[test]
+    fn redacts_jwt_signature_segment() {
+        // JWTs are dot-separated base64url segments. We expect at minimum the
+        // signature segment (high-entropy mixed-case) to be redacted.
+        let jwt =
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+        let line = format!("logged jwt={jwt}");
+        let (out, replacements) = redact_high_entropy_tokens(&line);
+        assert!(replacements >= 1, "expected JWT segment to redact: {out}");
+        assert!(
+            !out.contains("SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"),
+            "JWT signature leaked: {out}"
+        );
+    }
+
+    #[test]
+    fn preserves_plain_log_text() {
+        // Sanity: an ordinary log line must pass through unchanged so the
+        // high-entropy fallback isn't accidentally redacting useful content.
+        let line = "starting deploy on cluster main, build id 42";
+        let (out, replacements) = redact_high_entropy_tokens(line);
+        assert_eq!(replacements, 0);
+        assert_eq!(out, line);
+    }
+
+    #[test]
+    fn preserves_lowercase_dotted_identifier() {
+        // Container image refs are lowercase + digits + symbols; they must not
+        // be redacted by the high-entropy fallback (no uppercase character).
+        let line = "image: registry.example.com/projects/scaffold/runner:v1.2.3-rc4";
+        let (out, replacements) = redact_high_entropy_tokens(line);
+        assert_eq!(replacements, 0, "image ref over-redacted: {out}");
+        assert_eq!(out, line);
+    }
+
+    #[test]
+    fn private_key_pem_block_is_redacted_line_by_line() {
+        // Existing behavior, verified after rewrite.
+        let pem = "-----BEGIN OPENSSH PRIVATE KEY-----\n\
+                   b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB\n\
+                   -----END OPENSSH PRIVATE KEY-----";
+        assert_redacts(
+            pem,
+            &[
+                "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB",
+            ],
+        );
+    }
+
+    #[test]
+    fn url_special_chars_break_token_runs_cleanly() {
+        // Ensure non-token characters terminate token spans correctly.
+        let line = "url=https://example.com/some/path?x=1";
+        let (out, _) = redact_high_entropy_tokens(line);
+        assert!(out.contains("example.com"));
+        assert!(out.contains("/some/path"));
     }
 }
