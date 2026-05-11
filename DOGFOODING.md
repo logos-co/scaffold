@@ -892,7 +892,7 @@ From the module project root:
 
 ```bash
 "$SCAFFOLD_BIN" basecamp modules
-grep -n '^\[basecamp' scaffold.toml
+grep -n '^\[modules\.' scaffold.toml
 "$SCAFFOLD_BIN" basecamp modules --show
 "$SCAFFOLD_BIN" basecamp install
 "$SCAFFOLD_BIN" basecamp install --print-output
@@ -909,12 +909,12 @@ If your project does not auto-discover correctly, capture explicit sources:
 
 ### Expected Success Signals
 
-- `basecamp modules` either auto-discovers project sub-flakes exposing `.#lgx` or accepts explicit `--path` / `--flake` sources and writes one `[basecamp.modules.<name>]` sub-section per source into `scaffold.toml`. The file remains human-editable; re-runs are byte-identical and never overwrite existing keys.
-- For each captured project source, scaffold also resolves declared `dependencies` and inserts `role = "dependency"` entries unless the dep is already keyed, is a basecamp preinstall (`capability_module`, `package_manager`, `counter`, `webview_app`, and their `_ui` siblings), or is resolvable via the source's own `flake.lock` / the scaffold-default table.
-- An unresolvable dep fails fast with a targeted error naming the dep and the two user-side fixes (capture as a project source, or add `[basecamp.modules.<name>]` with `role = "dependency"`); no silent drop.
+- `basecamp modules` either auto-discovers project sub-flakes exposing `.#lgx` or accepts explicit `--path` / `--flake` sources and writes one `[modules.<name>]` sub-section per source into `scaffold.toml`. The file remains human-editable; re-runs are byte-identical and never overwrite existing keys.
+- For each captured project source, scaffold also resolves declared `dependencies` and inserts `role = "dependency"` entries unless the dep is already keyed, is a basecamp preinstall (`capability_module`, `package_manager`, `package_manager_ui`, `counter`, `counter_qml`, `webview_app`, `basecamp_main_ui`; see `BASECAMP_PREINSTALLED_MODULES` in `src/constants.rs` for the authoritative list), or is resolvable via the source's own `flake.lock` / the scaffold-default table.
+- An unresolvable dep fails fast with a targeted error naming the dep and the two user-side fixes (capture as a project source, or add `[modules.<name>]` with `role = "dependency"`); no silent drop.
 - `basecamp modules --show` prints the captured set without mutating state.
 - `basecamp install` builds each project source (sibling `--override-input` rewrites apply for `path:../<sibling>` inputs in multi-flake projects) and shells out to `lgpm` to install into both `alice` and `bob`. By default it logs to `.scaffold/logs/<ts>-install.log` and prints a one-line status; `--print-output` (or `LOGOS_SCAFFOLD_PRINT_OUTPUT=1`) streams nix output directly.
-- `basecamp doctor` reports each profile's installed modules matching the captured set; drift between `[basecamp.modules]` and on-disk profile state is flagged, not hidden.
+- `basecamp doctor` reports each profile's installed modules matching the captured set; drift between `[modules]` and on-disk profile state is flagged, not hidden.
 - `basecamp launch alice` kills any prior `logos_host` / `logos-basecamp` descendants for that profile, scrubs the profile's XDG dirs under `.scaffold/basecamp/profiles/alice/`, reinstalls each captured source for that profile, sets `XDG_{CONFIG,DATA,CACHE}_HOME` plus `LOGOS_PROFILE=alice`, and `exec`s basecamp.
 
 ### Failure Signals / Common Pitfalls
@@ -923,12 +923,12 @@ If your project does not auto-discover correctly, capture explicit sources:
 - Re-running `basecamp modules` overwriting an existing key is a regression — manual edits in `scaffold.toml` must win.
 - An unresolved transitive `logos-module-builder` input that fails without naming the missing `follows` is a regression.
 - `install` succeeding when a build or `lgpm install` step actually failed is a fail; exit codes must be non-zero on any source failure.
-- `launch alice` with an empty `[basecamp.modules]` and without `--no-clean` must bail (rather than scrubbing the profile and leaving it empty).
+- `launch alice` with an empty `[modules]` and without `--no-clean` must bail (rather than scrubbing the profile and leaving it empty).
 - Sibling `--override-input` not being applied at probe time would surface as a build that resolves the wrong sibling pin during `basecamp modules` auto-discovery; record any such mismatch with the exact derived module names.
 
 ### Evidence to Capture
 
-- `scaffold.toml` excerpt showing `[basecamp.modules.<name>]` sub-sections with `flake`, `role`, and (for project sources) the in-project relative path used.
+- `scaffold.toml` excerpt showing `[modules.<name>]` sub-sections with `flake`, `role`, and (for project sources) the in-project relative path used.
 - `basecamp modules --show` output.
 - `basecamp install` log path under `.scaffold/logs/` plus the printed one-line status, or the `--print-output` stream.
 - `basecamp doctor` output post-install.
@@ -936,7 +936,7 @@ If your project does not auto-discover correctly, capture explicit sources:
 
 ### Execution Notes
 
-- `basecamp modules` is the sole automated writer of `[basecamp.modules]`. If the user manually edited an entry, do not re-run `basecamp modules` mid-scenario without recording the pre-edit state — manual entries are intentionally preserved.
+- `basecamp modules` is the sole automated writer of `[modules]`. If the user manually edited an entry, do not re-run `basecamp modules` mid-scenario without recording the pre-edit state — manual entries are intentionally preserved.
 - Only `path:../<sibling>` flake inputs are sibling-rewritten; `path:./sub`, `github:`, and `git+` schemes pass through. If a project uses multi-line input declarations, the line-level parser may not detect them — record any sibling-override miss along with the offending `flake.nix` excerpt.
 
 ## B3. Two-Instance P2P Dogfooding
@@ -1026,14 +1026,14 @@ test -e .scaffold/basecamp/profiles/alice/.scaffold-xdg-data/scratch/marker.txt 
 - The default `launch alice` removes any user-introduced files under the alice profile XDG dirs and reinstalls each captured source before `exec`ing basecamp.
 - `launch alice --no-clean` skips the scrub and reinstall; pre-existing files in the profile survive.
 - `rm -rf` on `launch` is bounded to `<project>/.scaffold/basecamp/profiles/<profile>/`. Never any path outside that root.
-- A `launch` that finds no modules in `[basecamp.modules]` and is invoked without `--no-clean` bails before scrubbing (the empty-install + scrubbed profile combination is the regression we're guarding against).
+- A `launch` that finds no modules in `[modules]` and is invoked without `--no-clean` bails before scrubbing (the empty-install + scrubbed profile combination is the regression we're guarding against).
 
 ### Failure Signals / Common Pitfalls
 
 - The `marker.txt` file surviving the default `launch alice` is a regression: clean-slate is the v1 contract.
 - `--no-clean` triggering a scrub anyway is an escape-hatch regression.
 - A `launch` scrubbing a path outside the profile's XDG dirs is a severe safety regression — capture the offending path and stop.
-- An empty `[basecamp.modules]` plus a default `launch` that wipes the profile and leaves it empty is the exact bug guarded by `fix(basecamp): bail on empty [basecamp.modules] in launch without --no-clean`; if you can reproduce it, that's a real regression.
+- An empty `[modules]` plus a default `launch` that wipes the profile and leaves it empty is the exact bug guarded by `fix(basecamp): bail on empty [modules] in launch without --no-clean`; if you can reproduce it, that's a real regression.
 
 ### Evidence to Capture
 
@@ -1050,7 +1050,7 @@ test -e .scaffold/basecamp/profiles/alice/.scaffold-xdg-data/scratch/marker.txt 
 
 ### Goal
 
-Validate that project sources captured under `[basecamp.modules]` with `role = "project"` can be built against their `#lgx-portable` flake output for hand-loading into a basecamp AppImage, and that runtime `role = "dependency"` entries are skipped.
+Validate that project sources captured under `[modules]` with `role = "project"` can be built against their `#lgx-portable` flake output for hand-loading into a basecamp AppImage, and that runtime `role = "dependency"` entries are skipped.
 
 ### Preconditions
 
@@ -1068,7 +1068,7 @@ ls .scaffold/basecamp/portable 2>/dev/null || find .scaffold -maxdepth 4 -name '
 
 ### Expected Success Signals
 
-- `build-portable` builds `.#lgx-portable` for each `role = "project"` entry in `[basecamp.modules]`, in dependency order, and writes / symlinks the resulting artefacts under `.scaffold/`.
+- `build-portable` builds `.#lgx-portable` for each `role = "project"` entry in `[modules]`, in dependency order, and writes / symlinks the resulting artefacts under `.scaffold/`.
 - `role = "dependency"` entries are skipped — the target AppImage provides its own copies.
 - A flake that does not expose `.#lgx-portable` fails with a targeted error naming the missing attribute, not a raw nix trace.
 
@@ -1100,9 +1100,9 @@ ls .scaffold/basecamp/portable 2>/dev/null || find .scaffold -maxdepth 4 -name '
 - Changes to CLI argument parsing, help text, or error messages: rerun `E1`.
 - Changes to `create`/`new` flags or template selection logic: rerun `E2`.
 - Changes to `basecamp setup` (pin sync, lgpm build, profile seeding, idempotency) or `basecamp doctor`: rerun `B1`.
-- Changes to `[basecamp.modules]` derivation, dependency resolution, sibling `--override-input` handling, or `basecamp install` invocation of `lgpm`: rerun `B2`.
+- Changes to `[modules]` derivation, dependency resolution, sibling `--override-input` handling, or `basecamp install` invocation of `lgpm`: rerun `B2`.
 - Changes to `basecamp launch` (kill-and-scrub semantics, XDG isolation, port-override env vars, p2p surface): rerun `B3`.
-- Changes to clean-slate / `--no-clean` semantics or the empty `[basecamp.modules]` guard on `launch`: rerun `B4`.
+- Changes to clean-slate / `--no-clean` semantics or the empty `[modules]` guard on `launch`: rerun `B4`.
 - Changes to `basecamp build-portable` (project/dependency role split, ordering, attr selection): rerun `B5`.
 
 When in doubt, rerun more scenarios rather than fewer.

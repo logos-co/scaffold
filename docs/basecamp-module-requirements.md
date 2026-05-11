@@ -16,16 +16,16 @@ This is the contract between a module project and `logos-scaffold basecamp {setu
    - If a flake only exposes `packages.<system>.lgx-portable`, the resolver fails explicitly with a hint — it will not silently fall back. Expose `lgx` or pass `--flake <ref>#lgx-portable` on the command line to opt in.
    - If no flake exposes any `.lgx` attribute, the resolver fails with a generic hint pointing at `--path` / `--flake`.
 
-## The captured module set — `[basecamp.modules]` in scaffold.toml
+## The captured module set — `[modules]` in scaffold.toml
 
 The set of modules that `basecamp install` / `launch` / `build-portable` will act on lives in `scaffold.toml` as one sub-section per module, keyed by `module_name`:
 
 ```toml
-[basecamp.modules.tictactoe]
+[modules.tictactoe]
 flake = "path:/abs/tictactoe#lgx"
 role = "project"
 
-[basecamp.modules.delivery_module]
+[modules.delivery_module]
 flake = "github:logos-co/logos-delivery-module/1fde1566291fe062b98255003b9166b0261c6081#lgx"
 role = "dependency"
 ```
@@ -36,6 +36,8 @@ role = "dependency"
 
 `basecamp modules` is the sole writer of this section. The file stays human-editable — if you disagree with a generated entry, edit it directly.
 
+The pre-0.2.0 schema used `[basecamp.modules.<name>]`. Projects still on that layout are rejected at parse time with a hint pointing at `lgs init`; the section has moved to the top-level `[modules.<name>]` namespace.
+
 ### How entries get populated
 
 On every `basecamp modules` run (explicit `--flake` / `--path` args or auto-discovery), scaffold derives `module_name` for each source:
@@ -44,19 +46,19 @@ On every `basecamp modules` run (explicit `--flake` / `--path` args or auto-disc
 - **`.lgx` file paths** → read the sibling `metadata.json` if present; otherwise fall back to the filename stem and print a one-line assumption note.
 - **`github:` / other remote refs** → derive from the repo slug (strip `logos-` prefix, `-` → `_`) and print a one-line assumption note:
   ```
-  note: flake `github:logos-co/logos-storage-module/abc#lgx` — assumed module_name = `storage_module`. If wrong, edit `[basecamp.modules]` in scaffold.toml.
+  note: flake `github:logos-co/logos-storage-module/abc#lgx` — assumed module_name = `storage_module`. If wrong, edit `[modules]` in scaffold.toml.
   ```
   Edit the TOML if the guess is wrong — `basecamp modules` is **idempotent**: existing keys are never overwritten on re-run.
 
-Then for each project source's declared `dependencies`, scaffold resolves a flake ref for any name not already in `[basecamp.modules]`:
+Then for each project source's declared `dependencies`, scaffold resolves a flake ref for any name not already in `[modules]`:
 
-1. **Already keyed in `[basecamp.modules]`** (any role) → no-op. Whatever you have wins.
-2. **Basecamp preinstalls** (`capability_module`, `package_manager`, `counter`, `webview_app`, and their `_ui` siblings) → silent skip, basecamp ships them.
+1. **Already keyed in `[modules]`** (any role) → no-op. Whatever you have wins.
+2. **Basecamp preinstalls** (`capability_module`, `package_manager`, `package_manager_ui`, `counter`, `counter_qml`, `webview_app`, `basecamp_main_ui`; see `BASECAMP_PREINSTALLED_MODULES` in `src/constants.rs` for the authoritative list) → silent skip, basecamp ships them.
 3. **Declaring source's own `flake.lock`** → if the project source declares an input with the same name, scaffold reads the locked `github:<owner>/<repo>/<rev>` and rewrites to `#lgx`. Preferred path for most projects: whatever rev the module is already building against is, by definition, the rev its IPC clients expect at runtime.
 4. **Scaffold-default `BASECAMP_DEPENDENCIES`** → a hardcoded table keyed by module name (currently only `delivery_module`). Last-resort safety net for projects that don't carry the dep as a flake input.
-5. **Unresolved** → `basecamp modules` **fails with a targeted error** naming the dep and both user-side fixes (capture as a project source, or add an explicit `[basecamp.modules.<name>]` entry with `role = "dependency"`). No silent drop.
+5. **Unresolved** → `basecamp modules` **fails with a targeted error** naming the dep and both user-side fixes (capture as a project source, or add an explicit `[modules.<name>]` entry with `role = "dependency"`). No silent drop.
 
-Resolved deps are inserted into `[basecamp.modules]` with `role = "dependency"`. Re-running `basecamp modules` against the same sources is byte-identical.
+Resolved deps are inserted into `[modules]` with `role = "dependency"`. Re-running `basecamp modules` against the same sources is byte-identical.
 
 Implication for module authors: **declare each runtime dep as a flake input in your module's `flake.nix`**, even if your module doesn't technically build-link against it. It's the cleanest way to give scaffold an authoritative pin (step 3 above) without hitting the scaffold default.
 
@@ -129,12 +131,12 @@ logos-scaffold basecamp modules --flake github:me/my-module#lgx
 logos-scaffold basecamp modules --flake .#some-alt-attr
 ```
 
-Explicit sources skip root / sub-flake probing entirely. The entries land in `[basecamp.modules]` exactly as specified, `role = "project"`; re-run `basecamp modules` with different args to replace or extend. `basecamp install` then replays whatever the table captures.
+Explicit sources skip root / sub-flake probing entirely. The entries land in `[modules]` exactly as specified, `role = "project"`; re-run `basecamp modules` with different args to replace or extend. `basecamp install` then replays whatever the table captures.
 
 To override a single dependency pin without capturing it as a project source, edit `scaffold.toml` directly:
 
 ```toml
-[basecamp.modules.delivery_module]
+[modules.delivery_module]
 flake = "github:myfork/logos-delivery-module/abc123#lgx"
 role = "dependency"
 ```
@@ -147,7 +149,7 @@ role = "dependency"
 
 ```bash
 logos-scaffold basecamp build-portable
-# → builds .#lgx-portable for every `role = "project"` entry in [basecamp.modules]
+# → builds .#lgx-portable for every `role = "project"` entry in [modules]
 # → topologically orders by metadata.json dependencies (leaves first,
 #   so basecamp can resolve each module's deps before loading it)
 # → symlinks the built artefacts into `.scaffold/basecamp/portable/` as
