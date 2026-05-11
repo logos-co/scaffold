@@ -11,7 +11,7 @@ use crate::commands::idl::build_idl_for_current_project;
 use crate::commands::localnet::{build_localnet_status_for_project, cmd_localnet, LocalnetAction};
 use crate::commands::wallet::{cmd_wallet_topup_inner, TopupOutcome};
 use crate::constants::{DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, SPEL_BIN_REL_PATH};
-use crate::model::{LocalnetOwnership, Project};
+use crate::model::{LocalnetOwnership, LocalnetStatusReport, Project};
 use crate::project::{load_project, resolve_repo_path, run_in_project_dir};
 use crate::DynResult;
 
@@ -114,29 +114,75 @@ fn resolve_single_program_metadata(project: &Project) -> DynResult<Option<Single
     }))
 }
 
-fn ensure_localnet(project: &Project, timeout_sec: u64) -> DynResult<()> {
-    let status = build_localnet_status_for_project(project);
+/// Decision a `lgs run` step takes after observing the localnet status report.
+///
+/// Split out from `ensure_localnet` so that the per-ownership branching can be
+/// unit-tested without touching the filesystem or spawning a sequencer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum EnsureLocalnetAction {
+    AlreadyRunning { pid_display: String },
+    Start,
+    Bail { message: String },
+}
+
+pub(crate) fn decide_ensure_localnet_action(
+    status: &LocalnetStatusReport,
+    port: u16,
+) -> EnsureLocalnetAction {
+    let tracked_pid_display = status
+        .tracked_pid
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
     match status.ownership {
-        LocalnetOwnership::Managed if status.ready => {
-            let pid_display = status
-                .tracked_pid
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-            println!("      localnet already running (sequencer pid={pid_display})");
-            Ok(())
-        }
+        LocalnetOwnership::Managed if status.ready => EnsureLocalnetAction::AlreadyRunning {
+            pid_display: tracked_pid_display,
+        },
         LocalnetOwnership::Foreign => {
-            let pid_display = status
+            let listener_pid_display = status
                 .listener_pid
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            bail!(
-                "localnet port is in use by another process (pid={pid_display}).\n\
-                 This may be a sequencer from another project.\n\
-                 Stop it first with `logos-scaffold localnet stop` (or `kill {pid_display}`)."
-            );
+            EnsureLocalnetAction::Bail {
+                message: format!(
+                    "localnet port is in use by another process (pid={listener_pid_display}).\n\
+                     This may be a sequencer from another project.\n\
+                     Stop it first with `logos-scaffold localnet stop` (or `kill {listener_pid_display}`)."
+                ),
+            }
         }
-        _ => cmd_localnet(LocalnetAction::Start { timeout_sec }),
+        // The tracked sequencer pid is alive but the port is not accepting
+        // connections. Falling through to `start` here would call
+        // `cmd_localnet_start`, which sees the live pid and polls
+        // `wait_for_readiness` until `timeout_sec` elapses — leaving `lgs run`
+        // hung for the full window with no diagnostic. Bail with a concrete
+        // remediation pointer instead.
+        LocalnetOwnership::ManagedNotReady => EnsureLocalnetAction::Bail {
+            message: format!(
+                "the tracked sequencer pid={tracked_pid_display} is alive but is not accepting \
+                 connections on 127.0.0.1:{port}.\n\
+                 Run `logos-scaffold localnet stop` and retry, or inspect \
+                 `logos-scaffold localnet logs --tail 200` for a stall reason."
+            ),
+        },
+        // Managed-not-ready is now handled above; the remaining states
+        // (`Managed` without `ready`, `Stopped`, `StaleState`) all want a
+        // fresh start attempt.
+        LocalnetOwnership::Managed
+        | LocalnetOwnership::Stopped
+        | LocalnetOwnership::StaleState => EnsureLocalnetAction::Start,
+    }
+}
+
+fn ensure_localnet(project: &Project, timeout_sec: u64) -> DynResult<()> {
+    let status = build_localnet_status_for_project(project);
+    let port = project.config.localnet.port;
+    match decide_ensure_localnet_action(&status, port) {
+        EnsureLocalnetAction::AlreadyRunning { pid_display } => {
+            println!("      localnet already running (sequencer pid={pid_display})");
+            Ok(())
+        }
+        EnsureLocalnetAction::Bail { message } => bail!("{message}"),
+        EnsureLocalnetAction::Start => cmd_localnet(LocalnetAction::Start { timeout_sec }),
     }
 }
 
@@ -258,9 +304,124 @@ fn run_post_deploy_hook(
 mod tests {
     use super::*;
     use crate::model::{
-        Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, Project, RepoRef, RunConfig,
+        Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, LocalnetOwnership,
+        LocalnetStatusReport, Project, RepoRef, RunConfig,
     };
     use std::path::PathBuf;
+
+    fn status_for(
+        ownership: LocalnetOwnership,
+        ready: bool,
+        tracked_pid: Option<u32>,
+        listener_pid: Option<u32>,
+    ) -> LocalnetStatusReport {
+        LocalnetStatusReport {
+            tracked_pid,
+            tracked_running: tracked_pid.is_some(),
+            listener_present: listener_pid.is_some(),
+            listener_pid,
+            ownership,
+            ready,
+            log_path: String::new(),
+            remediation: vec![],
+        }
+    }
+
+    #[test]
+    fn decide_managed_ready_reports_already_running() {
+        let status = status_for(LocalnetOwnership::Managed, true, Some(4242), Some(4242));
+        let action = decide_ensure_localnet_action(&status, 3040);
+        assert_eq!(
+            action,
+            EnsureLocalnetAction::AlreadyRunning {
+                pid_display: "4242".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn decide_managed_not_ready_bails_with_actionable_message() {
+        // The bug from issue #115: when our tracked pid is alive but the port
+        // isn't open, we used to fall through to `Start` and hang for the full
+        // `--localnet-timeout` window. The new decision must bail and point
+        // the user at `localnet stop` / `localnet logs`.
+        let status = status_for(LocalnetOwnership::ManagedNotReady, false, Some(9988), None);
+        let action = decide_ensure_localnet_action(&status, 3040);
+        match action {
+            EnsureLocalnetAction::Bail { message } => {
+                assert!(
+                    message.contains("9988"),
+                    "expected pid 9988 in message, got: {message}"
+                );
+                assert!(
+                    message.contains("127.0.0.1:3040"),
+                    "expected addr in message, got: {message}"
+                );
+                assert!(
+                    message.contains("localnet stop"),
+                    "expected `localnet stop` remediation, got: {message}"
+                );
+                assert!(
+                    message.contains("localnet logs"),
+                    "expected `localnet logs` remediation, got: {message}"
+                );
+            }
+            other => panic!("expected Bail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_managed_not_ready_uses_unknown_when_tracked_pid_missing() {
+        // Defensive: even if state.json somehow lacks a tracked pid in this
+        // branch, the message must still be human-readable, not produce a
+        // raw "None" or panic.
+        let status = status_for(LocalnetOwnership::ManagedNotReady, false, None, None);
+        let action = decide_ensure_localnet_action(&status, 3040);
+        match action {
+            EnsureLocalnetAction::Bail { message } => assert!(
+                message.contains("pid=unknown"),
+                "expected pid=unknown placeholder, got: {message}"
+            ),
+            other => panic!("expected Bail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_foreign_bails_with_listener_pid() {
+        let status = status_for(LocalnetOwnership::Foreign, false, None, Some(7777));
+        let action = decide_ensure_localnet_action(&status, 3040);
+        match action {
+            EnsureLocalnetAction::Bail { message } => {
+                assert!(
+                    message.contains("7777"),
+                    "expected listener pid in message, got: {message}"
+                );
+                assert!(
+                    message.contains("another process"),
+                    "expected `another process` phrasing, got: {message}"
+                );
+            }
+            other => panic!("expected Bail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_stopped_requests_start() {
+        let status = status_for(LocalnetOwnership::Stopped, false, None, None);
+        assert_eq!(
+            decide_ensure_localnet_action(&status, 3040),
+            EnsureLocalnetAction::Start
+        );
+    }
+
+    #[test]
+    fn decide_stale_state_requests_start() {
+        let status = status_for(LocalnetOwnership::StaleState, false, Some(123), None);
+        assert_eq!(
+            decide_ensure_localnet_action(&status, 3040),
+            EnsureLocalnetAction::Start
+        );
+    }
 
     fn make_test_project(root: PathBuf) -> Project {
         Project {
