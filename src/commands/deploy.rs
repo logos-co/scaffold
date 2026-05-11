@@ -12,8 +12,9 @@ use crate::project::{load_project, resolve_repo_path};
 use crate::DynResult;
 
 use super::wallet_support::{
-    extract_tx_identifier, is_connectivity_failure, load_wallet_runtime, rpc_get_last_block_id,
-    sequencer_unreachable_hint, summarize_command_failure, wallet_password, RpcReachabilityError,
+    default_sequencer_http_url_for_project, extract_tx_identifier, is_connectivity_failure,
+    load_wallet_runtime, rpc_get_last_block_id, sequencer_unreachable_hint,
+    summarize_command_failure, wallet_password, RpcReachabilityError,
 };
 
 /// Roots searched (in order) for guest `.bin` artefacts. Both layouts exist in
@@ -24,7 +25,6 @@ use super::wallet_support::{
 /// this constant is the same project-relative directory that `build.rs`
 /// compiles via `crate::constants::METHODS_DIR`; keep them in sync.
 const GUEST_BIN_SEARCH_ROOTS: &[&str] = &["target/riscv-guest", "methods/target"];
-const DEFAULT_SEQUENCER_ADDR: &str = "http://127.0.0.1:3040";
 
 /// `spel inspect` line prefix that carries the risc0 image ID — the value the
 /// sequencer uses as the on-chain program ID. Format is whitespace-tolerant:
@@ -46,7 +46,7 @@ pub(crate) fn cmd_deploy(
     let sequencer_addr = wallet
         .sequencer_addr
         .clone()
-        .unwrap_or_else(|| DEFAULT_SEQUENCER_ADDR.to_string());
+        .unwrap_or_else(|| default_sequencer_http_url_for_project(&project));
 
     // --program-path: deploy a single custom ELF directly, skip auto-discovery
     if let Some(custom_path) = program_path {
