@@ -10,7 +10,8 @@ use crate::commands::deploy::{
 use crate::commands::idl::build_idl_for_current_project;
 use crate::commands::localnet::{build_localnet_status_for_project, cmd_localnet, LocalnetAction};
 use crate::commands::run_state::{
-    compute_program_hashes, deploy_can_be_skipped, load_state, save_state, RunDeployState,
+    compute_program_hashes, current_localnet_pid, deploy_can_be_skipped, load_state, save_state,
+    RunDeployState,
 };
 use crate::commands::wallet::{cmd_wallet_topup_inner, TopupOutcome};
 use crate::constants::{DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, SPEL_BIN_REL_PATH};
@@ -74,29 +75,32 @@ fn run_pipeline_once(
         bail!("wallet topup confirmation timed out; aborting run to avoid deploying with uncertain funding.\nHint: retry `logos-scaffold run` or run `logos-scaffold wallet topup` manually.");
     }
 
-    // Step 5: Deploy (idempotent: skip when guest .bin + IDL hashes both
-    // match the prior deploy. IDL is folded in so an ABI-only edit forces
-    // a re-deploy even if the binary is byte-identical). To force a
-    // re-deploy, delete `.scaffold/state/run_deploy.json` manually
-    // (a `--reset` switch arrives in a later branch of this stack).
+    // Step 5: Deploy (idempotent: skip when guest .bin + IDL + deploy
+    // config hashes match the prior deploy AND the sequencer is the same
+    // instance that received it. A `lgs localnet stop && start` cycle
+    // changes the sequencer PID and wipes on-chain state, so PID equality
+    // is the gate that prevents stale-deploy false positives. To force a
+    // re-deploy without restarting localnet, delete
+    // `.scaffold/state/run_deploy.json` manually (a `--reset` switch
+    // arrives in a later branch of this stack).
     let current_hashes = compute_program_hashes(project)?;
+    let current_pid = current_localnet_pid(project);
     let prior = load_state(project);
-    let deploy_skipped = if deploy_can_be_skipped(&current_hashes, &prior.program_hashes) {
+    let deploy_skipped = if deploy_can_be_skipped(&current_hashes, current_pid, &prior) {
         println!(
-            "[5/{total_steps}] Deploy skipped (guest binaries + IDL unchanged; delete `.scaffold/state/run_deploy.json` to force a re-deploy)"
+            "[5/{total_steps}] Deploy skipped (guest binaries + IDL + config + sequencer unchanged; delete `.scaffold/state/run_deploy.json` to force a re-deploy)"
         );
         true
     } else {
         println!("[5/{total_steps}] Deploying programs...");
         cmd_deploy(None, None, false)?;
-        if !current_hashes.is_empty() {
-            save_state(
-                project,
-                &RunDeployState {
-                    program_hashes: current_hashes,
-                },
-            )?;
-        }
+        save_state(
+            project,
+            &RunDeployState {
+                program_hashes: current_hashes,
+                localnet_pid: current_pid,
+            },
+        )?;
         false
     };
 
