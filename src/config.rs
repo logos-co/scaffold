@@ -226,6 +226,7 @@ fn parse_repo_ref(doc: &DocumentMut, name: &str) -> DynResult<Option<RepoRef>> {
     check_toml_value(&format!("repos.{name}.pin"), &pin)?;
     check_toml_value(&format!("repos.{name}.attr"), &attr)?;
     check_toml_value(&format!("repos.{name}.path"), &path)?;
+    check_repo_source(name, &source)?;
 
     Ok(Some(RepoRef {
         source,
@@ -234,6 +235,56 @@ fn parse_repo_ref(doc: &DocumentMut, name: &str) -> DynResult<Option<RepoRef>> {
         attr,
         path,
     }))
+}
+
+/// Reject `[repos.<name>].source` values that would let a malicious
+/// `scaffold.toml` execute code on contributor machines via `git clone`.
+///
+/// Two classes are covered here, both reachable from `ensure_repo_present`:
+///
+/// - Leading `-` is treated by `git clone` as an option, not a positional
+///   `<repository>`. Even with the `--` separator the clone call sites pass
+///   defensively, parse-time rejection gives a clear error pointing at the
+///   offending key instead of a confusing subprocess failure.
+/// - `ext::` (and other remote-helper transports written as `<helper>::...`)
+///   invoke `git-remote-<helper>`, which for `ext` runs an arbitrary shell
+///   command — the CVE-2017-1000117 class. None of scaffold's flows need
+///   it, so refusing it at parse time is strictly safer.
+fn check_repo_source(name: &str, source: &str) -> DynResult<()> {
+    let trimmed = source.trim();
+    if trimmed.is_empty() {
+        bail!("invalid scaffold.toml: [repos.{name}].source is empty");
+    }
+    if trimmed.starts_with('-') {
+        bail!(
+            "invalid scaffold.toml: [repos.{name}].source starts with '-' ({source:?}); \
+             refusing — git would treat this as an option, not a repository"
+        );
+    }
+    if is_dangerous_transport(trimmed) {
+        bail!(
+            "invalid scaffold.toml: [repos.{name}].source uses a dangerous git transport ({source:?}); \
+             `ext::` and other remote-helper transports can execute arbitrary commands at clone time and are not allowed"
+        );
+    }
+    Ok(())
+}
+
+/// Match the `<helper>::<rest>` remote-helper syntax for transports that can
+/// execute code. `ext::` is the canonical RCE vector (CVE-2017-1000117); the
+/// rest of the recognized list mirrors transports whose helpers historically
+/// shipped shell-out behavior or are otherwise unsuitable for an untrusted
+/// `scaffold.toml`.
+fn is_dangerous_transport(source: &str) -> bool {
+    const BANNED_PREFIXES: &[&str] = &[
+        "ext::",
+        "ext ::",
+        "transport-helper::",
+    ];
+    let lowered = source.to_ascii_lowercase();
+    BANNED_PREFIXES
+        .iter()
+        .any(|prefix| lowered.starts_with(prefix))
 }
 
 fn parse_modules(doc: &DocumentMut) -> DynResult<std::collections::BTreeMap<String, ModuleEntry>> {
@@ -787,6 +838,90 @@ role = "project"
             err.to_string().contains("70000") || err.to_string().contains("u16"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn rejects_repo_source_starting_with_dash() {
+        let toml = minimal_v0_2_0().replace(
+            &format!("source = \"{}\"\npin = \"{}\"", LEZ_SOURCE, DEFAULT_LEZ.sha),
+            &format!(
+                "source = \"-upload-pack=evil\"\npin = \"{}\"",
+                DEFAULT_LEZ.sha
+            ),
+        );
+        let err = parse_config(&toml).expect_err("dash-prefixed source must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("repos.lez"), "{msg}");
+        assert!(msg.contains("starts with '-'"), "{msg}");
+    }
+
+    #[test]
+    fn rejects_repo_source_with_ext_transport() {
+        let toml = minimal_v0_2_0().replace(
+            &format!("source = \"{}\"\npin = \"{}\"", LEZ_SOURCE, DEFAULT_LEZ.sha),
+            &format!(
+                "source = \"ext::sh -c id\"\npin = \"{}\"",
+                DEFAULT_LEZ.sha
+            ),
+        );
+        let err = parse_config(&toml).expect_err("ext:: transport must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("repos.lez"), "{msg}");
+        assert!(msg.contains("dangerous git transport"), "{msg}");
+    }
+
+    #[test]
+    fn rejects_repo_source_with_ext_transport_case_insensitive() {
+        let toml = minimal_v0_2_0().replace(
+            &format!("source = \"{}\"\npin = \"{}\"", LEZ_SOURCE, DEFAULT_LEZ.sha),
+            &format!(
+                "source = \"EXT::sh -c id\"\npin = \"{}\"",
+                DEFAULT_LEZ.sha
+            ),
+        );
+        let err = parse_config(&toml).expect_err("upper-case ext:: must be rejected");
+        assert!(
+            err.to_string().contains("dangerous git transport"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn rejects_repo_source_with_transport_helper_prefix() {
+        let toml = minimal_v0_2_0().replace(
+            &format!("source = \"{}\"\npin = \"{}\"", LEZ_SOURCE, DEFAULT_LEZ.sha),
+            &format!(
+                "source = \"transport-helper::evil\"\npin = \"{}\"",
+                DEFAULT_LEZ.sha
+            ),
+        );
+        let err = parse_config(&toml).expect_err("transport-helper:: must be rejected");
+        assert!(
+            err.to_string().contains("dangerous git transport"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn accepts_ordinary_repo_sources() {
+        // Defense-in-depth: the rejection path is selective. Confirm the
+        // common, benign source shapes still parse — https, ssh, git@, plain
+        // paths.
+        for source in [
+            "https://github.com/example/repo.git",
+            "http://example.com/repo",
+            "ssh://git@example.com/repo.git",
+            "git@github.com:example/repo.git",
+            "/abs/local/repo",
+            "./relative/repo",
+            "extender/repo",
+        ] {
+            let toml = minimal_v0_2_0().replace(
+                &format!("source = \"{}\"\npin = \"{}\"", LEZ_SOURCE, DEFAULT_LEZ.sha),
+                &format!("source = \"{}\"\npin = \"{}\"", source, DEFAULT_LEZ.sha),
+            );
+            parse_config(&toml).unwrap_or_else(|e| panic!("benign source {source:?} rejected: {e}"));
+        }
     }
 
     #[test]
