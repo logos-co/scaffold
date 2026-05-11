@@ -66,6 +66,9 @@ logos-scaffold localnet start [--timeout-sec N]
 logos-scaffold localnet stop
 logos-scaffold localnet status [--json]
 logos-scaffold localnet logs [--tail N]
+logos-scaffold localnet reset [--reset-wallet] [--verify-timeout-sec N]
+logos-scaffold build idl [project-path]
+logos-scaffold build client [project-path]
 logos-scaffold wallet list [--long]
 logos-scaffold wallet topup [<address> | --address <address-ref>] [--dry-run]
 logos-scaffold wallet default set <address-ref>
@@ -91,7 +94,10 @@ logos-scaffold help
 - `init` writes `scaffold.toml` (schema v0.2.0) with defaults into the current directory so an existing project can use the scaffold workflow. It creates `.scaffold/{state,logs}` and appends `.scaffold` to `.gitignore`. When `scaffold.toml` already exists at an older schema, `init` migrates it in place via `toml_edit` so comments, key ordering, and unrelated sections survive the rewrite — old `[basecamp].pin` / `.source` / `.lgpm_flake` move to `[repos.basecamp]` / `[repos.lgpm]`; old `[basecamp.modules.*]` move to top-level `[modules.*]`; legacy `url` fields on `[repos.{lez,spel}]` are dropped. Already-migrated configs are refused. Run `setup` next.
 - `setup` syncs LEZ and `spel` to their pinned commits (read from `[repos.lez]` / `[repos.spel]`), builds the standalone `sequencer_service`, `wallet`, and `spel` binaries locally, and seeds a deterministic default wallet from preconfigured public accounts when none is set. All binaries are project-local and are not installed to PATH — use `logos-scaffold wallet ...` / `logos-scaffold spel -- ...` to interact with them. By default `[repos.lez].path` / `[repos.spel].path` are empty in `scaffold.toml`; the on-disk location is resolved at runtime from `<cache_root>/repos/<name>/<pin>`, so the file is portable across machines and CI. `--vendor-deps` projects keep relative `.scaffold/repos/{lez,spel}` literals; an explicit absolute `path` set in `scaffold.toml` is honored as-is.
 - `build [project-path]` runs `setup` and then `cargo build --workspace`.
+- `build idl [project-path]` regenerates the IDL from the project source using the vendored `spel` binary.
+- `build client [project-path]` regenerates client bindings from the current IDL using the vendored `spel` binary.
 - `deploy [program-name]` deploys one or all guest programs discovered in `methods/guest/src/bin/*.rs` using prebuilt `.bin` artifacts. After each successful submission it prints `program_id: <hex>` (the risc0 image ID, computed locally from the submitted ELF) and includes it in `--program-path … --json` output.
+- `localnet reset [--reset-wallet] [--verify-timeout-sec N]` wipes the sequencer database and restarts the localnet from genesis. By default only the DB is cleared; `--reset-wallet` also wipes wallet state and regenerates keys.
 - `localnet start` waits until localnet is actually ready (`pid alive` + `127.0.0.1:3040` reachable), otherwise fails with diagnostics.
 - `localnet status` distinguishes managed process, stale state, and foreign listeners.
 - `wallet list` shows known wallet accounts (`wallet account list`).
