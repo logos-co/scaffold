@@ -985,23 +985,45 @@ fn localnet_start_patches_config_and_uses_configured_port() {
         .assert()
         .success();
 
-    // Verify sequencer_config.json was patched with the configured port
-    let patched_config = fs::read_to_string(&config_path).expect("read patched config");
+    // The vendored config in the lez checkout must be left untouched.
+    // Regression for #114: in-place mutation broke `git_clean(lez)` and
+    // silently disabled the cache-repo auto-reclone safety net.
+    let vendored_after = fs::read_to_string(&config_path).expect("read vendored config");
+    let vendored_json: serde_json::Value =
+        serde_json::from_str(&vendored_after).expect("parse vendored config");
+    assert_eq!(
+        vendored_json["port"],
+        serde_json::Value::Number(3040.into()),
+        "vendored sequencer_config.json must not be mutated, got: {vendored_after}"
+    );
+
+    // The patched copy lives under the project's `.scaffold/state/`.
+    let patched_path = temp.path().join(".scaffold/state/sequencer_config.json");
+    let patched_config = fs::read_to_string(&patched_path).expect("read patched config");
     let config_json: serde_json::Value =
         serde_json::from_str(&patched_config).expect("parse patched config");
     assert_eq!(
         config_json["port"],
         serde_json::Value::Number(localnet_port.into()),
-        "expected port in sequencer_config.json to be patched to {localnet_port}, got: {patched_config}"
+        "expected port in patched sequencer_config.json to be {localnet_port}, got: {patched_config}"
     );
     assert_eq!(
         config_json["max_block_size"],
         serde_json::Value::String("8 MiB".to_string()),
-        "expected max_block_size in sequencer_config.json to be widened so multi-program deploys fit, got: {patched_config}"
+        "expected max_block_size in patched sequencer_config.json to be widened so multi-program deploys fit, got: {patched_config}"
+    );
+
+    // The sequencer must have been invoked with the absolute path to the
+    // patched copy, not the in-repo relative path.
+    let args = fs::read_to_string(&args_log).expect("read args log");
+    assert!(
+        args.lines()
+            .any(|line| line == patched_path.to_string_lossy()),
+        "expected sequencer to receive patched config path {}, got args: {args}",
+        patched_path.display()
     );
 
     // Verify --port was NOT passed as a CLI arg
-    let args = fs::read_to_string(&args_log).expect("read args log");
     assert!(
         !args.contains("--port"),
         "expected --port NOT to appear in sequencer args, got: {args}"
