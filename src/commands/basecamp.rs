@@ -814,8 +814,14 @@ fn swap_flake_attr(flake_ref: &str, expected: &str, replacement: &str) -> String
 
 /// Command-line arguments (after `nix`) plus an optional working-directory
 /// override. For `path:<abs>#<attr>` refs we cd into `<abs>` and invoke
-/// `nix build .#<attr>` so the default `./result-<attr>` symlink lands next
-/// to the flake. For remote refs we stay in the caller's cwd.
+/// `nix build .#<attr>`; for remote refs we stay in the caller's cwd.
+///
+/// `--no-link` is always passed: callers parse `--print-out-paths` stdout
+/// for the resolved store paths, and `cmd_basecamp_build_portable` creates
+/// its own load-ordered symlinks under `.scaffold/basecamp/portable/`. The
+/// default `nix build` `result-<attr>` symlink would otherwise land inside
+/// each `path:` flake's source directory — polluting the user's working
+/// copy with untracked files on every run.
 #[derive(Debug, PartialEq, Eq)]
 struct NixBuildInvocation {
     cwd_override: Option<PathBuf>,
@@ -843,6 +849,7 @@ fn build_portable_nix_invocation(
         args.push(name.clone());
         args.push(value.clone());
     }
+    args.push("--no-link".to_string());
     args.push("--print-out-paths".to_string());
 
     NixBuildInvocation { cwd_override, args }
@@ -3186,7 +3193,12 @@ mod tests {
         assert_eq!(inv.cwd_override.as_deref(), Some(Path::new("/abs/to/foo")));
         assert_eq!(
             inv.args,
-            vec!["build", ".#lgx-portable", "--print-out-paths"]
+            vec![
+                "build",
+                ".#lgx-portable",
+                "--no-link",
+                "--print-out-paths",
+            ]
         );
     }
 
@@ -3199,21 +3211,41 @@ mod tests {
         );
         assert_eq!(
             inv.args,
-            vec!["build", "github:foo/bar#lgx-portable", "--print-out-paths"]
+            vec![
+                "build",
+                "github:foo/bar#lgx-portable",
+                "--no-link",
+                "--print-out-paths",
+            ]
         );
     }
 
     #[test]
-    fn build_portable_nix_invocation_does_not_use_out_link() {
-        // Spec: `nix build` without `-o`, so the default `./result-<attr>` symlink
-        // lands next to the flake. No `--out-link`, no `--no-link`.
-        let inv = build_portable_nix_invocation("path:/abs/a#lgx-portable", &[]);
-        for forbidden in ["-o", "--out-link", "--no-link"] {
+    fn build_portable_nix_invocation_passes_no_link() {
+        // Regression guard for the stray-`result-*`-symlink bug: when the
+        // path:-ref branch cds into the flake source dir, `nix build` would
+        // otherwise drop a `result-<attr>` symlink there on every run. We
+        // rely on `--print-out-paths` for the store paths and create our
+        // own symlinks under `.scaffold/basecamp/portable/`, so `--no-link`
+        // is required regardless of ref kind.
+        for flake_ref in [
+            "path:/abs/a#lgx-portable",
+            "github:foo/bar#lgx-portable",
+            "git+https://example.com/repo#lgx-portable",
+        ] {
+            let inv = build_portable_nix_invocation(flake_ref, &[]);
             assert!(
-                !inv.args.iter().any(|a| a == forbidden),
-                "argv must not contain `{forbidden}`: {:?}",
+                inv.args.iter().any(|a| a == "--no-link"),
+                "argv for `{flake_ref}` must contain `--no-link`: {:?}",
                 inv.args
             );
+            for forbidden in ["-o", "--out-link"] {
+                assert!(
+                    !inv.args.iter().any(|a| a == forbidden),
+                    "argv for `{flake_ref}` must not contain `{forbidden}`: {:?}",
+                    inv.args
+                );
+            }
         }
     }
 
@@ -3231,6 +3263,7 @@ mod tests {
                 "--override-input",
                 "core",
                 "path:/abs/core",
+                "--no-link",
                 "--print-out-paths",
             ]
         );
