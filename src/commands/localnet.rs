@@ -458,18 +458,18 @@ fn patch_sequencer_config_for_standalone(lez: &Path) -> DynResult<()> {
     if let Some(obj) = doc.as_object_mut() {
         // Keep required fields present but point them at localhost so config parsing succeeds.
         // The standalone build uses mock clients and never actually connects to these.
-        if !obj.contains_key("indexer_rpc_url") {
-            obj.insert(
-                "indexer_rpc_url".to_string(),
-                serde_json::json!("ws://127.0.0.1:8779"),
-            );
-        }
-        if !obj.contains_key("bedrock_config") {
-            obj.insert("bedrock_config".to_string(), serde_json::json!({
+        // Always overwrite — the default config points at real services unavailable in standalone mode.
+        obj.insert(
+            "indexer_rpc_url".to_string(),
+            serde_json::json!("ws://127.0.0.1:8779"),
+        );
+        obj.insert(
+            "bedrock_config".to_string(),
+            serde_json::json!({
                 "channel_id": "0101010101010101010101010101010101010101010101010101010101010101",
                 "node_url": "http://127.0.0.1:8080"
-            }));
-        }
+            }),
+        );
     } else {
         bail!(
             "sequencer_config.json is not a JSON object: {}",
