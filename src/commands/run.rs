@@ -137,7 +137,7 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
     let prior = load_state(project);
     let deploy_skipped = if deploy_can_be_skipped(&current_hashes, current_pid, &prior) {
         println!(
-            "[5/{total_steps}] Deploy skipped (guest binaries + IDL + config + sequencer unchanged; delete `.scaffold/state/run_deploy.json` to force a re-deploy)"
+            "[5/{total_steps}] Deploy skipped (guest binaries + IDL + config + sequencer unchanged; pass `--reset` to wipe and re-deploy, or delete `.scaffold/state/run_deploy.json` to force a re-deploy without a wipe)"
         );
         true
     } else {
