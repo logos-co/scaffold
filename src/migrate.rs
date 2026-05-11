@@ -36,6 +36,21 @@ pub(crate) struct MigrationReport {
 pub(crate) fn migrate_to_v0_2_0(doc: &mut DocumentMut) -> DynResult<MigrationReport> {
     let mut report = MigrationReport::default();
 
+    // Short-circuit when the file is already at the current schema version.
+    // The migrator's rewrites (lssa→lez drop, url strip, basecamp reshape, etc.)
+    // are pre-v0.2.0 fixups; running them against an already-current file can
+    // silently rewrite intentionally non-conformant content (e.g. a hand-kept
+    // `[repos.lssa]` for a fork).
+    if doc
+        .get("scaffold")
+        .and_then(Item::as_table)
+        .and_then(|t| t.get("version"))
+        .and_then(Item::as_str)
+        == Some(SCAFFOLD_TOML_SCHEMA_VERSION)
+    {
+        return Ok(report);
+    }
+
     // Ensure [scaffold] exists; bump version.
     let scaffold = doc.entry("scaffold").or_insert(Item::Table({
         let mut t = Table::new();
@@ -305,6 +320,41 @@ fn split_flake_ref(flake_ref: &str) -> Option<(String, String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migrator_short_circuits_on_current_version_and_preserves_stray_lssa() {
+        // A user keeps a hand-rolled [repos.lssa] in a v0.2.0 file (e.g. a fork
+        // that re-uses the old name). The migrator must not silently drop it.
+        let seed = r#"[scaffold]
+version = "0.2.0"
+
+[repos.lssa]
+source = "https://example.com/lssa.git"
+pin = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+[repos.lez]
+source = "https://example.com/lez.git"
+pin = "abc123abc123abc123abc123abc123abc123abc1"
+
+[repos.spel]
+source = "https://example.com/spel.git"
+pin = "feedfacefeedfacefeedfacefeedfacefeedface"
+"#;
+        let mut doc: DocumentMut = seed.parse().expect("parse seed");
+        let report = migrate_to_v0_2_0(&mut doc).expect("migrate");
+
+        assert!(
+            report.changes.is_empty(),
+            "no changes expected when already at v0.2.0, got: {:?}",
+            report.changes,
+        );
+        let after = doc.to_string();
+        assert!(
+            after.contains("[repos.lssa]"),
+            "stray [repos.lssa] must be preserved; got:\n{after}"
+        );
+        assert_eq!(after, seed, "document unchanged when version is current");
+    }
 
     #[test]
     fn split_flake_ref_pulls_apart_canonical_lgpm_form() {
