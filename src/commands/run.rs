@@ -229,6 +229,13 @@ fn build_hook_command(
         .env("NSSA_WALLET_HOME_DIR", &wallet_home)
         .env("SCAFFOLD_PROJECT_ROOT", &project_root)
         .env("SCAFFOLD_IDL_DIR", &idl_dir)
+        // Always-on: deploy-skip state is run-level (it's the same for
+        // every program in this invocation), so multi-program hooks need
+        // it just as much as single-program ones.
+        .env(
+            "SCAFFOLD_DEPLOY_SKIPPED",
+            if deploy_skipped { "1" } else { "0" },
+        )
         .current_dir(&project.root);
 
     // Single-program shortcut: when there's exactly one deployable program,
@@ -240,10 +247,6 @@ fn build_hook_command(
             cmd.env("SCAFFOLD_PROGRAM_ID", id);
         }
         cmd.env("SCAFFOLD_GUEST_BIN", &sp.binary_path);
-        cmd.env(
-            "SCAFFOLD_DEPLOY_SKIPPED",
-            if deploy_skipped { "1" } else { "0" },
-        );
     }
     cmd
 }
@@ -595,5 +598,42 @@ mod tests {
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content.trim(), "id=|bin=");
+    }
+
+    #[test]
+    fn hook_receives_deploy_skipped_env_without_single_program() {
+        // `SCAFFOLD_DEPLOY_SKIPPED` is run-level state and must reach the
+        // hook even when there's no single-program shortcut to ride on
+        // (i.e. multi-program projects). Pre-fix, the env var was only
+        // exported inside the `if let Some(single_program)` block, so
+        // multi-program hooks never saw it.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env_file = temp.path().join("env_out.txt");
+        let project = make_test_project(temp.path().to_path_buf());
+
+        let hook = format!(
+            "echo \"$SCAFFOLD_DEPLOY_SKIPPED\" > '{}'",
+            env_file.display()
+        );
+        run_post_deploy_hook(&project, &hook, None, true).expect("hook should succeed");
+
+        let content = std::fs::read_to_string(&env_file).expect("read env output");
+        assert_eq!(content.trim(), "1");
+    }
+
+    #[test]
+    fn hook_receives_deploy_skipped_zero_when_deploy_ran() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env_file = temp.path().join("env_out.txt");
+        let project = make_test_project(temp.path().to_path_buf());
+
+        let hook = format!(
+            "echo \"$SCAFFOLD_DEPLOY_SKIPPED\" > '{}'",
+            env_file.display()
+        );
+        run_post_deploy_hook(&project, &hook, None, false).expect("hook should succeed");
+
+        let content = std::fs::read_to_string(&env_file).expect("read env output");
+        assert_eq!(content.trim(), "0");
     }
 }
