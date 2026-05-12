@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -75,7 +76,7 @@ fn run_pipeline_once(
     println!("[5/{total_steps}] Deploying programs...");
     cmd_deploy(None, None, false)?;
 
-    // Step 6: Post-deploy hooks (or summary)
+    // Step 6: Post-deploy hooks (or footer)
     if has_hooks {
         let n = hooks.len();
         println!("[6/{total_steps}] Running {n} post-deploy hook(s)...");
@@ -89,7 +90,13 @@ fn run_pipeline_once(
             println!("<=== post_deploy[{}/{n}] OK", i + 1);
         }
     } else {
-        print_deploy_summary(project)?;
+        // `cmd_deploy` already printed the canonical deploy summary above
+        // (succeeded/failed counts, per-program tx + program_id). Re-walking
+        // the project here to print a second summary-shaped block produced
+        // two consecutive "summary"-shaped outputs for a single deploy and
+        // hid the real result (#126). Print only a one-line sequencer
+        // pointer so the user knows where to point a client.
+        let _ = write_run_footer(project, &mut std::io::stdout());
     }
 
     Ok(())
@@ -140,33 +147,14 @@ fn ensure_localnet(project: &Project, timeout_sec: u64) -> DynResult<()> {
     }
 }
 
-fn print_deploy_summary(project: &Project) -> DynResult<()> {
-    let programs_dir = project.root.join("methods/guest/src/bin");
-    if !programs_dir.exists() {
-        return Ok(());
-    }
-
-    let programs = discover_deployable_programs(&project.root)?;
-    if programs.is_empty() {
-        println!();
-        println!("No deployable programs found in {}", programs_dir.display());
-        return Ok(());
-    }
-    let binaries = discover_program_binaries(&project.root, &programs);
-
-    println!();
-    println!("Deployed programs:");
-    for stem in &programs {
-        if let Some(binary_path) = binaries.get(stem) {
-            println!("  {stem}");
-            println!("    Binary: {}", binary_path.display());
-        }
-    }
-
+/// Print the single-line sequencer pointer that follows the deploy summary
+/// when no post-deploy hooks ran. The deploy summary itself is emitted by
+/// `cmd_deploy`; this footer adds only what `cmd_deploy`'s output does not
+/// already contain — the localnet endpoint a downstream client should hit.
+fn write_run_footer(project: &Project, w: &mut dyn Write) -> std::io::Result<()> {
     let port = project.config.localnet.port;
-    println!();
-    println!("Sequencer: http://127.0.0.1:{port}");
-
+    writeln!(w)?;
+    writeln!(w, "Sequencer: http://127.0.0.1:{port}")?;
     Ok(())
 }
 
@@ -410,43 +398,85 @@ mod tests {
     }
 
     #[test]
-    fn print_deploy_summary_shows_programs() {
+    fn run_footer_emits_sequencer_pointer_and_no_program_listing() {
+        // Regression for #126: the no-hooks branch must not re-print a
+        // "Deployed programs:" block, since `cmd_deploy` already emitted
+        // the canonical per-program summary above. The footer's job is to
+        // add only the endpoint pointer that's missing from `cmd_deploy`.
         let temp = tempfile::tempdir().expect("tempdir");
         let project = make_test_project(temp.path().to_path_buf());
 
-        let programs_dir = temp.path().join("methods/guest/src/bin");
-        std::fs::create_dir_all(&programs_dir).expect("create programs dir");
-        std::fs::write(programs_dir.join("counter.rs"), "fn main() {}").expect("write source");
+        let mut buf: Vec<u8> = Vec::new();
+        write_run_footer(&project, &mut buf).expect("footer should write");
+        let output = String::from_utf8(buf).expect("valid utf8");
 
-        // Mirror the layout `discover_program_binaries` walks for: a
-        // `riscv32im*/release/` segment under one of the search roots.
-        let binary_dir = temp
-            .path()
-            .join("target/riscv-guest/methods/programs/riscv32im-risc0-zkvm-elf/release");
-        std::fs::create_dir_all(&binary_dir).expect("create binary dir");
-        std::fs::write(binary_dir.join("counter.bin"), b"fake binary").expect("write binary");
-
-        print_deploy_summary(&project).expect("should succeed");
+        assert!(
+            output.contains("Sequencer: http://127.0.0.1:3040"),
+            "expected sequencer pointer in footer, got: {output:?}"
+        );
+        assert!(
+            !output.contains("Deployed programs:"),
+            "footer must not duplicate `cmd_deploy`'s per-program listing, got: {output:?}"
+        );
+        assert!(
+            !output.contains("Binary:"),
+            "footer must not re-print per-program binary paths, got: {output:?}"
+        );
+        // The footer is intentionally short: one blank separator line plus
+        // the sequencer line. Anything longer drifts back toward the
+        // duplicated-summary shape that #126 reports.
+        let non_empty_lines: Vec<&str> =
+            output.lines().filter(|line| !line.is_empty()).collect();
+        assert_eq!(
+            non_empty_lines.len(),
+            1,
+            "footer must be a single non-empty line, got: {output:?}"
+        );
     }
 
     #[test]
-    fn print_deploy_summary_skips_non_rs_files() {
+    fn run_footer_uses_configured_localnet_port() {
+        // The footer reads `project.config.localnet.port` so a project on a
+        // non-default port still sees the right pointer (the user might be
+        // running multiple localnets and the default is misleading).
         let temp = tempfile::tempdir().expect("tempdir");
-        let project = make_test_project(temp.path().to_path_buf());
+        let mut project = make_test_project(temp.path().to_path_buf());
+        project.config.localnet.port = 7777;
 
-        let programs_dir = temp.path().join("methods/guest/src/bin");
-        std::fs::create_dir_all(&programs_dir).expect("create programs dir");
-        std::fs::write(programs_dir.join("README.md"), "# readme").expect("write non-rs file");
+        let mut buf: Vec<u8> = Vec::new();
+        write_run_footer(&project, &mut buf).expect("footer should write");
+        let output = String::from_utf8(buf).expect("valid utf8");
 
-        print_deploy_summary(&project).expect("should succeed with no .rs files");
+        assert!(
+            output.contains("Sequencer: http://127.0.0.1:7777"),
+            "expected configured port 7777 in pointer, got: {output:?}"
+        );
+        assert!(
+            !output.contains("3040"),
+            "default port leaked into output: {output:?}"
+        );
     }
 
     #[test]
-    fn print_deploy_summary_returns_ok_when_no_programs_dir() {
+    fn run_footer_ok_without_programs_directory() {
+        // The footer must not depend on any project layout: it should
+        // succeed even if `methods/guest/src/bin` does not exist. (Old
+        // `print_deploy_summary` walked the filesystem; the new footer
+        // doesn't, and this test pins that contract.)
         let temp = tempfile::tempdir().expect("tempdir");
         let project = make_test_project(temp.path().to_path_buf());
+        assert!(
+            !temp.path().join("methods/guest/src/bin").exists(),
+            "fixture invariant: programs dir should not exist"
+        );
 
-        print_deploy_summary(&project).expect("should succeed with missing dir");
+        let mut buf: Vec<u8> = Vec::new();
+        write_run_footer(&project, &mut buf).expect("footer should write");
+        let output = String::from_utf8(buf).expect("valid utf8");
+        assert!(
+            output.contains("Sequencer: http://127.0.0.1:3040"),
+            "footer should still emit pointer when no programs dir exists, got: {output:?}"
+        );
     }
 
     #[test]
