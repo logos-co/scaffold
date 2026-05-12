@@ -138,36 +138,6 @@ fn ensure_localnet(project: &Project, timeout_sec: u64) -> DynResult<()> {
     }
 }
 
-fn print_deploy_summary(project: &Project) -> DynResult<()> {
-    let programs_dir = project.root.join("methods/guest/src/bin");
-    if !programs_dir.exists() {
-        return Ok(());
-    }
-
-    let programs = discover_deployable_programs(&project.root)?;
-    if programs.is_empty() {
-        println!();
-        println!("No deployable programs found in {}", programs_dir.display());
-        return Ok(());
-    }
-    let binaries = discover_program_binaries(&project.root, &programs);
-
-    println!();
-    println!("Deployed programs:");
-    for stem in &programs {
-        if let Some(binary_path) = binaries.get(stem) {
-            println!("  {stem}");
-            println!("    Binary: {}", binary_path.display());
-        }
-    }
-
-    let port = project.config.localnet.port;
-    println!();
-    println!("Sequencer: http://127.0.0.1:{port}");
-
-    Ok(())
-}
-
 fn build_hook_command(
     project: &Project,
     hook_command: &str,
@@ -408,45 +378,8 @@ mod tests {
     }
 
     #[test]
-    fn print_deploy_summary_shows_programs() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let project = make_test_project(temp.path().to_path_buf());
-
-        let programs_dir = temp.path().join("methods/guest/src/bin");
-        std::fs::create_dir_all(&programs_dir).expect("create programs dir");
-        std::fs::write(programs_dir.join("counter.rs"), "fn main() {}").expect("write source");
-
-        // Mirror the layout `discover_program_binaries` walks for: a
-        // `riscv32im*/release/` segment under one of the search roots.
-        let binary_dir = temp
-            .path()
-            .join("target/riscv-guest/methods/programs/riscv32im-risc0-zkvm-elf/release");
-        std::fs::create_dir_all(&binary_dir).expect("create binary dir");
-        std::fs::write(binary_dir.join("counter.bin"), b"fake binary").expect("write binary");
-
-        print_deploy_summary(&project).expect("should succeed");
-    }
-
     #[test]
-    fn print_deploy_summary_skips_non_rs_files() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let project = make_test_project(temp.path().to_path_buf());
-
-        let programs_dir = temp.path().join("methods/guest/src/bin");
-        std::fs::create_dir_all(&programs_dir).expect("create programs dir");
-        std::fs::write(programs_dir.join("README.md"), "# readme").expect("write non-rs file");
-
-        print_deploy_summary(&project).expect("should succeed with no .rs files");
-    }
-
     #[test]
-    fn print_deploy_summary_returns_ok_when_no_programs_dir() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let project = make_test_project(temp.path().to_path_buf());
-
-        print_deploy_summary(&project).expect("should succeed with missing dir");
-    }
-
     #[test]
     fn hook_receives_full_env_contract_in_one_invocation() {
         // Integration-style assertion: every documented always-on env var
