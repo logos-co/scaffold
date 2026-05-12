@@ -276,11 +276,7 @@ fn check_repo_source(name: &str, source: &str) -> DynResult<()> {
 /// shipped shell-out behavior or are otherwise unsuitable for an untrusted
 /// `scaffold.toml`.
 fn is_dangerous_transport(source: &str) -> bool {
-    const BANNED_PREFIXES: &[&str] = &[
-        "ext::",
-        "ext ::",
-        "transport-helper::",
-    ];
+    const BANNED_PREFIXES: &[&str] = &["ext::", "ext ::", "transport-helper::"];
     let lowered = source.to_ascii_lowercase();
     BANNED_PREFIXES
         .iter()
@@ -859,10 +855,7 @@ role = "project"
     fn rejects_repo_source_with_ext_transport() {
         let toml = minimal_v0_2_0().replace(
             &format!("source = \"{}\"\npin = \"{}\"", LEZ_SOURCE, DEFAULT_LEZ.sha),
-            &format!(
-                "source = \"ext::sh -c id\"\npin = \"{}\"",
-                DEFAULT_LEZ.sha
-            ),
+            &format!("source = \"ext::sh -c id\"\npin = \"{}\"", DEFAULT_LEZ.sha),
         );
         let err = parse_config(&toml).expect_err("ext:: transport must be rejected");
         let msg = err.to_string();
@@ -874,16 +867,10 @@ role = "project"
     fn rejects_repo_source_with_ext_transport_case_insensitive() {
         let toml = minimal_v0_2_0().replace(
             &format!("source = \"{}\"\npin = \"{}\"", LEZ_SOURCE, DEFAULT_LEZ.sha),
-            &format!(
-                "source = \"EXT::sh -c id\"\npin = \"{}\"",
-                DEFAULT_LEZ.sha
-            ),
+            &format!("source = \"EXT::sh -c id\"\npin = \"{}\"", DEFAULT_LEZ.sha),
         );
         let err = parse_config(&toml).expect_err("upper-case ext:: must be rejected");
-        assert!(
-            err.to_string().contains("dangerous git transport"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("dangerous git transport"), "{err}");
     }
 
     #[test]
@@ -896,10 +883,7 @@ role = "project"
             ),
         );
         let err = parse_config(&toml).expect_err("transport-helper:: must be rejected");
-        assert!(
-            err.to_string().contains("dangerous git transport"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("dangerous git transport"), "{err}");
     }
 
     #[test]
@@ -920,7 +904,8 @@ role = "project"
                 &format!("source = \"{}\"\npin = \"{}\"", LEZ_SOURCE, DEFAULT_LEZ.sha),
                 &format!("source = \"{}\"\npin = \"{}\"", source, DEFAULT_LEZ.sha),
             );
-            parse_config(&toml).unwrap_or_else(|e| panic!("benign source {source:?} rejected: {e}"));
+            parse_config(&toml)
+                .unwrap_or_else(|e| panic!("benign source {source:?} rejected: {e}"));
         }
     }
 
