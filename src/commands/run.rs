@@ -9,6 +9,10 @@ use crate::commands::deploy::{
 };
 use crate::commands::idl::build_idl_for_current_project;
 use crate::commands::localnet::{build_localnet_status_for_project, cmd_localnet, LocalnetAction};
+use crate::commands::run_state::{
+    compute_program_hashes, current_localnet_pid, deploy_can_be_skipped, load_state, save_state,
+    RunDeployState,
+};
 use crate::commands::wallet::{cmd_wallet_topup_inner, TopupOutcome};
 use crate::constants::{DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, SPEL_BIN_REL_PATH};
 use crate::model::{LocalnetOwnership, Project};
@@ -71,9 +75,34 @@ fn run_pipeline_once(
         bail!("wallet topup confirmation timed out; aborting run to avoid deploying with uncertain funding.\nHint: retry `logos-scaffold run` or run `logos-scaffold wallet topup` manually.");
     }
 
-    // Step 5: Deploy
-    println!("[5/{total_steps}] Deploying programs...");
-    cmd_deploy(None, None, false)?;
+    // Step 5: Deploy (idempotent: skip when guest .bin + IDL + deploy
+    // config hashes match the prior deploy AND the sequencer is the same
+    // instance that received it. A `lgs localnet stop && start` cycle
+    // changes the sequencer PID and wipes on-chain state, so PID equality
+    // is the gate that prevents stale-deploy false positives. To force a
+    // re-deploy without restarting localnet, delete
+    // `.scaffold/state/run_deploy.json` manually (a `--reset` switch
+    // arrives in a later branch of this stack).
+    let current_hashes = compute_program_hashes(project)?;
+    let current_pid = current_localnet_pid(project);
+    let prior = load_state(project);
+    let deploy_skipped = if deploy_can_be_skipped(&current_hashes, current_pid, &prior) {
+        println!(
+            "[5/{total_steps}] Deploy skipped (guest binaries + IDL + config + sequencer unchanged; delete `.scaffold/state/run_deploy.json` to force a re-deploy)"
+        );
+        true
+    } else {
+        println!("[5/{total_steps}] Deploying programs...");
+        cmd_deploy(None, None, false)?;
+        save_state(
+            project,
+            &RunDeployState {
+                program_hashes: current_hashes,
+                localnet_pid: current_pid,
+            },
+        )?;
+        false
+    };
 
     // Step 6: Post-deploy hooks (or summary)
     if has_hooks {
@@ -85,7 +114,7 @@ fn run_pipeline_once(
         let single_program = resolve_single_program_metadata(project)?;
         for (i, hook) in hooks.iter().enumerate() {
             println!("===> post_deploy[{}/{n}]: {hook}", i + 1);
-            run_post_deploy_hook(project, hook, single_program.as_ref())?;
+            run_post_deploy_hook(project, hook, single_program.as_ref(), deploy_skipped)?;
             println!("<=== post_deploy[{}/{n}] OK", i + 1);
         }
     } else {
@@ -174,6 +203,7 @@ fn build_hook_command(
     project: &Project,
     hook_command: &str,
     single_program: Option<&SingleProgram>,
+    deploy_skipped: bool,
 ) -> Command {
     let port = project.config.localnet.port;
     let sequencer_url = format!("http://127.0.0.1:{port}");
@@ -199,6 +229,13 @@ fn build_hook_command(
         .env("NSSA_WALLET_HOME_DIR", &wallet_home)
         .env("SCAFFOLD_PROJECT_ROOT", &project_root)
         .env("SCAFFOLD_IDL_DIR", &idl_dir)
+        // Always-on: deploy-skip state is run-level (it's the same for
+        // every program in this invocation), so multi-program hooks need
+        // it just as much as single-program ones.
+        .env(
+            "SCAFFOLD_DEPLOY_SKIPPED",
+            if deploy_skipped { "1" } else { "0" },
+        )
         .current_dir(&project.root);
 
     // Single-program shortcut: when there's exactly one deployable program,
@@ -241,8 +278,9 @@ fn run_post_deploy_hook(
     project: &Project,
     hook_command: &str,
     single_program: Option<&SingleProgram>,
+    deploy_skipped: bool,
 ) -> DynResult<()> {
-    let status = build_hook_command(project, hook_command, single_program)
+    let status = build_hook_command(project, hook_command, single_program, deploy_skipped)
         .status()
         .context("failed to execute post-deploy hook")?;
 
@@ -309,7 +347,7 @@ mod tests {
         let project = make_test_project(temp.path().to_path_buf());
 
         let hook = format!("echo \"$SEQUENCER_URL\" > '{}'", env_file.display());
-        run_post_deploy_hook(&project, &hook, None).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, None, false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content.trim(), "http://127.0.0.1:3040");
@@ -322,7 +360,7 @@ mod tests {
         let project = make_test_project(temp.path().to_path_buf());
 
         let hook = format!("echo \"$NSSA_WALLET_HOME_DIR\" > '{}'", env_file.display());
-        run_post_deploy_hook(&project, &hook, None).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, None, false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert!(
@@ -338,7 +376,7 @@ mod tests {
         let project = make_test_project(temp.path().to_path_buf());
 
         let hook = format!("echo \"$SCAFFOLD_PROJECT_ROOT\" > '{}'", env_file.display());
-        run_post_deploy_hook(&project, &hook, None).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, None, false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         let canonical = temp
@@ -355,7 +393,7 @@ mod tests {
         let project = make_test_project(temp.path().to_path_buf());
 
         let hook = format!("echo \"$SCAFFOLD_IDL_DIR\" > '{}'", env_file.display());
-        run_post_deploy_hook(&project, &hook, None).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, None, false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert!(
@@ -372,7 +410,7 @@ mod tests {
         project.config.localnet.port = 9999;
 
         let hook = format!("echo \"$SEQUENCER_URL\" > '{}'", env_file.display());
-        run_post_deploy_hook(&project, &hook, None).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, None, false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content.trim(), "http://127.0.0.1:9999");
@@ -383,7 +421,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let project = make_test_project(temp.path().to_path_buf());
 
-        let result = run_post_deploy_hook(&project, "exit 42", None);
+        let result = run_post_deploy_hook(&project, "exit 42", None, false);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -399,7 +437,7 @@ mod tests {
         let project = make_test_project(temp.path().to_path_buf());
 
         let hook = format!("pwd > '{}'", pwd_file.display());
-        run_post_deploy_hook(&project, &hook, None).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, None, false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&pwd_file).expect("read pwd output");
         let canonical = temp
@@ -467,7 +505,7 @@ mod tests {
             }} > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, None).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, None, false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         let canonical = temp
@@ -510,7 +548,7 @@ mod tests {
             "echo \"$SCAFFOLD_PROGRAM_ID|$SCAFFOLD_GUEST_BIN\" > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, Some(&single)).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, Some(&single), false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         let expected_bin = temp.path().join("counter.bin");
@@ -538,7 +576,7 @@ mod tests {
             "if [ -z \"${{SCAFFOLD_PROGRAM_ID+set}}\" ]; then echo unset; else echo set; fi > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, Some(&single)).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, Some(&single), false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content.trim(), "unset");
@@ -556,9 +594,46 @@ mod tests {
             "echo \"id=${{SCAFFOLD_PROGRAM_ID+set}}|bin=${{SCAFFOLD_GUEST_BIN+set}}\" > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, None).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, None, false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content.trim(), "id=|bin=");
+    }
+
+    #[test]
+    fn hook_receives_deploy_skipped_env_without_single_program() {
+        // `SCAFFOLD_DEPLOY_SKIPPED` is run-level state and must reach the
+        // hook even when there's no single-program shortcut to ride on
+        // (i.e. multi-program projects). Pre-fix, the env var was only
+        // exported inside the `if let Some(single_program)` block, so
+        // multi-program hooks never saw it.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env_file = temp.path().join("env_out.txt");
+        let project = make_test_project(temp.path().to_path_buf());
+
+        let hook = format!(
+            "echo \"$SCAFFOLD_DEPLOY_SKIPPED\" > '{}'",
+            env_file.display()
+        );
+        run_post_deploy_hook(&project, &hook, None, true).expect("hook should succeed");
+
+        let content = std::fs::read_to_string(&env_file).expect("read env output");
+        assert_eq!(content.trim(), "1");
+    }
+
+    #[test]
+    fn hook_receives_deploy_skipped_zero_when_deploy_ran() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env_file = temp.path().join("env_out.txt");
+        let project = make_test_project(temp.path().to_path_buf());
+
+        let hook = format!(
+            "echo \"$SCAFFOLD_DEPLOY_SKIPPED\" > '{}'",
+            env_file.display()
+        );
+        run_post_deploy_hook(&project, &hook, None, false).expect("hook should succeed");
+
+        let content = std::fs::read_to_string(&env_file).expect("read env output");
+        assert_eq!(content.trim(), "0");
     }
 }
