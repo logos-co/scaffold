@@ -1,7 +1,6 @@
-use std::collections::VecDeque;
 use std::env;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -871,39 +870,95 @@ fn run_simple_command(program: &str, args: &[&str], cwd: Option<&Path>) -> DynRe
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+// Chunk size used when scanning backwards from EOF in `tail_file_lines_lossy`.
+const TAIL_CHUNK_SIZE: u64 = 8 * 1024;
+
+// Safety cap on the total bytes we will buffer when looking for the last N
+// lines. If a log has individual lines this large, we surface what we have
+// rather than continuing to grow the buffer.
+const TAIL_MAX_BUFFER_BYTES: u64 = 64 * 1024 * 1024;
+
 fn tail_file_lines_lossy(path: &Path, tail: usize) -> DynResult<String> {
+    tail_file_lines_lossy_with_chunk(path, tail, TAIL_CHUNK_SIZE, TAIL_MAX_BUFFER_BYTES)
+}
+
+fn tail_file_lines_lossy_with_chunk(
+    path: &Path,
+    tail: usize,
+    chunk_size: u64,
+    max_buffer_bytes: u64,
+) -> DynResult<String> {
     if tail == 0 {
         return Ok(String::new());
     }
 
-    // TODO: For very large logs, optimize this by seeking backwards from EOF.
-    let file =
+    let mut file =
         File::open(path).with_context(|| format!("failed to open log file {}", path.display()))?;
-    let mut reader = BufReader::new(file);
-    let mut buf = Vec::new();
-    let mut lines: VecDeque<Vec<u8>> = VecDeque::new();
+    let file_len = file
+        .metadata()
+        .with_context(|| format!("failed to read metadata for {}", path.display()))?
+        .len();
+    if file_len == 0 {
+        return Ok(String::new());
+    }
 
-    loop {
-        buf.clear();
-        let read = reader
-            .read_until(b'\n', &mut buf)
+    let chunk_size = chunk_size.max(1);
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut pos = file_len;
+    let mut newline_count: usize = 0;
+
+    while pos > 0 {
+        let read_size = pos.min(chunk_size);
+        pos -= read_size;
+        file.seek(SeekFrom::Start(pos))
+            .with_context(|| format!("failed to seek in {}", path.display()))?;
+        let mut chunk = vec![0u8; read_size as usize];
+        file.read_exact(&mut chunk)
             .with_context(|| format!("failed to read bytes from {}", path.display()))?;
-        if read == 0 {
+
+        newline_count += chunk.iter().filter(|&&b| b == b'\n').count();
+        chunk.extend_from_slice(&buffer);
+        buffer = chunk;
+
+        if newline_count > tail {
             break;
         }
-
-        if lines.len() == tail {
-            lines.pop_front();
+        if (file_len - pos) >= max_buffer_bytes {
+            break;
         }
-        lines.push_back(buf.clone());
     }
 
-    let mut out = Vec::new();
-    for line in lines {
-        out.extend_from_slice(&line);
+    let started_at_file_beginning = pos == 0;
+    let ends_with_newline = buffer.last() == Some(&b'\n');
+
+    // Number of trailing newlines we need to keep, walking backwards from the
+    // end of the buffer. A file that does not end with '\n' has a final
+    // partial line whose end is implicit, so we need one fewer newline.
+    let needed_trailing_newlines = if ends_with_newline { tail } else { tail - 1 };
+
+    let mut start_idx: usize = 0;
+    if needed_trailing_newlines > 0 {
+        let mut count = 0;
+        for (i, &b) in buffer.iter().enumerate().rev() {
+            if b == b'\n' {
+                count += 1;
+                if count > needed_trailing_newlines {
+                    start_idx = i + 1;
+                    break;
+                }
+            }
+        }
     }
 
-    Ok(String::from_utf8_lossy(&out).to_string())
+    // If we did not find enough newlines but our buffer does not begin at the
+    // file start, the first line in the buffer is partial. Drop it.
+    if start_idx == 0 && !started_at_file_beginning {
+        if let Some(first_nl) = buffer.iter().position(|&b| b == b'\n') {
+            start_idx = first_nl + 1;
+        }
+    }
+
+    Ok(String::from_utf8_lossy(&buffer[start_idx..]).to_string())
 }
 
 fn register_redaction(summary: &mut RedactionSummary, replacements: usize) {
@@ -1270,8 +1325,117 @@ struct BuildEvidenceReport {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::io::Write;
 
-    use super::resolve_home_dir_from_env_like;
+    use super::{resolve_home_dir_from_env_like, tail_file_lines_lossy_with_chunk};
+
+    fn write_temp_log(name: &str, contents: &[u8]) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "scaffold-report-tail-{}-{}.log",
+            std::process::id(),
+            name
+        ));
+        let mut f = std::fs::File::create(&path).expect("create temp log");
+        f.write_all(contents).expect("write temp log");
+        f.sync_all().expect("sync temp log");
+        path
+    }
+
+    #[test]
+    fn tail_returns_empty_when_tail_is_zero() {
+        let path = write_temp_log("zero", b"a\nb\nc\n");
+        let out = tail_file_lines_lossy_with_chunk(&path, 0, 4, 1024).unwrap();
+        assert_eq!(out, "");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tail_returns_empty_for_empty_file() {
+        let path = write_temp_log("empty", b"");
+        let out = tail_file_lines_lossy_with_chunk(&path, 10, 4, 1024).unwrap();
+        assert_eq!(out, "");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tail_returns_last_n_lines_when_file_terminates_with_newline() {
+        let path = write_temp_log("term_nl", b"a\nb\nc\nd\ne\n");
+        let out = tail_file_lines_lossy_with_chunk(&path, 3, 4, 1024).unwrap();
+        assert_eq!(out, "c\nd\ne\n");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tail_returns_last_n_lines_when_file_does_not_terminate_with_newline() {
+        let path = write_temp_log("no_term_nl", b"a\nb\nc\nd\ne");
+        let out = tail_file_lines_lossy_with_chunk(&path, 3, 4, 1024).unwrap();
+        assert_eq!(out, "c\nd\ne");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tail_returns_whole_file_when_tail_exceeds_line_count() {
+        let path = write_temp_log("over", b"a\nb\nc\n");
+        let out = tail_file_lines_lossy_with_chunk(&path, 99, 4, 1024).unwrap();
+        assert_eq!(out, "a\nb\nc\n");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tail_handles_chunk_boundaries_split_across_lines() {
+        // chunk size of 3 forces multiple backward reads that bisect lines.
+        let path = write_temp_log("chunked", b"aa\nbb\ncc\ndd\n");
+        let out = tail_file_lines_lossy_with_chunk(&path, 2, 3, 1024).unwrap();
+        assert_eq!(out, "cc\ndd\n");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tail_handles_single_line_without_newline() {
+        let path = write_temp_log("single", b"hello");
+        let out = tail_file_lines_lossy_with_chunk(&path, 5, 4, 1024).unwrap();
+        assert_eq!(out, "hello");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tail_bounds_memory_on_large_file() {
+        // Synthesize a multi-megabyte file and verify that:
+        //   1. tail returns exactly the requested number of lines, and
+        //   2. with a small max_buffer_bytes, total memory read stays bounded.
+        // We use a 4 MiB file but only allow 64 KiB of buffer scanning.
+        let line = b"this is a synthetic log line for tail bounding test\n";
+        let mut contents = Vec::with_capacity(4 * 1024 * 1024);
+        let mut line_no: u64 = 0;
+        while contents.len() < 4 * 1024 * 1024 {
+            line_no += 1;
+            contents.extend_from_slice(format!("{line_no} ").as_bytes());
+            contents.extend_from_slice(line);
+        }
+        let total_lines = line_no;
+        let path = write_temp_log("large", &contents);
+        let out = tail_file_lines_lossy_with_chunk(&path, 10, 8 * 1024, 64 * 1024).unwrap();
+        let returned_line_count = out.matches('\n').count();
+        // We asked for 10; with a 64 KiB cap and ~70-byte lines we should
+        // comfortably return 10 lines.
+        assert_eq!(returned_line_count, 10, "expected exactly 10 lines tailed");
+        // Last line in the file should be the final one returned.
+        let expected_last_prefix = format!("{total_lines} ");
+        assert!(
+            out.lines().last().unwrap().starts_with(&expected_last_prefix),
+            "expected last tailed line to start with {expected_last_prefix:?}, got {out:?}",
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tail_handles_consecutive_newlines() {
+        let path = write_temp_log("blank_lines", b"a\n\nb\n\nc\n");
+        let out = tail_file_lines_lossy_with_chunk(&path, 3, 4, 1024).unwrap();
+        assert_eq!(out, "b\n\nc\n");
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn resolve_home_dir_prefers_home() {
