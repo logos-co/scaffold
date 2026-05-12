@@ -801,6 +801,7 @@ grep -n "^\[wallet\]\|^home_dir\|^binary" dogfood-cache/scaffold.toml
 - If an invalid template name silently falls back to `default`, record that as a regression.
 - If `--vendor-deps` or `--cache-root` are silently ignored or produce an error, record the exact output.
 - If `--lez-path` is tested and the path does not exist, verify the error message points to the bad path.
+- If `--lez-path` points at a lez checkout whose HEAD does not match scaffold's pinned lez SHA, verify that `new` prints a `warning:` block naming both SHAs before continuing. Silent override is a regression.
 - If non-vendored cache reuse collapses different LEZ pins into a single shared `repos/lez` checkout, record that as a cache-isolation regression.
 
 ### Evidence to Capture

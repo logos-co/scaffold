@@ -14,7 +14,7 @@ use crate::constants::{
 };
 use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RunConfig};
 use crate::project::default_cache_root;
-use crate::repo::{sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
+use crate::repo::{lez_path_pin_warning, sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
 use crate::state::write_text;
 use crate::template::copy::{copy_dir_contents, patch_simple_tail_call_program_id};
 use crate::template::project::{apply_overlay, OverlayRenderContext};
@@ -59,6 +59,12 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
     fs::create_dir_all(bootstrap_cache.join("state"))?;
     fs::create_dir_all(bootstrap_cache.join("logs"))?;
     fs::create_dir_all(bootstrap_cache.join("builds"))?;
+
+    if let Some(supplied) = cmd.lez_path.as_deref() {
+        if let Some(warn) = lez_path_pin_warning(supplied, DEFAULT_LEZ.sha) {
+            eprintln!("{warn}");
+        }
+    }
 
     let lez_source = cmd
         .lez_path

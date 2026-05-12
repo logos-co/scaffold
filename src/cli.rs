@@ -165,7 +165,16 @@ struct NewArgs {
     name: String,
     #[arg(long)]
     vendor_deps: bool,
-    #[arg(long, alias = "lssa-path")]
+    #[arg(
+        long,
+        alias = "lssa-path",
+        help = "Local lez checkout to seed the scaffolded project from. \
+                The supplied path is cloned and then reset to scaffold's \
+                pinned lez SHA, so commits or uncommitted work above that \
+                pin are not carried into the new project. To dogfood local \
+                lez work, override [repos.lez].pin in the new project's \
+                scaffold.toml after creation."
+    )]
     lez_path: Option<PathBuf>,
     #[arg(long, default_value = "default", help = TEMPLATE_HELP.as_str())]
     template: String,

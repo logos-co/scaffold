@@ -107,4 +107,6 @@ logos-scaffold wallet topup
 logos-scaffold localnet stop
 ```
 
+`--lez-path` clones the supplied tree and then `git checkout`s scaffold's pinned lez SHA, so commits or uncommitted work above that pin will not appear in the new project. When the supplied path's HEAD differs from the pin, `new` prints a warning naming both SHAs. To dogfood local lez changes, edit `[repos.lez].pin` in the new project's `scaffold.toml` after creation and re-run `lgs setup`.
+
 Keep all temporary dogfood directories inside your local workspace and remove them after validation.

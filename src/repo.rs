@@ -250,6 +250,41 @@ pub(crate) fn git_head_sha(repo: &Path) -> DynResult<String> {
     Ok(out.stdout.trim().to_string())
 }
 
+/// Render the user-facing warning lines for `--lez-path <PATH>` when the
+/// supplied tree's HEAD does not match the scaffold's pinned lez SHA.
+///
+/// Returns `None` when the path is missing, not a git repo, unreadable, or
+/// already sitting at `pin` — in all those cases the regular sync flow is
+/// either expected (HEAD == pin) or already produces a targeted error (no
+/// `.git`, missing path). Otherwise returns a multi-line string ready to be
+/// emitted to stderr.
+///
+/// Why: `cmd_new` clones the supplied path and immediately `git checkout`s
+/// the scaffold pin, so anything past the pin SHA in the user's tree
+/// (feature-branch commits, uncommitted work) silently fails to appear in
+/// the scaffolded project — even though CONTRIBUTING.md recommends
+/// `--lez-path` exactly for dogfooding local LEZ work. This helper
+/// surfaces that override loudly without changing existing semantics.
+pub(crate) fn lez_path_pin_warning(path: &Path, pin: &str) -> Option<String> {
+    if !path.exists() || !path.join(".git").exists() {
+        return None;
+    }
+    let head = git_head_sha(path).ok()?;
+    if head == pin {
+        return None;
+    }
+    Some(format!(
+        "warning: --lez-path {} is at HEAD {} but scaffold pins lez at {}.\n\
+         warning: The supplied path will be cloned and reset to the scaffold pin; any commits, branch\n\
+         warning: tip, or uncommitted work above that pin will not appear in the new project.\n\
+         warning: To use your local lez work, edit `[repos.lez].pin` in the new project's scaffold.toml\n\
+         warning: after creation (and re-run `lgs setup`).",
+        path.display(),
+        head,
+        pin,
+    ))
+}
+
 pub(crate) fn git_clean(repo: &Path) -> DynResult<bool> {
     let out = run_capture(
         Command::new("git")
@@ -269,7 +304,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        git_head_sha, sync_repo_to_pin_at_path_with_opts, RepoSyncOptions, SourceMismatchPolicy,
+        git_head_sha, lez_path_pin_warning, sync_repo_to_pin_at_path_with_opts, RepoSyncOptions,
+        SourceMismatchPolicy,
     };
 
     #[test]
@@ -347,6 +383,47 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("has local changes"));
         assert!(cache_repo.join("dirty.txt").exists());
+    }
+
+    #[test]
+    fn lez_path_pin_warning_returns_none_for_missing_path() {
+        let temp = tempdir().expect("tempdir");
+        let missing = temp.path().join("does-not-exist");
+        assert!(lez_path_pin_warning(&missing, "deadbeef").is_none());
+    }
+
+    #[test]
+    fn lez_path_pin_warning_returns_none_for_non_git_path() {
+        let temp = tempdir().expect("tempdir");
+        let plain = temp.path().join("plain-dir");
+        fs::create_dir_all(&plain).expect("create plain dir");
+        assert!(lez_path_pin_warning(&plain, "deadbeef").is_none());
+    }
+
+    #[test]
+    fn lez_path_pin_warning_returns_none_when_head_matches_pin() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let pin = init_repo_with_commit(&repo, "a.txt", "a");
+        assert!(lez_path_pin_warning(&repo, &pin).is_none());
+    }
+
+    #[test]
+    fn lez_path_pin_warning_describes_mismatch() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let head = init_repo_with_commit(&repo, "a.txt", "a");
+        let pin = "0000000000000000000000000000000000000000";
+        let warn = lez_path_pin_warning(&repo, pin).expect("expected warning");
+        assert!(
+            warn.contains(&head),
+            "warning must name the user's HEAD sha"
+        );
+        assert!(warn.contains(pin), "warning must name the scaffold pin sha");
+        assert!(
+            warn.contains("[repos.lez].pin"),
+            "warning must point at the override site"
+        );
     }
 
     fn init_repo_with_commit(path: &std::path::Path, file: &str, contents: &str) -> String {
