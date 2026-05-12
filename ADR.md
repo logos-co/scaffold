@@ -27,12 +27,33 @@ Use native Cargo-based build flow as the primary compilation path.
 
 ## Network Configuration
 
-Developers need explicit, editable environment targeting for local and DevNet workflows.
-Use environment-file based network configuration as the default model.
-Generated projects include env files for local and DevNet,
-wallet interaction settings used by deploy and wallet-based interaction commands.
-Env files are familiar and automation-friendly,
-but require strict handling to avoid credential leakage.
+Developers need explicit, editable network targeting per project.
+Use `scaffold.toml` (the `[localnet]` and `[wallet]` sections) as the
+sole source of truth for runtime network parameters; this is the default
+model and the only one currently shipped.
+
+An earlier design considered environment-file based network configuration
+as the default model and proposed generated `.env.local` / `.env.devnet`
+files for local and DevNet workflows. That direction was deferred: it
+would have required scaffold to grow and maintain an env-file sourcing
+layer in addition to the existing TOML config loader, and the
+shipped commands already read network configuration exclusively from
+`scaffold.toml`. Re-introducing an env-file layer later would be a
+single-direction migration.
+
+Generated projects currently ship a `templates/default/.env.local`
+template. It is bundled (key-only, redacted) into `lgs report`
+diagnostic tarballs for support purposes but is **not** sourced by
+scaffold at runtime — `src/commands/localnet.rs` hardcodes the
+sequencer's `RUST_LOG` and `RISC0_DEV_MODE` values when spawning the
+process, independent of `.env.local`'s contents. The template carries a
+header comment to that effect so users editing it do not expect their
+edits to change `lgs localnet start` behavior.
+
+DevNet support is deferred — see "Deferred Items" in `FURPS.md`. Picking
+it up later will reopen the network-targeting question; a future ADR
+entry can revisit whether DevNet's selection knob belongs in
+`scaffold.toml`, an env file, or a CLI flag.
 
 ## Portable Artefact Build is Separate from Install
 

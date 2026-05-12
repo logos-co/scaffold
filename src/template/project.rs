@@ -359,6 +359,38 @@ mod tests {
     }
 
     #[test]
+    fn default_env_local_documents_that_scaffold_does_not_source_it() {
+        // `.env.local` is bundled (key-only, redacted) into `lgs report`
+        // but is not sourced by scaffold at runtime — `localnet.rs`
+        // hardcodes RUST_LOG / RISC0_DEV_MODE on sequencer spawn. The
+        // template carries a header comment so users who edit it do not
+        // expect their edits to change `lgs localnet start` behavior.
+        // Locking that contract here so future template edits do not
+        // silently strip the disclaimer.
+        let target = mk_temp_dir("env-local-comment");
+        let ctx = OverlayRenderContext {
+            crate_name: "my-app",
+            lez_pin: "abc123",
+            spel_tag: "v0.0.0-test",
+        };
+
+        apply_overlay(&target, "default", &ctx).expect("failed to apply default overlay");
+
+        let env_text = fs::read_to_string(target.join(".env.local"))
+            .expect("failed to read generated .env.local");
+        assert!(
+            env_text.contains("# This file is bundled"),
+            ".env.local should carry the diagnostic-bundle header comment, got: {env_text:?}"
+        );
+        assert!(
+            env_text.contains("NOT sourced by scaffold at runtime"),
+            ".env.local should call out non-sourcing explicitly, got: {env_text:?}"
+        );
+
+        fs::remove_dir_all(&target).expect("failed to cleanup temporary test directory");
+    }
+
+    #[test]
     fn render_fails_on_unresolved_placeholder() {
         let ctx = OverlayRenderContext {
             crate_name: "my-app",

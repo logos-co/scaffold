@@ -4,9 +4,9 @@
 
 ### Functionality
 
-1. One public DevNet vertical slice: generate wallet, fund wallet, deploy contract, execute one transaction type, verify result.
+1. **(deferred)** One public DevNet vertical slice: generate wallet, fund wallet, deploy contract, execute one transaction type, verify result. — DevNet support is not yet shipped; scaffold currently targets the standalone localnet flow only. See "Deferred Items" at the end of this file.
 2. Integrate wallet generation as part of the scaffold workflow for bootstrap and interaction flows.
-3. Support native token topup for wallet operations on local and DevNet environments.
+3. Support native token topup for wallet operations on local environments (DevNet topup is **deferred** alongside DevNet support generally).
 4. Deploy command auto-discovers program binaries from `methods/target/` by matching program names, so non-template projects deploy without `--program-path`.
 5. Build command auto-compiles `methods/Cargo.toml` when present, so projects whose parent workspace excludes the Risc0 guest crate produce guest binaries via `lgs build` without a separate `cargo build --manifest-path methods/Cargo.toml`.
 6. Deploy outputs the deployed program's on-chain ID (the risc0 image ID) for every successful submission, in both the human-readable output and the `--json` output, so users can hand the value to a client without rerunning a separate inspection tool. The value is computed locally from the submitted ELF; on-chain inclusion verification is future work and depends on LEZ exposing deploy receipts.
@@ -24,7 +24,7 @@
 
 ### Reliability
 
-1. The vertical slice must succeed 3 times in a row on a clean machine with deterministic wallets.
+1. **(deferred)** The vertical slice must succeed 3 times in a row on a clean machine with deterministic wallets. — Tied to the deferred DevNet vertical slice (Functional 1).
 2. Local network can be started and torn down in isolation without modifying host-global blockchain state.
 
 ### Performance
@@ -34,7 +34,7 @@
 ### Supportability
 
 1. Scaffold version and toolchain versions are explicit in generated output so projects remain buildable over time.
-2. Network configuration for local and DevNet deployment is .env based config.
+2. Per-project runtime network configuration lives in `scaffold.toml` (the `[localnet]` and `[wallet]` sections). An earlier design considered env-file-based network configuration; that path is **deferred** — see the ADR "Network Configuration" entry for the rationale. Generated projects ship a `templates/default/.env.local` file that is bundled (key-only, redacted) into `lgs report` diagnostic tarballs but is **not** sourced by scaffold at runtime.
 3. The scaffolded project includes command references for build, deploy, and interaction steps.
 4. `logos-scaffold doctor` reports the `spel` repo presence and pin status, mirroring the existing LEZ checks, so drift from `DEFAULT_SPEL_PIN` is surfaced before it bites at deploy time.
 5. `scaffold.toml` files predating the `[repos.spel]` section produce a targeted error from the config loader pointing at `logos-scaffold init` as the fix; `init` is safe to re-run and back-fills the missing section without overwriting customized fields.
@@ -44,7 +44,7 @@
 - Local workflow does not require uploading source code, artifacts, or private keys to third-party services.
 - CLI interaction flow works with locally controlled wallet keys and does not require custodial key management.
 - Local development and testing can run fully offline from public networks.
-- DevNet interaction uses explicit wallet and RPC configuration so developers can avoid accidental cross-network key reuse.
+- **(deferred)** DevNet interaction uses explicit wallet and RPC configuration so developers can avoid accidental cross-network key reuse. — Tied to the deferred DevNet vertical slice (Functional 1).
 
 ### Dependencies
 
@@ -58,8 +58,8 @@
 #### Runtime Dependencies
 
 - Local network runtime availability for local deploy and interaction workflows.
-- DevNet RPC endpoint availability and stable chain configuration.
-- Deterministic local/DevNet account and chain configuration via environment files.
+- **(deferred)** DevNet RPC endpoint availability and stable chain configuration. — Tied to the deferred DevNet vertical slice (Functional 1).
+- **(deferred)** Deterministic local/DevNet account and chain configuration via environment files. — DevNet target is deferred; env-file-based runtime config was deferred in favor of `scaffold.toml` (see ADR "Network Configuration").
 
 #### Wallet Dependencies
 
@@ -203,3 +203,32 @@
 - `.#lgx` flake output on the project (or sub-flakes) — `.#lgx-portable`-only projects fail explicitly until they expose `.#lgx`.
 - `.#lgx-portable` flake output for any module the developer wants to test against a basecamp AppImage. Projects without it get a clear error from `build-portable`, not a silent miss.
 - Modules that bind sockets must honor external port override via env var (names chosen by each module) for multi-instance launch to be fully useful.
+
+## Deferred Items
+
+Items marked **(deferred)** above are committed to in this document but are
+not yet implemented in scaffold's source. They remain in this file so the
+project's stated direction is visible, but are tagged so contributors and
+reviewers can tell at a glance which lines describe shipped behavior and
+which describe future work.
+
+Currently deferred:
+
+- **DevNet vertical slice and DevNet-related plumbing** (Functional 1,
+  Functional 3 DevNet half, Reliability 1, the DevNet +/Privacy bullet, and
+  Runtime Dependencies entries 2–3). Today scaffold only targets the
+  standalone localnet flow; there is no `--network devnet` flag, no DevNet
+  endpoint constant, no DevNet entry in `[localnet]` config, and no DevNet
+  branch in `wallet topup`. Picking up DevNet later will require a tracking
+  issue covering at minimum: a network-selection CLI flag, a DevNet RPC
+  default, a DevNet branch for `wallet topup` (the current path always uses
+  the Piñata faucet), and a network-aware wallet-state separation strategy.
+- **Env-file-based runtime network configuration** (formerly Supportability
+  2). Scaffold currently uses `scaffold.toml` (the `[localnet]` and
+  `[wallet]` sections) as the sole source of truth for runtime network
+  parameters. See the ADR "Network Configuration" entry for the rationale.
+  The shipped `templates/default/.env.local` file is bundled into
+  `lgs report` diagnostic tarballs (key-only, redacted) but is not sourced
+  at runtime — `src/commands/localnet.rs` hardcodes `RUST_LOG=info` and
+  `RISC0_DEV_MODE=1` when spawning the sequencer, independent of
+  `.env.local`'s contents.
