@@ -5,7 +5,7 @@
 //! sections survive. Anything the parser rejects in `config::detect_old_schema`
 //! is exactly what this module knows how to rewrite.
 
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use toml_edit::{value, DocumentMut, Item, Table};
 
 use crate::constants::{
@@ -234,6 +234,13 @@ pub(crate) fn migrate_to_v0_2_0(doc: &mut DocumentMut) -> DynResult<MigrationRep
             .as_table_mut()
             .ok_or_else(|| anyhow!("[modules] is not a table"))?;
         for (name, t) in &moved_modules {
+            if modules_table.contains_key(name) {
+                bail!(
+                    "module name collision during migration: `{name}` exists in both \
+                     [basecamp.modules.{name}] and [modules.{name}]. Resolve by renaming \
+                     or removing one entry in scaffold.toml before re-running init."
+                );
+            }
             modules_table.insert(name, Item::Table(t.clone()));
         }
         report.changes.push(format!(
@@ -379,5 +386,108 @@ pin = "feedfacefeedfacefeedfacefeedfacefeedface"
             "github:logos-co/logos-package-manager/e5c25989861f4487c3dc8c7b3bc0062bcbc3221f"
         )
         .is_none());
+    }
+
+    #[test]
+    fn migration_bails_on_module_name_collision_between_basecamp_modules_and_modules() {
+        // Pre-0.2.0 file that has BOTH a legacy [basecamp.modules.foo] and a
+        // pre-existing top-level [modules.foo] (hand-edited or half-migrated).
+        // The migrator must refuse rather than silently overwrite the existing
+        // [modules.foo] table — that is silent data loss in a version-controlled
+        // config file. The error must name the colliding module.
+        let input = r#"[scaffold]
+version = "0.1.1"
+
+[repos.lez]
+source = "u"
+pin = "abc"
+
+[repos.spel]
+source = "v"
+pin = "def"
+
+[basecamp]
+pin = "deadbeef"
+source = "https://example.com/basecamp"
+
+[basecamp.modules.foo]
+flake = "path:./legacy-foo"
+role = "project"
+
+[modules.foo]
+flake = "path:./new-foo"
+role = "project"
+"#;
+        let mut doc: DocumentMut = input.parse().expect("parse seed");
+        let err = match migrate_to_v0_2_0(&mut doc) {
+            Ok(_) => panic!("expected collision error, migration succeeded"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("module name collision"),
+            "error should name the failure mode; got: {msg}"
+        );
+        assert!(
+            msg.contains("foo"),
+            "error should name the colliding module; got: {msg}"
+        );
+
+        // The pre-existing [modules.foo] must still carry the hand-edited
+        // flake — i.e. it was NOT clobbered before the bail.
+        let preserved = doc
+            .get("modules")
+            .and_then(Item::as_table)
+            .and_then(|m| m.get("foo"))
+            .and_then(Item::as_table)
+            .and_then(|t| t.get("flake"))
+            .and_then(Item::as_str)
+            .expect("modules.foo.flake preserved");
+        assert_eq!(preserved, "path:./new-foo");
+    }
+
+    #[test]
+    fn migration_moves_basecamp_modules_when_no_collision() {
+        // Sanity counterpart to the collision test: without a colliding
+        // [modules.<name>] entry, the modules move succeeds and the new
+        // [modules.foo] carries the legacy flake.
+        let input = r#"[scaffold]
+version = "0.1.1"
+
+[repos.lez]
+source = "u"
+pin = "abc"
+
+[repos.spel]
+source = "v"
+pin = "def"
+
+[basecamp]
+pin = "deadbeef"
+source = "https://example.com/basecamp"
+
+[basecamp.modules.foo]
+flake = "path:./legacy-foo"
+role = "project"
+"#;
+        let mut doc: DocumentMut = input.parse().expect("parse seed");
+        let report = migrate_to_v0_2_0(&mut doc).expect("migration succeeds");
+        assert!(
+            report
+                .changes
+                .iter()
+                .any(|c| c.contains("[basecamp.modules.*] -> [modules.*]")),
+            "expected modules-move entry in report; got: {:?}",
+            report.changes
+        );
+        let moved = doc
+            .get("modules")
+            .and_then(Item::as_table)
+            .and_then(|m| m.get("foo"))
+            .and_then(Item::as_table)
+            .and_then(|t| t.get("flake"))
+            .and_then(Item::as_str)
+            .expect("modules.foo.flake present after move");
+        assert_eq!(moved, "path:./legacy-foo");
     }
 }
