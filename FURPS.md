@@ -10,7 +10,7 @@
 4. Deploy command auto-discovers program binaries from `methods/target/` by matching program names, so non-template projects deploy without `--program-path`.
 5. Build command auto-compiles `methods/Cargo.toml` when present, so projects whose parent workspace excludes the Risc0 guest crate produce guest binaries via `lgs build` without a separate `cargo build --manifest-path methods/Cargo.toml`.
 6. Deploy outputs the deployed program's on-chain ID (the risc0 image ID) for every successful submission, in both the human-readable output and the `--json` output, so users can hand the value to a client without rerunning a separate inspection tool. The value is computed locally from the submitted ELF; on-chain inclusion verification is future work and depends on LEZ exposing deploy receipts.
-7. Scaffold vendors the `spel` CLI per project — clones `logos-co/spel` to a project-local path, pinned via `[repos.spel]` in `scaffold.toml`, and builds it during `setup` — mirroring the LEZ vendoring pattern. `deploy` invokes the project-local binary; no global `spel` install is required. The default spel pin is selected so spel itself vendors the same LEZ commit scaffold pins; `doctor` enforces this alignment at runtime by inspecting `spel-cli/Cargo.toml` and warning if spel's vendored LEZ diverges from `DEFAULT_LEZ_PIN`.
+7. Scaffold vendors the `spel` CLI per project — clones `logos-co/spel` to a project-local path, pinned via `[repos.spel]` in `scaffold.toml`, and builds it during `setup` — mirroring the LEZ vendoring pattern. `deploy` invokes the project-local binary; no global `spel` install is required. The default spel pin is selected so spel itself vendors the same LEZ commit scaffold pins; `doctor` enforces this alignment at runtime by inspecting `spel-cli/Cargo.toml` and warning if spel's vendored LEZ diverges from `DEFAULT_LEZ.sha`.
 8. `logos-scaffold spel -- <args...>` (and the `lgs spel -- <args...>` alias) proxies trailing arguments to the project-vendored `spel` binary, so any spel command (`inspect`, `pda`, `generate-idl`, etc.) runs against the project's pinned version without a global install. Exit codes are forwarded.
 9. `logos-scaffold deploy --json` output is a pure JSON object on stdout — no command-echo, no informational text — and absent values are omitted from the object rather than emitted as `null`. Consumers can pipe directly to `jq` and test field presence with `has(...)`. Subprocess command-echoes and progress messages stay off the JSON channel. Two shapes by code path: `--program-path … --json` emits a bare object `{"status":"submitted","program":...,"tx"?:...,"program_id"?:...}`; auto-discovery `--json` emits `{"deploys":[<entry>,...]}` with one entry per attempted program. Failed entries replace `program_id` with `error`. Auto-discovery exit code is non-zero when any entry failed; the JSON object is still emitted so consumers can inspect partial results.
 
@@ -36,7 +36,7 @@
 1. Scaffold version and toolchain versions are explicit in generated output so projects remain buildable over time.
 2. Network configuration for local and DevNet deployment is .env based config.
 3. The scaffolded project includes command references for build, deploy, and interaction steps.
-4. `logos-scaffold doctor` reports the `spel` repo presence and pin status, mirroring the existing LEZ checks, so drift from `DEFAULT_SPEL_PIN` is surfaced before it bites at deploy time.
+4. `logos-scaffold doctor` reports the `spel` repo presence and pin status, mirroring the existing LEZ checks, so drift from `DEFAULT_SPEL.sha` is surfaced before it bites at deploy time.
 5. `scaffold.toml` files predating the `[repos.spel]` section produce a targeted error from the config loader pointing at `logos-scaffold init` as the fix; `init` is safe to re-run and back-fills the missing section without overwriting customized fields.
 
 ### + (Privacy, Anonymity, Censorship-Resistance)
@@ -53,7 +53,7 @@
 - Logos Core DevEx for overall developer journey alignment and terminology.
 - Logos Blockchain and Logos Execution Environment for functionality.
 - Wallet Module for interactions with Logos Execution Environment.
-- `logos-co/spel` CLI — vendored per project at a pinned commit (`DEFAULT_SPEL_PIN`, currently tag `v0.2.0`); supplies the `spel inspect` output that `deploy` parses for the program ID.
+- `logos-co/spel` CLI — vendored per project at a pinned commit (`DEFAULT_SPEL.sha`, currently tag `v0.2.0-rc.5`); supplies the `spel inspect` output that `deploy` parses for the program ID.
 
 #### Runtime Dependencies
 

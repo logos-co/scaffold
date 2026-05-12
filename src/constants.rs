@@ -152,3 +152,47 @@ pub(crate) const BASECAMP_PREINSTALLED_MODULES: &[&str] = &[
     "webview_app",
     "basecamp_main_ui",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Guards against doc-vs-code drift between the GitRef structs above and the
+    // canonical project docs (ADR.md, FURPS.md). The pre-GitRef constants were
+    // named `DEFAULT_{SPEL,LEZ}_PIN` / `DEFAULT_LEZ_TAG`; those names no longer
+    // exist in this file. Docs referencing them are stale and break grep.
+    const STALE_GITREF_NAMES: &[&str] =
+        &["DEFAULT_SPEL_PIN", "DEFAULT_LEZ_PIN", "DEFAULT_LEZ_TAG"];
+
+    #[test]
+    fn adr_md_does_not_reference_stale_gitref_names() {
+        let adr = include_str!("../ADR.md");
+        for name in STALE_GITREF_NAMES {
+            assert!(
+                !adr.contains(name),
+                "ADR.md references stale constant `{name}`; use `DEFAULT_SPEL.sha`, `DEFAULT_LEZ.sha`, or `DEFAULT_LEZ.tag` (see `src/constants.rs`)",
+            );
+        }
+    }
+
+    #[test]
+    fn furps_md_does_not_reference_stale_gitref_names() {
+        let furps = include_str!("../FURPS.md");
+        for name in STALE_GITREF_NAMES {
+            assert!(
+                !furps.contains(name),
+                "FURPS.md references stale constant `{name}`; use `DEFAULT_SPEL.sha`, `DEFAULT_LEZ.sha`, or `DEFAULT_LEZ.tag` (see `src/constants.rs`)",
+            );
+        }
+    }
+
+    #[test]
+    fn furps_md_references_current_spel_tag() {
+        let furps = include_str!("../FURPS.md");
+        assert!(
+            furps.contains(DEFAULT_SPEL.tag),
+            "FURPS.md should reference the current DEFAULT_SPEL.tag (`{}`); the doc fell behind the constant (note: unsuffixed `v0.2.0` is *older* than `v0.2.0-rc.5`)",
+            DEFAULT_SPEL.tag,
+        );
+    }
+}
