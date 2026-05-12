@@ -56,6 +56,24 @@ risc0_dev_mode = true
 "#;
 
 #[test]
+fn new_help_lists_documented_flags_including_cache_root() {
+    let temp = tempdir().expect("tempdir");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("new")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("--vendor-deps")
+                .and(predicate::str::contains("--lez-path"))
+                .and(predicate::str::contains("--template"))
+                .and(predicate::str::contains("--cache-root")),
+        );
+}
+
+#[test]
 fn create_help_does_not_mutate_filesystem() {
     let temp = tempdir().expect("tempdir");
 

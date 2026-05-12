@@ -169,6 +169,14 @@ struct NewArgs {
     lez_path: Option<PathBuf>,
     #[arg(long, default_value = "default", help = TEMPLATE_HELP.as_str())]
     template: String,
+    /// Override the cache root for this project. Persisted to
+    /// `[scaffold].cache_root` in the generated scaffold.toml so all
+    /// subsequent commands honor it; also used during `new` itself for the
+    /// initial LEZ clone of non-vendored projects (`<cache-root>/repos/lez/<pin>/`).
+    /// Relative paths are resolved against the current working directory at
+    /// `new` time and persisted as absolute.
+    #[arg(long, value_name = "PATH")]
+    cache_root: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -457,6 +465,7 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
             vendor_deps: args.vendor_deps,
             lez_path: args.lez_path,
             template: args.template,
+            cache_root: args.cache_root,
         }),
         Some(Commands::Setup(_)) => cmd_setup(),
         Some(Commands::Build(args)) => match args.subcommand {

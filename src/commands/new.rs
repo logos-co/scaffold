@@ -26,6 +26,7 @@ pub(crate) struct NewCommand {
     pub(crate) template: String,
     pub(crate) vendor_deps: bool,
     pub(crate) lez_path: Option<PathBuf>,
+    pub(crate) cache_root: Option<PathBuf>,
 }
 
 pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
@@ -54,7 +55,13 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
     fs::create_dir_all(target.join(".scaffold/state"))?;
     fs::create_dir_all(target.join(".scaffold/logs"))?;
 
-    let (bootstrap_cache, _) = default_cache_root()?;
+    let (bootstrap_cache, persisted_cache_root) = match cmd.cache_root.as_deref() {
+        Some(path) => resolve_cli_cache_root(&cwd, path),
+        None => {
+            let (path, _) = default_cache_root()?;
+            (path, String::new())
+        }
+    };
     fs::create_dir_all(bootstrap_cache.join("repos"))?;
     fs::create_dir_all(bootstrap_cache.join("state"))?;
     fs::create_dir_all(bootstrap_cache.join("logs"))?;
@@ -111,7 +118,7 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
 
     let cfg = Config {
         version: SCAFFOLD_TOML_SCHEMA_VERSION.to_string(),
-        cache_root: String::new(),
+        cache_root: persisted_cache_root,
         lez,
         spel,
         // Default scaffolded projects don't pin basecamp/lgpm — only
@@ -199,6 +206,21 @@ fn cleanup_lez_hello_artifacts(project_root: &Path) -> DynResult<()> {
     Ok(())
 }
 
+/// Resolve a `--cache-root` value supplied on the CLI into the directory used
+/// for the bootstrap LEZ clone and the string persisted to
+/// `[scaffold].cache_root`. Relative paths anchor to `cwd` at `new` time
+/// (not the future project root) and are persisted as absolute so the
+/// generated scaffold.toml resolves consistently from any CWD.
+fn resolve_cli_cache_root(cwd: &Path, cache_root: &Path) -> (PathBuf, String) {
+    let abs = if cache_root.is_absolute() {
+        cache_root.to_path_buf()
+    } else {
+        cwd.join(cache_root)
+    };
+    let display = abs.display().to_string();
+    (abs, display)
+}
+
 pub(crate) fn to_cargo_crate_name(input: &str) -> String {
     let mut out = String::new();
     let mut prev_dash = false;
@@ -230,7 +252,33 @@ pub(crate) fn to_cargo_crate_name(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::to_cargo_crate_name;
+    use super::{resolve_cli_cache_root, to_cargo_crate_name};
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn resolve_cli_cache_root_keeps_absolute_path_as_is() {
+        let (abs, persisted) =
+            resolve_cli_cache_root(Path::new("/tmp/wherever"), Path::new("/abs/cache"));
+        assert_eq!(abs, PathBuf::from("/abs/cache"));
+        assert_eq!(persisted, "/abs/cache");
+    }
+
+    #[test]
+    fn resolve_cli_cache_root_joins_relative_path_against_cwd() {
+        let (abs, persisted) =
+            resolve_cli_cache_root(Path::new("/tmp/scratch"), Path::new("custom-cache"));
+        assert_eq!(abs, PathBuf::from("/tmp/scratch/custom-cache"));
+        assert_eq!(persisted, "/tmp/scratch/custom-cache");
+    }
+
+    #[test]
+    fn resolve_cli_cache_root_resolves_dot_prefixed_relative_path() {
+        let (abs, persisted) =
+            resolve_cli_cache_root(Path::new("/tmp/scratch"), Path::new("./custom-cache"));
+        assert_eq!(abs, PathBuf::from("/tmp/scratch/./custom-cache"));
+        assert_eq!(persisted, "/tmp/scratch/./custom-cache");
+    }
+
 
     #[test]
     fn simple_name_is_lowercased() {
