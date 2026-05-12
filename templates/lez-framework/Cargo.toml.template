@@ -53,3 +53,44 @@ example_program_deployment_methods = { path = "methods" }
 serde.workspace = true
 clap.workspace = true
 tokio = { workspace = true, features = ["macros"] }
+
+# LEZ v0.2.0-rc1 declares its `logos-blockchain-*` deps without a `rev`,
+# so a fresh `cargo build` resolves every transitive `logos-blockchain-*`
+# crate against whatever `main` of logos-blockchain happens to be. A
+# regression on `main` (a `services/storage` file unconditionally `use`s a
+# module gated behind the `rocksdb-backend` feature) currently breaks the
+# build. Pin every transitive `logos-blockchain-*` crate to the exact rev
+# LEZ rc1's own `Cargo.lock` was tested against. Drop this table whenever
+# the parent `nssa`/`wallet` pin advances to LEZ rc2 or newer — those
+# tags pin the `logos-blockchain-*` deps themselves.
+[patch."https://github.com/logos-blockchain/logos-blockchain.git"]
+logos-blockchain-blend-crypto = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-blend-message = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-blend-proofs = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-chain-broadcast-service = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-chain-service = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-circuits-prover = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-circuits-utils = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-common-http-client = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-core = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-cryptarchia-engine = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-cryptarchia-sync = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-groth16 = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-http-api-common = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-key-management-system-keys = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-key-management-system-macros = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-key-management-system-operators = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-key-management-system-service = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-ledger = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-network-service = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-poc = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-pol = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-poq = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-poseidon2 = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-services-utils = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-storage-service = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-time-service = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-utils = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-utxotree = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-witness-generator = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
+logos-blockchain-zksign = { git = "https://github.com/logos-blockchain/logos-blockchain.git", rev = "{{lb_pin}}" }
