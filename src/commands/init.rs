@@ -14,8 +14,8 @@ use crate::constants::{
     SCAFFOLD_TOML_SCHEMA_VERSION,
 };
 use crate::migrate::migrate_to_v0_2_0;
-use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig};
-use crate::state::write_text;
+use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RunConfig};
+use crate::state::write_text_atomic;
 use crate::template::project::ensure_scaffold_in_gitignore;
 use crate::template::skills::apply_skills;
 use crate::DynResult;
@@ -44,7 +44,12 @@ pub(crate) fn cmd_init_at(target: &Path, bin_name: &str) -> DynResult<()> {
         let report = migrate_to_v0_2_0(&mut doc)?;
         let migrated = !report.changes.is_empty();
         if migrated {
-            write_text(&scaffold_path, &doc.to_string())?;
+            // Create the .scaffold/ directories before rewriting scaffold.toml.
+            // The fresh-init branch does the same, so migrated projects are
+            // left fully initialized even if they started from an older schema.
+            create_scaffold_dirs(target)?;
+            write_text_atomic(&scaffold_path, &doc.to_string())?;
+            ensure_scaffold_in_gitignore(target)?;
             println!(
                 "scaffold.toml in {} migrated to schema v{}.",
                 target.display(),
@@ -57,6 +62,8 @@ pub(crate) fn cmd_init_at(target: &Path, bin_name: &str) -> DynResult<()> {
                 println!("  ! {hint}");
             }
         } else {
+            create_scaffold_dirs(target)?;
+            ensure_scaffold_in_gitignore(target)?;
             println!(
                 "scaffold.toml at {} is already at schema v{}.",
                 target.display(),
@@ -73,13 +80,12 @@ pub(crate) fn cmd_init_at(target: &Path, bin_name: &str) -> DynResult<()> {
         return Ok(());
     }
 
-    // Fresh init — schema 0.2.0 by construction.
+    // Fresh init — schema 0.2.0 by construction. Create the .scaffold/
+    // directories first so that a failure here leaves no scaffold.toml
+    // behind and a re-run starts cleanly.
     let cfg = fresh_default_config();
-    write_text(&scaffold_path, &serialize_config(&cfg)?)?;
-    fs::create_dir_all(target.join(".scaffold/state"))
-        .with_context(|| format!("creating {}/.scaffold/state", target.display()))?;
-    fs::create_dir_all(target.join(".scaffold/logs"))
-        .with_context(|| format!("creating {}/.scaffold/logs", target.display()))?;
+    create_scaffold_dirs(target)?;
+    write_text_atomic(&scaffold_path, &serialize_config(&cfg)?)?;
     ensure_scaffold_in_gitignore(target)?;
     apply_skills(target)?;
 
@@ -92,6 +98,14 @@ pub(crate) fn cmd_init_at(target: &Path, bin_name: &str) -> DynResult<()> {
         "If this project is building modules for basecamp, run '{bin_name} basecamp setup' to pin + build basecamp + lgpm and seed alice/bob profiles."
     );
 
+    Ok(())
+}
+
+fn create_scaffold_dirs(target: &Path) -> DynResult<()> {
+    fs::create_dir_all(target.join(".scaffold/state"))
+        .with_context(|| format!("creating {}/.scaffold/state", target.display()))?;
+    fs::create_dir_all(target.join(".scaffold/logs"))
+        .with_context(|| format!("creating {}/.scaffold/logs", target.display()))?;
     Ok(())
 }
 
@@ -115,6 +129,7 @@ fn fresh_default_config() -> Config {
         localnet: LocalnetConfig::default(),
         modules: std::collections::BTreeMap::new(),
         basecamp: None,
+        run: RunConfig::default(),
     }
 }
 
@@ -483,5 +498,53 @@ home_dir = ".scaffold/wallet"
         let text = fs::read_to_string(target.join(".gitignore")).unwrap();
         let count = text.lines().filter(|l| l.trim() == ".scaffold").count();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn init_leaves_no_scaffold_toml_when_dir_creation_fails() {
+        let temp = tempdir().expect("tempdir");
+        let target = temp.path();
+        // Seed a regular file at `.scaffold` so `create_dir_all(".scaffold/state")` fails.
+        // Dir creation is the first filesystem mutation in fresh-init; if it fails the
+        // user must be left with no scaffold.toml so a retry starts from a clean state.
+        fs::write(target.join(".scaffold"), b"not a dir").expect("seed");
+
+        let err = cmd_init_at(target, "lgs").expect_err("dir creation should fail");
+        assert!(
+            err.to_string().contains(".scaffold"),
+            "error mentions .scaffold path: {err}"
+        );
+        assert!(
+            !target.join("scaffold.toml").exists(),
+            "scaffold.toml must not be written when dir creation fails",
+        );
+    }
+
+    #[test]
+    fn init_completes_wedged_state_when_dirs_missing() {
+        let temp = tempdir().expect("tempdir");
+        let target = temp.path();
+        // First, a normal init.
+        cmd_init_at(target, "lgs").expect("init");
+        // Simulate a wedge: scaffold.toml landed at v0.2.0 but `.scaffold/` is gone.
+        fs::remove_dir_all(target.join(".scaffold")).expect("nuke .scaffold");
+        assert!(target.join("scaffold.toml").exists());
+        assert!(!target.join(".scaffold/state").exists());
+
+        // Re-running init must complete the partial install, not refuse.
+        cmd_init_at(target, "lgs").expect("recover from wedge");
+        assert!(target.join(".scaffold/state").is_dir());
+        assert!(target.join(".scaffold/logs").is_dir());
+    }
+
+    #[test]
+    fn init_rerun_succeeds_when_already_initialized_and_dirs_present() {
+        let temp = tempdir().expect("tempdir");
+        let target = temp.path();
+        cmd_init_at(target, "lgs").expect("init");
+        cmd_init_at(target, "lgs").expect("second init should refresh skills");
+        assert!(target.join(".scaffold/state").is_dir());
+        assert!(target.join(".scaffold/logs").is_dir());
+        assert!(target.join(".claude/skills/lgs-cli/SKILL.md").is_file());
     }
 }

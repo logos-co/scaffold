@@ -27,7 +27,7 @@ Once a project exists on disk, also pull in the matching template / integration 
 | Group | Command | Purpose |
 |---|---|---|
 | Project | `new <name>` / `create <name>` | Scaffold a new project. Flags: `--template {default,lez-framework}`, `--vendor-deps`, `--lez-path`, `--cache-root`. |
-| Project | `init` | Adopt scaffold in an existing project (writes `scaffold.toml`, creates `.scaffold/`, appends to `.gitignore`). Re-run to migrate older schemas in place. |
+| Project | `init` | Adopt scaffold in an existing project (writes `scaffold.toml`, creates `.scaffold/`, appends to `.gitignore`). Re-run to migrate older schemas or refresh shipped AI skills in place. |
 | Project | `setup` | Sync LEZ + spel to pinned commits, build `sequencer_service` / `wallet` / `spel` locally, seed default wallet. Project-local; no PATH installs. |
 | Project | `build [project-path]` | Runs `setup` then `cargo build --workspace`; auto-compiles `methods/Cargo.toml` if present. |
 | Project | `deploy [program-name]` | Deploys one or all guest programs discovered in `methods/guest/src/bin/*.rs`. Prints `program_id` (risc0 image ID) on success. `--json` only structured when combined with `--program-path`. |
@@ -82,7 +82,7 @@ lgs init      # writes scaffold.toml, creates .scaffold/, appends .gitignore
 lgs setup
 ```
 
-`init` does not touch `Cargo.toml` or `src/`. Re-run `init` to migrate older `scaffold.toml` schemas (legacy `[basecamp]` keys move to `[repos.basecamp]` / `[modules.*]`; legacy `url` on `[repos.{lez,spel}]` is dropped). Already-migrated configs are refused.
+`init` does not touch `Cargo.toml` or `src/`. Re-run `init` to migrate older `scaffold.toml` schemas (legacy `[basecamp]` keys move to `[repos.basecamp]` / `[modules.*]`; legacy `url` on `[repos.{lez,spel}]` is dropped) or to refresh the shipped AI skills. Already-current configs succeed and leave `scaffold.toml` unchanged.
 
 ## `.scaffold/` Layout
 

@@ -110,16 +110,8 @@ fn parse_skill_frontmatter(raw: &str) -> DynResult<ParsedSkill> {
         .or_else(|| trimmed.strip_prefix("---\r\n"))
         .ok_or_else(|| anyhow!("SKILL.md missing leading `---` frontmatter delimiter"))?;
 
-    let close_idx = after_open
-        .find("\n---")
+    let (frontmatter, body) = split_frontmatter(after_open)
         .ok_or_else(|| anyhow!("SKILL.md missing closing `---` for frontmatter"))?;
-    let frontmatter = &after_open[..close_idx];
-    let after_close = &after_open[close_idx + "\n---".len()..];
-    let body = after_close
-        .strip_prefix('\n')
-        .or_else(|| after_close.strip_prefix("\r\n"))
-        .unwrap_or(after_close)
-        .to_string();
 
     let mut description: Option<String> = None;
     let mut buf = String::new();
@@ -153,7 +145,26 @@ fn parse_skill_frontmatter(raw: &str) -> DynResult<ParsedSkill> {
         bail!("SKILL.md frontmatter has empty `description:`");
     }
 
-    Ok(ParsedSkill { description, body })
+    Ok(ParsedSkill {
+        description,
+        body: body.to_string(),
+    })
+}
+
+fn split_frontmatter(after_open: &str) -> Option<(&str, &str)> {
+    let mut offset = 0;
+    for line in after_open.split_inclusive('\n') {
+        let line_without_lf = line.strip_suffix('\n').unwrap_or(line);
+        let line_text = line_without_lf
+            .strip_suffix('\r')
+            .unwrap_or(line_without_lf);
+        if line_text == "---" {
+            return Some((&after_open[..offset], &after_open[offset + line.len()..]));
+        }
+        offset += line.len();
+    }
+
+    None
 }
 
 fn render_cursor_mdc(description: &str, body: &str) -> String {
@@ -163,22 +174,12 @@ fn render_cursor_mdc(description: &str, body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{apply_skills, parse_skill_frontmatter, render_cursor_mdc, SKILLS_DIR};
+    use tempfile::{tempdir, TempDir};
 
-    fn mk_temp_dir(suffix: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time should be after unix epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "logos-scaffold-skills-{suffix}-{}-{nanos}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&path).expect("failed to create temporary test directory");
-        path
+    fn mk_temp_dir() -> TempDir {
+        tempdir().expect("failed to create temporary test directory")
     }
 
     fn shipped_skill_names() -> Vec<String> {
@@ -214,8 +215,9 @@ mod tests {
 
     #[test]
     fn apply_skills_writes_claude_cursor_and_agents_layouts() {
-        let target = mk_temp_dir("layout");
-        apply_skills(&target).expect("apply_skills");
+        let temp = mk_temp_dir();
+        let target = temp.path();
+        apply_skills(target).expect("apply_skills");
 
         for name in shipped_skill_names() {
             let claude = target.join(format!(".claude/skills/{name}/SKILL.md"));
@@ -238,14 +240,13 @@ mod tests {
                 "AGENTS.md is missing skill `{name}`; got:\n{agents_text}"
             );
         }
-
-        fs::remove_dir_all(&target).expect("cleanup");
     }
 
     #[test]
     fn claude_skill_md_is_byte_identical_to_source() {
-        let target = mk_temp_dir("byte-identical");
-        apply_skills(&target).expect("apply_skills");
+        let temp = mk_temp_dir();
+        let target = temp.path();
+        apply_skills(target).expect("apply_skills");
 
         let written = fs::read_to_string(target.join(".claude/skills/lgs-cli/SKILL.md"))
             .expect("read written SKILL.md");
@@ -254,14 +255,13 @@ mod tests {
             written, source,
             ".claude/skills/<name>/SKILL.md must be byte-identical to the canonical source"
         );
-
-        fs::remove_dir_all(&target).expect("cleanup");
     }
 
     #[test]
     fn cursor_mdc_drops_name_field_and_adds_always_apply() {
-        let target = mk_temp_dir("mdc-frontmatter");
-        apply_skills(&target).expect("apply_skills");
+        let temp = mk_temp_dir();
+        let target = temp.path();
+        apply_skills(target).expect("apply_skills");
 
         let mdc =
             fs::read_to_string(target.join(".cursor/rules/lgs-cli.mdc")).expect("read lgs-cli.mdc");
@@ -283,21 +283,20 @@ mod tests {
             !frontmatter.contains("name:"),
             "mdc frontmatter must not include the source `name:` field; got:\n{frontmatter}"
         );
-
-        fs::remove_dir_all(&target).expect("cleanup");
     }
 
     #[test]
     fn apply_skills_is_idempotent() {
-        let target = mk_temp_dir("idempotent");
-        apply_skills(&target).expect("first apply");
+        let temp = mk_temp_dir();
+        let target = temp.path();
+        apply_skills(target).expect("first apply");
         let claude_first = fs::read_to_string(target.join(".claude/skills/lgs-cli/SKILL.md"))
             .expect("read claude after first");
         let mdc_first = fs::read_to_string(target.join(".cursor/rules/lgs-cli.mdc"))
             .expect("read mdc after first");
         let agents_first = fs::read_to_string(target.join("AGENTS.md")).expect("read agents first");
 
-        apply_skills(&target).expect("second apply");
+        apply_skills(target).expect("second apply");
         let claude_second = fs::read_to_string(target.join(".claude/skills/lgs-cli/SKILL.md"))
             .expect("read claude after second");
         let mdc_second = fs::read_to_string(target.join(".cursor/rules/lgs-cli.mdc"))
@@ -308,13 +307,12 @@ mod tests {
         assert_eq!(claude_first, claude_second);
         assert_eq!(mdc_first, mdc_second);
         assert_eq!(agents_first, agents_second);
-
-        fs::remove_dir_all(&target).expect("cleanup");
     }
 
     #[test]
     fn apply_skills_preserves_user_added_skill_files() {
-        let target = mk_temp_dir("user-additions");
+        let temp = mk_temp_dir();
+        let target = temp.path();
         let custom_claude = target.join(".claude/skills/team-custom/SKILL.md");
         let custom_cursor = target.join(".cursor/rules/team-custom.mdc");
         fs::create_dir_all(custom_claude.parent().unwrap()).expect("mkdir claude");
@@ -322,7 +320,7 @@ mod tests {
         fs::write(&custom_claude, "team-only canonical").expect("write team claude skill");
         fs::write(&custom_cursor, "team-only cursor rule").expect("write team cursor rule");
 
-        apply_skills(&target).expect("apply_skills");
+        apply_skills(target).expect("apply_skills");
 
         assert_eq!(
             fs::read_to_string(&custom_claude).expect("read custom claude"),
@@ -332,8 +330,6 @@ mod tests {
             fs::read_to_string(&custom_cursor).expect("read custom cursor"),
             "team-only cursor rule"
         );
-
-        fs::remove_dir_all(&target).expect("cleanup");
     }
 
     #[test]
@@ -357,6 +353,16 @@ mod tests {
         let err = parse_skill_frontmatter(raw).expect_err("should reject");
         assert!(
             err.to_string().contains("missing leading"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_skill_frontmatter_rejects_non_delimiter_close_line() {
+        let raw = "---\nname: foo\ndescription: bar\n---foo\n# Body\n";
+        let err = parse_skill_frontmatter(raw).expect_err("should reject");
+        assert!(
+            err.to_string().contains("missing closing"),
             "unexpected error: {err}"
         );
     }
