@@ -152,7 +152,7 @@ fn cmd_localnet_start(
     let localnet_port = localnet_cfg.port;
     let risc0_dev_mode = localnet_cfg.risc0_dev_mode;
     let sequencer_bin = localnet_cfg.sequencer_bin_path(lez);
-    if !sequencer_bin.exists() {
+    if !sequencer_bin.is_file() {
         return Err(LocalnetError::MissingSequencerBinary {
             path: sequencer_bin.display().to_string(),
         }
@@ -510,7 +510,7 @@ pub(crate) fn cmd_localnet_reset(
     // Prerequisite: the sequencer binary must already be built. If not, setup
     // would fail later and we'd have already deleted data with no way to start.
     let sequencer_bin = localnet_cfg.sequencer_bin_path(lez);
-    if !sequencer_bin.exists() {
+    if !sequencer_bin.is_file() {
         return Err(LocalnetError::MissingSequencerBinary {
             path: sequencer_bin.display().to_string(),
         }

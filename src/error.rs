@@ -2,7 +2,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub(crate) enum LocalnetError {
-    #[error("missing sequencer binary at {path}; run `logos-scaffold setup`")]
+    #[error("missing or invalid sequencer binary at {path}; run `logos-scaffold setup`")]
     MissingSequencerBinary { path: String },
 
     #[error("sequencer process exited before becoming ready (pid={pid})\nlast logs:\n{log_tail}")]
