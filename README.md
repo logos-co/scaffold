@@ -229,8 +229,9 @@ build and run a sequencer that isn't upstream LEZ's `sequencer_service`
 without forking scaffold. `sequencer_binary` is treated as the cargo
 package name (`cargo build -p <sequencer_binary>`); the produced binary
 must land at `<lez>/target/release/<sequencer_binary>`.
-`sequencer_config_path` is resolved relative to the LEZ checkout when not
-absolute.
+`sequencer_config_path` must be a relative path inside the LEZ checkout.
+`localnet start` patches this file in place to apply `[localnet].port`, so
+absolute paths and `..` parent components are rejected.
 
 ```toml
 [localnet]

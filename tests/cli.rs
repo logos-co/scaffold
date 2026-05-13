@@ -885,6 +885,44 @@ fn localnet_start_rejects_sequencer_binary_directory() {
         ));
 }
 
+#[cfg(unix)]
+#[test]
+fn localnet_reset_rejects_config_symlink_outside_lez_before_cleanup() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir().expect("tempdir");
+    let lez_path = temp.path().join("lez");
+    let sequencer_bin = lez_path.join("target/release/sequencer_service");
+    let config_path = lez_path.join("sequencer/service/configs/debug/sequencer_config.json");
+    let outside_config = temp.path().join("outside_config.json");
+    let rocksdb_path = lez_path.join("rocksdb");
+
+    fs::create_dir_all(sequencer_bin.parent().expect("parent")).expect("create binary dir");
+    fs::write(&sequencer_bin, "#!/bin/sh\nexit 1\n").expect("write fake sequencer");
+    fs::create_dir_all(config_path.parent().expect("parent")).expect("create config dir");
+    fs::write(&outside_config, r#"{"port": 3040}"#).expect("write outside config");
+    symlink(&outside_config, &config_path).expect("symlink config outside lez");
+    fs::create_dir_all(&rocksdb_path).expect("create rocksdb");
+    write_scaffold_toml(temp.path(), &lez_path);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("localnet")
+        .arg("reset")
+        .arg("--verify-timeout-sec")
+        .arg("1")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "sequencer config must resolve inside the LEZ checkout",
+        ));
+
+    assert!(
+        rocksdb_path.exists(),
+        "reset must not delete chain data before config preflight passes"
+    );
+}
+
 #[test]
 fn localnet_stop_outside_project_succeeds() {
     let temp = tempdir().expect("tempdir");

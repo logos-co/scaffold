@@ -383,11 +383,16 @@ fn parse_localnet(doc: &DocumentMut) -> DynResult<LocalnetConfig> {
     if let Some(v) = table.get("risc0_dev_mode").and_then(Item::as_value) {
         cfg.risc0_dev_mode = v.as_bool().unwrap_or(true);
     }
-    if let Some(s) = read_string(table, "sequencer_binary") {
+    if let Some(s) = read_present_string(table, "sequencer_binary", "[localnet].sequencer_binary")?
+    {
         validate_sequencer_binary_name(&s)?;
         cfg.sequencer_binary = s;
     }
-    if let Some(s) = read_string(table, "sequencer_config_path") {
+    if let Some(s) = read_present_string(
+        table,
+        "sequencer_config_path",
+        "[localnet].sequencer_config_path",
+    )? {
         validate_sequencer_config_path(&s)?;
         cfg.sequencer_config_path = s;
     }
@@ -422,22 +427,41 @@ fn validate_sequencer_binary_name(name: &str) -> DynResult<()> {
 }
 
 /// `[localnet].sequencer_config_path` is mutated in place by
-/// `patch_sequencer_port`, so it has to be a real filesystem path the
-/// operator owns. We deliberately do *not* reject path separators here —
-/// the file naturally lives a few directories deep inside LEZ — but we
-/// still fail on values that look like CLI flags so they can't sneak into
-/// the spawned sequencer's argv.
+/// `patch_sequencer_port`, so keep it constrained to a path inside the
+/// configured LEZ checkout. Forward-slash separators are allowed because
+/// the file naturally lives a few directories deep inside LEZ.
 fn validate_sequencer_config_path(path: &str) -> DynResult<()> {
-    if path.is_empty() {
-        bail!("invalid scaffold.toml: [localnet].sequencer_config_path must not be empty");
-    }
-    if path.starts_with('-') {
+    let parsed = std::path::Path::new(path);
+    let invalid = path.is_empty()
+        || path.starts_with('-')
+        || path.contains('\\')
+        || parsed.is_absolute()
+        || parsed.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::Prefix(_)
+                    | std::path::Component::RootDir
+            )
+        });
+    if invalid {
         bail!(
-            "invalid scaffold.toml: [localnet].sequencer_config_path must not start with `-` \
-             (would be parsed as a sequencer CLI flag); got {path:?}"
+            "invalid scaffold.toml: [localnet].sequencer_config_path must be a LEZ-relative \
+             config file path (non-empty, no leading `-`, absolute paths, parent components, \
+             or backslash separators); got {path:?}"
         );
     }
     check_toml_value("localnet.sequencer_config_path", path)
+}
+
+fn read_present_string(table: &Table, key: &str, label: &str) -> DynResult<Option<String>> {
+    let Some(item) = table.get(key) else {
+        return Ok(None);
+    };
+    let Some(value) = item.as_str() else {
+        bail!("invalid scaffold.toml: {label} must be a string");
+    };
+    Ok(Some(value.to_string()))
 }
 
 fn read_string(table: &Table, key: &str) -> Option<String> {
@@ -1046,7 +1070,14 @@ role = "project"
 
     #[test]
     fn validate_sequencer_config_path_rejects_bad_inputs() {
-        for bad in ["", "-flag-like-value"] {
+        for bad in [
+            "",
+            "-flag-like-value",
+            "../escape.json",
+            "sequencer/../escape.json",
+            "/abs/path/config.json",
+            "sub\\dir\\config.json",
+        ] {
             assert!(
                 validate_sequencer_config_path(bad).is_err(),
                 "expected rejection for {bad:?}"
@@ -1056,25 +1087,33 @@ role = "project"
 
     #[test]
     fn parse_rejects_invalid_sequencer_binary() {
-        let toml = minimal_v0_2_0().replace(
-            "[localnet]\nport = 3040\nrisc0_dev_mode = true\n",
-            "[localnet]\nport = 3040\nrisc0_dev_mode = true\nsequencer_binary = \"../escape\"\n",
-        );
-        let err = parse_config(&toml).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("sequencer_binary"), "{msg}");
-        assert!(msg.contains("../escape"), "{msg}");
+        for bad in ["../escape", ""] {
+            let toml = minimal_v0_2_0().replace(
+                "[localnet]\nport = 3040\nrisc0_dev_mode = true\n",
+                &format!(
+                    "[localnet]\nport = 3040\nrisc0_dev_mode = true\nsequencer_binary = {bad:?}\n"
+                ),
+            );
+            let err = parse_config(&toml).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("sequencer_binary"), "{msg}");
+            assert!(msg.contains(bad), "{msg}");
+        }
     }
 
     #[test]
     fn parse_rejects_invalid_sequencer_config_path() {
-        let toml = minimal_v0_2_0().replace(
-            "[localnet]\nport = 3040\nrisc0_dev_mode = true\n",
-            "[localnet]\nport = 3040\nrisc0_dev_mode = true\nsequencer_config_path = \"--port=80\"\n",
-        );
-        let err = parse_config(&toml).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("sequencer_config_path"), "{msg}");
-        assert!(msg.contains("--port=80"), "{msg}");
+        for bad in ["--port=80", "", "../escape.json", "/abs/path/config.json"] {
+            let toml = minimal_v0_2_0().replace(
+                "[localnet]\nport = 3040\nrisc0_dev_mode = true\n",
+                &format!(
+                    "[localnet]\nport = 3040\nrisc0_dev_mode = true\nsequencer_config_path = {bad:?}\n"
+                ),
+            );
+            let err = parse_config(&toml).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("sequencer_config_path"), "{msg}");
+            assert!(msg.contains(bad), "{msg}");
+        }
     }
 }

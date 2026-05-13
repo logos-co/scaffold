@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -162,14 +162,7 @@ fn cmd_localnet_start(
     // `patch_sequencer_port` so a misconfigured value surfaces with a
     // targeted message rather than a generic "Is a directory" /
     // serde_json parse error from inside the JSON-mutation helper.
-    let sequencer_config = localnet_cfg.sequencer_config_resolved_path(lez);
-    if !sequencer_config.is_file() {
-        bail!(
-            "sequencer config not found or not a regular file at {}; \
-             fix [localnet].sequencer_config_path in scaffold.toml or run `logos-scaffold setup`",
-            sequencer_config.display()
-        );
-    }
+    let sequencer_config = resolve_sequencer_config_file(lez, localnet_cfg)?;
 
     let mut state = read_localnet_state(state_path).unwrap_or_default();
     if let Some(pid) = state.sequencer_pid {
@@ -516,6 +509,7 @@ pub(crate) fn cmd_localnet_reset(
         }
         .into());
     }
+    let _sequencer_config = resolve_sequencer_config_file(lez, localnet_cfg)?;
 
     println!("stopping sequencer…");
     cmd_localnet_stop(state_path, localnet_port)?;
@@ -538,6 +532,35 @@ pub(crate) fn cmd_localnet_reset(
 
     println!("waiting for block production…");
     verify_block_production(localnet_addr, verify_timeout_sec)
+}
+
+fn resolve_sequencer_config_file(lez: &Path, localnet_cfg: &LocalnetConfig) -> DynResult<PathBuf> {
+    let sequencer_config = localnet_cfg.sequencer_config_resolved_path(lez);
+    if !sequencer_config.is_file() {
+        bail!(
+            "sequencer config not found or not a regular file at {}; \
+             fix [localnet].sequencer_config_path in scaffold.toml or run `logos-scaffold setup`",
+            sequencer_config.display()
+        );
+    }
+
+    let lez = fs::canonicalize(lez)
+        .with_context(|| format!("failed to resolve LEZ checkout at {}", lez.display()))?;
+    let sequencer_config = fs::canonicalize(&sequencer_config).with_context(|| {
+        format!(
+            "failed to resolve sequencer config at {}",
+            sequencer_config.display()
+        )
+    })?;
+    if !sequencer_config.starts_with(&lez) {
+        bail!(
+            "sequencer config must resolve inside the LEZ checkout {}; got {}",
+            lez.display(),
+            sequencer_config.display()
+        );
+    }
+
+    Ok(sequencer_config)
 }
 
 /// Deletes on-disk state so the next start begins with a fresh chain.

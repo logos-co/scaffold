@@ -61,8 +61,7 @@ pub(crate) struct LocalnetConfig {
     /// (`<lez>/target/release/<sequencer_binary>`). See
     /// `DEFAULT_SEQUENCER_BIN_NAME`.
     pub(crate) sequencer_binary: String,
-    /// Path to the sequencer's JSON config file. Resolved relative to the
-    /// LEZ checkout root if not absolute. Mutated in place by
+    /// LEZ-relative path to the sequencer's JSON config file. Mutated in place by
     /// `patch_sequencer_port` in `commands::localnet` to honour
     /// `[localnet].port`, so it must point at a regular file the scaffold
     /// has write access to.
@@ -80,16 +79,11 @@ impl LocalnetConfig {
             .join(&self.sequencer_binary)
     }
 
-    /// Resolved on-disk path to the sequencer config file. Absolute paths
-    /// are taken as-is; relative paths are resolved against the LEZ
-    /// checkout root so the same value works on every machine.
+    /// Resolved on-disk path to the sequencer config file. Config parsing
+    /// rejects absolute paths and parent components, so this stays inside
+    /// the LEZ checkout root.
     pub(crate) fn sequencer_config_resolved_path(&self, lez: &std::path::Path) -> PathBuf {
-        let p = PathBuf::from(&self.sequencer_config_path);
-        if p.is_absolute() {
-            p
-        } else {
-            lez.join(p)
-        }
+        lez.join(&self.sequencer_config_path)
     }
 }
 
