@@ -624,6 +624,9 @@ fn doctor_reports_configured_sequencer_binary_and_config_path() {
     fs::create_dir_all(&lez_path).expect("create lez path");
     let spel_path = temp.path().join("spel");
     let custom_config_rel = "sequencer/service/configs/dev/sequencer_config.json";
+    fs::create_dir_all(lez_path.join("target/release/my_custom_seq"))
+        .expect("create binary directory");
+    fs::create_dir_all(lez_path.join(custom_config_rel)).expect("create config directory");
 
     let toml = format!(
         "[scaffold]\nversion = \"0.2.0\"\ncache_root = \"{}\"\n\n\
@@ -668,6 +671,15 @@ fn doctor_reports_configured_sequencer_binary_and_config_path() {
         bin_detail.contains("target/release/my_custom_seq"),
         "expected detail to mention configured binary path, got {bin_detail:?}"
     );
+    assert_eq!(
+        bin_row.get("status").and_then(serde_json::Value::as_str),
+        Some("fail"),
+        "directory at configured binary path should fail doctor"
+    );
+    assert!(
+        bin_detail.contains("not a regular file"),
+        "expected directory binary path to fail as non-file, got {bin_detail:?}"
+    );
 
     let cfg_row = checks
         .iter()
@@ -680,6 +692,15 @@ fn doctor_reports_configured_sequencer_binary_and_config_path() {
     assert!(
         cfg_detail.contains(custom_config_rel),
         "expected detail to mention configured config path, got {cfg_detail:?}"
+    );
+    assert_eq!(
+        cfg_row.get("status").and_then(serde_json::Value::as_str),
+        Some("fail"),
+        "directory at configured config path should fail doctor"
+    );
+    assert!(
+        cfg_detail.contains("not a regular file"),
+        "expected directory config path to fail as non-file, got {cfg_detail:?}"
     );
 }
 
@@ -837,6 +858,31 @@ fn localnet_start_patches_config_and_uses_configured_port() {
 
     let env = fs::read_to_string(&env_log).expect("read env log");
     assert_eq!(env, "0", "expected risc0 dev mode override to be passed");
+}
+
+#[test]
+fn localnet_start_rejects_sequencer_binary_directory() {
+    let temp = tempdir().expect("tempdir");
+    let lez_path = temp.path().join("lez");
+    let sequencer_bin = lez_path.join("target/release/sequencer_service");
+    let config_path = lez_path.join("sequencer/service/configs/debug/sequencer_config.json");
+
+    fs::create_dir_all(&sequencer_bin).expect("create binary directory");
+    fs::create_dir_all(config_path.parent().expect("parent")).expect("create config dir");
+    fs::write(&config_path, r#"{"port": 3040}"#).expect("write sequencer config");
+    write_scaffold_toml(temp.path(), &lez_path);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("localnet")
+        .arg("start")
+        .arg("--timeout-sec")
+        .arg("1")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "missing or invalid sequencer binary",
+        ));
 }
 
 #[test]
