@@ -37,24 +37,25 @@ pub(crate) const DEFAULT_SPEL: GitRef = GitRef {
     tag: "v0.2.0-rc.5",
 };
 
-/// `logos-blockchain` rev that scaffold-generated projects use to pin the
-/// `logos-blockchain-*` transitive crates pulled in via LEZ.
+/// `logos-blockchain-circuits` GitHub release version that contains the
+/// proving/verification keys and witness generators every
+/// `logos-blockchain-{pol,poc,poq,zksign}` build script reads at compile time
+/// via `logos-blockchain-circuits-utils::circuits_dir()`.
 ///
-/// `DEFAULT_LEZ` (v0.2.0-rc1) declares its `logos-blockchain-*` deps in
-/// `Cargo.toml` *without* a `rev`, so a downstream `cargo build` resolves
-/// each transitive crate against whatever `main` of `logos-blockchain` is
-/// at the moment of resolution. A regression on `main` (a `services/storage`
-/// file unconditionally `use`s a module gated behind the `rocksdb-backend`
-/// feature) currently breaks `lgs build` on a freshly scaffolded project.
+/// Pinned to the version LEZ rc1's `flake.lock` resolves to (its
+/// `logos-blockchain-circuits` input is `ec7d298…`, whose `flake.nix` declares
+/// `circuitsVersion = "0.4.1"`). A mismatched circuits release silently
+/// produces incompatible verifier keys, so bump this in lock-step with
+/// `DEFAULT_LB_PIN` / `DEFAULT_LEZ`.
 ///
-/// To insulate generated projects from `main` drift, the templates ship a
-/// `[patch."https://github.com/logos-blockchain/logos-blockchain.git"]`
-/// table that pins every transitive `logos-blockchain-*` crate to this
-/// rev — the exact rev LEZ rc1's own `Cargo.lock` was tested against.
-/// Bump this in lock-step with `DEFAULT_LEZ`; LEZ rc2+ pins these deps
-/// itself so once `DEFAULT_LEZ` advances past rc1 the patch table can be
-/// dropped entirely.
-pub(crate) const DEFAULT_LB_PIN: &str = "81dbb4517aa466358ed425d92fad7d45a0c419fd";
+/// Materialised on demand into `<cache_root>/circuits/v<ver>-<triple>/` by
+/// `circuits::ensure_circuits_for_subprocess`. Override the version hop by
+/// setting `LOGOS_BLOCKCHAIN_CIRCUITS` to a populated checkout; the env var
+/// short-circuits the download.
+pub(crate) const DEFAULT_CIRCUITS_VERSION: &str = "0.4.1";
+pub(crate) const LOGOS_BLOCKCHAIN_CIRCUITS_ENV: &str = "LOGOS_BLOCKCHAIN_CIRCUITS";
+pub(crate) const CIRCUITS_RELEASE_BASE_URL: &str =
+    "https://github.com/logos-blockchain/logos-blockchain-circuits/releases/download";
 
 pub(crate) const DEFAULT_HELLO_WORLD_IMAGE_ID_HEX: &str =
     "4880b298f59699c1e4263c5c2245c80123632d608b9116f4b253c63e6c340771";
