@@ -8,9 +8,9 @@ use std::process::Command;
 use crate::process::{run_logged, set_print_output};
 use crate::DynResult;
 
-/// Drive `run_logged` against `/bin/true` (or `/bin/false` when `fail` is
-/// set) and exit. Lets CLI integration tests pin the visible output shape
-/// of the logged / `--print-output` paths without invoking nix.
+/// Drive `run_logged` against `true` (or `false` when `fail` is set) and exit.
+/// Lets CLI integration tests pin the visible output shape of the logged /
+/// `--print-output` paths without invoking nix.
 pub(crate) fn cmd_self_test_run_logged(
     log_path: &Path,
     step: &str,
@@ -20,7 +20,7 @@ pub(crate) fn cmd_self_test_run_logged(
     if print_output {
         set_print_output(true);
     }
-    let binary = if fail { "/bin/false" } else { "/bin/true" };
+    let binary = if fail { "false" } else { "true" };
     let mut cmd = Command::new(binary);
     run_logged(&mut cmd, step, log_path)
 }

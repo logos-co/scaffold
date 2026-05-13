@@ -116,7 +116,7 @@ struct SelfTestRunLoggedArgs {
     /// Step label passed to `run_logged`. Appears in progress / failure lines.
     #[arg(long, default_value = "self-test step")]
     step: String,
-    /// Run `/bin/false` instead of `/bin/true` — exercises the failure bail.
+    /// Run `false` instead of `true` — exercises the failure bail.
     #[arg(long)]
     fail: bool,
     /// Set `LOGOS_SCAFFOLD_PRINT_OUTPUT=1` for this call — exercises the
