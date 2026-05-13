@@ -323,11 +323,15 @@ fn validate_sequencer_binary_name(name: &str) -> DynResult<()> {
         || name == ".."
         || name.contains('/')
         || name.contains('\\')
-        || path.is_absolute();
+        || path.is_absolute()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
     if invalid {
         bail!(
             "invalid scaffold.toml: [localnet].sequencer_binary must be a cargo package name \
-             (no path separators, leading `-`, `.`, `..`, or absolute paths); got {name:?}"
+             (ASCII letters, digits, `_`, or `-`; no path separators, leading `-`, `.`, `..`, \
+             or absolute paths); got {name:?}"
         );
     }
     check_toml_value("localnet.sequencer_binary", name)
@@ -832,6 +836,10 @@ role = "project"
             "-help",
             ".",
             "..",
+            "foo bar",
+            "foo.bar",
+            "foo:bar",
+            "séquencer",
             "../escape",
             "sub/dir",
             "sub\\dir",
