@@ -13,6 +13,16 @@ use super::wallet_support::{
     summarize_command_failure, wallet_password, wallet_state_path, write_default_wallet_address,
 };
 
+/// Result of a wallet topup attempt. `cmd_run` distinguishes the
+/// confirmation-timeout case so the pipeline can bail before deploy
+/// rather than continue with uncertain funding. Standalone `wallet topup`
+/// treats both as success (matching prior behavior).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TopupOutcome {
+    Success,
+    ConfirmationTimeout,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum WalletAction {
     List {
@@ -92,6 +102,15 @@ fn cmd_wallet_topup(
     address: Option<String>,
     dry_run: bool,
 ) -> DynResult<()> {
+    let _ = cmd_wallet_topup_inner(project, address, dry_run)?;
+    Ok(())
+}
+
+pub(crate) fn cmd_wallet_topup_inner(
+    project: &crate::model::Project,
+    address: Option<String>,
+    dry_run: bool,
+) -> DynResult<TopupOutcome> {
     let wallet = load_wallet_runtime(project)?;
     let default_address = read_default_wallet_address(&project.root)?;
     let resolved_to = resolve_wallet_address(address.as_deref(), default_address.as_deref())?;
@@ -139,7 +158,7 @@ fn cmd_wallet_topup(
         println!("planned wallet: {resolved_to}");
         println!("planned method: pinata faucet claim");
         println!("planned network: local sequencer ({sequencer_addr})");
-        return Ok(());
+        return Ok(TopupOutcome::Success);
     }
 
     let preflight_output = run_with_stdin(preflight_command, password_input.clone())
@@ -207,7 +226,7 @@ fn cmd_wallet_topup(
             if let Some(tx) = extract_tx_identifier(&output.stdout, &output.stderr) {
                 println!("  Tx: {tx}");
             }
-            return Ok(());
+            return Ok(TopupOutcome::ConfirmationTimeout);
         }
         bail!(
             "wallet topup failed: {summary}\nHint: run `logos-scaffold wallet list` to inspect addresses, then retry with `--address` or set a default wallet."
@@ -222,7 +241,7 @@ fn cmd_wallet_topup(
         println!("  Tx: {tx}");
     }
 
-    Ok(())
+    Ok(TopupOutcome::Success)
 }
 
 fn cmd_wallet_default_set(project: &crate::model::Project, address: &str) -> DynResult<()> {

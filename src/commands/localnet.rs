@@ -271,7 +271,38 @@ fn cmd_localnet_stop(state_path: &Path, localnet_port: u16) -> DynResult<()> {
     if let Some(pid) = report.tracked_pid {
         if report.tracked_running {
             println!("$ kill {pid} # sequencer");
-            let _ = Command::new("kill").arg(pid.to_string()).status();
+            let kill_output = Command::new("kill")
+                .arg(pid.to_string())
+                .output()
+                .context("failed to spawn `kill`")?;
+            let kill_succeeded = kill_output.status.success();
+
+            // Wait for the process to actually exit, regardless of `kill`'s
+            // exit code: TERM may have been delivered even if `kill` returned
+            // non-zero (race with reaping). If the process is still alive
+            // after the deadline, do not remove the state file — we still
+            // legitimately track this pid.
+            let pid_timeout = Duration::from_secs(5);
+            if !wait_for_pid_exit(pid, pid_timeout) {
+                if !kill_succeeded {
+                    let stderr = String::from_utf8_lossy(&kill_output.stderr)
+                        .trim()
+                        .to_string();
+                    return Err(LocalnetError::StopKillFailed { pid, stderr }.into());
+                }
+                return Err(LocalnetError::StopTimeout {
+                    pid,
+                    timeout_sec: pid_timeout.as_secs(),
+                }
+                .into());
+            }
+
+            // Process exited; wait briefly for the bound socket to be released
+            // so an immediate `localnet start` doesn't race the still-bound
+            // port. A timeout here is not fatal — the port may be held by a
+            // foreign listener that survived our sequencer, and `localnet
+            // start` will surface that with a more specific error.
+            let _ = wait_for_port_free(&localnet_addr, Duration::from_secs(5));
         } else {
             println!("sequencer state is stale (pid={pid} not running)");
         }
@@ -574,6 +605,21 @@ fn remove_file_if_exists(path: &Path, label: &str) -> DynResult<()> {
     Ok(())
 }
 
+/// Poll `pid` until it is no longer running (exited or zombie), or `timeout`
+/// elapses. Returns `true` if the process exited within the deadline.
+fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !pid_running(pid) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Poll `localnet_addr` until no listener is accepting, or `timeout` elapses.
 fn wait_for_port_free(localnet_addr: &str, timeout: Duration) -> Result<(), ()> {
     let deadline = Instant::now() + timeout;
@@ -629,11 +675,11 @@ mod tests {
     use std::net::TcpListener;
     use std::time::Duration;
 
-    use super::{reset_cleanup, verify_block_production, wait_for_port_free};
+    use super::{reset_cleanup, verify_block_production, wait_for_pid_exit, wait_for_port_free};
     use crate::commands::wallet_support::wallet_state_path;
     use crate::error::ResetError;
     use crate::model::{
-        Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, Project, RepoRef,
+        Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, Project, RepoRef, RunConfig,
     };
 
     fn make_test_project(temp: &tempfile::TempDir) -> (Project, PathBuf) {
@@ -672,6 +718,7 @@ mod tests {
             },
             modules: std::collections::BTreeMap::new(),
             basecamp: None,
+            run: RunConfig::default(),
         };
 
         let project = Project {
@@ -759,6 +806,38 @@ mod tests {
         let err = wait_for_port_free(&addr, Duration::from_millis(300));
         drop(listener);
         assert!(err.is_err(), "expected timeout while listener was open");
+    }
+
+    #[test]
+    fn wait_for_pid_exit_returns_true_after_process_dies() {
+        // Spawn a long sleep, then SIGKILL it. wait_for_pid_exit must observe
+        // the exit within the timeout — this is the success path that
+        // `cmd_localnet_stop` relies on before deleting the state file.
+        let mut child = std::process::Command::new("sleep")
+            .arg("10")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        child.kill().expect("kill sleep");
+        let exited = wait_for_pid_exit(pid, Duration::from_secs(2));
+        let _ = child.wait();
+        assert!(exited, "expected pid {pid} to exit within 2s after SIGKILL");
+    }
+
+    #[test]
+    fn wait_for_pid_exit_returns_false_when_pid_stays_alive() {
+        // While the child is still running, wait_for_pid_exit must time out
+        // rather than report success — this is the failure path that
+        // `cmd_localnet_stop` relies on to preserve the state file.
+        let mut child = std::process::Command::new("sleep")
+            .arg("10")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        let exited = wait_for_pid_exit(pid, Duration::from_millis(200));
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(!exited, "expected timeout while pid {pid} was still alive");
     }
 
     #[test]

@@ -323,6 +323,48 @@ because users would never get nudged hard enough to actually
 migrate. Hard-fail + targeted hint is the same model as the original
 `[repos.spel]` migration.
 
+## `lgs run` is a Single-Command Inner Loop
+
+The dev's "change → build → deploy → interact" cycle was multiple commands
+(`build`, `localnet start`, `wallet topup`, `deploy`, then ad-hoc post-deploy
+calls). Scaffold could have stayed at primitives and let projects script the
+sequence themselves; instead, `lgs run` collapses the sequence into one
+command with numbered step headers and optional post-deploy hooks.
+
+Tradeoff: scaffold takes on responsibility for the pipeline shape. Adding or
+reordering steps becomes a coordinated change across `cmd_run`, cli args,
+serializer, and the dogfooding doc. Upside: every project gets the same
+discoverable inner-loop story without per-project shell-script drift, and
+the env contract that hooks see is uniform across projects.
+
+The pipeline composes the existing primitives (`cmd_build_shortcut`,
+`build_idl_for_current_project`, `cmd_localnet`, `cmd_wallet_topup_inner`,
+`cmd_deploy`) — no parallel implementation. Step ordering is fixed; if a
+new step is needed, it joins the chain rather than offering a knob.
+
+## Hook Env Contract is a Documented Public Surface
+
+Post-deploy hooks run via `sh -c` with `cwd` at the project root. The env
+they see is stable, documented in README, and validated by unit and
+integration tests:
+
+- `SEQUENCER_URL` / `NSSA_WALLET_HOME_DIR` / `SCAFFOLD_PROJECT_ROOT` /
+  `SCAFFOLD_IDL_DIR` — pipeline state.
+- `SCAFFOLD_PROGRAM_ID` / `SCAFFOLD_GUEST_BIN` — single-program shortcuts.
+  Set only when exactly one program is deployable; absent for
+  multi-program projects so hooks fail loudly rather than silently
+  picking up the wrong program.
+
+`NSSA_WALLET_HOME_DIR` keeps its upstream-wallet name rather than being
+renamed to a `SCAFFOLD_*` prefix: hooks that exec the wallet binary
+(directly or via `cargo run --bin run_*`) need the var under the name the
+binary's `WalletCore::from_env()` reads. Renaming for hook ergonomics
+would silently break those hooks.
+
+The single-program metadata is resolved once per `lgs run` invocation
+and reused across every hook so multiple hooks don't multiply the cost
+of `spel inspect`.
+
 ## Build Output Discovery
 
 The deploy command must work for any scaffolded project regardless of its name.

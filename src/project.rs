@@ -12,10 +12,16 @@ use crate::DynResult;
 pub(crate) fn load_project() -> DynResult<Project> {
     let cwd = env::current_dir()?;
     let root = find_project_root(cwd.clone()).ok_or_else(|| {
-        anyhow!(
-            "Not a logos-scaffold project at {}. Run `logos-scaffold create <name>` (or `logos-scaffold new <name>`) first.",
-            cwd.display()
-        )
+        {
+            let bin = std::env::args()
+                .next()
+                .and_then(|p| std::path::Path::new(&p).file_name().map(|n| n.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| "logos-scaffold".to_string());
+            anyhow!(
+                "Not a logos-scaffold project at {}. Run `{bin} create <name>` (or `{bin} new <name>`) first.",
+                cwd.display()
+            )
+        }
     })?;
 
     let config_path = root.join("scaffold.toml");
@@ -224,6 +230,7 @@ mod tests {
                 localnet: LocalnetConfig::default(),
                 modules: std::collections::BTreeMap::new(),
                 basecamp: None,
+                run: crate::model::RunConfig::default(),
             },
         }
     }

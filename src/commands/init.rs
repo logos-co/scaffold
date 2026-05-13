@@ -14,8 +14,8 @@ use crate::constants::{
     SCAFFOLD_TOML_SCHEMA_VERSION,
 };
 use crate::migrate::migrate_to_v0_2_0;
-use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig};
-use crate::state::write_text;
+use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RunConfig};
+use crate::state::write_text_atomic;
 use crate::template::project::ensure_scaffold_in_gitignore;
 use crate::DynResult;
 
@@ -42,13 +42,35 @@ pub(crate) fn cmd_init_at(target: &Path, bin_name: &str) -> DynResult<()> {
 
         let report = migrate_to_v0_2_0(&mut doc)?;
         if report.changes.is_empty() {
-            bail!(
-                "scaffold.toml at {} is already at schema v{} — nothing to migrate",
+            // No migration needed. If the project is missing the .scaffold/
+            // directories that fresh-init creates, this is a previously
+            // wedged init (the file landed but a later step failed). Finish
+            // the init instead of refusing — without this, the user can
+            // only recover by hand-removing scaffold.toml.
+            if scaffold_dirs_present(target) {
+                bail!(
+                    "scaffold.toml at {} is already at schema v{} — nothing to migrate",
+                    target.display(),
+                    SCAFFOLD_TOML_SCHEMA_VERSION,
+                );
+            }
+            create_scaffold_dirs(target)?;
+            ensure_scaffold_in_gitignore(target)?;
+            println!(
+                "scaffold.toml at {} is already at schema v{}; created missing .scaffold/ \
+                 directories to complete a previously-interrupted init.",
                 target.display(),
                 SCAFFOLD_TOML_SCHEMA_VERSION,
             );
+            return Ok(());
         }
-        write_text(&scaffold_path, &doc.to_string())?;
+        // Create the .scaffold/ directories before rewriting scaffold.toml.
+        // The fresh-init branch does the same — both paths should leave the
+        // project in the same fully-initialized state, otherwise a re-run on
+        // a project that was upgraded by migration alone would look wedged.
+        create_scaffold_dirs(target)?;
+        write_text_atomic(&scaffold_path, &doc.to_string())?;
+        ensure_scaffold_in_gitignore(target)?;
         println!(
             "scaffold.toml in {} migrated to schema v{}.",
             target.display(),
@@ -64,13 +86,12 @@ pub(crate) fn cmd_init_at(target: &Path, bin_name: &str) -> DynResult<()> {
         return Ok(());
     }
 
-    // Fresh init — schema 0.2.0 by construction.
+    // Fresh init — schema 0.2.0 by construction. Create the .scaffold/
+    // directories first so that a failure here leaves no scaffold.toml
+    // behind and a re-run starts cleanly.
     let cfg = fresh_default_config();
-    write_text(&scaffold_path, &serialize_config(&cfg)?)?;
-    fs::create_dir_all(target.join(".scaffold/state"))
-        .with_context(|| format!("creating {}/.scaffold/state", target.display()))?;
-    fs::create_dir_all(target.join(".scaffold/logs"))
-        .with_context(|| format!("creating {}/.scaffold/logs", target.display()))?;
+    create_scaffold_dirs(target)?;
+    write_text_atomic(&scaffold_path, &serialize_config(&cfg)?)?;
     ensure_scaffold_in_gitignore(target)?;
 
     println!(
@@ -82,6 +103,18 @@ pub(crate) fn cmd_init_at(target: &Path, bin_name: &str) -> DynResult<()> {
     );
 
     Ok(())
+}
+
+fn create_scaffold_dirs(target: &Path) -> DynResult<()> {
+    fs::create_dir_all(target.join(".scaffold/state"))
+        .with_context(|| format!("creating {}/.scaffold/state", target.display()))?;
+    fs::create_dir_all(target.join(".scaffold/logs"))
+        .with_context(|| format!("creating {}/.scaffold/logs", target.display()))?;
+    Ok(())
+}
+
+fn scaffold_dirs_present(target: &Path) -> bool {
+    target.join(".scaffold/state").is_dir() && target.join(".scaffold/logs").is_dir()
 }
 
 fn fresh_default_config() -> Config {
@@ -104,6 +137,7 @@ fn fresh_default_config() -> Config {
         localnet: LocalnetConfig::default(),
         modules: std::collections::BTreeMap::new(),
         basecamp: None,
+        run: RunConfig::default(),
     }
 }
 
@@ -431,5 +465,53 @@ home_dir = ".scaffold/wallet"
         let text = fs::read_to_string(target.join(".gitignore")).unwrap();
         let count = text.lines().filter(|l| l.trim() == ".scaffold").count();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn init_leaves_no_scaffold_toml_when_dir_creation_fails() {
+        let temp = tempdir().expect("tempdir");
+        let target = temp.path();
+        // Seed a regular file at `.scaffold` so `create_dir_all(".scaffold/state")` fails.
+        // Dir creation is the first filesystem mutation in fresh-init; if it fails the
+        // user must be left with no scaffold.toml — otherwise a retry will refuse to run.
+        fs::write(target.join(".scaffold"), b"not a dir").expect("seed");
+
+        let err = cmd_init_at(target, "lgs").expect_err("dir creation should fail");
+        assert!(
+            err.to_string().contains(".scaffold"),
+            "error mentions .scaffold path: {err}"
+        );
+        assert!(
+            !target.join("scaffold.toml").exists(),
+            "scaffold.toml must not be written when dir creation fails",
+        );
+    }
+
+    #[test]
+    fn init_completes_wedged_state_when_dirs_missing() {
+        let temp = tempdir().expect("tempdir");
+        let target = temp.path();
+        // First, a normal init.
+        cmd_init_at(target, "lgs").expect("init");
+        // Simulate a wedge: scaffold.toml landed at v0.2.0 but `.scaffold/` is gone.
+        fs::remove_dir_all(target.join(".scaffold")).expect("nuke .scaffold");
+        assert!(target.join("scaffold.toml").exists());
+        assert!(!target.join(".scaffold/state").exists());
+
+        // Re-running init must complete the partial install, not refuse.
+        cmd_init_at(target, "lgs").expect("recover from wedge");
+        assert!(target.join(".scaffold/state").is_dir());
+        assert!(target.join(".scaffold/logs").is_dir());
+    }
+
+    #[test]
+    fn init_still_refuses_when_already_initialized_and_dirs_present() {
+        // The wedged-state recovery must not weaken the existing refuse-on-double-init
+        // guard. With `.scaffold/` directories present, a second init still bails.
+        let temp = tempdir().expect("tempdir");
+        let target = temp.path();
+        cmd_init_at(target, "lgs").expect("init");
+        let err = cmd_init_at(target, "lgs").expect_err("second init should refuse");
+        assert!(err.to_string().contains("already at schema"), "{err}");
     }
 }

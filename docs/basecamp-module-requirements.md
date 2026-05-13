@@ -36,6 +36,8 @@ role = "dependency"
 
 `basecamp modules` is the sole writer of this section. The file stays human-editable — if you disagree with a generated entry, edit it directly.
 
+The pre-0.2.0 schema used `[basecamp.modules.<name>]`. Projects still on that layout are rejected at parse time with a hint pointing at `lgs init`; the section has moved to the top-level `[modules.<name>]` namespace.
+
 ### How entries get populated
 
 On every `basecamp modules` run (explicit `--flake` / `--path` args or auto-discovery), scaffold derives `module_name` for each source:
@@ -51,7 +53,7 @@ On every `basecamp modules` run (explicit `--flake` / `--path` args or auto-disc
 Then for each project source's declared `dependencies`, scaffold resolves a flake ref for any name not already in `[modules]`:
 
 1. **Already keyed in `[modules]`** (any role) → no-op. Whatever you have wins.
-2. **Basecamp preinstalls** (`capability_module`, `package_manager`, `counter`, `webview_app`, and their `_ui` siblings) → silent skip, basecamp ships them.
+2. **Basecamp preinstalls** (`capability_module`, `package_manager`, `package_manager_ui`, `counter`, `counter_qml`, `webview_app`, `basecamp_main_ui`; see `BASECAMP_PREINSTALLED_MODULES` in `src/constants.rs` for the authoritative list) → silent skip, basecamp ships them.
 3. **Declaring source's own `flake.lock`** → if the project source declares an input with the same name, scaffold reads the locked `github:<owner>/<repo>/<rev>` and rewrites to `#lgx`. Preferred path for most projects: whatever rev the module is already building against is, by definition, the rev its IPC clients expect at runtime.
 4. **Scaffold-default `BASECAMP_DEPENDENCIES`** → a hardcoded table keyed by module name (currently only `delivery_module`). Last-resort safety net for projects that don't carry the dep as a flake input.
 5. **Unresolved** → `basecamp modules` **fails with a targeted error** naming the dep and both user-side fixes (capture as a project source, or add an explicit `[modules.<name>]` entry with `role = "dependency"`). No silent drop.

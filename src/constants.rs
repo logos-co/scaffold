@@ -37,6 +37,25 @@ pub(crate) const DEFAULT_SPEL: GitRef = GitRef {
     tag: "v0.2.0-rc.5",
 };
 
+/// `logos-blockchain` rev that scaffold-generated projects use to pin the
+/// `logos-blockchain-*` transitive crates pulled in via LEZ.
+///
+/// `DEFAULT_LEZ` (v0.2.0-rc1) declares its `logos-blockchain-*` deps in
+/// `Cargo.toml` *without* a `rev`, so a downstream `cargo build` resolves
+/// each transitive crate against whatever `main` of `logos-blockchain` is
+/// at the moment of resolution. A regression on `main` (a `services/storage`
+/// file unconditionally `use`s a module gated behind the `rocksdb-backend`
+/// feature) currently breaks `lgs build` on a freshly scaffolded project.
+///
+/// To insulate generated projects from `main` drift, the templates ship a
+/// `[patch."https://github.com/logos-blockchain/logos-blockchain.git"]`
+/// table that pins every transitive `logos-blockchain-*` crate to this
+/// rev — the exact rev LEZ rc1's own `Cargo.lock` was tested against.
+/// Bump this in lock-step with `DEFAULT_LEZ`; LEZ rc2+ pins these deps
+/// itself so once `DEFAULT_LEZ` advances past rc1 the patch table can be
+/// dropped entirely.
+pub(crate) const DEFAULT_LB_PIN: &str = "81dbb4517aa466358ed425d92fad7d45a0c419fd";
+
 pub(crate) const DEFAULT_HELLO_WORLD_IMAGE_ID_HEX: &str =
     "4880b298f59699c1e4263c5c2245c80123632d608b9116f4b253c63e6c340771";
 pub(crate) const DEFAULT_WALLET_PASSWORD: &str = "logos-scaffold-v0";
@@ -55,6 +74,11 @@ pub(crate) const METHODS_DIR: &str = "methods";
 pub(crate) const SEQUENCER_CONFIG_REL_PATH: &str =
     "sequencer/service/configs/debug/sequencer_config.json";
 pub(crate) const SPEL_BIN_REL_PATH: &str = "target/release/spel";
+/// Default seconds to wait for the sequencer to become ready when `lgs run`
+/// has to start localnet itself. Cold first runs (fresh repo clone, cold
+/// nix/cargo caches) routinely overshoot the previous 20s ceiling. Override
+/// per invocation with `lgs run --localnet-timeout <SECS>`.
+pub(crate) const DEFAULT_RUN_LOCALNET_TIMEOUT_SEC: u64 = 120;
 /// Default `source` for `[repos.basecamp]`. Built via `nix build .#app`,
 /// hence `BASECAMP_ATTR = "app"`.
 pub(crate) const BASECAMP_SOURCE: &str = "https://github.com/logos-co/logos-basecamp.git";

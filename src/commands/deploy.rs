@@ -278,7 +278,7 @@ fn preflight_sequencer_reachability(sequencer_addr: &str) -> DynResult<()> {
     }
 }
 
-fn discover_deployable_programs(project_root: &Path) -> DynResult<Vec<String>> {
+pub(crate) fn discover_deployable_programs(project_root: &Path) -> DynResult<Vec<String>> {
     let programs_dir = project_root.join("methods/guest/src/bin");
     if !programs_dir.exists() {
         bail!(
@@ -430,7 +430,7 @@ const SPEL_INSPECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// missing, non-zero exit, output unparseable, timeout). Callers print an
 /// "unavailable" hint instead of failing the deploy — the deploy itself has
 /// already succeeded by the time this runs.
-fn extract_program_id(spel_bin: &Path, binary_path: &Path) -> Option<String> {
+pub(crate) fn extract_program_id(spel_bin: &Path, binary_path: &Path) -> Option<String> {
     use std::io::Read;
     use std::process::Stdio;
     use std::time::Instant;
