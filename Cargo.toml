@@ -11,6 +11,7 @@ include = [
   "/src/**",
   "/templates/**",
   "/templates/**/.*",
+  "/skills/**",
   "/tests/**",
   "/Cargo.toml",
   "/Cargo.lock",

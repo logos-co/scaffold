@@ -22,6 +22,15 @@ const DEFAULT_WALLET_PASSWORD: &str = "logos-scaffold-v0";
 const GUEST_BIN_REL_PATH: &str =
     "target/riscv-guest/example_program_deployment_methods/example_program_deployment_programs/riscv32im-risc0-zkvm-elf/release";
 
+#[cfg(unix)]
+fn true_bin() -> &'static str {
+    if Path::new("/bin/true").exists() {
+        "/bin/true"
+    } else {
+        "/usr/bin/true"
+    }
+}
+
 /// Minimal valid `scaffold.toml` content for tests that only need the project
 /// context to exist (no basecamp section). Older tests in this file inline
 /// the same content; new tests should prefer this helper.
@@ -883,9 +892,11 @@ fn localnet_start_fails_when_process_exits_before_ready() {
     let lez_path = temp.path().join("lez");
     let sequencer_bin = lez_path.join("target/release/sequencer_service");
     let config_path = lez_path.join("sequencer/service/configs/debug/sequencer_config.json");
+    let localnet_port = unused_local_port();
     fs::create_dir_all(sequencer_bin.parent().expect("parent")).expect("create dirs");
     fs::create_dir_all(config_path.parent().expect("parent")).expect("create config dir");
-    fs::write(&config_path, r#"{"port": 3040}"#).expect("write sequencer config");
+    fs::write(&config_path, format!(r#"{{"port": {localnet_port}}}"#))
+        .expect("write sequencer config");
     fs::write(&sequencer_bin, "#!/bin/sh\nexit 1\n").expect("write fake sequencer");
 
     #[cfg(unix)]
@@ -898,7 +909,7 @@ fn localnet_start_fails_when_process_exits_before_ready() {
         fs::set_permissions(&sequencer_bin, perms).expect("chmod");
     }
 
-    write_scaffold_toml(temp.path(), &lez_path);
+    write_scaffold_toml_with_localnet(temp.path(), &lez_path, Some(localnet_port), Some(true));
 
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(temp.path())
@@ -910,10 +921,7 @@ fn localnet_start_fails_when_process_exits_before_ready() {
         .failure()
         .stderr(
             predicate::str::contains("sequencer process exited before becoming ready")
-                .or(predicate::str::contains("localnet start timed out after"))
-                .or(predicate::str::contains(
-                    "cannot start localnet: port 3040 is already in use",
-                )),
+                .or(predicate::str::contains("localnet start timed out after")),
         );
 
     assert!(
@@ -2523,13 +2531,15 @@ fn basecamp_launch_rejects_unknown_profile() {
     fs::write(project.join("scaffold.toml"), MINIMAL_SCAFFOLD_TOML).expect("write scaffold.toml");
 
     // Fake a completed setup so we get past the first gate and reach profile validation.
-    // Paths are /bin/echo / /bin/sh — they exist on Linux and macOS, and launch never actually
-    // reaches `exec` because the profile check fails first.
+    // Use an existing true binary so the launch path reaches profile validation.
     let state_dir = project.join(".scaffold/state");
     fs::create_dir_all(&state_dir).expect("mkdir state");
     fs::write(
         state_dir.join("basecamp.state"),
-        "pin=deadbeef\nbasecamp_bin=/bin/echo\nlgpm_bin=/bin/sh\n",
+        &format!(
+            "pin=deadbeef\nbasecamp_bin={}\nlgpm_bin=/bin/echo\n",
+            true_bin()
+        ),
     )
     .expect("write state");
 
@@ -2572,7 +2582,10 @@ fn basecamp_launch_bails_when_no_modules_captured() {
     fs::create_dir_all(&state_dir).expect("mkdir state");
     fs::write(
         state_dir.join("basecamp.state"),
-        "pin=deadbeef\nbasecamp_bin=/bin/echo\nlgpm_bin=/bin/sh\n",
+        &format!(
+            "pin=deadbeef\nbasecamp_bin={}\nlgpm_bin=/bin/echo\n",
+            true_bin()
+        ),
     )
     .expect("write state");
     fs::create_dir_all(project.join(".scaffold/basecamp/profiles/alice")).expect("mkdir profile");
@@ -2701,7 +2714,7 @@ fn basecamp_launch_dry_run_prints_plan_without_scrubbing() {
 fn basecamp_launch_no_clean_bypasses_empty_modules_check() {
     // --no-clean is the documented escape hatch for keeping whatever's already
     // installed in the profile. It must skip the empty-modules check entirely.
-    // We don't run launch to completion in the assertion path, but the
+    // We don't run launch to completion (basecamp_bin is a true binary), but the
     // command should get past the modules check and fail later — not fail on
     // an "install modules first" hint.
     let temp = tempdir().expect("tempdir");
@@ -2746,7 +2759,10 @@ port_stride = 10
     fs::create_dir_all(&state_dir).expect("mkdir state");
     fs::write(
         state_dir.join("basecamp.state"),
-        "pin=deadbeef\nbasecamp_bin=/bin/sh\nlgpm_bin=/bin/echo\n",
+        &format!(
+            "pin=deadbeef\nbasecamp_bin={}\nlgpm_bin=/bin/echo\n",
+            true_bin()
+        ),
     )
     .expect("write state");
     fs::create_dir_all(project.join(".scaffold/basecamp/profiles/alice")).expect("mkdir profile");
@@ -3522,29 +3538,55 @@ fn init_creates_scaffold_toml_and_dirs() {
 }
 
 #[test]
-fn init_refuses_already_at_v0_2_0_scaffold_toml() {
+fn init_refreshes_skills_when_already_at_v0_2_0_scaffold_toml() {
     let temp = tempdir().expect("tempdir");
     let scaffold_path = temp.path().join("scaffold.toml");
-    // First, run init to lay down a fresh v0.2.0 file.
+    // First, run init to lay down a fresh v0.2.0 file plus the AI skill set.
     Command::new(assert_cmd::cargo::cargo_bin!("lgs"))
         .current_dir(temp.path())
         .arg("init")
         .assert()
         .success();
-    let original = fs::read_to_string(&scaffold_path).expect("read scaffold.toml");
+    let original_scaffold = fs::read_to_string(&scaffold_path).expect("read scaffold.toml");
 
-    // Second invocation must refuse with the "already migrated" hint.
+    // Second invocation must succeed (no migration needed) and refresh the
+    // shipped skill set, but it must not rewrite scaffold.toml.
     Command::new(assert_cmd::cargo::cargo_bin!("lgs"))
         .current_dir(temp.path())
         .arg("init")
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("already at schema"));
+        .success()
+        .stdout(predicate::str::contains("already at schema"))
+        .stdout(predicate::str::contains("AI skills refreshed"));
 
-    let after = fs::read_to_string(&scaffold_path).expect("read scaffold.toml");
+    let after_scaffold = fs::read_to_string(&scaffold_path).expect("read scaffold.toml");
     assert_eq!(
-        after, original,
+        after_scaffold, original_scaffold,
         "init must not overwrite an already-migrated scaffold.toml"
+    );
+
+    for skill in [
+        "lgs-cli",
+        "lez-template",
+        "lez-framework-template",
+        "basecamp",
+    ] {
+        assert!(
+            temp.path()
+                .join(format!(".claude/skills/{skill}/SKILL.md"))
+                .is_file(),
+            "claude skill `{skill}` must be present after re-init"
+        );
+        assert!(
+            temp.path()
+                .join(format!(".cursor/rules/{skill}.mdc"))
+                .is_file(),
+            "cursor rule `{skill}` must be present after re-init"
+        );
+    }
+    assert!(
+        temp.path().join("AGENTS.md").is_file(),
+        "AGENTS.md must be present after re-init"
     );
 }
 
@@ -3639,15 +3681,15 @@ home_dir = ".scaffold/wallet"
         "[repos.lgpm].attr must carry the flake attr; got:\n{after}"
     );
 
-    // Re-running any non-init command must now succeed at the parse step
-    // (we only check parsing here; downstream commands will fail for other
-    // reasons in a stub setup).
+    // Re-running init on the now-migrated config must succeed (skills get
+    // refreshed) and report that no migration was needed.
     Command::new(assert_cmd::cargo::cargo_bin!("lgs"))
         .current_dir(temp.path())
         .arg("init")
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("already at schema"));
+        .success()
+        .stdout(predicate::str::contains("already at schema"))
+        .stdout(predicate::str::contains("AI skills refreshed"));
 }
 
 #[test]

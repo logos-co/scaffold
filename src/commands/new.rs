@@ -18,6 +18,7 @@ use crate::repo::{sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
 use crate::state::write_text;
 use crate::template::copy::{copy_dir_contents, patch_simple_tail_call_program_id};
 use crate::template::project::{apply_overlay, OverlayRenderContext};
+use crate::template::skills::apply_skills;
 use crate::DynResult;
 
 #[derive(Debug)]
@@ -154,6 +155,7 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
         cleanup_lez_hello_artifacts(&target)?;
     }
     write_text(&target.join("scaffold.toml"), &serialize_config(&cfg)?)?;
+    apply_skills(&target)?;
 
     let old_getting_started = target.join("GETTING_STARTED.md");
     if old_getting_started.exists() {
@@ -167,6 +169,7 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
     );
     println!("Pinned lez: {}", cfg.lez.pin);
     println!("Template variant: {}", cfg.framework.kind);
+    println!("AI skills installed under .claude/skills/, .cursor/rules/, and AGENTS.md.");
 
     Ok(())
 }

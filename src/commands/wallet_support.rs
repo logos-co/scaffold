@@ -466,8 +466,10 @@ fn one_line(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::WALLET_CONFIG_PRIMARY;
     use std::fs;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
 
     use tempfile::tempdir;
 
@@ -475,9 +477,63 @@ mod tests {
         extract_tx_identifier, first_public_wallet_address, is_already_initialized_failure,
         is_uninitialized_account_output, normalize_address_ref, read_default_wallet_address,
         resolve_wallet_address, wallet_state_path, write_default_wallet_address,
+        WALLET_CONFIG_PRIMARY,
     };
 
     const ACCOUNT_ID: &str = "6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV";
+
+    fn spawn_json_rpc_response(body: &'static str) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let url = format!("http://{addr}");
+
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            read_http_request(&mut stream);
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).expect("write");
+            stream.flush().expect("flush");
+        });
+
+        (url, handle)
+    }
+
+    fn read_http_request(stream: &mut TcpStream) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("set read timeout");
+        let mut request = Vec::new();
+        let mut buf = [0_u8; 1024];
+
+        loop {
+            let n = stream.read(&mut buf).expect("read request");
+            if n == 0 {
+                break;
+            }
+            request.extend_from_slice(&buf[..n]);
+
+            if let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+        }
+    }
 
     #[test]
     fn normalize_accepts_raw_account_id() {
@@ -677,27 +733,7 @@ details: [1, 2, 3]
 
     #[test]
     fn rpc_get_last_block_id_parses_valid_response() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().expect("local addr");
-        let url = format!("http://{addr}");
-
-        let handle = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
-            let mut buf = [0_u8; 4096];
-            let _ = stream.read(&mut buf);
-
-            let body = r#"{"jsonrpc":"2.0","result":42,"id":1}"#;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            stream.write_all(response.as_bytes()).expect("write");
-            stream.flush().expect("flush");
-        });
+        let (url, handle) = spawn_json_rpc_response(r#"{"jsonrpc":"2.0","result":42,"id":1}"#);
 
         let block =
             super::rpc_get_last_block_id(&url).expect("rpc_get_last_block_id should succeed");
@@ -717,28 +753,7 @@ details: [1, 2, 3]
 
     #[test]
     fn rpc_get_last_block_id_returns_error_on_malformed_response() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().expect("local addr");
-        let url = format!("http://{addr}");
-
-        let handle = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
-            let mut buf = [0_u8; 4096];
-            let _ = stream.read(&mut buf);
-
-            // Response with non-numeric `result`
-            let body = r#"{"jsonrpc":"2.0","result":{},"id":1}"#;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            stream.write_all(response.as_bytes()).expect("write");
-            stream.flush().expect("flush");
-        });
+        let (url, handle) = spawn_json_rpc_response(r#"{"jsonrpc":"2.0","result":{},"id":1}"#);
 
         let result = super::rpc_get_last_block_id(&url);
         assert!(result.is_err());
@@ -752,28 +767,9 @@ details: [1, 2, 3]
 
     #[test]
     fn rpc_get_last_block_id_returns_error_on_method_not_found() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().expect("local addr");
-        let url = format!("http://{addr}");
-
-        let handle = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
-            let mut buf = [0_u8; 4096];
-            let _ = stream.read(&mut buf);
-
-            let body =
-                r#"{"jsonrpc":"2.0","error":{"code":-32601,"message":"Method not found"},"id":1}"#;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            stream.write_all(response.as_bytes()).expect("write");
-            stream.flush().expect("flush");
-        });
+        let (url, handle) = spawn_json_rpc_response(
+            r#"{"jsonrpc":"2.0","error":{"code":-32601,"message":"Method not found"},"id":1}"#,
+        );
 
         let result = super::rpc_get_last_block_id(&url);
         let err_msg = result

@@ -17,6 +17,7 @@ use crate::migrate::migrate_to_v0_2_0;
 use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RunConfig};
 use crate::state::write_text_atomic;
 use crate::template::project::ensure_scaffold_in_gitignore;
+use crate::template::skills::apply_skills;
 use crate::DynResult;
 
 pub(crate) fn cmd_init(bin_name: &str, dry_run: bool, no_backup: bool) -> DynResult<()> {
@@ -46,22 +47,97 @@ pub(crate) fn cmd_init_at(
         })?;
 
         let report = migrate_to_v0_2_0(&mut doc)?;
-        if report.changes.is_empty() {
-            // No migration needed. If the project is missing the .scaffold/
-            // directories that fresh-init creates, this is a previously
-            // wedged init (the file landed but a later step failed). Finish
-            // the init instead of refusing — without this, the user can
-            // only recover by hand-removing scaffold.toml.
-            if scaffold_dirs_present(target) {
-                bail!(
-                    "scaffold.toml at {} is already at schema v{} — nothing to migrate",
+        let migrated = !report.changes.is_empty();
+
+        if migrated {
+            let backup_path = scaffold_path.with_extension("toml.bak");
+            // If a previous migration (or a hand-curated backup) already wrote
+            // scaffold.toml.bak, `fs::copy` would silently overwrite it and the
+            // user would lose the older backup with no warning. Refuse instead
+            // and surface both ways out: rename/delete the existing .bak, or
+            // pass --no-backup to skip the backup entirely.
+            let backup_collision = !no_backup && backup_path.exists();
+            if dry_run {
+                println!(
+                    "dry-run: would migrate scaffold.toml at {} to schema v{} (no changes made)",
                     target.display(),
                     SCAFFOLD_TOML_SCHEMA_VERSION,
                 );
+                if !no_backup {
+                    if backup_collision {
+                        println!(
+                            "dry-run: WOULD ABORT — backup target already exists at {}. \
+                             Move/delete it, or re-run with --no-backup to skip the backup.",
+                            backup_path.display(),
+                        );
+                    } else {
+                        println!(
+                            "dry-run: would write backup of current scaffold.toml to {}",
+                            backup_path.display(),
+                        );
+                    }
+                }
+                for change in &report.changes {
+                    println!("  - {change}");
+                }
+                if let Some(hint) = &report.hand_edit_hint {
+                    println!("  ! {hint}");
+                }
+                println!(
+                    "Re-run without --dry-run to apply, or `{bin_name} init --no-backup` to skip the .bak."
+                );
+                return Ok(());
             }
+
+            if backup_collision {
+                bail!(
+                    "refusing to overwrite existing scaffold.toml.bak at {}.\n\
+                     Move or delete it first, or re-run with --no-backup to migrate without writing a backup.\n\
+                     Preview the migration with `{bin_name} init --dry-run`.",
+                    backup_path.display(),
+                );
+            }
+
+            // Create the .scaffold/ directories before rewriting scaffold.toml.
+            // The fresh-init branch does the same — both paths should leave the
+            // project in the same fully-initialized state, otherwise a re-run on
+            // a project that was upgraded by migration alone would look wedged.
+            create_scaffold_dirs(target)?;
+
+            // Write the backup before rewriting scaffold.toml, so a crash mid
+            // write can't leave both the original and the migration unrecoverable.
+            if !no_backup {
+                fs::copy(&scaffold_path, &backup_path).with_context(|| {
+                    format!(
+                        "writing backup of scaffold.toml to {} before migrating",
+                        backup_path.display()
+                    )
+                })?;
+            }
+            write_text_atomic(&scaffold_path, &doc.to_string())?;
+            ensure_scaffold_in_gitignore(target)?;
+            println!(
+                "scaffold.toml in {} migrated to schema v{}.",
+                target.display(),
+                SCAFFOLD_TOML_SCHEMA_VERSION,
+            );
+            if !no_backup {
+                println!("  backup: {}", backup_path.display());
+            }
+            for change in report.changes {
+                println!("  - {change}");
+            }
+            if let Some(hint) = report.hand_edit_hint {
+                println!("  ! {hint}");
+            }
+        } else {
+            // Already at current schema. Re-run is the user-facing entry point
+            // for refreshing the shipped AI skills, and also recovers from a
+            // wedged init where scaffold.toml landed but the .scaffold/ dirs
+            // never got created.
             if dry_run {
                 println!(
-                    "dry-run: scaffold.toml at {} is already at schema v{}; would create missing .scaffold/state and .scaffold/logs directories (no changes made)",
+                    "dry-run: scaffold.toml at {} is already at schema v{}; would ensure .scaffold/state and .scaffold/logs and refresh AI skills (no changes made)",
                     target.display(),
                     SCAFFOLD_TOML_SCHEMA_VERSION,
                 );
@@ -74,95 +150,18 @@ pub(crate) fn cmd_init_at(
             create_scaffold_dirs(target)?;
             ensure_scaffold_in_gitignore(target)?;
             println!(
-                "scaffold.toml at {} is already at schema v{}; created missing .scaffold/ \
-                 directories to complete a previously-interrupted init.",
+                "scaffold.toml at {} is already at schema v{}.",
                 target.display(),
                 SCAFFOLD_TOML_SCHEMA_VERSION,
             );
-            return Ok(());
         }
 
-        let backup_path = scaffold_path.with_extension("toml.bak");
-        // If a previous migration (or a hand-curated backup) already wrote
-        // scaffold.toml.bak, `fs::copy` would silently overwrite it and the
-        // user would lose the older backup with no warning. Refuse instead
-        // and surface both ways out: rename/delete the existing .bak, or
-        // pass --no-backup to skip the backup entirely.
-        let backup_collision = !no_backup && backup_path.exists();
-        if dry_run {
-            println!(
-                "dry-run: would migrate scaffold.toml at {} to schema v{} (no changes made)",
-                target.display(),
-                SCAFFOLD_TOML_SCHEMA_VERSION,
-            );
-            if !no_backup {
-                if backup_collision {
-                    println!(
-                        "dry-run: WOULD ABORT — backup target already exists at {}. \
-                         Move/delete it, or re-run with --no-backup to skip the backup.",
-                        backup_path.display(),
-                    );
-                } else {
-                    println!(
-                        "dry-run: would write backup of current scaffold.toml to {}",
-                        backup_path.display(),
-                    );
-                }
-            }
-            for change in report.changes {
-                println!("  - {change}");
-            }
-            if let Some(hint) = report.hand_edit_hint {
-                println!("  ! {hint}");
-            }
-            println!(
-                "Re-run without --dry-run to apply, or `{bin_name} init --no-backup` to skip the .bak."
-            );
-            return Ok(());
-        }
+        apply_skills(target)?;
+        println!("AI skills refreshed under .claude/skills/, .cursor/rules/, AGENTS.md.");
 
-        if backup_collision {
-            bail!(
-                "refusing to overwrite existing scaffold.toml.bak at {}.\n\
-                 Move or delete it first, or re-run with --no-backup to migrate without writing a backup.\n\
-                 Preview the migration with `{bin_name} init --dry-run`.",
-                backup_path.display(),
-            );
+        if migrated {
+            println!("Run `{bin_name} setup` to clone and build per the new schema.");
         }
-
-        // Create the .scaffold/ directories before rewriting scaffold.toml.
-        // The fresh-init branch does the same — both paths should leave the
-        // project in the same fully-initialized state, otherwise a re-run on
-        // a project that was upgraded by migration alone would look wedged.
-        create_scaffold_dirs(target)?;
-
-        // Write the backup before rewriting scaffold.toml, so a crash mid
-        // write can't leave both the original and the migration unrecoverable.
-        if !no_backup {
-            fs::copy(&scaffold_path, &backup_path).with_context(|| {
-                format!(
-                    "writing backup of scaffold.toml to {} before migrating",
-                    backup_path.display()
-                )
-            })?;
-        }
-        write_text_atomic(&scaffold_path, &doc.to_string())?;
-        ensure_scaffold_in_gitignore(target)?;
-        println!(
-            "scaffold.toml in {} migrated to schema v{}.",
-            target.display(),
-            SCAFFOLD_TOML_SCHEMA_VERSION,
-        );
-        if !no_backup {
-            println!("  backup: {}", backup_path.display());
-        }
-        for change in report.changes {
-            println!("  - {change}");
-        }
-        if let Some(hint) = report.hand_edit_hint {
-            println!("  ! {hint}");
-        }
-        println!("Run `{bin_name} setup` to clone and build per the new schema.");
         return Ok(());
     }
 
@@ -190,11 +189,13 @@ pub(crate) fn cmd_init_at(
     create_scaffold_dirs(target)?;
     write_text_atomic(&scaffold_path, &serialize_config(&cfg)?)?;
     ensure_scaffold_in_gitignore(target)?;
+    apply_skills(target)?;
 
     println!(
         "scaffold.toml created at {}. Run '{bin_name} setup' to clone LEZ and build dependencies.",
         scaffold_path.display()
     );
+    println!("AI skills installed under .claude/skills/, .cursor/rules/, and AGENTS.md.");
     println!(
         "If this project is building modules for basecamp, run '{bin_name} basecamp setup' to pin + build basecamp + lgpm and seed alice/bob profiles."
     );
@@ -208,10 +209,6 @@ fn create_scaffold_dirs(target: &Path) -> DynResult<()> {
     fs::create_dir_all(target.join(".scaffold/logs"))
         .with_context(|| format!("creating {}/.scaffold/logs", target.display()))?;
     Ok(())
-}
-
-fn scaffold_dirs_present(target: &Path) -> bool {
-    target.join(".scaffold/state").is_dir() && target.join(".scaffold/logs").is_dir()
 }
 
 fn fresh_default_config() -> Config {
@@ -297,12 +294,53 @@ mod tests {
     }
 
     #[test]
-    fn init_refuses_when_already_at_v0_2_0() {
+    fn init_is_idempotent_when_already_at_v0_2_0_and_refreshes_skills() {
         let temp = tempdir().expect("tempdir");
         let target = temp.path();
         cmd_init_at(target, "lgs", false, false).expect("init");
-        let err = cmd_init_at(target, "lgs", false, false).expect_err("should refuse");
-        assert!(err.to_string().contains("already at schema"), "{err}");
+
+        // Re-running init on an already-migrated project must succeed; it is
+        // the user-facing entry point for refreshing AI skill files alongside
+        // any pending schema migration.
+        cmd_init_at(target, "lgs", false, false).expect("re-init must succeed and refresh skills");
+        assert!(
+            target.join(".claude/skills/lgs-cli/SKILL.md").is_file(),
+            "claude skill must be present after re-init"
+        );
+        assert!(
+            target.join(".cursor/rules/lgs-cli.mdc").is_file(),
+            "cursor rule must be present after re-init"
+        );
+        assert!(
+            target.join("AGENTS.md").is_file(),
+            "AGENTS.md must be present after re-init"
+        );
+    }
+
+    #[test]
+    fn init_writes_skills_on_fresh_project() {
+        let temp = tempdir().expect("tempdir");
+        let target = temp.path();
+        cmd_init_at(target, "lgs", false, false).expect("init");
+
+        for name in [
+            "lgs-cli",
+            "lez-template",
+            "lez-framework-template",
+            "basecamp",
+        ] {
+            assert!(
+                target
+                    .join(format!(".claude/skills/{name}/SKILL.md"))
+                    .is_file(),
+                "missing claude skill: {name}"
+            );
+            assert!(
+                target.join(format!(".cursor/rules/{name}.mdc")).is_file(),
+                "missing cursor rule: {name}"
+            );
+        }
+        assert!(target.join("AGENTS.md").is_file());
     }
 
     #[test]
@@ -589,7 +627,7 @@ home_dir = ".scaffold/wallet"
         let target = temp.path();
         // Seed a regular file at `.scaffold` so `create_dir_all(".scaffold/state")` fails.
         // Dir creation is the first filesystem mutation in fresh-init; if it fails the
-        // user must be left with no scaffold.toml — otherwise a retry will refuse to run.
+        // user must be left with no scaffold.toml so a retry starts from a clean state.
         fs::write(target.join(".scaffold"), b"not a dir").expect("seed");
 
         let err = cmd_init_at(target, "lgs", false, false).expect_err("dir creation should fail");
@@ -761,13 +799,13 @@ home_dir = ".scaffold/wallet"
     }
 
     #[test]
-    fn init_still_refuses_when_already_initialized_and_dirs_present() {
-        // The wedged-state recovery must not weaken the existing refuse-on-double-init
-        // guard. With `.scaffold/` directories present, a second init still bails.
+    fn init_rerun_succeeds_when_already_initialized_and_dirs_present() {
         let temp = tempdir().expect("tempdir");
         let target = temp.path();
         cmd_init_at(target, "lgs", false, false).expect("init");
-        let err = cmd_init_at(target, "lgs", false, false).expect_err("second init should refuse");
-        assert!(err.to_string().contains("already at schema"), "{err}");
+        cmd_init_at(target, "lgs", false, false).expect("second init should refresh skills");
+        assert!(target.join(".scaffold/state").is_dir());
+        assert!(target.join(".scaffold/logs").is_dir());
+        assert!(target.join(".claude/skills/lgs-cli/SKILL.md").is_file());
     }
 }
