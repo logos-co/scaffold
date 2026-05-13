@@ -193,6 +193,7 @@ fn cmd_localnet_start(
     }
 
     patch_sequencer_port(lez, localnet_port)?;
+    patch_sequencer_config_for_standalone(lez)?;
 
     // Use a path relative to lez (the child's cwd), not relative to the
     // parent's cwd.  `current_dir(lez)` applies before exec, so a parent-
@@ -471,6 +472,48 @@ fn build_status_report(
 /// Update the port in `sequencer_config.json` so the sequencer listens on the
 /// configured port.  The pinned LEZ version does not accept `--port` as a CLI
 /// flag — it reads the port from this file.
+
+/// Patch `sequencer_config.json` for standalone (scaffold localnet) mode.
+///
+/// The default config references an indexer and bedrock node that are not
+/// available in scaffold localnet. The `standalone` feature uses mock clients
+/// but the config parser still requires these fields to be present and valid.
+/// We patch them to point at localhost addresses that won't be dialed at runtime.
+fn patch_sequencer_config_for_standalone(lez: &Path) -> DynResult<()> {
+    let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
+    let text = fs::read_to_string(&config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    let mut doc: Value =
+        serde_json::from_str(&text).context("failed to parse sequencer_config.json")?;
+
+    if let Some(obj) = doc.as_object_mut() {
+        // Keep required fields present but point them at localhost so config parsing succeeds.
+        // The standalone build uses mock clients and never actually connects to these.
+        // Always overwrite — the default config points at real services unavailable in standalone mode.
+        obj.insert(
+            "indexer_rpc_url".to_string(),
+            serde_json::json!("ws://127.0.0.1:8779"),
+        );
+        obj.insert(
+            "bedrock_config".to_string(),
+            serde_json::json!({
+                "channel_id": "0101010101010101010101010101010101010101010101010101010101010101",
+                "node_url": "http://127.0.0.1:8080"
+            }),
+        );
+    } else {
+        bail!(
+            "sequencer_config.json is not a JSON object: {}",
+            config_path.display()
+        );
+    }
+
+    let updated = serde_json::to_string_pretty(&doc).context("failed to serialize config")?;
+    fs::write(&config_path, format!("{updated}\n"))
+        .with_context(|| format!("failed to write {}", config_path.display()))?;
+    Ok(())
+}
+
 fn patch_sequencer_port(lez: &Path, port: u16) -> DynResult<()> {
     let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
     let text = fs::read_to_string(&config_path)
