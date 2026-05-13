@@ -332,6 +332,7 @@ mod tests {
                 localnet: LocalnetConfig {
                     port: 3040,
                     risc0_dev_mode: true,
+                    ..LocalnetConfig::default()
                 },
                 modules: std::collections::BTreeMap::new(),
                 run: RunConfig::default(),
