@@ -13,6 +13,7 @@ pub(crate) struct OverlayRenderContext<'a> {
     pub(crate) crate_name: &'a str,
     pub(crate) lez_pin: &'a str,
     pub(crate) spel_tag: &'a str,
+    pub(crate) lb_pin: &'a str,
 }
 
 pub(crate) fn apply_overlay(
@@ -107,7 +108,8 @@ fn render_template_text(raw: &str, ctx: &OverlayRenderContext<'_>) -> DynResult<
     let rendered = raw
         .replace("{{crate_name}}", ctx.crate_name)
         .replace("{{lez_pin}}", ctx.lez_pin)
-        .replace("{{spel_tag}}", ctx.spel_tag);
+        .replace("{{spel_tag}}", ctx.spel_tag)
+        .replace("{{lb_pin}}", ctx.lb_pin);
 
     if let Some(token) = find_unresolved_placeholder(&rendered) {
         bail!("unresolved template token `{token}`");
@@ -147,6 +149,7 @@ pub(crate) fn available_templates() -> Vec<String> {
 mod tests {
     use std::fs;
     use std::path::PathBuf;
+    use std::str::FromStr;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{apply_overlay, render_template_text, OverlayRenderContext};
@@ -171,6 +174,7 @@ mod tests {
             crate_name: "my-app",
             lez_pin: "abc123",
             spel_tag: "v0.0.0-test",
+            lb_pin: "feedface00000000000000000000000000000000",
         };
 
         apply_overlay(&target, "default", &ctx).expect("failed to apply default overlay");
@@ -209,6 +213,7 @@ mod tests {
             crate_name: "my-app",
             lez_pin: "abc123",
             spel_tag: "v0.0.0-test",
+            lb_pin: "feedface00000000000000000000000000000000",
         };
 
         apply_overlay(&target, "lez-framework", &ctx).expect("failed to apply lez-framework");
@@ -245,6 +250,7 @@ mod tests {
             crate_name: "example-name",
             lez_pin: "deadbeef",
             spel_tag: "v0.0.0-test",
+            lb_pin: "feedface00000000000000000000000000000000",
         };
 
         apply_overlay(&target, "default", &ctx).expect("failed to apply default overlay");
@@ -259,12 +265,64 @@ mod tests {
     }
 
     #[test]
+    fn overlay_emits_logos_blockchain_patch_table_pinned_to_lb_pin() {
+        // Locks the workaround for `lgs build` failing because LEZ rc1's
+        // workspace pulls `logos-blockchain-*` crates without a `rev`, so a
+        // fresh resolution picks up an upstream `main` commit whose
+        // `services/storage` unconditionally `use`s a feature-gated module
+        // and fails to compile. The templates ship a `[patch]` table that
+        // pins every transitive `logos-blockchain-*` crate to `{{lb_pin}}`.
+        // Drop this test (and the patch table) only after the parent LEZ
+        // pin advances past rc1 — LEZ rc2+ pins these deps itself.
+        for variant in ["default", "lez-framework"] {
+            let target = mk_temp_dir(&format!("lb-patch-{variant}"));
+            let ctx = OverlayRenderContext {
+                crate_name: "my-app",
+                lez_pin: "abc123",
+                spel_tag: "v0.0.0-test",
+                lb_pin: "feedface00000000000000000000000000000000",
+            };
+            apply_overlay(&target, variant, &ctx)
+                .unwrap_or_else(|e| panic!("apply_overlay({variant}) failed: {e}"));
+            let cargo = fs::read_to_string(target.join("Cargo.toml"))
+                .expect("failed to read generated Cargo.toml");
+            assert!(
+                cargo.contains(
+                    "[patch.\"https://github.com/logos-blockchain/logos-blockchain.git\"]"
+                ),
+                "{variant}: generated Cargo.toml must declare the logos-blockchain patch table; got:\n{cargo}"
+            );
+            assert!(
+                cargo.contains("logos-blockchain-storage-service = { git ="),
+                "{variant}: patch table must pin logos-blockchain-storage-service (the rocksdb-backend regression)"
+            );
+            // Every patch entry should carry the rendered lb_pin, not a literal placeholder.
+            assert!(
+                cargo.contains("rev = \"feedface00000000000000000000000000000000\""),
+                "{variant}: patch table must render {{{{lb_pin}}}} into a rev string"
+            );
+            assert!(
+                !cargo.contains("{{lb_pin}}"),
+                "{variant}: unresolved {{{{lb_pin}}}} placeholder leaked into output"
+            );
+            // Final guard: the rendered Cargo.toml must still parse as TOML.
+            // A malformed patch table would otherwise blow up at `cargo build`
+            // on the user's machine with a confusing manifest-parse error.
+            toml_edit::DocumentMut::from_str(&cargo).unwrap_or_else(|e| {
+                panic!("{variant}: generated Cargo.toml is not valid TOML: {e}\n---\n{cargo}")
+            });
+            fs::remove_dir_all(&target).expect("failed to cleanup temporary test directory");
+        }
+    }
+
+    #[test]
     fn static_files_match_template_content_after_overlay() {
         let target = mk_temp_dir("parity");
         let ctx = OverlayRenderContext {
             crate_name: "my-app",
             lez_pin: "abc123",
             spel_tag: "v0.0.0-test",
+            lb_pin: "feedface00000000000000000000000000000000",
         };
 
         apply_overlay(&target, "default", &ctx).expect("failed to apply default overlay");
@@ -297,6 +355,7 @@ mod tests {
             crate_name: "my-app",
             lez_pin: "abc123",
             spel_tag: "v0.0.0-test",
+            lb_pin: "feedface00000000000000000000000000000000",
         };
 
         apply_overlay(&target, "default", &ctx).expect("failed to apply default overlay");
@@ -346,6 +405,7 @@ mod tests {
             crate_name: "my-app",
             lez_pin: "abc123",
             spel_tag: "v0.2.0-rc.5",
+            lb_pin: "feedface00000000000000000000000000000000",
         };
         let rendered = render_template_text(
             "spel-framework = { git = \"...\", tag = \"{{spel_tag}}\" }",
@@ -364,6 +424,7 @@ mod tests {
             crate_name: "my-app",
             lez_pin: "abc123",
             spel_tag: "v0.0.0-test",
+            lb_pin: "feedface00000000000000000000000000000000",
         };
 
         let err = render_template_text("name = \"{{unknown_token}}\"", &ctx)

@@ -14,6 +14,19 @@ pub(crate) enum LocalnetError {
         pid: u32,
         log_tail: String,
     },
+
+    #[error(
+        "failed to send TERM to sequencer (pid={pid}): {stderr}\n\
+         localnet state file preserved; resolve the kill failure manually and retry."
+    )]
+    StopKillFailed { pid: u32, stderr: String },
+
+    #[error(
+        "sequencer did not exit within {timeout_sec}s of TERM (pid={pid}).\n\
+         localnet state file preserved; the process may be ignoring TERM. \
+         Try `kill -9 {pid}` and retry `logos-scaffold localnet stop`."
+    )]
+    StopTimeout { pid: u32, timeout_sec: u64 },
 }
 
 #[derive(Debug, Error)]

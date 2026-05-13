@@ -84,6 +84,8 @@ pub(crate) struct Config {
     /// `[basecamp]` — runtime config only (port_base, port_stride). Pin and
     /// source moved to `[repos.basecamp]`; modules moved to `[modules.*]`.
     pub(crate) basecamp: Option<BasecampConfig>,
+    /// `[run]` — `lgs run` pipeline config (post-deploy hooks).
+    pub(crate) run: RunConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -257,4 +259,14 @@ pub(crate) struct FrameworkConfig {
 pub(crate) struct FrameworkIdlConfig {
     pub(crate) spec: String,
     pub(crate) path: String,
+}
+
+/// `[run]` — config for the `lgs run` pipeline. Branch-1 surface is the
+/// minimal inline `post_deploy` hook(s); profile/reset support arrives in
+/// later branches of the run-command stack.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RunConfig {
+    /// Inline `[run].post_deploy` — string (single hook) or array (multiple).
+    /// Empty when not configured.
+    pub(crate) post_deploy: Vec<String>,
 }

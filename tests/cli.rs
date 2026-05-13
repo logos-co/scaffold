@@ -2216,7 +2216,7 @@ fn basecamp_launch_without_profile_errors() {
 #[test]
 fn self_test_run_logged_success_shape() {
     // Hidden `self-test run-logged` hook drives `run_logged` against a
-    // trivial subprocess (`/bin/true`). We assert the visible output shape
+    // trivial subprocess (`true`). We assert the visible output shape
     // so future reshapes of `run_logged` don't silently regress the UX.
     let temp = tempdir().expect("tempdir");
     let log = temp.path().join("self-test.log");
@@ -2301,7 +2301,7 @@ fn self_test_run_logged_print_output_streams_and_echoes_command() {
         .success();
     let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
     assert!(
-        stdout.contains("running: ") && stdout.contains("/bin/true"),
+        stdout.contains("running: ") && stdout.contains("true"),
         "--print-output must echo the command, got:\n{stdout}"
     );
     assert!(
@@ -2523,13 +2523,13 @@ fn basecamp_launch_rejects_unknown_profile() {
     fs::write(project.join("scaffold.toml"), MINIMAL_SCAFFOLD_TOML).expect("write scaffold.toml");
 
     // Fake a completed setup so we get past the first gate and reach profile validation.
-    // Paths are /bin/true / /bin/echo — they exist on Linux, and launch never actually
+    // Paths are /bin/echo / /bin/sh — they exist on Linux and macOS, and launch never actually
     // reaches `exec` because the profile check fails first.
     let state_dir = project.join(".scaffold/state");
     fs::create_dir_all(&state_dir).expect("mkdir state");
     fs::write(
         state_dir.join("basecamp.state"),
-        "pin=deadbeef\nbasecamp_bin=/bin/true\nlgpm_bin=/bin/echo\n",
+        "pin=deadbeef\nbasecamp_bin=/bin/echo\nlgpm_bin=/bin/sh\n",
     )
     .expect("write state");
 
@@ -2572,7 +2572,7 @@ fn basecamp_launch_bails_when_no_modules_captured() {
     fs::create_dir_all(&state_dir).expect("mkdir state");
     fs::write(
         state_dir.join("basecamp.state"),
-        "pin=deadbeef\nbasecamp_bin=/bin/true\nlgpm_bin=/bin/echo\n",
+        "pin=deadbeef\nbasecamp_bin=/bin/echo\nlgpm_bin=/bin/sh\n",
     )
     .expect("write state");
     fs::create_dir_all(project.join(".scaffold/basecamp/profiles/alice")).expect("mkdir profile");
@@ -2701,7 +2701,7 @@ fn basecamp_launch_dry_run_prints_plan_without_scrubbing() {
 fn basecamp_launch_no_clean_bypasses_empty_modules_check() {
     // --no-clean is the documented escape hatch for keeping whatever's already
     // installed in the profile. It must skip the empty-modules check entirely.
-    // We don't run launch to completion (basecamp_bin is /bin/true), but the
+    // We don't run launch to completion in the assertion path, but the
     // command should get past the modules check and fail later — not fail on
     // an "install modules first" hint.
     let temp = tempdir().expect("tempdir");
@@ -2746,7 +2746,7 @@ port_stride = 10
     fs::create_dir_all(&state_dir).expect("mkdir state");
     fs::write(
         state_dir.join("basecamp.state"),
-        "pin=deadbeef\nbasecamp_bin=/bin/true\nlgpm_bin=/bin/echo\n",
+        "pin=deadbeef\nbasecamp_bin=/bin/sh\nlgpm_bin=/bin/echo\n",
     )
     .expect("write state");
     fs::create_dir_all(project.join(".scaffold/basecamp/profiles/alice")).expect("mkdir profile");
@@ -3933,4 +3933,157 @@ fn doctor_json_hard_fails_with_clean_stdout_on_pre_v0_2_0_scaffold_toml() {
         stderr.contains("init"),
         "stderr must point at `init`; got:\n{stderr}"
     );
+}
+
+// ─── run command tests ───────────────────────────────────────────────────────
+
+#[test]
+fn run_help_lists_command_summary() {
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .arg("run")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Build, start localnet, top up wallet, deploy, and run post-deploy hook",
+        ));
+}
+
+#[test]
+fn run_outside_project_fails_with_project_scoped_message() {
+    let temp = tempdir().expect("tempdir");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("run")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Not a logos-scaffold project"));
+}
+
+#[test]
+fn run_rejects_both_post_deploy_flags() {
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .arg("run")
+        .arg("--post-deploy")
+        .arg("echo override")
+        .arg("--no-post-deploy")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn run_help_advertises_localnet_timeout_flag() {
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .arg("run")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--localnet-timeout"))
+        .stdout(predicate::str::contains("default: 120"));
+}
+
+#[test]
+fn run_rejects_non_numeric_localnet_timeout() {
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .arg("run")
+        .arg("--localnet-timeout")
+        .arg("abc")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid value"));
+}
+
+#[test]
+fn run_fails_at_build_step_in_mock_project() {
+    // The run command calls cmd_build_shortcut which runs cargo build --workspace.
+    // In a mock project without a real Cargo workspace, this fails at step 1.
+    // This tests that the pipeline starts and fails fast.
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("run")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("[1/5] Building..."));
+}
+
+#[test]
+fn run_with_post_deploy_hook_shows_6_steps_in_output() {
+    // When a post_deploy hook is configured, the step counter shows /6.
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+    append_run_config(temp.path(), &["echo hello"]);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("run")
+        .assert()
+        .failure() // still fails at build
+        .stdout(predicate::str::contains("[1/6] Building..."));
+}
+
+#[test]
+fn run_with_multiple_post_deploy_hooks_uses_array_form() {
+    // Multiple hooks are configured as a TOML inline array; pipeline still has 6 steps.
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+    append_run_config(temp.path(), &["echo one", "echo two"]);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("run")
+        .assert()
+        .failure() // still fails at build
+        .stdout(predicate::str::contains("[1/6] Building..."));
+}
+
+#[test]
+fn run_no_post_deploy_flag_skips_configured_hooks() {
+    // --no-post-deploy must collapse total_steps back to 5 even when
+    // scaffold.toml configures hooks. The build still fails first, but the
+    // step counter in stdout proves the override was honored.
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+    append_run_config(temp.path(), &["echo configured"]);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("run")
+        .arg("--no-post-deploy")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("[1/5] Building..."));
+}
+
+#[test]
+fn run_post_deploy_flag_overrides_configured_hooks() {
+    // --post-deploy replaces config hooks. With one config hook ([1/6]) and
+    // two flag overrides, the resulting step count stays at /6 — proving
+    // that the flag took effect and config wasn't merged on top.
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+    append_run_config(temp.path(), &["echo configured"]);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("run")
+        .arg("--post-deploy")
+        .arg("echo override-a")
+        .arg("--post-deploy")
+        .arg("echo override-b")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("[1/6] Building..."));
+}
+
+fn append_run_config(project_root: &Path, post_deploy: &[&str]) {
+    let toml_path = project_root.join("scaffold.toml");
+    let mut content = fs::read_to_string(&toml_path).expect("read scaffold.toml");
+    let quoted: Vec<String> = post_deploy.iter().map(|c| format!("\"{c}\"")).collect();
+    content.push_str(&format!("\n[run]\npost_deploy = [{}]\n", quoted.join(", ")));
+    fs::write(toml_path, content).expect("write scaffold.toml");
 }

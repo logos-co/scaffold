@@ -22,10 +22,11 @@ use crate::commands::init::cmd_init;
 use crate::commands::localnet::{cmd_localnet, LocalnetAction};
 use crate::commands::new::{cmd_new, NewCommand};
 use crate::commands::report::cmd_report;
+use crate::commands::run::{cmd_run, RunInvocation};
 use crate::commands::setup::cmd_setup;
 use crate::commands::spel::cmd_spel;
 use crate::commands::wallet::{cmd_wallet, WalletAction};
-use crate::constants::VERSION;
+use crate::constants::{DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, VERSION};
 use crate::process::set_command_echo;
 use crate::template::project::available_templates;
 use crate::DynResult;
@@ -43,6 +44,15 @@ static CREATE_ABOUT: LazyLock<String> = LazyLock::new(|| {
 static NEW_ABOUT: LazyLock<String> = LazyLock::new(|| {
     let templates = available_templates().join(", ");
     format!("Alias for `create` (templates: {templates})")
+});
+
+static RUN_LOCALNET_TIMEOUT_HELP: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "Seconds to wait for the sequencer to become ready when `run` has to \
+         start localnet itself (default: {DEFAULT_RUN_LOCALNET_TIMEOUT_SEC}). \
+         Bump this if a cold first run (fresh clone, cold caches) overshoots \
+         the default."
+    )
 });
 
 #[derive(Debug, Parser)]
@@ -80,6 +90,8 @@ enum Commands {
     #[command(about = "Manage pre-seeded basecamp profiles for p2p dogfooding")]
     Basecamp(BasecampArgs),
     Doctor(DoctorArgs),
+    #[command(about = "Build, start localnet, top up wallet, deploy, and run post-deploy hook")]
+    Run(RunArgs),
     #[command(about = "Collect a sanitized diagnostics archive for issue reporting")]
     Report(ReportArgs),
     #[command(
@@ -245,6 +257,19 @@ struct ReportArgs {
     out: Option<PathBuf>,
     #[arg(long, default_value_t = 500)]
     tail: usize,
+}
+
+#[derive(Debug, clap::Args)]
+struct RunArgs {
+    /// Skip post-deploy hooks even if scaffold.toml configures them
+    #[arg(long)]
+    no_post_deploy: bool,
+    /// Override post-deploy hooks (repeatable). Replaces config-defined hooks
+    /// for this invocation. Conflicts with --no-post-deploy.
+    #[arg(long, value_name = "CMD", conflicts_with = "no_post_deploy")]
+    post_deploy: Vec<String>,
+    #[arg(long, value_name = "SECS", help = RUN_LOCALNET_TIMEOUT_HELP.as_str())]
+    localnet_timeout: Option<u64>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -490,7 +515,13 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 print!("{err}");
                 return Ok(());
             }
-            _ => return Err(anyhow!(err.to_string())),
+            _ => {
+                // clap's Display already starts with "error: "; strip it to avoid
+                // "error: error: ..." when entry_main adds its own prefix.
+                let msg = err.to_string();
+                let msg = msg.strip_prefix("error: ").unwrap_or(&msg);
+                return Err(anyhow!("{}", msg));
+            }
         },
     };
 
@@ -584,6 +615,19 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
             cmd_basecamp(action)
         }
         Some(Commands::Doctor(args)) => cmd_doctor(args.json),
+        Some(Commands::Run(args)) => {
+            let post_deploy = if args.no_post_deploy {
+                Some(Vec::new())
+            } else if !args.post_deploy.is_empty() {
+                Some(args.post_deploy)
+            } else {
+                None
+            };
+            cmd_run(RunInvocation {
+                post_deploy_override: post_deploy,
+                localnet_timeout_sec: args.localnet_timeout,
+            })
+        }
         Some(Commands::Report(args)) => cmd_report(args.out, args.tail),
         Some(Commands::Completions(args)) => {
             let shell = match args.shell {

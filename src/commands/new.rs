@@ -9,10 +9,10 @@ use crate::config::{
 };
 use crate::constants::{
     DEFAULT_BASECAMP_PIN, DEFAULT_FRAMEWORK_IDL_PATH, DEFAULT_FRAMEWORK_IDL_SPEC,
-    DEFAULT_FRAMEWORK_VERSION, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL, FRAMEWORK_KIND_DEFAULT,
-    FRAMEWORK_KIND_LEZ_FRAMEWORK, LEZ_SOURCE, SCAFFOLD_TOML_SCHEMA_VERSION,
+    DEFAULT_FRAMEWORK_VERSION, DEFAULT_LB_PIN, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL,
+    FRAMEWORK_KIND_DEFAULT, FRAMEWORK_KIND_LEZ_FRAMEWORK, LEZ_SOURCE, SCAFFOLD_TOML_SCHEMA_VERSION,
 };
-use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig};
+use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RunConfig};
 use crate::project::default_cache_root;
 use crate::repo::{sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
 use crate::state::write_text;
@@ -132,6 +132,7 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
         localnet: LocalnetConfig::default(),
         modules: std::collections::BTreeMap::new(),
         basecamp: None,
+        run: RunConfig::default(),
     };
 
     let template_root = lez_repo_path.join("examples/program_deployment");
@@ -147,6 +148,7 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
         crate_name: &crate_name,
         lez_pin: &cfg.lez.pin,
         spel_tag: DEFAULT_SPEL.tag,
+        lb_pin: DEFAULT_LB_PIN,
     };
     apply_overlay(&target, &template_variant, &overlay_ctx)?;
     if template_variant == FRAMEWORK_KIND_LEZ_FRAMEWORK {
