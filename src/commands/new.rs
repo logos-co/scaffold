@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context};
@@ -50,7 +51,15 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
     // we created ourselves in this run.
     let result = cmd_new_inner(&cmd, &target, &template_variant);
     if result.is_err() {
-        let _ = fs::remove_dir_all(&target);
+        match fs::remove_dir_all(&target) {
+            Ok(()) => {}
+            // Ignore NotFound: inner may have failed before creating target.
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => eprintln!(
+                "warning: failed to clean up incomplete project directory {}: {err}",
+                target.display()
+            ),
+        }
     }
     result
 }
@@ -92,30 +101,31 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
         "Cloning lez at pin {} from {} (this may take a minute the first time)...",
         DEFAULT_LEZ.sha, lez_source
     );
-    let _echo_guard = crate::process::EchoGuard::suppress();
-
-    let lez_repo_path = if cmd.vendor_deps {
-        let root = target.join(".scaffold/repos");
-        fs::create_dir_all(&root)?;
-        let lez_vendor = root.join("lez");
-        sync_repo_to_pin_at_path_with_opts(
-            &lez_vendor,
-            &lez_source,
-            DEFAULT_LEZ.sha,
-            "lez",
-            RepoSyncOptions::fail_on_source_mismatch(),
-        )?;
-        lez_vendor
-    } else {
-        let lez_cached = bootstrap_cache.join("repos/lez").join(DEFAULT_LEZ.sha);
-        sync_repo_to_pin_at_path_with_opts(
-            &lez_cached,
-            &lez_source,
-            DEFAULT_LEZ.sha,
-            "lez",
-            RepoSyncOptions::auto_reclone_cache_repo(),
-        )?;
-        lez_cached
+    let lez_repo_path = {
+        let _echo_guard = crate::process::EchoGuard::suppress();
+        if cmd.vendor_deps {
+            let root = target.join(".scaffold/repos");
+            fs::create_dir_all(&root)?;
+            let lez_vendor = root.join("lez");
+            sync_repo_to_pin_at_path_with_opts(
+                &lez_vendor,
+                &lez_source,
+                DEFAULT_LEZ.sha,
+                "lez",
+                RepoSyncOptions::fail_on_source_mismatch(),
+            )?;
+            lez_vendor
+        } else {
+            let lez_cached = bootstrap_cache.join("repos/lez").join(DEFAULT_LEZ.sha);
+            sync_repo_to_pin_at_path_with_opts(
+                &lez_cached,
+                &lez_source,
+                DEFAULT_LEZ.sha,
+                "lez",
+                RepoSyncOptions::auto_reclone_cache_repo(),
+            )?;
+            lez_cached
+        }
     };
 
     // spel is recorded in scaffold.toml here but actually cloned + built by

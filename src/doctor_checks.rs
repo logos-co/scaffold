@@ -203,6 +203,7 @@ fn check_logos_blockchain_circuits_with(
 
     let env_status = match env_path {
         None => "unset".to_string(),
+        Some(p) if is_broken_symlink(p) => format!("set to broken symlink `{}`", p.display()),
         Some(p) if !p.exists() => format!("set to nonexistent path `{}`", p.display()),
         Some(p) => format!("set to non-directory `{}`", p.display()),
     };
@@ -217,6 +218,13 @@ fn check_logos_blockchain_circuits_with(
             "Obtain the logos-blockchain-circuits release and either set LOGOS_BLOCKCHAIN_CIRCUITS=<path> or place it at {home_hint}"
         )),
     }
+}
+
+fn is_broken_symlink(path: &Path) -> bool {
+    !path.exists()
+        && fs::symlink_metadata(path)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
 }
 
 pub(crate) fn check_standalone_support(lez_path: &Path) -> CheckRow {
@@ -360,6 +368,24 @@ mod tests {
             row.detail
         );
         assert!(row.detail.contains(bogus.to_str().unwrap()));
+        assert!(!row.detail.contains("unset"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn circuits_check_fail_distinguishes_broken_symlink() {
+        let tmp = tempdir().expect("tempdir");
+        let broken = tmp.path().join("broken-circuits-link");
+        std::os::unix::fs::symlink(tmp.path().join("missing-target"), &broken)
+            .expect("create broken symlink");
+        let missing_home = tmp.path().join(".logos-blockchain-circuits");
+        let row = check_logos_blockchain_circuits_with(Some(&broken), Some(&missing_home));
+        assert_eq!(row.status, CheckStatus::Fail);
+        assert!(
+            row.detail.contains("set to broken symlink"),
+            "must distinguish broken symlink, got: {}",
+            row.detail
+        );
         assert!(!row.detail.contains("unset"));
     }
 

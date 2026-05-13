@@ -78,15 +78,7 @@ pub(crate) fn cmd_basecamp(action: BasecampAction) -> DynResult<()> {
             paths,
             flakes,
             show,
-        } => {
-            // `--show` is a read-only print of the captured set; no nix
-            // needed. Otherwise capture invokes `nix eval` via the probe,
-            // so preflight to surface the scaffold-styled hint.
-            if !show {
-                ensure_nix_present()?;
-            }
-            cmd_basecamp_modules(project, paths, flakes, show, &NixLgxProbe)
-        }
+        } => cmd_basecamp_modules(project, paths, flakes, show, &NixLgxProbe),
         BasecampAction::Install { print_output } => {
             if print_output {
                 set_print_output(true);
@@ -1023,9 +1015,11 @@ fn cmd_basecamp_modules(
         print_modules_table("captured modules", &existing_modules);
         return Ok(());
     }
-    // Note: nix preflight for production callers lives in `cmd_basecamp`'s
-    // Modules dispatch arm so unit tests can drive `cmd_basecamp_modules`
-    // with a fake probe without requiring nix on the test runner.
+    // Production probes shell out to nix, so keep the missing-nix UX local to
+    // the modules implementation. Unit-test probes opt out below.
+    if probe.requires_nix() {
+        ensure_nix_present()?;
+    }
 
     let explicit = !paths.is_empty() || !flakes.is_empty();
     let flakes: Vec<String> = flakes
@@ -2376,6 +2370,10 @@ fn collect_api_headers(alice_modules: &Path, module_name: &str) -> Vec<PathBuf> 
 /// resolves under `/nix/store/` rather than the real project tree. Mirrors the
 /// sibling-override plumbing already applied at build time.
 trait LgxFlakeProbe {
+    fn requires_nix(&self) -> bool {
+        true
+    }
+
     fn package_names(
         &self,
         flake_ref: &str,
@@ -2723,6 +2721,10 @@ mod tests {
     }
 
     impl LgxFlakeProbe for FakeProbe {
+        fn requires_nix(&self) -> bool {
+            false
+        }
+
         fn package_names(
             &self,
             flake_ref: &str,

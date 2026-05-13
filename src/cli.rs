@@ -130,7 +130,7 @@ struct SelfTestRunLoggedArgs {
     /// Step label passed to `run_logged`. Appears in progress / failure lines.
     #[arg(long, default_value = "self-test step")]
     step: String,
-    /// Run `/bin/false` instead of `/bin/true` — exercises the failure bail.
+    /// Run `false` instead of `true` — exercises the failure bail.
     #[arg(long)]
     fail: bool,
     /// Set `LOGOS_SCAFFOLD_PRINT_OUTPUT=1` for this call — exercises the
@@ -445,19 +445,22 @@ struct BasecampLaunchArgs {
 }
 
 pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
-    if let Some(action) = wallet_passthrough_action(&args)? {
-        return cmd_wallet(action);
-    }
-    if let Some(spel_args) = spel_passthrough_args(&args)? {
-        return cmd_spel(spel_args);
-    }
-
     let bin_name = args
         .first()
         .and_then(|s| std::path::Path::new(s).file_name())
         .and_then(|f| f.to_str())
         .unwrap_or("logos-scaffold")
         .to_string();
+
+    if is_spel_help_request(&args) {
+        return print_spel_help(&bin_name);
+    }
+    if let Some(action) = wallet_passthrough_action(&args)? {
+        return cmd_wallet(action);
+    }
+    if let Some(spel_args) = spel_passthrough_args(&args)? {
+        return cmd_spel(spel_args);
+    }
 
     let cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
@@ -617,6 +620,25 @@ pub(crate) fn print_help(bin_name: &str) -> DynResult<()> {
     Ok(())
 }
 
+fn print_spel_help(bin_name: &str) -> DynResult<()> {
+    let mut cmd = Cli::command().bin_name(bin_name);
+    if let Some(spel) = cmd.find_subcommand_mut("spel") {
+        spel.print_long_help()?;
+        println!();
+        Ok(())
+    } else {
+        print_help(bin_name)
+    }
+}
+
+fn is_spel_help_request(args: &[String]) -> bool {
+    args.len() >= 3 && args[1] == "spel" && is_help_token(&args[2])
+}
+
+fn is_help_token(token: &str) -> bool {
+    matches!(token, "--help" | "-h" | "help" | "-?")
+}
+
 /// Forward `lgs spel -- <args...>` to the project-vendored `spel` binary.
 /// Mirrors `wallet_passthrough_action` so the same `--` convention applies
 /// across passthroughs. When `spel` is invoked without `--`, intercept early
@@ -626,11 +648,9 @@ fn spel_passthrough_args(args: &[String]) -> DynResult<Option<Vec<String>>> {
     if args.len() < 2 || args[1] != "spel" {
         return Ok(None);
     }
-    // Let `lgs spel --help` / `-h` reach clap so the user sees the
-    // variant's `long_about` (which documents the passthrough form).
-    // Without this, the intercept below would trigger the "Did you mean"
-    // error path and shadow clap's help.
-    if args.len() >= 3 && (args[2] == "--help" || args[2] == "-h") {
+    // Help spellings are handled before this function so the user sees the
+    // variant's `long_about` instead of the passthrough hint.
+    if args.len() >= 3 && is_help_token(&args[2]) {
         return Ok(None);
     }
     if args.len() < 3 {

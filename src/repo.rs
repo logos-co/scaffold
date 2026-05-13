@@ -258,6 +258,8 @@ fn looks_like_url(source: &str) -> bool {
 /// `.git`, bare repo `HEAD` + `objects`).
 fn source_is_reachable(source: &str) -> bool {
     if looks_like_url(source) {
+        // Intentionally bypass run_* helpers: this silent probe should collapse
+        // auth, DNS, and missing-remote failures into `false`.
         std::process::Command::new("git")
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_ASKPASS", "/bin/false")
