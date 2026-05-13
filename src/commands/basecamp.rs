@@ -44,6 +44,8 @@ pub(crate) enum BasecampAction {
     Launch {
         profile: String,
         no_clean: bool,
+        yes: bool,
+        dry_run: bool,
     },
     /// Attr-swap replay on `state.project_sources` only (`#lgx` →
     /// `#lgx-portable`). `state.dependencies` is ignored — the target AppImage
@@ -85,9 +87,12 @@ pub(crate) fn cmd_basecamp(action: BasecampAction) -> DynResult<()> {
             }
             cmd_basecamp_install(project, &NixLgxProbe)
         }
-        BasecampAction::Launch { profile, no_clean } => {
-            cmd_basecamp_launch(project, profile, no_clean)
-        }
+        BasecampAction::Launch {
+            profile,
+            no_clean,
+            yes,
+            dry_run,
+        } => cmd_basecamp_launch(project, profile, no_clean, yes, dry_run),
         BasecampAction::BuildPortable => cmd_basecamp_build_portable(project),
         BasecampAction::Doctor { json } => cmd_basecamp_doctor(project, json),
         // Handled above via early return (project-context-free).
@@ -248,7 +253,13 @@ fn resolve_basecamp_binary(app_link: &Path) -> DynResult<PathBuf> {
 // lock; document as 'don't do that'"). The code below assumes a single launcher
 // per profile at a time — scrub, re-seed, replay install, and PID write are all
 // non-atomic. If two invocations race, expect partial state.
-fn cmd_basecamp_launch(project: Project, profile: String, no_clean: bool) -> DynResult<()> {
+fn cmd_basecamp_launch(
+    project: Project,
+    profile: String,
+    no_clean: bool,
+    yes: bool,
+    dry_run: bool,
+) -> DynResult<()> {
     let state_path = project.root.join(".scaffold/state/basecamp.state");
     let state = match read_basecamp_state(&state_path).ok() {
         Some(s) if !s.basecamp_bin.is_empty() && !s.lgpm_bin.is_empty() => s,
@@ -277,6 +288,26 @@ fn cmd_basecamp_launch(project: Project, profile: String, no_clean: bool) -> Dyn
         bail!(
             "profile `{profile}` missing under {}; re-run `logos-scaffold basecamp setup`",
             profiles_root.display()
+        );
+    }
+
+    if dry_run {
+        return cmd_basecamp_launch_dry_run(&project, &profile, &profile_dir, &state, no_clean);
+    }
+
+    // The default launch scrubs `xdg-data` and `xdg-cache` for the profile and
+    // reinstalls captured modules from scratch. That destroys per-profile state
+    // (chat history, settings, lgpm install records) — so refuse the default
+    // form unless the caller has explicitly confirmed via `--yes`. `--no-clean`
+    // is a non-destructive launch and does not require confirmation.
+    if !no_clean && !yes {
+        bail!(
+            "basecamp launch is destructive by default: it scrubs the profile's xdg-data and xdg-cache, then reinstalls captured modules.\n\
+             Pass --yes to confirm, --dry-run to preview the plan, or --no-clean to launch without scrubbing.\n\
+             Examples:\n  \
+             logos-scaffold basecamp launch {profile} --dry-run\n  \
+             logos-scaffold basecamp launch {profile} --yes\n  \
+             logos-scaffold basecamp launch {profile} --no-clean"
         );
     }
 
@@ -365,6 +396,49 @@ fn cmd_basecamp_launch(project: Project, profile: String, no_clean: bool) -> Dyn
     // later launch doesn't kill whatever reuses the PID.
     let _ = fs::remove_file(&launch_state_path);
     bail!("failed to exec basecamp at {}: {err}", state.basecamp_bin);
+}
+
+fn cmd_basecamp_launch_dry_run(
+    project: &Project,
+    profile: &str,
+    profile_dir: &Path,
+    state: &BasecampState,
+    no_clean: bool,
+) -> DynResult<()> {
+    let xdg_data = profile_dir.join("xdg-data");
+    let xdg_cache = profile_dir.join("xdg-cache");
+
+    println!("dry-run: basecamp launch {profile} (no changes made)");
+    if no_clean {
+        println!("planned: skip scrub (--no-clean); preserve existing profile data");
+    } else {
+        println!(
+            "planned: scrub {} (exists: {})",
+            xdg_data.display(),
+            xdg_data.exists()
+        );
+        println!(
+            "planned: scrub {} (exists: {})",
+            xdg_cache.display(),
+            xdg_cache.exists()
+        );
+        let captured = total_captured_modules(project);
+        if captured == 0 {
+            println!(
+                "warning: no modules captured — a real launch would abort with `no modules captured` before reinstall. \
+                 Run `logos-scaffold basecamp modules` first."
+            );
+        } else {
+            println!(
+                "planned: reinstall {captured} captured module(s) into profile {profile} via lgpm"
+            );
+        }
+    }
+    println!(
+        "planned: exec basecamp at {} for profile {profile}",
+        state.basecamp_bin
+    );
+    Ok(())
 }
 
 /// Env map exported to the basecamp child on launch. Scaffold-owned names only

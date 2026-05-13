@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -33,6 +33,8 @@ pub(crate) enum LocalnetAction {
         tail: usize,
     },
     Reset {
+        dry_run: bool,
+        yes: bool,
         reset_wallet: bool,
         verify_timeout_sec: u64,
     },
@@ -93,6 +95,8 @@ fn cmd_localnet_in_project(project: &Project, action: LocalnetAction) -> DynResu
         }
         LocalnetAction::Logs { tail } => cmd_localnet_logs(&log_path, tail),
         LocalnetAction::Reset {
+            dry_run,
+            yes,
             reset_wallet,
             verify_timeout_sec,
         } => cmd_localnet_reset(
@@ -101,6 +105,8 @@ fn cmd_localnet_in_project(project: &Project, action: LocalnetAction) -> DynResu
             &state_path,
             &log_path,
             &localnet_addr,
+            dry_run,
+            yes,
             reset_wallet,
             verify_timeout_sec,
         ),
@@ -509,20 +515,152 @@ fn read_log_tail(log_path: &Path, tail: usize) -> String {
 
 // ─── reset ───────────────────────────────────────────────────────────────────
 
+fn cmd_localnet_reset_dry_run(
+    project: &Project,
+    lez: &Path,
+    state_path: &Path,
+    log_path: &Path,
+    localnet_addr: &str,
+    localnet_port: u16,
+    reset_wallet: bool,
+    verify_timeout_sec: u64,
+    sequencer_bin: &Path,
+) -> DynResult<()> {
+    // `lez` and `sequencer_bin` come out of the cache-root resolver, which can
+    // return either an absolute path (env override, explicit absolute
+    // `[repos.lez].path`, or scaffold default cache layer) or a path relative
+    // to `project.root` (the portable default for vendored / new projects).
+    // State / wallet paths are already joined onto `project.root`. Pass
+    // every lez-derived path through `abs` so the dry-run output stays
+    // copy-pasteable into a shell regardless of which case applied.
+    let abs = |p: &Path| -> PathBuf {
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            project.root.join(p)
+        }
+    };
+    let rocksdb_path = abs(&lez.join("rocksdb"));
+    let sequencer_bin_abs = abs(sequencer_bin);
+
+    println!("dry-run: localnet reset (no changes made)");
+    println!(
+        "planned: stop sequencer if tracked (state file: {})",
+        state_path.display()
+    );
+    println!(
+        "planned: delete sequencer DB at {} (exists: {})",
+        rocksdb_path.display(),
+        rocksdb_path.exists()
+    );
+    if reset_wallet {
+        let wallet_path = project.root.join(&project.config.wallet_home_dir);
+        let wallet_state = wallet_state_path(&project.root);
+        println!(
+            "planned: delete wallet home at {} (exists: {})",
+            wallet_path.display(),
+            wallet_path.exists()
+        );
+        println!(
+            "planned: delete wallet state at {} (exists: {})",
+            wallet_state.display(),
+            wallet_state.exists()
+        );
+    } else {
+        println!("planned: preserve wallet home (pass --reset-wallet to also remove wallet)");
+    }
+    println!(
+        "planned: delete localnet state file {} (exists: {})",
+        state_path.display(),
+        state_path.exists()
+    );
+    println!(
+        "planned: start sequencer (log: {}), then verify block production (timeout {}s)",
+        log_path.display(),
+        verify_timeout_sec
+    );
+    if !sequencer_bin_abs.exists() {
+        println!(
+            "warning: missing sequencer binary at {}; a real reset would fail before any destructive step",
+            sequencer_bin_abs.display()
+        );
+    } else {
+        println!(
+            "prerequisite ok: sequencer binary exists at {}",
+            sequencer_bin_abs.display()
+        );
+    }
+    let state = read_localnet_state(state_path).unwrap_or_default();
+    if let Some(pid) = state.sequencer_pid {
+        println!(
+            "current tracked sequencer pid: {pid} (running: {})",
+            pid_running(pid)
+        );
+    } else {
+        println!("current tracked sequencer pid: none");
+    }
+    if port_open(localnet_addr) {
+        // Foreign-listener case: nothing tracked but the port is held. The
+        // real reset stops nothing, then `wait_for_port_free` times out and
+        // returns `ResetError::ForeignListener` before any cleanup. Surface
+        // that here so the dry-run doesn't silently imply a clean run.
+        if state.sequencer_pid.is_none() {
+            println!(
+                "warning: foreign listener on {localnet_addr} (port {localnet_port}); a real reset would abort with foreign-listener error before any destructive step"
+            );
+        } else {
+            println!("note: listener currently on {localnet_addr} (port {localnet_port})");
+        }
+    } else {
+        println!("note: no listener on {localnet_addr} currently");
+    }
+    Ok(())
+}
+
 pub(crate) fn cmd_localnet_reset(
     project: &Project,
     lez: &Path,
     state_path: &Path,
     log_path: &Path,
     localnet_addr: &str,
+    dry_run: bool,
+    yes: bool,
     reset_wallet: bool,
     verify_timeout_sec: u64,
 ) -> DynResult<()> {
     let localnet_port = project.config.localnet.port;
 
-    // Prerequisite: the sequencer binary must already be built. If not, setup
-    // would fail later and we'd have already deleted data with no way to start.
     let sequencer_bin = lez.join(SEQUENCER_BIN_REL_PATH);
+    if dry_run {
+        return cmd_localnet_reset_dry_run(
+            project,
+            lez,
+            state_path,
+            log_path,
+            localnet_addr,
+            localnet_port,
+            reset_wallet,
+            verify_timeout_sec,
+            &sequencer_bin,
+        );
+    }
+
+    if !yes {
+        let wallet_hint = if reset_wallet {
+            " (with --reset-wallet, also deletes wallet keypairs irrecoverably)"
+        } else {
+            ""
+        };
+        bail!(
+            "localnet reset is destructive: it wipes the sequencer chain DB{wallet_hint}.\n\
+             Pass --yes to confirm, or --dry-run to preview the plan first.\n\
+             Examples:\n  \
+             logos-scaffold localnet reset --dry-run\n  \
+             logos-scaffold localnet reset --yes\n  \
+             logos-scaffold localnet reset --reset-wallet --yes"
+        );
+    }
+
     if !sequencer_bin.exists() {
         return Err(LocalnetError::MissingSequencerBinary {
             path: sequencer_bin.display().to_string(),
