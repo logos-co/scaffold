@@ -170,8 +170,8 @@ fn download_to_tempfile(url: &str) -> DynResult<tempfile::NamedTempFile> {
         );
     }
 
-    let tmp = tempfile::NamedTempFile::new()
-        .map_err(|e| anyhow!("create download temp file: {e}"))?;
+    let tmp =
+        tempfile::NamedTempFile::new().map_err(|e| anyhow!("create download temp file: {e}"))?;
 
     let status = Command::new("curl")
         .arg("--fail")
@@ -271,7 +271,8 @@ mod tests {
         }
         let mut gz = Vec::new();
         {
-            let mut encoder = flate2::write::GzEncoder::new(&mut gz, flate2::Compression::default());
+            let mut encoder =
+                flate2::write::GzEncoder::new(&mut gz, flate2::Compression::default());
             encoder.write_all(&tar_bytes).unwrap();
             encoder.finish().unwrap();
         }
