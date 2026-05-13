@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -8,9 +8,10 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context};
 use serde_json::Value;
 
-use crate::constants::{SEQUENCER_BIN_REL_PATH, SEQUENCER_CONFIG_REL_PATH};
 use crate::error::{LocalnetError, ResetError};
-use crate::model::{LocalnetOwnership, LocalnetState, LocalnetStatusReport, Project};
+use crate::model::{
+    LocalnetConfig, LocalnetOwnership, LocalnetState, LocalnetStatusReport, Project,
+};
 use crate::process::{listener_pid, pid_alive, pid_command, pid_running, port_open, spawn_to_log};
 use crate::project::{ensure_dir_exists, find_project_root, load_project, resolve_repo_path};
 use crate::state::{read_localnet_state, write_localnet_state};
@@ -68,8 +69,8 @@ pub(crate) fn build_localnet_status_for_project(project: &Project) -> LocalnetSt
 }
 
 fn cmd_localnet_in_project(project: &Project, action: LocalnetAction) -> DynResult<()> {
-    let localnet_port = project.config.localnet.port;
-    let risc0_dev_mode = project.config.localnet.risc0_dev_mode;
+    let localnet_cfg = &project.config.localnet;
+    let localnet_port = localnet_cfg.port;
     let localnet_addr = format!("127.0.0.1:{localnet_port}");
     let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
     let state_path = project.root.join(".scaffold/state/localnet.state");
@@ -83,8 +84,7 @@ fn cmd_localnet_in_project(project: &Project, action: LocalnetAction) -> DynResu
             &state_path,
             &log_path,
             timeout_sec,
-            localnet_port,
-            risc0_dev_mode,
+            localnet_cfg,
             &localnet_addr,
         ),
         LocalnetAction::Stop => cmd_localnet_stop(&state_path, localnet_port),
@@ -145,18 +145,24 @@ fn cmd_localnet_start(
     state_path: &Path,
     log_path: &Path,
     timeout_sec: u64,
-    localnet_port: u16,
-    risc0_dev_mode: bool,
+    localnet_cfg: &LocalnetConfig,
     localnet_addr: &str,
 ) -> DynResult<()> {
     ensure_dir_exists(lez, "lez")?;
-    let sequencer_bin = lez.join(SEQUENCER_BIN_REL_PATH);
-    if !sequencer_bin.exists() {
+    let localnet_port = localnet_cfg.port;
+    let risc0_dev_mode = localnet_cfg.risc0_dev_mode;
+    let sequencer_bin = localnet_cfg.sequencer_bin_path(lez);
+    if !sequencer_bin.is_file() {
         return Err(LocalnetError::MissingSequencerBinary {
             path: sequencer_bin.display().to_string(),
         }
         .into());
     }
+    // Validate the configured config path *before* we call into
+    // `patch_sequencer_port` so a misconfigured value surfaces with a
+    // targeted message rather than a generic "Is a directory" /
+    // serde_json parse error from inside the JSON-mutation helper.
+    let sequencer_config = resolve_sequencer_config_file(lez, localnet_cfg)?;
 
     let mut state = read_localnet_state(state_path).unwrap_or_default();
     if let Some(pid) = state.sequencer_pid {
@@ -192,16 +198,18 @@ fn cmd_localnet_start(
         bail!("{message}");
     }
 
-    patch_sequencer_port(lez, localnet_port)?;
+    patch_sequencer_port(&sequencer_config, localnet_port)?;
 
-    // Use a path relative to lez (the child's cwd), not relative to the
-    // parent's cwd.  `current_dir(lez)` applies before exec, so a parent-
-    // relative path like `.scaffold/cache/repos/lez/target/release/…`
-    // would be resolved inside lez and fail with ENOENT.
+    // Spawn from the absolute binary path; `current_dir(lez)` is preserved
+    // so the sequencer's own relative paths (rocksdb, logs) still resolve
+    // against the LEZ checkout. The config path is passed as the single
+    // positional arg — the pinned sequencer reads its port from this file
+    // (already patched above), so we deliberately do NOT pass a `--port`
+    // CLI flag (the pinned binary refuses unknown flags).
     let sequencer_pid = spawn_to_log(
-        Command::new(format!("./{SEQUENCER_BIN_REL_PATH}"))
+        Command::new(&sequencer_bin)
             .current_dir(lez)
-            .arg(SEQUENCER_CONFIG_REL_PATH)
+            .arg(&sequencer_config)
             .env("RUST_LOG", "info")
             .env("RISC0_DEV_MODE", if risc0_dev_mode { "1" } else { "0" }),
         log_path,
@@ -437,27 +445,29 @@ fn build_status_report(
     }
 }
 
-/// Update the port in `sequencer_config.json` so the sequencer listens on the
-/// configured port.  The pinned LEZ version does not accept `--port` as a CLI
-/// flag — it reads the port from this file.
-fn patch_sequencer_port(lez: &Path, port: u16) -> DynResult<()> {
-    let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
-    let text = fs::read_to_string(&config_path)
+/// Update the port in the sequencer's JSON config so the sequencer listens
+/// on the configured port. The pinned LEZ version does not accept `--port`
+/// as a CLI flag — it reads the port from this file.
+///
+/// `config_path` is the already-resolved absolute path; the caller has
+/// verified it points at a regular file.
+fn patch_sequencer_port(config_path: &Path, port: u16) -> DynResult<()> {
+    let text = fs::read_to_string(config_path)
         .with_context(|| format!("failed to read {}", config_path.display()))?;
-    let mut doc: Value =
-        serde_json::from_str(&text).context("failed to parse sequencer_config.json")?;
+    let mut doc: Value = serde_json::from_str(&text)
+        .with_context(|| format!("failed to parse {} as JSON", config_path.display()))?;
 
     if let Some(obj) = doc.as_object_mut() {
         obj.insert("port".to_string(), Value::Number(port.into()));
     } else {
         bail!(
-            "sequencer_config.json is not a JSON object: {}",
+            "sequencer config is not a JSON object: {}",
             config_path.display()
         );
     }
 
     let updated = serde_json::to_string_pretty(&doc).context("failed to serialize config")?;
-    fs::write(&config_path, format!("{updated}\n"))
+    fs::write(config_path, format!("{updated}\n"))
         .with_context(|| format!("failed to write {}", config_path.display()))?;
     Ok(())
 }
@@ -487,17 +497,19 @@ pub(crate) fn cmd_localnet_reset(
     reset_wallet: bool,
     verify_timeout_sec: u64,
 ) -> DynResult<()> {
-    let localnet_port = project.config.localnet.port;
+    let localnet_cfg = &project.config.localnet;
+    let localnet_port = localnet_cfg.port;
 
     // Prerequisite: the sequencer binary must already be built. If not, setup
     // would fail later and we'd have already deleted data with no way to start.
-    let sequencer_bin = lez.join(SEQUENCER_BIN_REL_PATH);
-    if !sequencer_bin.exists() {
+    let sequencer_bin = localnet_cfg.sequencer_bin_path(lez);
+    if !sequencer_bin.is_file() {
         return Err(LocalnetError::MissingSequencerBinary {
             path: sequencer_bin.display().to_string(),
         }
         .into());
     }
+    let _sequencer_config = resolve_sequencer_config_file(lez, localnet_cfg)?;
 
     println!("stopping sequencer…");
     cmd_localnet_stop(state_path, localnet_port)?;
@@ -516,18 +528,39 @@ pub(crate) fn cmd_localnet_reset(
     reset_cleanup(project, lez, state_path, reset_wallet)?;
 
     println!("starting sequencer…");
-    cmd_localnet_start(
-        lez,
-        state_path,
-        log_path,
-        20,
-        localnet_port,
-        project.config.localnet.risc0_dev_mode,
-        localnet_addr,
-    )?;
+    cmd_localnet_start(lez, state_path, log_path, 20, localnet_cfg, localnet_addr)?;
 
     println!("waiting for block production…");
     verify_block_production(localnet_addr, verify_timeout_sec)
+}
+
+fn resolve_sequencer_config_file(lez: &Path, localnet_cfg: &LocalnetConfig) -> DynResult<PathBuf> {
+    let sequencer_config = localnet_cfg.sequencer_config_resolved_path(lez);
+    if !sequencer_config.is_file() {
+        bail!(
+            "sequencer config not found or not a regular file at {}; \
+             fix [localnet].sequencer_config_path in scaffold.toml or run `logos-scaffold setup`",
+            sequencer_config.display()
+        );
+    }
+
+    let lez = fs::canonicalize(lez)
+        .with_context(|| format!("failed to resolve LEZ checkout at {}", lez.display()))?;
+    let sequencer_config = fs::canonicalize(&sequencer_config).with_context(|| {
+        format!(
+            "failed to resolve sequencer config at {}",
+            sequencer_config.display()
+        )
+    })?;
+    if !sequencer_config.starts_with(&lez) {
+        bail!(
+            "sequencer config must resolve inside the LEZ checkout {}; got {}",
+            lez.display(),
+            sequencer_config.display()
+        );
+    }
+
+    Ok(sequencer_config)
 }
 
 /// Deletes on-disk state so the next start begins with a fresh chain.
@@ -667,8 +700,8 @@ mod tests {
                 },
             },
             localnet: LocalnetConfig {
-                port: 3040,
                 risc0_dev_mode: false,
+                ..LocalnetConfig::default()
             },
             modules: std::collections::BTreeMap::new(),
             basecamp: None,

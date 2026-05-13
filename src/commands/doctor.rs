@@ -5,11 +5,9 @@ use anyhow::bail;
 
 use super::wallet_support::wallet_password;
 use crate::commands::wallet_support::WALLET_CONFIG_PRIMARY;
-use crate::constants::{
-    DEFAULT_LEZ, DEFAULT_SPEL, SEQUENCER_BIN_REL_PATH, SPEL_BIN_REL_PATH, WALLET_BIN_REL_PATH,
-};
+use crate::constants::{DEFAULT_LEZ, DEFAULT_SPEL, SPEL_BIN_REL_PATH, WALLET_BIN_REL_PATH};
 use crate::doctor_checks::{
-    check_binary, check_container_runtime, check_path, check_port_warn, check_repo,
+    check_binary, check_container_runtime, check_file, check_path, check_port_warn, check_repo,
     check_standalone_support, one_line, print_rows,
 };
 use crate::model::{CheckRow, CheckStatus, DoctorReport, DoctorSummary};
@@ -157,10 +155,18 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
         remediation: None,
     });
 
-    rows.push(check_path(
+    let sequencer_bin = project.config.localnet.sequencer_bin_path(&lez);
+    rows.push(check_file(
         "sequencer binary",
-        &lez.join(SEQUENCER_BIN_REL_PATH),
+        &sequencer_bin,
         "Run `logos-scaffold setup`",
+    ));
+
+    let sequencer_config = project.config.localnet.sequencer_config_resolved_path(&lez);
+    rows.push(check_file(
+        "sequencer config",
+        &sequencer_config,
+        "Fix [localnet].sequencer_config_path in scaffold.toml or run `logos-scaffold setup`",
     ));
 
     let wallet_binary_path = lez.join(WALLET_BIN_REL_PATH);

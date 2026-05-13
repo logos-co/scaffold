@@ -128,6 +128,24 @@ pub(crate) fn check_path(name: &str, path: &Path, remediation: &str) -> CheckRow
     }
 }
 
+pub(crate) fn check_file(name: &str, path: &Path, remediation: &str) -> CheckRow {
+    if path.is_file() {
+        CheckRow {
+            status: CheckStatus::Pass,
+            name: name.to_string(),
+            detail: format!("found {}", path.display()),
+            remediation: None,
+        }
+    } else {
+        CheckRow {
+            status: CheckStatus::Fail,
+            name: name.to_string(),
+            detail: format!("missing or not a regular file {}", path.display()),
+            remediation: Some(remediation.to_string()),
+        }
+    }
+}
+
 pub(crate) fn check_port_warn(name: &str, addr: &str, remediation: &str) -> CheckRow {
     if port_open(addr) {
         CheckRow {

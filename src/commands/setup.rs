@@ -21,6 +21,11 @@ pub(crate) fn cmd_setup() -> DynResult<()> {
     sync_pinned_repo(&project.config.lez, &lez, "lez")?;
     ensure_dir_exists(&lez, "lez")?;
 
+    // The binary name in [localnet].sequencer_binary doubles as the cargo
+    // package name (`-p`) and the produced binary's filename under
+    // `target/release/` — see `model::LocalnetConfig::sequencer_binary`.
+    let sequencer_binary = &project.config.localnet.sequencer_binary;
+    let build_label = format!("build {sequencer_binary} (standalone)");
     run_checked(
         Command::new("cargo")
             .current_dir(&lez)
@@ -29,8 +34,8 @@ pub(crate) fn cmd_setup() -> DynResult<()> {
             .arg("--features")
             .arg("standalone")
             .arg("-p")
-            .arg("sequencer_service"),
-        "build sequencer_service (standalone)",
+            .arg(sequencer_binary),
+        &build_label,
     )?;
 
     run_checked(

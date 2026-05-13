@@ -222,6 +222,30 @@ logos-scaffold localnet status
 logos-scaffold doctor
 ```
 
+### Pointing localnet at a custom sequencer
+
+`[localnet].sequencer_binary` and `[localnet].sequencer_config_path` let you
+build and run a sequencer that isn't upstream LEZ's `sequencer_service`
+without forking scaffold. `sequencer_binary` is treated as the cargo
+package name (`cargo build -p <sequencer_binary>`); the produced binary
+must land at `<lez>/target/release/<sequencer_binary>`.
+`sequencer_config_path` must be a relative path inside the LEZ checkout.
+`localnet start` patches this file in place to apply `[localnet].port`, so
+absolute paths and `..` parent components are rejected.
+
+```toml
+[localnet]
+port = 3040
+risc0_dev_mode = true
+sequencer_binary = "my_custom_seq"
+sequencer_config_path = "sequencer/service/configs/dev/sequencer_config.json"
+```
+
+Defaults match upstream LEZ at the pinned version; override at your own
+risk. Overriding opts out of the scaffold ↔ LEZ pin alignment guarantee —
+make sure your fork stays compatible with the `[repos.lez].pin` your
+project uses, or `setup` and `doctor` will surface the mismatch.
+
 ## LEZ Framework
 
 To use the [LEZ Framework](https://github.com/jimmy-claw/lez-framework) for an

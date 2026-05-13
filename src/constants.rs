@@ -46,13 +46,25 @@ pub(crate) const FRAMEWORK_KIND_LEZ_FRAMEWORK: &str = "lez-framework";
 pub(crate) const DEFAULT_FRAMEWORK_VERSION: &str = "0.1.0";
 pub(crate) const DEFAULT_FRAMEWORK_IDL_SPEC: &str = "lssa-idl/0.1.0";
 pub(crate) const DEFAULT_FRAMEWORK_IDL_PATH: &str = "idl";
-pub(crate) const SEQUENCER_BIN_REL_PATH: &str = "target/release/sequencer_service";
+/// Cargo build profile directory under the LEZ checkout that holds release
+/// binaries. The binary *file name* is data-driven via
+/// `[localnet].sequencer_binary` in `scaffold.toml`; this constant is the
+/// dirname half of that join, shared by setup, localnet, and doctor.
+pub(crate) const SEQUENCER_TARGET_REL_DIR: &str = "target/release";
+/// Default for `[localnet].sequencer_binary`. Doubles as the cargo *package*
+/// name passed to `cargo build -p` and the output binary file name under
+/// `target/release/` — upstream LEZ keeps the two in sync. Projects pointing
+/// at a fork must preserve this coupling (cargo `-p <name>` produces
+/// `target/release/<name>`).
+pub(crate) const DEFAULT_SEQUENCER_BIN_NAME: &str = "sequencer_service";
 /// Project-relative directory holding the Risc0 guest crate (`methods/Cargo.toml`,
 /// `methods/guest/...`). Shared between the build side (`build_methods_guests`),
 /// which compiles the manifest, and the deploy side, which discovers the resulting
 /// `.bin` artefacts under `methods/target/...`.
 pub(crate) const METHODS_DIR: &str = "methods";
-pub(crate) const SEQUENCER_CONFIG_REL_PATH: &str =
+/// Default for `[localnet].sequencer_config_path`. Resolved relative to the
+/// LEZ checkout root unless an absolute path is configured.
+pub(crate) const DEFAULT_SEQUENCER_CONFIG_REL_PATH: &str =
     "sequencer/service/configs/debug/sequencer_config.json";
 pub(crate) const SPEL_BIN_REL_PATH: &str = "target/release/spel";
 /// Default seconds to wait for the sequencer to become ready when `lgs run`

@@ -383,7 +383,85 @@ fn parse_localnet(doc: &DocumentMut) -> DynResult<LocalnetConfig> {
     if let Some(v) = table.get("risc0_dev_mode").and_then(Item::as_value) {
         cfg.risc0_dev_mode = v.as_bool().unwrap_or(true);
     }
+    if let Some(s) = read_present_string(table, "sequencer_binary", "[localnet].sequencer_binary")?
+    {
+        validate_sequencer_binary_name(&s)?;
+        cfg.sequencer_binary = s;
+    }
+    if let Some(s) = read_present_string(
+        table,
+        "sequencer_config_path",
+        "[localnet].sequencer_config_path",
+    )? {
+        validate_sequencer_config_path(&s)?;
+        cfg.sequencer_config_path = s;
+    }
     Ok(cfg)
+}
+
+/// `[localnet].sequencer_binary` is consumed both as a `cargo build -p`
+/// argument and as a filename joined under `<lez>/target/release/`.
+/// Reject anything that is not a plain cargo package / binary name so
+/// neither use can be subverted (option injection, path traversal, or
+/// silent `Path::join` short-circuit on absolute values).
+fn validate_sequencer_binary_name(name: &str) -> DynResult<()> {
+    let path = std::path::Path::new(name);
+    let invalid = name.is_empty()
+        || name.starts_with('-')
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || path.is_absolute()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    if invalid {
+        bail!(
+            "invalid scaffold.toml: [localnet].sequencer_binary must be a cargo package name \
+             (ASCII letters, digits, `_`, or `-`; no path separators, leading `-`, `.`, `..`, \
+             or absolute paths); got {name:?}"
+        );
+    }
+    check_toml_value("localnet.sequencer_binary", name)
+}
+
+/// `[localnet].sequencer_config_path` is mutated in place by
+/// `patch_sequencer_port`, so keep it constrained to a path inside the
+/// configured LEZ checkout. Forward-slash separators are allowed because
+/// the file naturally lives a few directories deep inside LEZ.
+fn validate_sequencer_config_path(path: &str) -> DynResult<()> {
+    let parsed = std::path::Path::new(path);
+    let invalid = path.is_empty()
+        || path.starts_with('-')
+        || path.contains('\\')
+        || parsed.is_absolute()
+        || parsed.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::Prefix(_)
+                    | std::path::Component::RootDir
+            )
+        });
+    if invalid {
+        bail!(
+            "invalid scaffold.toml: [localnet].sequencer_config_path must be a LEZ-relative \
+             config file path (non-empty, no leading `-`, absolute paths, parent components, \
+             or backslash separators); got {path:?}"
+        );
+    }
+    check_toml_value("localnet.sequencer_config_path", path)
+}
+
+fn read_present_string(table: &Table, key: &str, label: &str) -> DynResult<Option<String>> {
+    let Some(item) = table.get(key) else {
+        return Ok(None);
+    };
+    let Some(value) = item.as_str() else {
+        bail!("invalid scaffold.toml: {label} must be a string");
+    };
+    Ok(Some(value.to_string()))
 }
 
 fn read_string(table: &Table, key: &str) -> Option<String> {
@@ -458,10 +536,17 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
     idl_table["path"] = value(&cfg.framework.idl.path);
 
     // [localnet]
+    check_toml_value("localnet.sequencer_binary", &cfg.localnet.sequencer_binary)?;
+    check_toml_value(
+        "localnet.sequencer_config_path",
+        &cfg.localnet.sequencer_config_path,
+    )?;
     let localnet = doc.entry("localnet").or_insert(Item::Table(Table::new()));
     let localnet_table = localnet.as_table_mut().expect("localnet table");
     localnet_table["port"] = value(i64::from(cfg.localnet.port));
     localnet_table["risc0_dev_mode"] = value(cfg.localnet.risc0_dev_mode);
+    localnet_table["sequencer_binary"] = value(&cfg.localnet.sequencer_binary);
+    localnet_table["sequencer_config_path"] = value(&cfg.localnet.sequencer_config_path);
 
     // [basecamp]
     if let Some(bc) = &cfg.basecamp {
@@ -917,5 +1002,118 @@ role = "project"
         );
         let cfg = parse_config(&toml).expect("parse");
         assert_eq!(cfg.lez.path, "/abs/lez");
+    }
+
+    #[test]
+    fn localnet_sequencer_keys_default_when_absent() {
+        let cfg = parse_config(&minimal_v0_2_0()).expect("parse");
+        let dflt = LocalnetConfig::default();
+        assert_eq!(cfg.localnet.sequencer_binary, dflt.sequencer_binary);
+        assert_eq!(
+            cfg.localnet.sequencer_config_path,
+            dflt.sequencer_config_path
+        );
+    }
+
+    #[test]
+    fn localnet_sequencer_keys_round_trip_explicit_values() {
+        let toml = minimal_v0_2_0().replace(
+            "[localnet]\nport = 3040\nrisc0_dev_mode = true\n",
+            "[localnet]\nport = 3040\nrisc0_dev_mode = true\n\
+             sequencer_binary = \"my_sequencer\"\n\
+             sequencer_config_path = \"sequencer/service/configs/dev/sequencer_config.json\"\n",
+        );
+        let cfg = parse_config(&toml).expect("parse");
+        assert_eq!(cfg.localnet.sequencer_binary, "my_sequencer");
+        assert_eq!(
+            cfg.localnet.sequencer_config_path,
+            "sequencer/service/configs/dev/sequencer_config.json"
+        );
+        let serialized = serialize_config(&cfg).expect("serialize");
+        let cfg2 = parse_config(&serialized).expect("re-parse");
+        assert_eq!(cfg2.localnet.sequencer_binary, "my_sequencer");
+        assert_eq!(
+            cfg2.localnet.sequencer_config_path,
+            "sequencer/service/configs/dev/sequencer_config.json"
+        );
+    }
+
+    #[test]
+    fn validate_sequencer_binary_name_rejects_bad_inputs() {
+        for bad in [
+            "",
+            "-help",
+            ".",
+            "..",
+            "foo bar",
+            "foo.bar",
+            "foo:bar",
+            "séquencer",
+            "../escape",
+            "sub/dir",
+            "sub\\dir",
+            "/abs/path",
+        ] {
+            assert!(
+                validate_sequencer_binary_name(bad).is_err(),
+                "expected rejection for {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_sequencer_binary_name_accepts_real_names() {
+        for ok in ["sequencer_service", "sequencer_runner", "my-sequencer"] {
+            validate_sequencer_binary_name(ok).expect("accept");
+        }
+    }
+
+    #[test]
+    fn validate_sequencer_config_path_rejects_bad_inputs() {
+        for bad in [
+            "",
+            "-flag-like-value",
+            "../escape.json",
+            "sequencer/../escape.json",
+            "/abs/path/config.json",
+            "sub\\dir\\config.json",
+        ] {
+            assert!(
+                validate_sequencer_config_path(bad).is_err(),
+                "expected rejection for {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_rejects_invalid_sequencer_binary() {
+        for bad in ["../escape", ""] {
+            let toml = minimal_v0_2_0().replace(
+                "[localnet]\nport = 3040\nrisc0_dev_mode = true\n",
+                &format!(
+                    "[localnet]\nport = 3040\nrisc0_dev_mode = true\nsequencer_binary = {bad:?}\n"
+                ),
+            );
+            let err = parse_config(&toml).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("sequencer_binary"), "{msg}");
+            assert!(msg.contains(bad), "{msg}");
+        }
+    }
+
+    #[test]
+    fn parse_rejects_invalid_sequencer_config_path() {
+        for bad in ["--port=80", "", "../escape.json", "/abs/path/config.json"] {
+            let toml = minimal_v0_2_0().replace(
+                "[localnet]\nport = 3040\nrisc0_dev_mode = true\n",
+                &format!(
+                    "[localnet]\nport = 3040\nrisc0_dev_mode = true\nsequencer_config_path = {bad:?}\n"
+                ),
+            );
+            let err = parse_config(&toml).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("sequencer_config_path"), "{msg}");
+            assert!(msg.contains(bad), "{msg}");
+        }
     }
 }
