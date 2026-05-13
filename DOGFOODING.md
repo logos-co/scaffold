@@ -83,6 +83,7 @@ The `lgs` binary is a short alias for `logos-scaffold` produced by the same crat
 | L4 | `lez-framework` | Core | LEZ deploy and counter interaction | `deploy`, `cargo run --bin run_lez_counter` |
 | E1 | N/A | Core | CLI discoverability and error quality | `--help`, `help`, `--version`, unknown commands, out-of-project errors |
 | E2 | N/A | Advanced | Project creation with advanced flags and invalid inputs | `new --template`, `new --vendor-deps`, `new --cache-root` |
+| E3 | N/A | Core | AI skills materialized into generated and adopted projects | `new`, `new --template lez-framework`, `init`, `init` re-run |
 | B1 | external module project | Core | Basecamp + lgpm setup and idempotent re-run | `init`, `basecamp setup`, `basecamp doctor`, `basecamp docs` |
 | B2 | external module project | Core | Module capture, install, and single-instance launch | `basecamp modules`, `basecamp modules --show`, `basecamp install`, `basecamp launch alice` |
 | B3 | external module project | Core | Two-instance p2p dogfooding | `basecamp launch alice`, `basecamp launch bob` (parallel) |
@@ -817,6 +818,75 @@ grep -n "^\[wallet\]\|^home_dir\|^binary" dogfood-cache/scaffold.toml
 - Clean up the generated projects after this scenario to avoid consuming disk space with multiple scaffolded projects.
 - The `--lez-path` flag is optional to test here because it requires a real LEZ checkout. Only probe it if one is available.
 
+## E3. AI Skills Materialized Into Every Project
+
+### Goal
+
+Validate that `lgs new` and `lgs init` both drop the canonical AI skill set
+into a generated project so that Claude Code, Cursor, and Codex pick them up
+without manual configuration. Skills are version-controlled in the generated
+project (no `.gitignore` exclusion).
+
+### Preconditions
+
+- Latest scaffold binary built from the repo root (`"$SCAFFOLD_BIN"`).
+- Scratch workspace exists.
+
+### Commands / Actions
+
+From the scratch workspace:
+
+```bash
+cd "$SCRATCH_ROOT"
+"$SCAFFOLD_BIN" new dogfood-skills-default
+"$SCAFFOLD_BIN" new dogfood-skills-lez --template lez-framework
+
+mkdir dogfood-skills-init && cd dogfood-skills-init
+"$SCAFFOLD_BIN" init
+shasum AGENTS.md .claude/skills/lgs-cli/SKILL.md .cursor/rules/lgs-cli.mdc
+"$SCAFFOLD_BIN" init   # re-init must succeed and not change skill content
+shasum AGENTS.md .claude/skills/lgs-cli/SKILL.md .cursor/rules/lgs-cli.mdc
+```
+
+Inspect the generated layout in each of the three projects:
+
+```bash
+find dogfood-skills-default/.claude/skills dogfood-skills-default/.cursor/rules -type f | sort
+find dogfood-skills-lez/.claude/skills dogfood-skills-lez/.cursor/rules -type f | sort
+ls dogfood-skills-default/AGENTS.md dogfood-skills-lez/AGENTS.md dogfood-skills-init/AGENTS.md
+```
+
+### Expected Success Signals
+
+- Every generated project (default template, lez-framework template, and `init`-adopted bare directory) contains exactly four `.claude/skills/<name>/SKILL.md` files: `lgs-cli`, `lez-template`, `lez-framework-template`, `basecamp`.
+- The same four skills appear under `.cursor/rules/<name>.mdc`.
+- `AGENTS.md` exists at every project root, lists all four skills with their descriptions, and links to `.claude/skills/<name>/SKILL.md`.
+- Re-running `init` on an already-migrated project succeeds (no longer bails) and prints `AI skills refreshed under .claude/skills/, .cursor/rules/, AGENTS.md.` The `shasum` output before and after a re-init is byte-identical for all three skill files.
+- `.claude/skills/<name>/SKILL.md` is byte-identical to the canonical source under `<scaffold-repo>/skills/<name>/SKILL.md` (run `diff` if validating against a built-from-source binary).
+- `.cursor/rules/<name>.mdc` frontmatter contains `description:` and `alwaysApply: false`, and does **not** contain a `name:` field. The body after the closing `---` is identical to the SKILL.md body.
+- The generated `.gitignore` does not exclude `.claude/`, `.cursor/`, or `AGENTS.md`.
+
+### Failure Signals / Common Pitfalls
+
+- A skill missing from one of the three locations in any generated project is a regression — every project gets the same four-skill set per the v0.1 contract.
+- A `.cursor/rules/<name>.mdc` that still carries the `name:` line from the source SKILL.md is a regression in the frontmatter rewrite.
+- A re-`init` that errors with "already at schema" is a stale build — that bail was removed when skill refresh became part of init's contract.
+- A re-`init` that mutates skill content without a corresponding canonical-source change is a regression in idempotency.
+- Skills appearing in `.gitignore` is a regression — they are version-controlled by design.
+- Hand-edited team skills under `.claude/skills/<other>/` that get clobbered by `init` are a regression — `apply_skills` only owns the four shipped names.
+
+### Evidence to Capture
+
+- File listings under `.claude/skills/`, `.cursor/rules/`, and the existence of `AGENTS.md` for each of the three project flavors.
+- One `.cursor/rules/<name>.mdc` head excerpt showing the rewritten frontmatter.
+- `AGENTS.md` excerpt showing the four-row table.
+- `shasum` pairs from the re-`init` idempotency check.
+
+### Execution Notes
+
+- This scenario does not require `setup`, `localnet`, or any network access — it validates only the materialization contract.
+- Pair with E2 when validating template-related changes; pair with B1 when validating `init` behavior alongside basecamp adoption.
+
 ## B1. Basecamp Setup From a Module Project
 
 ### Goal
@@ -1100,6 +1170,7 @@ ls .scaffold/basecamp/portable 2>/dev/null || find .scaffold -maxdepth 4 -name '
 - Changes to LEZ template scaffolding or generated outputs: rerun `L1`, `L2`, `L3`, and `L4`.
 - Changes to CLI argument parsing, help text, or error messages: rerun `E1`.
 - Changes to `create`/`new` flags or template selection logic: rerun `E2`.
+- Changes to AI skill materialization (`apply_skills`, the canonical `skills/` source, frontmatter rewrite, `AGENTS.md` template, or `init` re-run semantics): rerun `E3`.
 - Changes to `basecamp setup` (pin sync, lgpm build, profile seeding, idempotency) or `basecamp doctor`: rerun `B1`.
 - Changes to `[modules]` derivation, dependency resolution, sibling `--override-input` handling, or `basecamp install` invocation of `lgpm`: rerun `B2`.
 - Changes to `basecamp launch` (kill-and-scrub semantics, XDG isolation, port-override env vars, p2p surface): rerun `B3`.

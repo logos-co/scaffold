@@ -466,7 +466,6 @@ fn one_line(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::WALLET_CONFIG_PRIMARY;
     use std::fs;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -479,6 +478,7 @@ mod tests {
         extract_tx_identifier, first_public_wallet_address, is_already_initialized_failure,
         is_uninitialized_account_output, normalize_address_ref, read_default_wallet_address,
         resolve_wallet_address, wallet_state_path, write_default_wallet_address,
+        WALLET_CONFIG_PRIMARY,
     };
 
     const ACCOUNT_ID: &str = "6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV";

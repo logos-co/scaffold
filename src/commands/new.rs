@@ -10,8 +10,8 @@ use crate::config::{
 };
 use crate::constants::{
     DEFAULT_BASECAMP_PIN, DEFAULT_FRAMEWORK_IDL_PATH, DEFAULT_FRAMEWORK_IDL_SPEC,
-    DEFAULT_FRAMEWORK_VERSION, DEFAULT_LB_PIN, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL,
-    FRAMEWORK_KIND_DEFAULT, FRAMEWORK_KIND_LEZ_FRAMEWORK, LEZ_SOURCE, SCAFFOLD_TOML_SCHEMA_VERSION,
+    DEFAULT_FRAMEWORK_VERSION, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL, FRAMEWORK_KIND_DEFAULT,
+    FRAMEWORK_KIND_LEZ_FRAMEWORK, LEZ_SOURCE, SCAFFOLD_TOML_SCHEMA_VERSION,
 };
 use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RunConfig};
 use crate::project::default_cache_root;
@@ -19,6 +19,7 @@ use crate::repo::{sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
 use crate::state::write_text;
 use crate::template::copy::{copy_dir_contents, patch_simple_tail_call_program_id};
 use crate::template::project::{apply_overlay, OverlayRenderContext};
+use crate::template::skills::apply_skills;
 use crate::DynResult;
 
 #[derive(Debug)]
@@ -187,13 +188,13 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
         crate_name: &crate_name,
         lez_pin: &cfg.lez.pin,
         spel_tag: DEFAULT_SPEL.tag,
-        lb_pin: DEFAULT_LB_PIN,
     };
     apply_overlay(target, template_variant, &overlay_ctx)?;
     if template_variant == FRAMEWORK_KIND_LEZ_FRAMEWORK {
         cleanup_lez_hello_artifacts(target)?;
     }
     write_text(&target.join("scaffold.toml"), &serialize_config(&cfg)?)?;
+    apply_skills(&target)?;
 
     let old_getting_started = target.join("GETTING_STARTED.md");
     if old_getting_started.exists() {
@@ -207,6 +208,7 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
     );
     println!("Pinned lez: {}", cfg.lez.pin);
     println!("Template variant: {}", cfg.framework.kind);
+    println!("AI skills installed under .claude/skills/, .cursor/rules/, and AGENTS.md.");
 
     Ok(())
 }

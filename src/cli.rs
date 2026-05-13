@@ -4,6 +4,13 @@ use std::sync::LazyLock;
 use anyhow::anyhow;
 use clap::{CommandFactory, Parser, Subcommand};
 
+use crate::cli_help::{
+    EXAMPLES_BUILD, EXAMPLES_COMPLETIONS, EXAMPLES_CREATE, EXAMPLES_DEPLOY, EXAMPLES_DOCTOR,
+    EXAMPLES_INIT, EXAMPLES_LOCALNET_LOGS, EXAMPLES_LOCALNET_RESET, EXAMPLES_LOCALNET_START,
+    EXAMPLES_LOCALNET_STATUS, EXAMPLES_LOCALNET_STOP, EXAMPLES_REPORT, EXAMPLES_ROOT,
+    EXAMPLES_SETUP, EXAMPLES_WALLET, EXAMPLES_WALLET_DEFAULT_SET, EXAMPLES_WALLET_LIST,
+    EXAMPLES_WALLET_TOPUP,
+};
 use crate::commands::basecamp::{cmd_basecamp, BasecampAction};
 use crate::commands::build::cmd_build_shortcut;
 use crate::commands::client::cmd_client;
@@ -20,6 +27,7 @@ use crate::commands::setup::cmd_setup;
 use crate::commands::spel::cmd_spel;
 use crate::commands::wallet::{cmd_wallet, WalletAction};
 use crate::constants::{DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, VERSION};
+use crate::process::set_command_echo;
 use crate::template::project::available_templates;
 use crate::DynResult;
 
@@ -51,9 +59,17 @@ static RUN_LOCALNET_TIMEOUT_HELP: LazyLock<String> = LazyLock::new(|| {
 #[command(
     name = "logos-scaffold",
     version = VERSION,
-    disable_help_subcommand = true
+    disable_help_subcommand = true,
+    after_long_help = EXAMPLES_ROOT
 )]
 struct Cli {
+    #[arg(
+        short,
+        long,
+        global = true,
+        help = "Suppress echoed external commands (lines starting with `$`). Same effect as LOGOS_SCAFFOLD_QUIET=1."
+    )]
+    quiet: bool,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -97,9 +113,11 @@ enum Commands {
         long_about = "Print a shell completion script to stdout.\n\n\
                       Run `lgs completions <shell> --help` for per-shell install instructions."
     )]
+    #[command(after_long_help = EXAMPLES_COMPLETIONS)]
     Completions(CompletionsArgs),
     #[command(about = "Initialize scaffold.toml in the current directory")]
-    Init,
+    #[command(after_long_help = EXAMPLES_INIT)]
+    Init(InitArgs),
     #[command(hide = true)]
     Help,
     /// Test-only hooks — hidden from `--help` output. Keeps the binary
@@ -175,6 +193,7 @@ enum CompletionsShell {
 }
 
 #[derive(Debug, clap::Args)]
+#[command(after_long_help = EXAMPLES_CREATE)]
 struct NewArgs {
     name: String,
     #[arg(long)]
@@ -186,9 +205,11 @@ struct NewArgs {
 }
 
 #[derive(Debug, clap::Args)]
+#[command(after_long_help = EXAMPLES_SETUP)]
 struct SetupArgs {}
 
 #[derive(Debug, clap::Args)]
+#[command(after_long_help = EXAMPLES_BUILD)]
 struct BuildArgs {
     #[command(subcommand)]
     subcommand: Option<BuildSubcommand>,
@@ -209,23 +230,42 @@ struct BuildSubArgs {
 }
 
 #[derive(Debug, clap::Args)]
+#[command(after_long_help = EXAMPLES_DEPLOY)]
 struct DeployArgs {
     program_name: Option<String>,
     /// Path to a custom ELF binary to deploy directly (bypasses auto-discovery)
     #[arg(long, value_name = "PATH")]
     program_path: Option<PathBuf>,
-    /// Output result as JSON
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Emit deploy results as JSON on stdout (recommended for automation)."
+    )]
     json: bool,
 }
 
 #[derive(Debug, clap::Args)]
+struct InitArgs {
+    #[arg(
+        long,
+        help = "Print what `init` would create or migrate, without writing scaffold.toml or creating .scaffold/."
+    )]
+    dry_run: bool,
+    #[arg(
+        long,
+        help = "Skip writing scaffold.toml.bak before migrating an existing config (default: a backup is written next to scaffold.toml)."
+    )]
+    no_backup: bool,
+}
+
+#[derive(Debug, clap::Args)]
+#[command(after_long_help = EXAMPLES_DOCTOR)]
 struct DoctorArgs {
     #[arg(long)]
     json: bool,
 }
 
 #[derive(Debug, clap::Args)]
+#[command(after_long_help = EXAMPLES_REPORT)]
 struct ReportArgs {
     #[arg(long)]
     out: Option<PathBuf>,
@@ -254,10 +294,15 @@ struct LocalnetArgs {
 
 #[derive(Debug, Subcommand)]
 enum LocalnetSubcommand {
+    #[command(after_long_help = EXAMPLES_LOCALNET_START)]
     Start(LocalnetStartArgs),
+    #[command(after_long_help = EXAMPLES_LOCALNET_STOP)]
     Stop,
+    #[command(after_long_help = EXAMPLES_LOCALNET_STATUS)]
     Status(LocalnetStatusArgs),
+    #[command(after_long_help = EXAMPLES_LOCALNET_LOGS)]
     Logs(LocalnetLogsArgs),
+    #[command(after_long_help = EXAMPLES_LOCALNET_RESET)]
     Reset(LocalnetResetArgs),
 }
 
@@ -286,6 +331,16 @@ struct LocalnetLogsArgs {
 /// delete wallet keypairs and wallet state.
 #[derive(Debug, clap::Args)]
 struct LocalnetResetArgs {
+    #[arg(
+        long,
+        help = "Print planned reset steps and paths without stopping, deleting, or restarting."
+    )]
+    dry_run: bool,
+    #[arg(
+        long,
+        help = "Confirm the destructive reset (always wipes the sequencer DB; with --reset-wallet also deletes wallet keypairs). Required unless --dry-run is passed."
+    )]
+    yes: bool,
     /// Also delete the wallet home directory and wallet state. Destructive:
     /// keypairs are not recoverable after this.
     #[arg(long)]
@@ -297,10 +352,7 @@ struct LocalnetResetArgs {
 }
 
 #[derive(Debug, clap::Args)]
-#[command(long_about = "Manage the project's vendored wallet.\n\n\
-                  For raw wallet CLI access, use the passthrough form: \
-                  `logos-scaffold wallet -- <wallet-args...>`\n\n\
-                  Example: logos-scaffold wallet -- account list")]
+#[command(after_long_help = EXAMPLES_WALLET)]
 struct WalletArgs {
     #[command(subcommand)]
     command: WalletSubcommand,
@@ -316,8 +368,10 @@ struct SpelArgs {
 #[derive(Debug, Subcommand)]
 enum WalletSubcommand {
     #[command(about = "List wallet accounts (same as `wallet account list`)")]
+    #[command(after_long_help = EXAMPLES_WALLET_LIST)]
     List(WalletListArgs),
     #[command(about = "Top up wallet using pinata faucet claim")]
+    #[command(after_long_help = EXAMPLES_WALLET_TOPUP)]
     Topup(WalletTopupArgs),
     #[command(about = "Manage project default wallet")]
     Default(WalletDefaultArgs),
@@ -347,6 +401,7 @@ struct WalletDefaultArgs {
 
 #[derive(Debug, Subcommand)]
 enum WalletDefaultSubcommand {
+    #[command(after_long_help = EXAMPLES_WALLET_DEFAULT_SET)]
     Set(WalletDefaultSetArgs),
 }
 
@@ -379,7 +434,7 @@ enum BasecampSubcommand {
     )]
     Install(BasecampInstallArgs),
     #[command(
-        about = "Launch basecamp for a named profile with clean-slate semantics. See `basecamp docs` for project requirements."
+        about = "Launch basecamp for a named profile with clean-slate semantics. Destructive by default (scrubs xdg-data/xdg-cache); requires --yes, --no-clean, or --dry-run. See `basecamp docs` for project requirements."
     )]
     Launch(BasecampLaunchArgs),
     #[command(
@@ -442,9 +497,25 @@ struct BasecampLaunchArgs {
     /// Skip the clean-slate scrub and reinstall step
     #[arg(long)]
     no_clean: bool,
+    #[arg(
+        long,
+        help = "Confirm the clean-slate scrub of the profile's xdg-data and xdg-cache. Required for the destructive default launch unless --no-clean or --dry-run is passed."
+    )]
+    yes: bool,
+    #[arg(
+        long,
+        help = "Print what would be scrubbed and reinstalled without touching the profile or launching basecamp."
+    )]
+    dry_run: bool,
 }
 
 pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
+    apply_quiet_from_env();
+    let passthrough_start = leading_global_flags_end(&args);
+    if passthrough_start > 1 {
+        set_command_echo(false);
+    }
+
     let bin_name = args
         .first()
         .and_then(|s| std::path::Path::new(s).file_name())
@@ -452,13 +523,13 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
         .unwrap_or("logos-scaffold")
         .to_string();
 
-    if is_spel_help_request(&args) {
+    if is_spel_help_request(&args, passthrough_start) {
         return print_spel_help(&bin_name);
     }
-    if let Some(action) = wallet_passthrough_action(&args)? {
+    if let Some(action) = wallet_passthrough_action(&args, passthrough_start)? {
         return cmd_wallet(action);
     }
-    if let Some(spel_args) = spel_passthrough_args(&args)? {
+    if let Some(spel_args) = spel_passthrough_args(&args, passthrough_start)? {
         return cmd_spel(spel_args);
     }
 
@@ -478,6 +549,10 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
             }
         },
     };
+
+    if cli.quiet {
+        set_command_echo(false);
+    }
 
     match cli.command {
         Some(Commands::Create(args)) | Some(Commands::New(args)) => cmd_new(NewCommand {
@@ -510,6 +585,8 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 LocalnetSubcommand::Status(args) => LocalnetAction::Status { json: args.json },
                 LocalnetSubcommand::Logs(args) => LocalnetAction::Logs { tail: args.tail },
                 LocalnetSubcommand::Reset(args) => LocalnetAction::Reset {
+                    dry_run: args.dry_run,
+                    yes: args.yes,
                     reset_wallet: args.reset_wallet,
                     verify_timeout_sec: args.verify_timeout_sec,
                 },
@@ -564,6 +641,8 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 BasecampSubcommand::Launch(args) => BasecampAction::Launch {
                     profile: args.profile,
                     no_clean: args.no_clean,
+                    yes: args.yes,
+                    dry_run: args.dry_run,
                 },
                 BasecampSubcommand::BuildPortable(_) => BasecampAction::BuildPortable,
                 BasecampSubcommand::Doctor(args) => BasecampAction::Doctor { json: args.json },
@@ -593,7 +672,7 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
             };
             cmd_completions(shell)
         }
-        Some(Commands::Init) => cmd_init(&bin_name),
+        Some(Commands::Init(args)) => cmd_init(&bin_name, args.dry_run, args.no_backup),
         Some(Commands::Help) => print_help(&bin_name),
         Some(Commands::SelfTest(args)) => match args.command {
             SelfTestSubcommand::RunLogged(a) => {
@@ -631,66 +710,118 @@ fn print_spel_help(bin_name: &str) -> DynResult<()> {
     }
 }
 
-fn is_spel_help_request(args: &[String]) -> bool {
-    args.len() >= 3 && args[1] == "spel" && is_help_token(&args[2])
+fn is_spel_help_request(args: &[String], start: usize) -> bool {
+    args.len() > start + 1 && args[start] == "spel" && is_help_token(&args[start + 1])
 }
 
 fn is_help_token(token: &str) -> bool {
     matches!(token, "--help" | "-h" | "help" | "-?")
 }
 
+fn apply_quiet_from_env() {
+    if std::env::var("LOGOS_SCAFFOLD_QUIET")
+        .map(|v| {
+            v == "1"
+                || v.eq_ignore_ascii_case("true")
+                || v.eq_ignore_ascii_case("yes")
+                || v.eq_ignore_ascii_case("on")
+        })
+        .unwrap_or(false)
+    {
+        set_command_echo(false);
+    }
+}
+
+fn leading_global_flags_end(args: &[String]) -> usize {
+    let mut i = 1;
+    while i < args.len() && (args[i] == "--quiet" || args[i] == "-q") {
+        i += 1;
+    }
+    i
+}
+
+/// Advance past any consecutive `-q`/`--quiet` tokens in `args` starting
+/// at `from`. Returns the new index and whether at least one was consumed.
+/// Used inside the passthrough sniffers so `lgs wallet -q -- <args...>` /
+/// `lgs spel -q -- <args...>` are recognized, matching clap's `global = true`
+/// semantics on the `--quiet` flag. Caller is responsible for calling
+/// `set_command_echo(false)` if the second tuple element is `true`.
+fn skip_inline_quiet(args: &[String], from: usize) -> (usize, bool) {
+    let mut i = from;
+    let mut seen = false;
+    while i < args.len() && (args[i] == "-q" || args[i] == "--quiet") {
+        seen = true;
+        i += 1;
+    }
+    (i, seen)
+}
+
 /// Forward `lgs spel -- <args...>` to the project-vendored `spel` binary.
 /// Mirrors `wallet_passthrough_action` so the same `--` convention applies
 /// across passthroughs. When `spel` is invoked without `--`, intercept early
 /// and surface a hint pointing at the right form — clap's "unknown
-/// subcommand" message would otherwise leave the user guessing.
-fn spel_passthrough_args(args: &[String]) -> DynResult<Option<Vec<String>>> {
-    if args.len() < 2 || args[1] != "spel" {
+/// subcommand" message would otherwise leave the user guessing. `start` is
+/// the index after any leading global flags (e.g. `-q`), matching the
+/// signature of `wallet_passthrough_action` so `lgs -q spel -- <args...>`
+/// composes the same way. `lgs spel -q -- <args...>` (the in-between form)
+/// is also accepted via `skip_inline_quiet`.
+fn spel_passthrough_args(args: &[String], start: usize) -> DynResult<Option<Vec<String>>> {
+    if args.len() <= start || args[start] != "spel" {
         return Ok(None);
     }
     // Help spellings are handled before this function so the user sees the
     // variant's `long_about` instead of the passthrough hint.
-    if args.len() >= 3 && is_help_token(&args[2]) {
+    if args.len() > start + 1 && is_help_token(&args[start + 1]) {
         return Ok(None);
     }
-    if args.len() < 3 {
+    let (sep_idx, quiet_seen) = skip_inline_quiet(args, start + 1);
+    if args.len() <= sep_idx {
         return Err(anyhow!(
             "`spel` requires arguments. Use the passthrough form, e.g. `logos-scaffold spel -- inspect <bin>`."
         ));
     }
-    if args[2] != "--" {
+    if args[sep_idx] != "--" {
         return Err(anyhow!(
             "`spel {0} ...` is not a scaffold subcommand. Did you mean `logos-scaffold spel -- {0} ...`? \
              The `--` separator forwards every following argument to the project-vendored `spel` binary.",
-            args[2]
+            args[sep_idx]
         ));
     }
-    if args.len() == 3 {
+    if args.len() == sep_idx + 1 {
         return Err(anyhow!(
             "spel passthrough requires at least one argument after `--`. Example: `logos-scaffold spel -- inspect <bin>`"
         ));
     }
-    Ok(Some(args[3..].to_vec()))
+    if quiet_seen {
+        set_command_echo(false);
+    }
+    Ok(Some(args[sep_idx + 1..].to_vec()))
 }
 
-fn wallet_passthrough_action(args: &[String]) -> DynResult<Option<WalletAction>> {
-    if args.len() < 3 {
+fn wallet_passthrough_action(args: &[String], start: usize) -> DynResult<Option<WalletAction>> {
+    if args.len() <= start || args[start] != "wallet" {
         return Ok(None);
     }
-
-    if args[1] == "wallet" && args[2] == "--" {
-        if args.len() == 3 {
-            return Err(anyhow!(
-                "wallet passthrough requires at least one argument after `--`. Example: `logos-scaffold wallet -- account list`"
-            ));
-        }
-
-        return Ok(Some(WalletAction::Proxy {
-            args: args[3..].to_vec(),
-        }));
+    let (sep_idx, quiet_seen) = skip_inline_quiet(args, start + 1);
+    // Only intercept as passthrough when the next token is `--`; otherwise
+    // it's `wallet list`, `wallet topup`, etc. — let clap parse it. This
+    // also means a stray `lgs wallet -q` (no `--`) falls through to clap,
+    // which surfaces a normal "missing subcommand" error rather than us
+    // hijacking it.
+    if sep_idx >= args.len() || args[sep_idx] != "--" {
+        return Ok(None);
     }
-
-    Ok(None)
+    if args.len() == sep_idx + 1 {
+        return Err(anyhow!(
+            "wallet passthrough requires at least one argument after `--`. Example: `logos-scaffold wallet -- account list`. Discover inner flags with: `logos-scaffold wallet -- --help` (from a project directory)."
+        ));
+    }
+    if quiet_seen {
+        set_command_echo(false);
+    }
+    Ok(Some(WalletAction::Proxy {
+        args: args[sep_idx + 1..].to_vec(),
+    }))
 }
 
 fn merge_optional_address(

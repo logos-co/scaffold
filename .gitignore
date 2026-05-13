@@ -1,4 +1,5 @@
 /target
+.claude/
 docs/specs/
 docs/ideas/
 graphify-out/
