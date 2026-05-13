@@ -270,8 +270,22 @@ fn single_program_binary(project: &Project) -> DynResult<Option<PathBuf>> {
 }
 
 fn resolve_spel_bin(project: &Project) -> Option<PathBuf> {
-    let spel = resolve_repo_path(project, &project.config.spel, "spel").ok()?;
-    Some(spel.join(SPEL_BIN_REL_PATH))
+    // Surface resolver failures rather than silently dropping them: the most
+    // common reasons `resolve_repo_path` errors here are exactly the cases
+    // the user cares about (misconfigured `[repos.spel]`, missing
+    // `cache_root`, broken pin). Without this warning, deploy succeeds and
+    // every post-deploy hook runs with `SCAFFOLD_PROGRAM_ID` /
+    // `SCAFFOLD_GUEST_BIN` mysteriously unset.
+    match resolve_repo_path(project, &project.config.spel, "spel") {
+        Ok(p) => Some(p.join(SPEL_BIN_REL_PATH)),
+        Err(e) => {
+            eprintln!(
+                "warning: cannot resolve spel binary: {e}; \
+                 SCAFFOLD_PROGRAM_ID will be unset for post-deploy hooks"
+            );
+            None
+        }
+    }
 }
 
 fn run_post_deploy_hook(
@@ -580,6 +594,32 @@ mod tests {
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content.trim(), "unset");
+    }
+
+    #[test]
+    fn resolve_spel_bin_returns_none_when_repo_unresolvable() {
+        // Regression for the silent-error-swallowing bug: when
+        // `[repos.spel]` is misconfigured (both path and pin empty),
+        // `resolve_spel_bin` must return `None` rather than panic, so the
+        // caller can still produce a `SingleProgram` with `program_id: None`
+        // and the post-deploy hook keeps running. The accompanying stderr
+        // warning is exercised in the binary via `eprintln!` and isn't
+        // captured here — what we lock in is that the failure mode stays
+        // `None`, not a panic.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut project = make_test_project(temp.path().to_path_buf());
+        // Force `resolve_repo_path` to error: path empty AND pin empty.
+        project.config.spel = RepoRef {
+            source: "spel".to_string(),
+            path: String::new(),
+            pin: String::new(),
+            ..Default::default()
+        };
+        // Also blank the cache_root so the env layer doesn't accidentally
+        // succeed in a sandbox.
+        project.config.cache_root = String::new();
+
+        assert!(resolve_spel_bin(&project).is_none());
     }
 
     #[test]
