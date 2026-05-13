@@ -123,6 +123,7 @@ pub(crate) fn ensure_repo_present(
         Command::new("git")
             .arg("clone")
             .arg("--no-hardlinks")
+            .arg("--")
             .arg(source)
             .arg(path),
         &format!("clone {label}"),
@@ -161,6 +162,7 @@ fn reconcile_repo_source(
                 Command::new("git")
                     .arg("clone")
                     .arg("--no-hardlinks")
+                    .arg("--")
                     .arg(source)
                     .arg(path),
                 &format!("refresh clone {label}"),

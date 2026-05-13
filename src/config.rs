@@ -29,7 +29,7 @@ use crate::constants::{
 };
 use crate::model::{
     BasecampConfig, Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, ModuleEntry,
-    ModuleRole, RepoBuild, RepoRef,
+    ModuleRole, RepoBuild, RepoRef, RunConfig,
 };
 use crate::DynResult;
 
@@ -68,6 +68,7 @@ pub(crate) fn parse_config(text: &str) -> DynResult<Config> {
 
     let modules = parse_modules(&doc)?;
     let basecamp = parse_basecamp_runtime(&doc)?;
+    let run = parse_run(&doc)?;
     let framework = parse_framework(&doc);
     let localnet = parse_localnet(&doc)?;
     let wallet_home_dir = doc
@@ -88,7 +89,43 @@ pub(crate) fn parse_config(text: &str) -> DynResult<Config> {
         localnet,
         modules,
         basecamp,
+        run,
     })
+}
+
+/// Parse the `[run]` section. Branch-1 surface is the inline `post_deploy`
+/// only — string (single hook) or array (multiple). `[run.profiles.*]`,
+/// `default_profile`, and `reset` arrive in later branches.
+fn parse_run(doc: &DocumentMut) -> DynResult<RunConfig> {
+    let Some(run_table) = doc.get("run").and_then(Item::as_table) else {
+        return Ok(RunConfig::default());
+    };
+    let post_deploy = parse_post_deploy(run_table.get("post_deploy"))?;
+    Ok(RunConfig { post_deploy })
+}
+
+fn parse_post_deploy(item: Option<&Item>) -> DynResult<Vec<String>> {
+    let Some(item) = item else {
+        return Ok(Vec::new());
+    };
+    if let Some(s) = item.as_str() {
+        return Ok(if s.is_empty() {
+            Vec::new()
+        } else {
+            vec![s.to_string()]
+        });
+    }
+    if let Some(arr) = item.as_array() {
+        let mut out = Vec::with_capacity(arr.len());
+        for v in arr.iter() {
+            let s = v.as_str().ok_or_else(|| {
+                anyhow!("invalid scaffold.toml: post_deploy entries must be strings")
+            })?;
+            out.push(s.to_string());
+        }
+        return Ok(out);
+    }
+    bail!("invalid scaffold.toml: post_deploy must be a string or array of strings")
 }
 
 /// Reject pre-0.2.0 schemas with a targeted error naming the section that's
@@ -189,6 +226,7 @@ fn parse_repo_ref(doc: &DocumentMut, name: &str) -> DynResult<Option<RepoRef>> {
     check_toml_value(&format!("repos.{name}.pin"), &pin)?;
     check_toml_value(&format!("repos.{name}.attr"), &attr)?;
     check_toml_value(&format!("repos.{name}.path"), &path)?;
+    check_repo_source(name, &source)?;
 
     Ok(Some(RepoRef {
         source,
@@ -197,6 +235,52 @@ fn parse_repo_ref(doc: &DocumentMut, name: &str) -> DynResult<Option<RepoRef>> {
         attr,
         path,
     }))
+}
+
+/// Reject `[repos.<name>].source` values that would let a malicious
+/// `scaffold.toml` execute code on contributor machines via `git clone`.
+///
+/// Two classes are covered here, both reachable from `ensure_repo_present`:
+///
+/// - Leading `-` is treated by `git clone` as an option, not a positional
+///   `<repository>`. Even with the `--` separator the clone call sites pass
+///   defensively, parse-time rejection gives a clear error pointing at the
+///   offending key instead of a confusing subprocess failure.
+/// - `ext::` (and other remote-helper transports written as `<helper>::...`)
+///   invoke `git-remote-<helper>`, which for `ext` runs an arbitrary shell
+///   command — the CVE-2017-1000117 class. None of scaffold's flows need
+///   it, so refusing it at parse time is strictly safer.
+fn check_repo_source(name: &str, source: &str) -> DynResult<()> {
+    let trimmed = source.trim();
+    if trimmed.is_empty() {
+        bail!("invalid scaffold.toml: [repos.{name}].source is empty");
+    }
+    if trimmed.starts_with('-') {
+        bail!(
+            "invalid scaffold.toml: [repos.{name}].source starts with '-' ({source:?}); \
+             refusing — git would treat this as an option, not a repository"
+        );
+    }
+    if is_dangerous_transport(trimmed) {
+        bail!(
+            "invalid scaffold.toml: [repos.{name}].source uses a dangerous git transport ({source:?}); \
+             `ext::` and other remote-helper transports can execute arbitrary commands at clone time and are not allowed"
+        );
+    }
+    Ok(())
+}
+
+/// Match the `<helper>::<rest>` remote-helper syntax for transports that can
+/// execute code. `ext::` is the canonical RCE vector (CVE-2017-1000117); the
+/// rest of the recognized list mirrors transports whose helpers historically
+/// shipped shell-out behavior or are otherwise unsuitable for an untrusted
+/// `scaffold.toml`.
+fn is_dangerous_transport(source: &str) -> bool {
+    const BANNED_PREFIXES: &[&str] = &["ext::", "ext ::", "transport-helper::"];
+    let lowered = source.to_ascii_lowercase();
+    BANNED_PREFIXES
+        .iter()
+        .any(|prefix| lowered.starts_with(prefix))
 }
 
 fn parse_modules(doc: &DocumentMut) -> DynResult<std::collections::BTreeMap<String, ModuleEntry>> {
@@ -448,7 +532,35 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
         basecamp_table["port_stride"] = value(i64::from(bc.port_stride));
     }
 
+    // [run] — only emit when non-default to keep fresh scaffold.toml minimal.
+    write_run_config(&mut doc, &cfg.run)?;
+
     Ok(doc.to_string())
+}
+
+fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
+    if run.post_deploy.is_empty() {
+        return Ok(());
+    }
+    for hook in &run.post_deploy {
+        check_toml_value("run.post_deploy", hook)?;
+    }
+    let run_item = doc.entry("run").or_insert(Item::Table(Table::new()));
+    let run_table = run_item.as_table_mut().expect("run table");
+    run_table["post_deploy"] = post_deploy_value(&run.post_deploy);
+    Ok(())
+}
+
+fn post_deploy_value(hooks: &[String]) -> Item {
+    if hooks.len() == 1 {
+        value(&hooks[0])
+    } else {
+        let mut arr = toml_edit::Array::new();
+        for h in hooks {
+            arr.push(h.as_str());
+        }
+        value(arr)
+    }
 }
 
 fn write_repo_ref(doc: &mut DocumentMut, name: &str, repo: &RepoRef) -> DynResult<()> {
@@ -783,6 +895,79 @@ role = "project"
             err.to_string().contains("70000") || err.to_string().contains("u16"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn rejects_repo_source_starting_with_dash() {
+        let toml = minimal_v0_2_0().replace(
+            &format!("source = \"{}\"\npin = \"{}\"", LEZ_SOURCE, DEFAULT_LEZ.sha),
+            &format!(
+                "source = \"-upload-pack=evil\"\npin = \"{}\"",
+                DEFAULT_LEZ.sha
+            ),
+        );
+        let err = parse_config(&toml).expect_err("dash-prefixed source must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("repos.lez"), "{msg}");
+        assert!(msg.contains("starts with '-'"), "{msg}");
+    }
+
+    #[test]
+    fn rejects_repo_source_with_ext_transport() {
+        let toml = minimal_v0_2_0().replace(
+            &format!("source = \"{}\"\npin = \"{}\"", LEZ_SOURCE, DEFAULT_LEZ.sha),
+            &format!("source = \"ext::sh -c id\"\npin = \"{}\"", DEFAULT_LEZ.sha),
+        );
+        let err = parse_config(&toml).expect_err("ext:: transport must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("repos.lez"), "{msg}");
+        assert!(msg.contains("dangerous git transport"), "{msg}");
+    }
+
+    #[test]
+    fn rejects_repo_source_with_ext_transport_case_insensitive() {
+        let toml = minimal_v0_2_0().replace(
+            &format!("source = \"{}\"\npin = \"{}\"", LEZ_SOURCE, DEFAULT_LEZ.sha),
+            &format!("source = \"EXT::sh -c id\"\npin = \"{}\"", DEFAULT_LEZ.sha),
+        );
+        let err = parse_config(&toml).expect_err("upper-case ext:: must be rejected");
+        assert!(err.to_string().contains("dangerous git transport"), "{err}");
+    }
+
+    #[test]
+    fn rejects_repo_source_with_transport_helper_prefix() {
+        let toml = minimal_v0_2_0().replace(
+            &format!("source = \"{}\"\npin = \"{}\"", LEZ_SOURCE, DEFAULT_LEZ.sha),
+            &format!(
+                "source = \"transport-helper::evil\"\npin = \"{}\"",
+                DEFAULT_LEZ.sha
+            ),
+        );
+        let err = parse_config(&toml).expect_err("transport-helper:: must be rejected");
+        assert!(err.to_string().contains("dangerous git transport"), "{err}");
+    }
+
+    #[test]
+    fn accepts_ordinary_repo_sources() {
+        // Defense-in-depth: the rejection path is selective. Confirm the
+        // common, benign source shapes still parse — https, ssh, git@, plain
+        // paths.
+        for source in [
+            "https://github.com/example/repo.git",
+            "http://example.com/repo",
+            "ssh://git@example.com/repo.git",
+            "git@github.com:example/repo.git",
+            "/abs/local/repo",
+            "./relative/repo",
+            "extender/repo",
+        ] {
+            let toml = minimal_v0_2_0().replace(
+                &format!("source = \"{}\"\npin = \"{}\"", LEZ_SOURCE, DEFAULT_LEZ.sha),
+                &format!("source = \"{}\"\npin = \"{}\"", source, DEFAULT_LEZ.sha),
+            );
+            parse_config(&toml)
+                .unwrap_or_else(|e| panic!("benign source {source:?} rejected: {e}"));
+        }
     }
 
     #[test]

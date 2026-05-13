@@ -460,12 +460,34 @@ fn check_spel_lez_alignment(spel_path: &std::path::Path) -> CheckRow {
     }
 }
 
+// Decide whether a wallet-check failure should be downgraded from Fail to
+// Warn because the local sequencer is simply unreachable. Conservative on
+// purpose: doctor's job is to surface failures, so a misclassification in
+// either direction has to be a real connectivity error before the user
+// sees the friendly "start localnet" hint instead of the raw failure.
+//
+// The hard rule is that mentioning the sequencer URL is **not enough** —
+// wallet binaries routinely echo the configured address in unrelated
+// error contexts (RPC rejection, signature mismatch, malformed payload).
+// We require *both* an explicit transport-error token *and* the address,
+// so an unrelated failure that happens to print the URL is left as Fail.
 fn is_localnet_connectivity_failure(stdout: &str, stderr: &str) -> bool {
     let text = format!("{stdout}\n{stderr}").to_lowercase();
-    text.contains("connection refused")
+
+    let mentions_localnet_address =
+        text.contains("127.0.0.1:3040") || text.contains("localhost:3040");
+
+    let has_transport_error_token = text.contains("connection refused")
+        || text.contains("econnrefused")
+        || text.contains("tcp connect error")
+        || text.contains("network is unreachable")
+        || text.contains("no route to host")
+        || text.contains("failed to connect")
+        || text.contains("couldn't connect")
         || text.contains("connecterror")
-        || text.contains("127.0.0.1:3040")
-        || text.contains("localhost:3040")
+        || text.contains("dns error");
+
+    mentions_localnet_address && has_transport_error_token
 }
 
 fn derive_next_steps(rows: &[CheckRow]) -> Vec<String> {
@@ -577,5 +599,61 @@ mod tests {
         let row = check_spel_lez_alignment(tmp.path());
         assert_eq!(row.status, CheckStatus::Pass);
         assert!(row.detail.contains("skipped"));
+    }
+
+    #[test]
+    fn connectivity_heuristic_triggers_on_refused_connection_with_address() {
+        let stderr = "Error: reqwest::Error { kind: Request, url: \"http://127.0.0.1:3040/\", \
+                      source: hyper::Error(Connect, ConnectError(\"tcp connect error\", \
+                      Os { code: 111, kind: ConnectionRefused, message: \"Connection refused\" })) }";
+        assert!(is_localnet_connectivity_failure("", stderr));
+    }
+
+    #[test]
+    fn connectivity_heuristic_triggers_on_localhost_alias_with_econnrefused() {
+        let stderr = "wallet: rpc call to http://localhost:3040 failed: ECONNREFUSED";
+        assert!(is_localnet_connectivity_failure("", stderr));
+    }
+
+    #[test]
+    fn connectivity_heuristic_does_not_trigger_on_signature_mismatch_echoing_address() {
+        // Genuine non-connectivity failure: the sequencer answered, rejected
+        // the payload, and the wallet echoed the target URL in its error
+        // context. This must stay Fail, not get downgraded to Warn.
+        let stderr = "Error: rpc call to http://127.0.0.1:3040/ failed: \
+                      signature mismatch for sender 0xabcd...";
+        assert!(!is_localnet_connectivity_failure("", stderr));
+    }
+
+    #[test]
+    fn connectivity_heuristic_does_not_trigger_on_malformed_payload_echoing_address() {
+        // Another genuine failure shape: sequencer rejected a malformed
+        // request and the URL appears in the trace. Must stay Fail.
+        let stdout = "POST http://localhost:3040/ -> 400 Bad Request: invalid abi-encoded calldata";
+        assert!(!is_localnet_connectivity_failure(stdout, ""));
+    }
+
+    #[test]
+    fn connectivity_heuristic_does_not_trigger_on_address_alone() {
+        // Bare address mention with no transport-error token is the exact
+        // false-positive shape we are tightening against. Issue #113.
+        let stdout = "wallet check-health: target http://127.0.0.1:3040/, sender 0xdead";
+        assert!(!is_localnet_connectivity_failure(stdout, ""));
+    }
+
+    #[test]
+    fn connectivity_heuristic_does_not_trigger_on_transport_error_without_address() {
+        // Transport-error token alone, on a non-localnet endpoint, must
+        // not be classified as a localnet-connectivity failure: it could
+        // be a different network call entirely (proxy, external RPC).
+        let stderr = "io error: connection refused while reaching https://example.com/";
+        assert!(!is_localnet_connectivity_failure("", stderr));
+    }
+
+    #[test]
+    fn connectivity_heuristic_is_case_insensitive() {
+        // Some toolchains emit Title-Case error variants.
+        let stderr = "Connection Refused (os error 111) talking to http://127.0.0.1:3040/";
+        assert!(is_localnet_connectivity_failure("", stderr));
     }
 }
