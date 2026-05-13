@@ -302,8 +302,7 @@ mod tests {
         // Re-running init on an already-migrated project must succeed; it is
         // the user-facing entry point for refreshing AI skill files alongside
         // any pending schema migration.
-        cmd_init_at(target, "lgs", false, false)
-            .expect("re-init must succeed and refresh skills");
+        cmd_init_at(target, "lgs", false, false).expect("re-init must succeed and refresh skills");
         assert!(
             target.join(".claude/skills/lgs-cli/SKILL.md").is_file(),
             "claude skill must be present after re-init"
