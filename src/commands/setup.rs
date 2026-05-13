@@ -1,9 +1,10 @@
 use std::path::Path;
 use std::process::Command;
 
+use crate::circuits::ensure_circuits_for_subprocess;
 use crate::model::RepoRef;
 use crate::process::run_checked;
-use crate::project::{ensure_dir_exists, load_project, resolve_repo_path};
+use crate::project::{ensure_dir_exists, load_project, resolve_cache_root, resolve_repo_path};
 use crate::repo::{sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
 use crate::state::prepare_wallet_home;
 use crate::DynResult;
@@ -17,6 +18,14 @@ pub(crate) fn cmd_setup() -> DynResult<()> {
     let project = load_project()?;
     let lez = resolve_repo_path(&project, &project.config.lez, "lez")?;
     let spel = resolve_repo_path(&project, &project.config.spel, "spel")?;
+
+    // Both the LEZ standalone-sequencer build below and (downstream) the
+    // user-project workspace build pull in `logos-blockchain-{pol,poc,poq,zksign}`
+    // build scripts, which panic when their circuits release isn't visible.
+    // Materialise it once before any cargo invocation; the export propagates
+    // to every subprocess for the rest of the process.
+    let (cache_root, _) = resolve_cache_root(&project)?;
+    ensure_circuits_for_subprocess(&cache_root)?;
 
     sync_pinned_repo(&project.config.lez, &lez, "lez")?;
     ensure_dir_exists(&lez, "lez")?;

@@ -8,11 +8,14 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context};
 use serde_json::Value;
 
+use crate::circuits::ensure_circuits_for_subprocess;
 use crate::constants::{SEQUENCER_BIN_REL_PATH, SEQUENCER_CONFIG_REL_PATH};
 use crate::error::{LocalnetError, ResetError};
 use crate::model::{LocalnetOwnership, LocalnetState, LocalnetStatusReport, Project};
 use crate::process::{listener_pid, pid_alive, pid_command, pid_running, port_open, spawn_to_log};
-use crate::project::{ensure_dir_exists, find_project_root, load_project, resolve_repo_path};
+use crate::project::{
+    ensure_dir_exists, find_project_root, load_project, resolve_cache_root, resolve_repo_path,
+};
 use crate::state::{read_localnet_state, write_localnet_state};
 use crate::DynResult;
 
@@ -78,6 +81,19 @@ fn cmd_localnet_in_project(project: &Project, action: LocalnetAction) -> DynResu
     let logs_dir = project.root.join(".scaffold/logs");
     let log_path = logs_dir.join("sequencer.log");
     fs::create_dir_all(&logs_dir)?;
+
+    // The standalone `sequencer_service` binary calls into the
+    // `logos-blockchain-zksign` runtime, which loads circuit witness
+    // generators from `LOGOS_BLOCKCHAIN_CIRCUITS` (or `~/.logos-blockchain-circuits`)
+    // and panics if neither exists. Materialise the release if absent and
+    // export the env var so any subprocess we spawn here inherits it.
+    if matches!(
+        action,
+        LocalnetAction::Start { .. } | LocalnetAction::Reset { .. }
+    ) {
+        let (cache_root, _) = resolve_cache_root(project)?;
+        ensure_circuits_for_subprocess(&cache_root)?;
+    }
 
     match action {
         LocalnetAction::Start { timeout_sec } => cmd_localnet_start(

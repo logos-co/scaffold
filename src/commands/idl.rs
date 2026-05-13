@@ -4,9 +4,10 @@ use std::process::Command;
 
 use anyhow::{anyhow, bail};
 
+use crate::circuits::ensure_circuits_for_subprocess;
 use crate::constants::FRAMEWORK_KIND_LEZ_FRAMEWORK;
 use crate::process::run_capture;
-use crate::project::{load_project, run_in_project_dir};
+use crate::project::{load_project, resolve_cache_root, run_in_project_dir};
 use crate::state::write_text;
 use crate::DynResult;
 
@@ -48,6 +49,11 @@ pub(crate) fn build_idl_for_current_project() -> DynResult<()> {
     let idl_dir = project.root.join(&project.config.framework.idl.path);
     fs::create_dir_all(&idl_dir)?;
     clear_existing_json_files(&idl_dir)?;
+
+    // Same rationale as `setup`: the workspace test build pulls in the
+    // logos-blockchain crates that need a populated circuits release.
+    let (cache_root, _) = resolve_cache_root(&project)?;
+    ensure_circuits_for_subprocess(&cache_root)?;
 
     let out = run_capture(
         Command::new("cargo")
