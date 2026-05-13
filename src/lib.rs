@@ -1,6 +1,7 @@
 pub(crate) type DynResult<T> = anyhow::Result<T>;
 
 pub(crate) mod cli;
+pub(crate) mod cli_help;
 pub(crate) mod commands;
 pub(crate) mod config;
 pub(crate) mod constants;

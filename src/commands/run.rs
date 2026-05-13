@@ -71,8 +71,12 @@ fn run_pipeline_once(
     // Step 4: Wallet topup
     println!("[4/{total_steps}] Topping up wallet...");
     let outcome = cmd_wallet_topup_inner(project, None, false)?;
-    if outcome == TopupOutcome::ConfirmationTimeout {
-        bail!("wallet topup confirmation timed out; aborting run to avoid deploying with uncertain funding.\nHint: retry `logos-scaffold run` or run `logos-scaffold wallet topup` manually.");
+    if let TopupOutcome::ConfirmationTimeout { message } = outcome {
+        bail!(
+            "{message}\n\
+             Run aborted before deploy to avoid deploying with uncertain funding.\n\
+             Hint: retry `logos-scaffold run` or run `logos-scaffold wallet topup` manually."
+        );
     }
 
     // Step 5: Deploy (idempotent: skip when guest .bin + IDL + deploy

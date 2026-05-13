@@ -56,6 +56,235 @@ risc0_dev_mode = true
 "#;
 
 #[test]
+fn root_help_lists_quiet_flag_and_examples() {
+    let temp = tempdir().expect("tempdir");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("--quiet")
+                .and(predicate::str::contains("Examples:"))
+                .and(predicate::str::contains("LOGOS_SCAFFOLD_QUIET")),
+        );
+}
+
+#[test]
+fn deploy_help_documents_json_for_automation() {
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .arg("deploy")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("--json")
+                .and(predicate::str::contains("Machine-readable output"))
+                .and(predicate::str::contains("LOGOS_SCAFFOLD_WALLET_PASSWORD")),
+        );
+}
+
+#[test]
+fn localnet_reset_help_lists_dry_run() {
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .arg("localnet")
+        .arg("reset")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--dry-run"));
+}
+
+#[test]
+fn localnet_reset_dry_run_prints_plan_without_mutations() {
+    let temp = tempdir().expect("tempdir");
+    let lez_path = temp.path().join("lez");
+    fs::create_dir_all(&lez_path).expect("create lez path");
+    write_scaffold_toml(temp.path(), &lez_path);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("localnet")
+        .arg("reset")
+        .arg("--dry-run")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("dry-run: localnet reset")
+                .and(predicate::str::contains("planned: delete sequencer DB")),
+        );
+
+    let rocksdb = lez_path.join("rocksdb");
+    assert!(
+        !rocksdb.exists(),
+        "dry-run must not create or require rocksdb at {}",
+        rocksdb.display()
+    );
+}
+
+#[test]
+fn localnet_reset_without_yes_or_dry_run_refuses_destructive_default() {
+    // C1: `localnet reset` with no flags must refuse rather than silently
+    // wiping the sequencer DB. The error message advertises the two valid
+    // shapes (`--yes` to confirm, `--dry-run` to preview) so an agent that
+    // got the syntax wrong can copy-paste the corrected form.
+    let temp = tempdir().expect("tempdir");
+    let lez_path = temp.path().join("lez");
+    fs::create_dir_all(&lez_path).expect("create lez path");
+    write_scaffold_toml(temp.path(), &lez_path);
+    // Seed the sequencer DB so we can verify the refusal does NOT delete it.
+    let rocksdb = lez_path.join("rocksdb");
+    fs::create_dir_all(&rocksdb).expect("seed rocksdb");
+    fs::write(rocksdb.join("CURRENT"), b"sentinel").expect("seed db file");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("localnet")
+        .arg("reset")
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("destructive")
+                .and(predicate::str::contains("--yes"))
+                .and(predicate::str::contains("--dry-run")),
+        );
+
+    assert!(
+        rocksdb.join("CURRENT").exists(),
+        "refusal must leave rocksdb untouched at {}",
+        rocksdb.display()
+    );
+}
+
+#[test]
+fn wallet_help_documents_inner_cli_discovery() {
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .arg("wallet")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("wallet -- --help"));
+}
+
+#[test]
+fn wallet_passthrough_works_with_leading_quiet_flag() {
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("--quiet")
+        .arg("wallet")
+        .arg("--")
+        .arg("account")
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Preconfigured Public/"));
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("-q")
+        .arg("wallet")
+        .arg("--")
+        .arg("account")
+        .arg("list")
+        .assert()
+        .success();
+}
+
+#[test]
+fn wallet_passthrough_accepts_quiet_between_subcommand_and_separator() {
+    // Copilot review on PR #86: `--quiet` is `global = true`, so an agent
+    // would reasonably try `lgs wallet -q -- account list` (or `--quiet`).
+    // The passthrough sniffer must accept the in-between form and still
+    // suppress the `$ <wallet-bin>` echo line on stdout.
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("wallet")
+        .arg("-q")
+        .arg("--")
+        .arg("account")
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Preconfigured Public/"));
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(
+        !stdout.contains("$ "),
+        "in-between -q must suppress the `$ <cmd>` echo line, got:\n{stdout}"
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("wallet")
+        .arg("--quiet")
+        .arg("--")
+        .arg("account")
+        .arg("list")
+        .assert()
+        .success();
+}
+
+#[test]
+fn logos_scaffold_quiet_env_suppresses_command_echo_case_insensitively() {
+    // Pins the contract advertised by `cli_help::EXAMPLES_ROOT` and the
+    // `--quiet` help string: `LOGOS_SCAFFOLD_QUIET=` accepts `1`, `true`,
+    // `yes`, `on` case-insensitively. Without the env var the wallet
+    // passthrough echoes `$ <wallet-bin> account list` via `run_forwarded`;
+    // any accepted truthy value must suppress that line.
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+
+    let baseline = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["wallet", "--", "account", "list"])
+        .assert()
+        .success();
+    let baseline_stdout = String::from_utf8_lossy(&baseline.get_output().stdout).into_owned();
+    assert!(
+        baseline_stdout.contains("$ "),
+        "baseline (no quiet) must echo `$ <cmd>`, got:\n{baseline_stdout}"
+    );
+
+    // Each row must suppress the `$ ` echo. Mixed-case values pin the
+    // case-insensitive branch — they used to slip through the `matches!`
+    // arm and still echo.
+    for value in ["1", "true", "TRUE", "True", "yes", "YES", "Yes", "on", "ON"] {
+        let out = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+            .current_dir(temp.path())
+            .env("LOGOS_SCAFFOLD_QUIET", value)
+            .args(["wallet", "--", "account", "list"])
+            .assert()
+            .success();
+        let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
+        assert!(
+            !stdout.contains("$ "),
+            "LOGOS_SCAFFOLD_QUIET={value} should suppress `$ ` echo, got:\n{stdout}"
+        );
+    }
+
+    // Negative cases: empty / `0` / `false` / garbage must NOT suppress.
+    for value in ["", "0", "false", "no", "off", "garbage"] {
+        let out = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+            .current_dir(temp.path())
+            .env("LOGOS_SCAFFOLD_QUIET", value)
+            .args(["wallet", "--", "account", "list"])
+            .assert()
+            .success();
+        let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
+        assert!(
+            stdout.contains("$ "),
+            "LOGOS_SCAFFOLD_QUIET={value:?} must NOT suppress echo, got:\n{stdout}"
+        );
+    }
+}
+
+#[test]
 fn create_help_does_not_mutate_filesystem() {
     let temp = tempdir().expect("tempdir");
 
@@ -1173,7 +1402,11 @@ fn wallet_topup_continues_when_init_reports_already_initialized() {
 }
 
 #[test]
-fn wallet_topup_timeout_is_reported_as_non_fatal() {
+fn wallet_topup_timeout_exits_non_zero_with_pending_status() {
+    // C3: confirmation timeout means we don't actually know whether the
+    // submission landed. Surface that to the agent via a non-zero exit and
+    // an explicit `status: pending` in the message, instead of the previous
+    // soft-success that tricked retry loops into thinking the topup was done.
     let temp = tempdir().expect("tempdir");
     setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
 
@@ -1185,10 +1418,11 @@ fn wallet_topup_timeout_is_reported_as_non_fatal() {
         .arg("--address")
         .arg(VALID_PUBLIC_ADDRESS)
         .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "wallet topup submitted, but confirmation timed out",
-        ));
+        .failure()
+        .stderr(
+            predicate::str::contains("wallet topup submitted, but confirmation timed out")
+                .and(predicate::str::contains("status: pending")),
+        );
 }
 
 #[test]
@@ -1767,6 +2001,74 @@ fn spel_proxy_forwards_args_to_vendored_binary() {
 }
 
 #[test]
+fn spel_proxy_works_with_leading_quiet_flag() {
+    // Suppressed copilot comment on PR #86: `spel_passthrough_args` was
+    // hard-coded to look at args[1], so `lgs -q spel -- ...` skipped the
+    // passthrough entirely and fell through to clap (which has no `spel`
+    // subcommand). Mirrors `wallet_passthrough_works_with_leading_quiet_flag`
+    // for symmetry with the other passthrough.
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("--quiet")
+        .arg("spel")
+        .arg("--")
+        .arg("inspect")
+        .arg("methods/guest/foo.bin")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ImageID (hex bytes):"));
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("-q")
+        .arg("spel")
+        .arg("--")
+        .arg("inspect")
+        .arg("methods/guest/foo.bin")
+        .assert()
+        .success();
+}
+
+#[test]
+fn spel_proxy_accepts_quiet_between_subcommand_and_separator() {
+    // Copilot review on PR #86: same global-quiet composition fix as for
+    // wallet passthrough. `lgs spel -q -- inspect ...` must be intercepted
+    // (not handed to clap, which has no `spel` subcommand) and must
+    // suppress the `$ <spel-bin>` echo on stdout.
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("spel")
+        .arg("-q")
+        .arg("--")
+        .arg("inspect")
+        .arg("methods/guest/foo.bin")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ImageID (hex bytes):"));
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(
+        !stdout.contains("$ "),
+        "in-between -q must suppress the `$ <cmd>` echo line, got:\n{stdout}"
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("spel")
+        .arg("--quiet")
+        .arg("--")
+        .arg("inspect")
+        .arg("methods/guest/foo.bin")
+        .assert()
+        .success();
+}
+
+#[test]
 fn spel_proxy_forwards_nonzero_exit_code() {
     let temp = tempdir().expect("tempdir");
     setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
@@ -1914,7 +2216,7 @@ fn basecamp_launch_without_profile_errors() {
 #[test]
 fn self_test_run_logged_success_shape() {
     // Hidden `self-test run-logged` hook drives `run_logged` against a
-    // trivial subprocess (`/bin/true`). We assert the visible output shape
+    // trivial subprocess (`true`). We assert the visible output shape
     // so future reshapes of `run_logged` don't silently regress the UX.
     let temp = tempdir().expect("tempdir");
     let log = temp.path().join("self-test.log");
@@ -1999,7 +2301,7 @@ fn self_test_run_logged_print_output_streams_and_echoes_command() {
         .success();
     let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
     assert!(
-        stdout.contains("running: ") && stdout.contains("/bin/true"),
+        stdout.contains("running: ") && stdout.contains("true"),
         "--print-output must echo the command, got:\n{stdout}"
     );
     assert!(
@@ -2221,13 +2523,13 @@ fn basecamp_launch_rejects_unknown_profile() {
     fs::write(project.join("scaffold.toml"), MINIMAL_SCAFFOLD_TOML).expect("write scaffold.toml");
 
     // Fake a completed setup so we get past the first gate and reach profile validation.
-    // Paths are /bin/true / /bin/echo — they exist on Linux, and launch never actually
+    // Paths are /bin/echo / /bin/sh — they exist on Linux and macOS, and launch never actually
     // reaches `exec` because the profile check fails first.
     let state_dir = project.join(".scaffold/state");
     fs::create_dir_all(&state_dir).expect("mkdir state");
     fs::write(
         state_dir.join("basecamp.state"),
-        "pin=deadbeef\nbasecamp_bin=/bin/true\nlgpm_bin=/bin/echo\n",
+        "pin=deadbeef\nbasecamp_bin=/bin/echo\nlgpm_bin=/bin/sh\n",
     )
     .expect("write state");
 
@@ -2270,16 +2572,20 @@ fn basecamp_launch_bails_when_no_modules_captured() {
     fs::create_dir_all(&state_dir).expect("mkdir state");
     fs::write(
         state_dir.join("basecamp.state"),
-        "pin=deadbeef\nbasecamp_bin=/bin/true\nlgpm_bin=/bin/echo\n",
+        "pin=deadbeef\nbasecamp_bin=/bin/echo\nlgpm_bin=/bin/sh\n",
     )
     .expect("write state");
     fs::create_dir_all(project.join(".scaffold/basecamp/profiles/alice")).expect("mkdir profile");
 
+    // `--yes` clears the C2 destructive-default gate so the assertion below
+    // exercises the no-modules-captured bail (which still fires on a clean
+    // launch with an empty module set, regardless of the gate).
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(project)
         .arg("basecamp")
         .arg("launch")
         .arg("alice")
+        .arg("--yes")
         .assert()
         .failure()
         .stderr(predicate::str::contains("basecamp modules"))
@@ -2288,10 +2594,114 @@ fn basecamp_launch_bails_when_no_modules_captured() {
 
 #[cfg(unix)]
 #[test]
+fn basecamp_launch_without_safety_flag_refuses_default_scrub() {
+    // C2: a bare `basecamp launch <profile>` used to silently scrub the
+    // profile's xdg-data and xdg-cache. Now the destructive default refuses
+    // unless the caller passes one of --yes, --no-clean, or --dry-run. The
+    // error advertises all three so a wrong invocation is corrected by
+    // copy-paste.
+    let temp = tempdir().expect("tempdir");
+    let project = temp.path();
+    let scaffold_toml = format!(
+        "{MINIMAL_SCAFFOLD_TOML}\n\
+         [repos.basecamp]\n\
+         source = \"https://example/basecamp\"\n\
+         pin = \"deadbeef\"\n\
+         build = \"nix-flake\"\n\
+         attr = \"app\"\n\
+         \n\
+         [basecamp]\n\
+         port_base = 60000\n\
+         port_stride = 10\n"
+    );
+    fs::write(project.join("scaffold.toml"), scaffold_toml).expect("write scaffold.toml");
+
+    // Pre-seed everything needed to clear the early gates so we land on the
+    // new yes/no-clean/dry-run check. /bin/echo + /bin/sh exist on every Unix
+    // and pass the path-exists checks; the command never actually exec()s.
+    let state_dir = project.join(".scaffold/state");
+    fs::create_dir_all(&state_dir).expect("mkdir state");
+    fs::write(
+        state_dir.join("basecamp.state"),
+        "pin=deadbeef\nbasecamp_bin=/bin/echo\nlgpm_bin=/bin/sh\n",
+    )
+    .expect("write state");
+    let profile_dir = project.join(".scaffold/basecamp/profiles/alice");
+    fs::create_dir_all(profile_dir.join("xdg-data")).expect("mkdir xdg-data");
+    fs::write(profile_dir.join("xdg-data/sentinel"), b"do-not-scrub").expect("seed sentinel");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(project)
+        .args(["basecamp", "launch", "alice"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("destructive by default")
+                .and(predicate::str::contains("--yes"))
+                .and(predicate::str::contains("--no-clean"))
+                .and(predicate::str::contains("--dry-run")),
+        );
+
+    assert!(
+        profile_dir.join("xdg-data/sentinel").exists(),
+        "refusal must leave profile data untouched"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn basecamp_launch_dry_run_prints_plan_without_scrubbing() {
+    // C2: --dry-run lists what the destructive default would scrub and
+    // reinstall, without mutating the profile or attempting to exec basecamp.
+    let temp = tempdir().expect("tempdir");
+    let project = temp.path();
+    let scaffold_toml = format!(
+        "{MINIMAL_SCAFFOLD_TOML}\n\
+         [repos.basecamp]\n\
+         source = \"https://example/basecamp\"\n\
+         pin = \"deadbeef\"\n\
+         build = \"nix-flake\"\n\
+         attr = \"app\"\n\
+         \n\
+         [basecamp]\n\
+         port_base = 60000\n\
+         port_stride = 10\n"
+    );
+    fs::write(project.join("scaffold.toml"), scaffold_toml).expect("write scaffold.toml");
+
+    let state_dir = project.join(".scaffold/state");
+    fs::create_dir_all(&state_dir).expect("mkdir state");
+    fs::write(
+        state_dir.join("basecamp.state"),
+        "pin=deadbeef\nbasecamp_bin=/bin/echo\nlgpm_bin=/bin/sh\n",
+    )
+    .expect("write state");
+    let profile_dir = project.join(".scaffold/basecamp/profiles/alice");
+    fs::create_dir_all(profile_dir.join("xdg-data")).expect("mkdir xdg-data");
+    fs::write(profile_dir.join("xdg-data/sentinel"), b"do-not-scrub").expect("seed sentinel");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(project)
+        .args(["basecamp", "launch", "alice", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("dry-run: basecamp launch alice")
+                .and(predicate::str::contains("planned: scrub")),
+        );
+
+    assert!(
+        profile_dir.join("xdg-data/sentinel").exists(),
+        "dry-run must not scrub profile data"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn basecamp_launch_no_clean_bypasses_empty_modules_check() {
     // --no-clean is the documented escape hatch for keeping whatever's already
     // installed in the profile. It must skip the empty-modules check entirely.
-    // We don't run launch to completion (basecamp_bin is /bin/true), but the
+    // We don't run launch to completion in the assertion path, but the
     // command should get past the modules check and fail later — not fail on
     // an "install modules first" hint.
     let temp = tempdir().expect("tempdir");
@@ -2336,7 +2746,7 @@ port_stride = 10
     fs::create_dir_all(&state_dir).expect("mkdir state");
     fs::write(
         state_dir.join("basecamp.state"),
-        "pin=deadbeef\nbasecamp_bin=/bin/true\nlgpm_bin=/bin/echo\n",
+        "pin=deadbeef\nbasecamp_bin=/bin/sh\nlgpm_bin=/bin/echo\n",
     )
     .expect("write state");
     fs::create_dir_all(project.join(".scaffold/basecamp/profiles/alice")).expect("mkdir profile");
@@ -3408,6 +3818,46 @@ fn assert_pre_v0_2_0_rejection(args: &[&str]) {
 #[test]
 fn setup_hard_fails_on_pre_v0_2_0_scaffold_toml() {
     assert_pre_v0_2_0_rejection(&["setup"]);
+}
+
+#[test]
+fn build_idl_fails_loudly_on_default_framework() {
+    // C4: explicit `build idl` against a non-lez-framework project used to
+    // print `Skipping…` and exit 0. Agents that piped `lgs build idl &&
+    // next-step` would silently carry on with no IDL produced. The fix
+    // bails with an explicit framework-kind message so the agent stops.
+    let temp = tempdir().expect("tempdir");
+    fs::write(temp.path().join("scaffold.toml"), MINIMAL_SCAFFOLD_TOML)
+        .expect("seed scaffold.toml");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["build", "idl"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("`build idl` is only supported for `lez-framework`")
+                .and(predicate::str::contains("framework.kind = `default`")),
+        );
+}
+
+#[test]
+fn build_client_fails_loudly_on_default_framework() {
+    // C4: same as `build idl` — explicit `build client` on a default-framework
+    // project must fail rather than silently no-op.
+    let temp = tempdir().expect("tempdir");
+    fs::write(temp.path().join("scaffold.toml"), MINIMAL_SCAFFOLD_TOML)
+        .expect("seed scaffold.toml");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["build", "client"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("`build client` is only supported for `lez-framework`")
+                .and(predicate::str::contains("framework.kind = `default`")),
+        );
 }
 
 #[test]
