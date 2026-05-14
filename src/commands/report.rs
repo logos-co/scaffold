@@ -1639,8 +1639,7 @@ mod tests {
         // short-circuited on `://` and `redact_url_credentials` only handled
         // userinfo. The full pipeline (k/v → URL → high-entropy) must now
         // strip the query secret.
-        let line =
-            "auth_token https://internal.example/feed?token=abc123def456789xyz0&user=alice";
+        let line = "auth_token https://internal.example/feed?token=abc123def456789xyz0&user=alice";
         let sanitized = sanitize_text(line, &empty_ctx());
         assert!(
             !sanitized.text.contains("abc123def456789xyz0"),
@@ -1661,7 +1660,10 @@ mod tests {
         let line = "ping https://internal.example/feed?token=abc123def456&user=alice";
         let (out, replacements) = redact_url_credentials(line);
         assert!(replacements >= 1);
-        assert!(out.contains("token=[REDACTED]"), "expected token redacted: {out}");
+        assert!(
+            out.contains("token=[REDACTED]"),
+            "expected token redacted: {out}"
+        );
         assert!(
             out.contains("user=alice"),
             "non-sensitive param `user` should be preserved: {out}"
@@ -1674,8 +1676,14 @@ mod tests {
         let line = "GET https://alice:hunter2@host/path?api_key=zzz";
         let (out, replacements) = redact_url_credentials(line);
         assert!(replacements >= 2);
-        assert!(out.contains("[REDACTED]@host"), "userinfo not redacted: {out}");
-        assert!(out.contains("api_key=[REDACTED]"), "query secret not redacted: {out}");
+        assert!(
+            out.contains("[REDACTED]@host"),
+            "userinfo not redacted: {out}"
+        );
+        assert!(
+            out.contains("api_key=[REDACTED]"),
+            "query secret not redacted: {out}"
+        );
         assert!(!out.contains("hunter2"));
         assert!(!out.contains("zzz"));
     }
@@ -1761,9 +1769,7 @@ mod tests {
                    -----END OPENSSH PRIVATE KEY-----";
         assert_redacts(
             pem,
-            &[
-                "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB",
-            ],
+            &["b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB"],
         );
     }
 
