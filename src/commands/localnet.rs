@@ -214,7 +214,7 @@ fn cmd_localnet_start(
         bail!("{message}");
     }
 
-    patch_sequencer_port(lez, localnet_port)?;
+    patch_sequencer_config(lez, localnet_port)?;
 
     // Use a path relative to lez (the child's cwd), not relative to the
     // parent's cwd.  `current_dir(lez)` applies before exec, so a parent-
@@ -490,24 +490,35 @@ fn build_status_report(
     }
 }
 
-/// Update the port in `sequencer_config.json` so the sequencer listens on the
-/// configured port.  The pinned LEZ version does not accept `--port` as a CLI
-/// flag — it reads the port from this file.
-fn patch_sequencer_port(lez: &Path, port: u16) -> DynResult<()> {
+/// Patch `sequencer_config.json` so the sequencer listens on the configured
+/// port and accepts a block size large enough for scaffold's bundled deploy
+/// flow. The pinned LEZ version does not accept `--port` as a CLI flag — it
+/// reads everything from this file.
+///
+/// Block-size bump: the upstream debug config caps `max_block_size` at 1 MiB,
+/// which a `lgs deploy` of the default template (5 risc0 guest ELFs ≈ 360 KiB
+/// each) overflows on the second block — and the pinned sequencer crashes
+/// rather than carrying the deferred tx forward. Until LEZ stops aborting on
+/// deferral, scaffold widens the limit so the documented first-success path
+/// fits in a single block.
+fn patch_sequencer_config(lez: &Path, port: u16) -> DynResult<()> {
     let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
     let text = fs::read_to_string(&config_path)
         .with_context(|| format!("failed to read {}", config_path.display()))?;
     let mut doc: Value =
         serde_json::from_str(&text).context("failed to parse sequencer_config.json")?;
 
-    if let Some(obj) = doc.as_object_mut() {
-        obj.insert("port".to_string(), Value::Number(port.into()));
-    } else {
+    let Some(obj) = doc.as_object_mut() else {
         bail!(
             "sequencer_config.json is not a JSON object: {}",
             config_path.display()
         );
-    }
+    };
+    obj.insert("port".to_string(), Value::Number(port.into()));
+    obj.insert(
+        "max_block_size".to_string(),
+        Value::String("8 MiB".to_string()),
+    );
 
     let updated = serde_json::to_string_pretty(&doc).context("failed to serialize config")?;
     fs::write(&config_path, format!("{updated}\n"))

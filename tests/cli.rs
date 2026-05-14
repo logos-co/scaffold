@@ -994,6 +994,11 @@ fn localnet_start_patches_config_and_uses_configured_port() {
         serde_json::Value::Number(localnet_port.into()),
         "expected port in sequencer_config.json to be patched to {localnet_port}, got: {patched_config}"
     );
+    assert_eq!(
+        config_json["max_block_size"],
+        serde_json::Value::String("8 MiB".to_string()),
+        "expected max_block_size in sequencer_config.json to be widened so multi-program deploys fit, got: {patched_config}"
+    );
 
     // Verify --port was NOT passed as a CLI arg
     let args = fs::read_to_string(&args_log).expect("read args log");
