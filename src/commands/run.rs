@@ -14,7 +14,9 @@ use crate::commands::run_state::{
     RunDeployState,
 };
 use crate::commands::wallet::{cmd_wallet_topup_inner, TopupOutcome};
-use crate::constants::{DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, SPEL_BIN_REL_PATH};
+use crate::constants::{
+    DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, FRAMEWORK_KIND_LEZ_FRAMEWORK, SPEL_BIN_REL_PATH,
+};
 use crate::model::{LocalnetOwnership, Project};
 use crate::project::{load_project, resolve_repo_path, run_in_project_dir};
 use crate::DynResult;
@@ -53,23 +55,37 @@ fn run_pipeline_once(
     localnet_timeout_sec: u64,
 ) -> DynResult<()> {
     let has_hooks = !hooks.is_empty();
-    // Steps: build, build idl, localnet, topup, deploy, [+1 if hooks]
-    let total_steps: u32 = if has_hooks { 6 } else { 5 };
+    let needs_idl_step = project.config.framework.kind == FRAMEWORK_KIND_LEZ_FRAMEWORK;
+    // Steps: build, [build idl for lez-framework], localnet, topup, deploy, [+1 if hooks]
+    let pipeline_steps: u32 = if needs_idl_step { 5 } else { 4 };
+    let total_steps: u32 = if has_hooks {
+        pipeline_steps + 1
+    } else {
+        pipeline_steps
+    };
+    let mut step: u32 = 1;
 
     // Step 1: Build (chains setup internally)
-    println!("[1/{total_steps}] Building...");
+    println!("[{step}/{total_steps}] Building...");
     cmd_build_shortcut(None)?;
+    step += 1;
 
-    // Step 2: Build IDL (no-op for non-lez-framework projects)
-    println!("[2/{total_steps}] Building IDL...");
-    build_idl_for_current_project()?;
+    // Step 2 (lez-framework only): Build IDL. `build_idl_for_current_project`
+    // bails on non-lez-framework projects rather than silently no-op'ing, so
+    // gate the call here on the framework kind.
+    if needs_idl_step {
+        println!("[{step}/{total_steps}] Building IDL...");
+        build_idl_for_current_project()?;
+        step += 1;
+    }
 
-    // Step 3: Ensure localnet is running.
-    println!("[3/{total_steps}] Ensuring localnet...");
+    // Ensure localnet is running.
+    println!("[{step}/{total_steps}] Ensuring localnet...");
     ensure_localnet(project, localnet_timeout_sec)?;
+    step += 1;
 
-    // Step 4: Wallet topup
-    println!("[4/{total_steps}] Topping up wallet...");
+    // Wallet topup
+    println!("[{step}/{total_steps}] Topping up wallet...");
     let outcome = cmd_wallet_topup_inner(project, None, false)?;
     if let TopupOutcome::ConfirmationTimeout { message } = outcome {
         bail!(
@@ -78,8 +94,9 @@ fn run_pipeline_once(
              Hint: retry `logos-scaffold run` or run `logos-scaffold wallet topup` manually."
         );
     }
+    step += 1;
 
-    // Step 5: Deploy (idempotent: skip when guest .bin + IDL + deploy
+    // Deploy (idempotent: skip when guest .bin + IDL + deploy
     // config hashes match the prior deploy AND the sequencer is the same
     // instance that received it. A `lgs localnet stop && start` cycle
     // changes the sequencer PID and wipes on-chain state, so PID equality
@@ -92,11 +109,11 @@ fn run_pipeline_once(
     let prior = load_state(project);
     let deploy_skipped = if deploy_can_be_skipped(&current_hashes, current_pid, &prior) {
         println!(
-            "[5/{total_steps}] Deploy skipped (guest binaries + IDL + config + sequencer unchanged; delete `.scaffold/state/run_deploy.json` to force a re-deploy)"
+            "[{step}/{total_steps}] Deploy skipped (guest binaries + IDL + config + sequencer unchanged; delete `.scaffold/state/run_deploy.json` to force a re-deploy)"
         );
         true
     } else {
-        println!("[5/{total_steps}] Deploying programs...");
+        println!("[{step}/{total_steps}] Deploying programs...");
         cmd_deploy(None, None, false)?;
         save_state(
             project,
@@ -107,6 +124,7 @@ fn run_pipeline_once(
         )?;
         false
     };
+    step += 1;
 
     // Collect deployed-program metadata for hook env injection regardless
     // of whether deploy ran or was skipped — hooks address programs by
@@ -115,10 +133,10 @@ fn run_pipeline_once(
     // here so the per-hook loop doesn't multiply latency by hook count.
     let deployed = collect_deployed_programs(project, deploy_skipped)?;
 
-    // Step 6: Post-deploy hooks (or summary)
+    // Post-deploy hooks (or summary)
     if has_hooks {
         let n = hooks.len();
-        println!("[6/{total_steps}] Running {n} post-deploy hook(s)...");
+        println!("[{step}/{total_steps}] Running {n} post-deploy hook(s)...");
         check_env_var_suffix_collisions(&deployed.programs)?;
         warn_on_rewritten_program_names(&deployed.programs);
         for (i, hook) in hooks.iter().enumerate() {

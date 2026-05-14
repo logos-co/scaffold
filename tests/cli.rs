@@ -4077,12 +4077,12 @@ fn run_fails_at_build_step_in_mock_project() {
         .arg("run")
         .assert()
         .failure()
-        .stdout(predicate::str::contains("[1/5] Building..."));
+        .stdout(predicate::str::contains("[1/4] Building..."));
 }
 
 #[test]
-fn run_with_post_deploy_hook_shows_6_steps_in_output() {
-    // When a post_deploy hook is configured, the step counter shows /6.
+fn run_with_post_deploy_hook_shows_5_steps_in_output() {
+    // Default-template pipeline is 4 steps; one post_deploy hook bumps it to 5.
     let temp = tempdir().expect("tempdir");
     setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
     append_run_config(temp.path(), &["echo hello"]);
@@ -4092,12 +4092,14 @@ fn run_with_post_deploy_hook_shows_6_steps_in_output() {
         .arg("run")
         .assert()
         .failure() // still fails at build
-        .stdout(predicate::str::contains("[1/6] Building..."));
+        .stdout(predicate::str::contains("[1/5] Building..."));
 }
 
 #[test]
 fn run_with_multiple_post_deploy_hooks_uses_array_form() {
-    // Multiple hooks are configured as a TOML inline array; pipeline still has 6 steps.
+    // Multiple hooks are configured as a TOML inline array; hook stage is a
+    // single step regardless of hook count, so total stays at 5 for the
+    // default template.
     let temp = tempdir().expect("tempdir");
     setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
     append_run_config(temp.path(), &["echo one", "echo two"]);
@@ -4107,12 +4109,12 @@ fn run_with_multiple_post_deploy_hooks_uses_array_form() {
         .arg("run")
         .assert()
         .failure() // still fails at build
-        .stdout(predicate::str::contains("[1/6] Building..."));
+        .stdout(predicate::str::contains("[1/5] Building..."));
 }
 
 #[test]
 fn run_no_post_deploy_flag_skips_configured_hooks() {
-    // --no-post-deploy must collapse total_steps back to 5 even when
+    // --no-post-deploy must collapse total_steps back to 4 even when
     // scaffold.toml configures hooks. The build still fails first, but the
     // step counter in stdout proves the override was honored.
     let temp = tempdir().expect("tempdir");
@@ -4125,13 +4127,13 @@ fn run_no_post_deploy_flag_skips_configured_hooks() {
         .arg("--no-post-deploy")
         .assert()
         .failure()
-        .stdout(predicate::str::contains("[1/5] Building..."));
+        .stdout(predicate::str::contains("[1/4] Building..."));
 }
 
 #[test]
 fn run_post_deploy_flag_overrides_configured_hooks() {
-    // --post-deploy replaces config hooks. With one config hook ([1/6]) and
-    // two flag overrides, the resulting step count stays at /6 — proving
+    // --post-deploy replaces config hooks. With one config hook ([1/5]) and
+    // two flag overrides, the resulting step count stays at /5 — proving
     // that the flag took effect and config wasn't merged on top.
     let temp = tempdir().expect("tempdir");
     setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
@@ -4146,7 +4148,7 @@ fn run_post_deploy_flag_overrides_configured_hooks() {
         .arg("echo override-b")
         .assert()
         .failure()
-        .stdout(predicate::str::contains("[1/6] Building..."));
+        .stdout(predicate::str::contains("[1/5] Building..."));
 }
 
 fn append_run_config(project_root: &Path, post_deploy: &[&str]) {
