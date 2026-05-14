@@ -13,6 +13,16 @@ use super::wallet_support::{
     summarize_command_failure, wallet_password, wallet_state_path, write_default_wallet_address,
 };
 
+/// Result of a wallet topup attempt. `cmd_run` distinguishes the
+/// confirmation-timeout case so the pipeline can bail before deploy
+/// rather than continue with uncertain funding. Standalone `wallet topup`
+/// treats both as success (matching prior behavior).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TopupOutcome {
+    Success,
+    ConfirmationTimeout { message: String },
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum WalletAction {
     List {
@@ -92,6 +102,17 @@ fn cmd_wallet_topup(
     address: Option<String>,
     dry_run: bool,
 ) -> DynResult<()> {
+    match cmd_wallet_topup_inner(project, address, dry_run)? {
+        TopupOutcome::Success => Ok(()),
+        TopupOutcome::ConfirmationTimeout { message } => bail!("{message}"),
+    }
+}
+
+pub(crate) fn cmd_wallet_topup_inner(
+    project: &crate::model::Project,
+    address: Option<String>,
+    dry_run: bool,
+) -> DynResult<TopupOutcome> {
     let wallet = load_wallet_runtime(project)?;
     let default_address = read_default_wallet_address(&project.root)?;
     let resolved_to = resolve_wallet_address(address.as_deref(), default_address.as_deref())?;
@@ -139,7 +160,7 @@ fn cmd_wallet_topup(
         println!("planned wallet: {resolved_to}");
         println!("planned method: pinata faucet claim");
         println!("planned network: local sequencer ({sequencer_addr})");
-        return Ok(());
+        return Ok(TopupOutcome::Success);
     }
 
     let preflight_output = run_with_stdin(preflight_command, password_input.clone())
@@ -197,17 +218,13 @@ fn cmd_wallet_topup(
             );
         }
         if is_confirmation_timeout_failure(&combined) {
-            println!("wallet topup submitted, but confirmation timed out");
-            println!("  Address: {resolved_to}");
-            println!("  Method: pinata faucet claim");
-            println!("  Network: local sequencer ({sequencer_addr})");
-            println!(
-                "  Hint: verify balance with `logos-scaffold wallet -- account list` or retry `logos-scaffold wallet topup`."
+            let message = confirmation_timeout_message(
+                &resolved_to,
+                &sequencer_addr,
+                &output.stdout,
+                &output.stderr,
             );
-            if let Some(tx) = extract_tx_identifier(&output.stdout, &output.stderr) {
-                println!("  Tx: {tx}");
-            }
-            return Ok(());
+            return Ok(TopupOutcome::ConfirmationTimeout { message });
         }
         bail!(
             "wallet topup failed: {summary}\nHint: run `logos-scaffold wallet list` to inspect addresses, then retry with `--address` or set a default wallet."
@@ -222,7 +239,29 @@ fn cmd_wallet_topup(
         println!("  Tx: {tx}");
     }
 
-    Ok(())
+    Ok(TopupOutcome::Success)
+}
+
+fn confirmation_timeout_message(
+    resolved_to: &str,
+    sequencer_addr: &str,
+    stdout: &str,
+    stderr: &str,
+) -> String {
+    // Submission reached the sequencer but confirmation didn't arrive before
+    // the wallet binary's timeout. We genuinely don't know whether the topup
+    // landed, so callers must treat this as uncertain funding.
+    let tx_line = match extract_tx_identifier(stdout, stderr) {
+        Some(tx) => format!("\n  Tx: {tx}"),
+        None => String::new(),
+    };
+    format!(
+        "wallet topup submitted, but confirmation timed out (status: pending — topup may still land)\n  \
+         Address: {resolved_to}\n  \
+         Method: pinata faucet claim\n  \
+         Network: local sequencer ({sequencer_addr}){tx_line}\n  \
+         Hint: verify balance with `logos-scaffold wallet -- account list`, or retry with `logos-scaffold wallet topup`."
+    )
 }
 
 fn cmd_wallet_default_set(project: &crate::model::Project, address: &str) -> DynResult<()> {

@@ -1,10 +1,11 @@
-use std::env;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
+use crate::circuits::ensure_circuits_for_subprocess;
+use crate::model::RepoRef;
 use crate::process::run_checked;
-use crate::project::{ensure_dir_exists, load_project, save_project_config};
-use crate::repo::{sync_repo_to_pin, RepoSyncOptions};
+use crate::project::{ensure_dir_exists, load_project, resolve_cache_root, resolve_repo_path};
+use crate::repo::{sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
 use crate::state::prepare_wallet_home;
 use crate::DynResult;
 
@@ -14,17 +15,19 @@ use super::wallet_support::{
 };
 
 pub(crate) fn cmd_setup(prebuilt: bool) -> DynResult<()> {
-    let mut project = load_project()?;
-    let lez = PathBuf::from(&project.config.lez.path);
-    let cache_root = PathBuf::from(&project.config.cache_root);
-    let sync_opts = if is_cache_managed_repo_path(&cache_root, &lez) {
-        RepoSyncOptions::auto_reclone_cache_repo()
-    } else {
-        RepoSyncOptions::fail_on_source_mismatch()
-    };
+    let project = load_project()?;
+    let lez = resolve_repo_path(&project, &project.config.lez, "lez")?;
+    let spel = resolve_repo_path(&project, &project.config.spel, "spel")?;
 
-    sync_repo_to_pin(&mut project.config.lez, "lez", sync_opts)?;
+    // Both the LEZ standalone-sequencer build below and (downstream) the
+    // user-project workspace build pull in `logos-blockchain-{pol,poc,poq,zksign}`
+    // build scripts, which panic when their circuits release isn't visible.
+    // Materialise it once before any cargo invocation; the export propagates
+    // to every subprocess for the rest of the process.
+    let (cache_root, _) = resolve_cache_root(&project)?;
+    ensure_circuits_for_subprocess(&cache_root)?;
 
+    sync_pinned_repo(&project.config.lez, &lez, "lez")?;
     ensure_dir_exists(&lez, "lez")?;
 
     let built_from_prebuilt = if prebuilt {
@@ -45,26 +48,52 @@ pub(crate) fn cmd_setup(prebuilt: bool) -> DynResult<()> {
                 .arg("sequencer_service"),
             "build sequencer_service (standalone)",
         )?;
+
+        run_checked(
+            Command::new("cargo")
+                .current_dir(&lez)
+                .arg("build")
+                .arg("--release")
+                .arg("-p")
+                .arg("wallet"),
+            "build wallet",
+        )?;
     }
 
+    sync_pinned_repo(&project.config.spel, &spel, "spel")?;
+    ensure_dir_exists(&spel, "spel")?;
     run_checked(
         Command::new("cargo")
-            .current_dir(&lez)
+            .current_dir(&spel)
             .arg("build")
             .arg("--release")
             .arg("-p")
-            .arg("wallet"),
-        "build wallet",
+            .arg("spel"),
+        "build spel",
     )?;
 
     let wallet_home = project.root.join(&project.config.wallet_home_dir);
     prepare_wallet_home(&lez, &wallet_home)?;
     ensure_default_wallet_seeded(&project.root, &wallet_home)?;
 
-    save_project_config(&project)?;
     println!("setup complete");
 
     Ok(())
+}
+
+/// Sync the cloned repo to its pinned commit at `path`.
+///
+/// Sync mode is decided by `repo.path`: empty → cache-managed (auto-reclone
+/// when origin drifts, since the directory is scaffold-owned); non-empty →
+/// vendored or user-overridden, where we refuse to silently rewrite the
+/// developer's checkout on origin mismatch.
+fn sync_pinned_repo(repo: &RepoRef, path: &Path, label: &str) -> DynResult<()> {
+    let opts = if repo.path.is_empty() {
+        RepoSyncOptions::auto_reclone_cache_repo()
+    } else {
+        RepoSyncOptions::fail_on_source_mismatch()
+    };
+    sync_repo_to_pin_at_path_with_opts(path, &repo.source, &repo.pin, label, opts)
 }
 
 fn ensure_default_wallet_seeded(project_root: &Path, wallet_home: &Path) -> DynResult<()> {
@@ -106,71 +135,6 @@ fn ensure_default_wallet_seeded(project_root: &Path, wallet_home: &Path) -> DynR
 
     Ok(())
 }
-
-fn is_cache_managed_repo_path(cache_root: &Path, repo_path: &Path) -> bool {
-    let cache_repos = normalize_path(cache_root).join("repos");
-    let repo = normalize_path(repo_path);
-    repo.starts_with(cache_repos)
-}
-
-fn normalize_path(path: &Path) -> PathBuf {
-    if let Ok(canonical) = path.canonicalize() {
-        return canonical;
-    }
-
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .unwrap_or_else(|_| path.to_path_buf())
-    }
-}
-
-
-fn try_download_prebuilt(lez: &Path, pin: &str) -> DynResult<bool> {
-    let commit = &pin[..8.min(pin.len())];
-    let arch = if cfg!(target_arch = "x86_64") { "x86_64" } else { "aarch64" };
-    let os = if cfg!(target_os = "linux") { "linux" } else { "macos" };
-    let tag = format!("lez-prebuilt-{commit}-{arch}-{os}");
-
-    println!("Checking for prebuilt binaries (tag: {tag})...");
-
-    let url = format!(
-        "https://github.com/logos-co/logos-scaffold/releases/download/{tag}/sequencer_service"
-    );
-
-    let bin_dir = lez.join("target/release");
-    std::fs::create_dir_all(&bin_dir)?;
-    let bin_path = bin_dir.join("sequencer_service");
-
-    let status = Command::new("curl")
-        .args([
-            "--fail", "--silent", "--location",
-            "--output", bin_path.to_str().unwrap_or("sequencer_service"),
-            &url,
-        ])
-        .status();
-
-    match status {
-        Ok(s) if s.success() && bin_path.exists() => {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = std::fs::metadata(&bin_path)?.permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(&bin_path, perms)?;
-            }
-            println!("prebuilt sequencer_service downloaded successfully");
-            Ok(true)
-        }
-        _ => {
-            println!("no prebuilt found for tag {tag}, falling back to source build...");
-            Ok(false)
-        }
-    }
-}
-
 
 #[cfg(test)]
 mod tests {
@@ -244,5 +208,51 @@ mod tests {
             state,
             "default_address=Public/8zxWNm1qh6FLsJpVBuDxdxcTm55qHPgFEdqJpPVu1fuy\n"
         );
+    }
+}
+
+fn try_download_prebuilt(lez: &Path, pin: &str) -> crate::DynResult<bool> {
+    let commit = &pin[..8];
+    let arch = if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else {
+        "aarch64"
+    };
+    let os = if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "macos"
+    };
+    let tag = format!("lez-prebuilt-{commit}-{arch}-{os}");
+
+    println!("Checking for prebuilt binaries (tag: {tag})...");
+
+    let url = format!(
+        "https://github.com/logos-co/logos-scaffold/releases/download/{tag}/sequencer_service"
+    );
+
+    let bin_dir = lez.join("target/release");
+    std::fs::create_dir_all(&bin_dir)?;
+    let dest = bin_dir.join("sequencer_service");
+
+    let response = ureq::get(&url).call();
+    match response {
+        Ok(resp) => {
+            let mut reader = resp.into_reader();
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut reader, &mut bytes)?;
+            std::fs::write(&dest, &bytes)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
+            }
+            println!("prebuilt sequencer_service downloaded successfully");
+            Ok(true)
+        }
+        Err(_) => {
+            println!("no prebuilt found for tag {tag}, falling back to source build...");
+            Ok(false)
+        }
     }
 }
