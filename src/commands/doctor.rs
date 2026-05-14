@@ -9,8 +9,8 @@ use crate::constants::{
     DEFAULT_LEZ, DEFAULT_SPEL, SEQUENCER_BIN_REL_PATH, SPEL_BIN_REL_PATH, WALLET_BIN_REL_PATH,
 };
 use crate::doctor_checks::{
-    check_binary, check_container_runtime, check_path, check_port_warn, check_repo,
-    check_standalone_support, one_line, print_rows,
+    check_binary, check_container_runtime, check_logos_blockchain_circuits, check_path,
+    check_port_warn, check_r0vm, check_repo, check_standalone_support, one_line, print_rows,
 };
 use crate::model::{CheckRow, CheckStatus, DoctorReport, DoctorSummary};
 use crate::process::{pid_running, run_capture, run_with_stdin, set_command_echo};
@@ -85,6 +85,13 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
     rows.push(check_binary("ps", true));
     rows.push(check_binary("kill", true));
     rows.push(check_container_runtime());
+
+    // Sequencer runtime prereqs that live outside the project tree. Without
+    // these, the sequencer panics on the zk-signature path (circuits) or on
+    // its first risc0 program execution (r0vm) with opaque
+    // `ProgramExecutionFailed` / `Main loop exited unexpectedly` errors.
+    rows.push(check_r0vm());
+    rows.push(check_logos_blockchain_circuits());
 
     rows.push(check_repo("lez", &lez, &project.config.lez.pin));
 

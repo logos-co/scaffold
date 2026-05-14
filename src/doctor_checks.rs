@@ -200,6 +200,107 @@ pub(crate) fn one_line(text: &str) -> String {
     text.replace('\n', " ").replace('\r', " ")
 }
 
+/// Probe whether the host environment has the LEZ sequencer's runtime
+/// prerequisites: a risc0 `r0vm` resolvable by `risc0-zkvm` (via
+/// `RISC0_SERVER_PATH`, the rzup extensions layout, or `r0vm` on `PATH`)
+/// and the `logos-blockchain-circuits` directory referenced by zksign.
+///
+/// These are not checked elsewhere because they live outside the project
+/// tree, but without them the sequencer panics on its first block-settlement
+/// path (zk signature) or its first risc0 program execution, producing
+/// opaque `ProgramExecutionFailed` / `Main loop exited unexpectedly` errors
+/// instead of an actionable message.
+pub(crate) fn check_r0vm() -> CheckRow {
+    if let Some(found) = locate_r0vm() {
+        return CheckRow {
+            status: CheckStatus::Pass,
+            name: "risc0 r0vm".to_string(),
+            detail: format!("found {}", found.display()),
+            remediation: None,
+        };
+    }
+    CheckRow {
+        status: CheckStatus::Fail,
+        name: "risc0 r0vm".to_string(),
+        detail: "r0vm not found via RISC0_SERVER_PATH, rzup, or PATH".to_string(),
+        remediation: Some(
+            "Install rzup (https://risczero.com/install) and run \
+             `rzup install r0vm`, or set RISC0_SERVER_PATH to a r0vm binary."
+                .to_string(),
+        ),
+    }
+}
+
+pub(crate) fn check_logos_blockchain_circuits() -> CheckRow {
+    let env_path = std::env::var("LOGOS_BLOCKCHAIN_CIRCUITS")
+        .ok()
+        .map(PathBuf::from);
+    let candidate = env_path.clone().unwrap_or_else(|| {
+        dirs_home()
+            .unwrap_or_default()
+            .join(".logos-blockchain-circuits")
+    });
+
+    if candidate.is_dir() {
+        return CheckRow {
+            status: CheckStatus::Pass,
+            name: "logos-blockchain-circuits".to_string(),
+            detail: format!("found {}", candidate.display()),
+            remediation: None,
+        };
+    }
+    let source = if env_path.is_some() {
+        "LOGOS_BLOCKCHAIN_CIRCUITS"
+    } else {
+        "~/.logos-blockchain-circuits"
+    };
+    CheckRow {
+        status: CheckStatus::Fail,
+        name: "logos-blockchain-circuits".to_string(),
+        detail: format!("missing {} ({})", candidate.display(), source),
+        remediation: Some(
+            "Install with `curl -sSL https://raw.githubusercontent.com/\
+             logos-blockchain/logos-blockchain/main/scripts/setup-logos-blockchain-circuits.sh | bash`, \
+             or set LOGOS_BLOCKCHAIN_CIRCUITS to an existing release directory."
+                .to_string(),
+        ),
+    }
+}
+
+fn dirs_home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+fn locate_r0vm() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("RISC0_SERVER_PATH") {
+        let path = PathBuf::from(p);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    // rzup extensions layout: <RISC0_HOME>/extensions/v<ver>-cargo-risczero-<platform>/r0vm
+    // (R0Vm's parent component is CargoRiscZero, so the binary lives under
+    //  the cargo-risczero version dir, not a r0vm-* dir.)
+    if let Some(risc0_home) = std::env::var_os("RISC0_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs_home().map(|h| h.join(".risc0")))
+    {
+        let ext = risc0_home.join("extensions");
+        if let Ok(entries) = fs::read_dir(&ext) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.contains("-cargo-risczero-") || name.contains("-r0vm-") {
+                    let candidate = entry.path().join("r0vm");
+                    if candidate.is_file() {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
+    }
+    which("r0vm")
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;

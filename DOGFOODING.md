@@ -61,6 +61,25 @@ Do not run project-scoped commands from the repository root unless the scenario 
 - Network access available for setup/build flows that fetch dependencies.
 - No preinstalled `wallet` binary is required. If one exists on `PATH`, do not treat it as the runtime under test for scaffold wallet scenarios.
 - Optional but supported: `LOGOS_SCAFFOLD_WALLET_PASSWORD` when validating password override behavior.
+- Sequencer runtime prerequisites (live outside the project tree but required from the first block onward):
+    - **risc0 toolchain** installed via `rzup` (https://risczero.com/install). The
+      pinned LEZ guest crates require a `risc0-rust` toolchain that supports
+      ruint ≥ 1.18 (verified working: `rzup install rust 1.91.1`). A too-old
+      toolchain (e.g., `1.88.0`) produces `ruint@... requires rustc 1.90` from
+      the guest build.
+    - **r0vm** discoverable by `risc0-zkvm`. Either install via
+      `rzup install r0vm` (lands under
+      `~/.risc0/extensions/v<ver>-cargo-risczero-<platform>/r0vm`) or set
+      `RISC0_SERVER_PATH` to a r0vm binary. Without it the sequencer
+      crashes on its first risc0 program execution with `ProgramExecutionFailed`
+      and `Main loop exited unexpectedly`.
+    - **logos-blockchain-circuits** release at `~/.logos-blockchain-circuits/`
+      (or `$LOGOS_BLOCKCHAIN_CIRCUITS`). Install with
+      `curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/main/scripts/setup-logos-blockchain-circuits.sh | bash`.
+      Without it the sequencer panics on the zk-signature path the first
+      time it tries to seal a block.
+  These are surfaced as `risc0 r0vm` and `logos-blockchain-circuits` rows in
+  `lgs doctor` — confirm both are PASS before running D1-style scenarios.
 - For `B`-series (basecamp) scenarios: Nix with flakes enabled, plus a module project on disk whose `flake.nix` exposes a `packages.<system>.lgx` output (e.g., a `tictactoe`-style project built against the `logos-module-builder` `tutorial-v1` convention). `docs/basecamp-module-requirements.md` (also reachable via `"$SCAFFOLD_BIN" basecamp docs`) is the canonical contract.
 
 The `lgs` binary is a short alias for `logos-scaffold` produced by the same crate; `"$SCAFFOLD_BIN"` and `lgs` are interchangeable in the commands below.
@@ -547,6 +566,20 @@ The `ls` step verifies that LEZ-specific directories were scaffolded before proc
 - If LEZ bootstrap behavior diverges from the default template in setup/localnet/doctor flows, capture the difference explicitly.
 - If `build` does not automatically trigger IDL + client generation for the LEZ template, record that as a regression.
 
+### Known Gap (current pins)
+
+The `lez-framework` pin (`jimmy-claw/lez-framework` rev `1e146970…`) referenced
+by the lez-framework template generates code that calls
+`nssa_core::program::write_nssa_outputs_with_chained_call`, which is not
+exposed by the scaffold-default LEZ pin (`35d8df0d…`). As a result `build`
+(and therefore L1–L4) currently fails with `error[E0425]: cannot find function
+write_nssa_outputs_with_chained_call`. The default-template scenarios are
+unaffected.
+
+Until the lez-framework macro and the LEZ pin are realigned, treat L1–L4 as
+expected-to-fail with the discovered compile error captured as evidence
+rather than re-attempting workarounds.
+
 ### Evidence to Capture
 
 - LEZ project creation output.
@@ -767,7 +800,9 @@ Check that no new directories were created by the `--help` invocations.
 
 ### Goal
 
-Validate that `create`/`new` handle the `--template`, `--vendor-deps`, `--lez-path` (legacy alias: `--lssa-path`), and `--cache-root` flags correctly, including error cases for invalid inputs.
+Validate that `create`/`new` handle the `--template`, `--vendor-deps`, and
+`--lez-path` (legacy alias: `--lssa-path`) flags correctly, including error
+cases for invalid inputs, and that the non-vendored cache root is XDG-resolved.
 
 ### Preconditions
 
@@ -784,8 +819,11 @@ cd "$SCRATCH_ROOT"
 "$SCAFFOLD_BIN" new dogfood-lez-explicit --template lez-framework
 ls -d dogfood-lez-explicit/idl dogfood-lez-explicit/crates/lez-client-gen
 "$SCAFFOLD_BIN" new dogfood-vendor --vendor-deps
-"$SCAFFOLD_BIN" new dogfood-cache --cache-root "$SCRATCH_ROOT/custom-cache"
-find "$SCRATCH_ROOT/custom-cache/repos/lez" -maxdepth 2 -mindepth 1 -type d | sort
+ls -d dogfood-vendor/.scaffold/repos/lez
+# Override the non-vendored cache root via XDG_CACHE_HOME:
+XDG_CACHE_HOME="$SCRATCH_ROOT/custom-cache" \
+  "$SCAFFOLD_BIN" new dogfood-cache
+find "$SCRATCH_ROOT/custom-cache/logos-scaffold/repos/lez" -maxdepth 2 -mindepth 1 -type d | sort
 grep -n "^\[wallet\]\|^home_dir\|^binary" dogfood-cache/scaffold.toml
 ```
 
@@ -794,13 +832,13 @@ grep -n "^\[wallet\]\|^home_dir\|^binary" dogfood-cache/scaffold.toml
 - Invalid `--template` name fails with a clear error listing the available templates (`default`, `lez-framework`).
 - `--template lez-framework` creates a project with LEZ-specific structure (same as L1).
 - `--vendor-deps` is accepted without error and creates a project that vendors the pinned LEZ repo under `.scaffold/repos/lez`.
-- `--cache-root` is honored and scaffold uses the specified directory for cache operations, with non-vendored LEZ clones isolated by pin under `<cache-root>/repos/lez/<pin>/`.
+- The non-vendored cache root resolves from `XDG_CACHE_HOME` (or `$HOME/.cache`), with LEZ clones isolated by pin under `<cache-root>/logos-scaffold/repos/lez/<pin>/`. There is **no** `--cache-root` CLI flag on `new`/`create`; control the location via `XDG_CACHE_HOME`.
 - Generated `scaffold.toml` includes `[wallet].home_dir` and does not include a deprecated `wallet.binary` field.
 
 ### Failure Signals / Common Pitfalls
 
 - If an invalid template name silently falls back to `default`, record that as a regression.
-- If `--vendor-deps` or `--cache-root` are silently ignored or produce an error, record the exact output.
+- If `--vendor-deps` is silently ignored or produces an error, record the exact output.
 - If `--lez-path` is tested and the path does not exist, verify the error message points to the bad path.
 - If non-vendored cache reuse collapses different LEZ pins into a single shared `repos/lez` checkout, record that as a cache-isolation regression.
 
@@ -808,8 +846,8 @@ grep -n "^\[wallet\]\|^home_dir\|^binary" dogfood-cache/scaffold.toml
 
 - Error output for invalid `--template`.
 - Creation output for `--template lez-framework` with directory listing.
-- Creation output for `--vendor-deps` and `--cache-root` if tested.
-- Directory listing proving the pin-isolated cache path.
+- Creation output for `--vendor-deps`.
+- Directory listing proving the pin-isolated cache path under `XDG_CACHE_HOME`.
 - `scaffold.toml` excerpt showing wallet home config without a wallet binary field.
 
 ### Execution Notes

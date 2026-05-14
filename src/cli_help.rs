@@ -16,7 +16,9 @@ pub(crate) const EXAMPLES_CREATE: &str = r"Examples:
   logos-scaffold create my-app
   logos-scaffold new my-app --template default
   logos-scaffold create my-app --vendor-deps --lez-path /abs/path/to/lez
-  logos-scaffold create my-app --cache-root ~/.cache/logos-scaffold";
+
+To override the cache root for non-vendored projects, set XDG_CACHE_HOME or
+$HOME/.cache before running create/new (scaffold uses XDG-conformant paths).";
 
 pub(crate) const EXAMPLES_INIT: &str = r"Examples:
   logos-scaffold init
