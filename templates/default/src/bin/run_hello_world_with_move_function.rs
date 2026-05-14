@@ -2,6 +2,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use example_program_deployment_methods::HELLO_WORLD_WITH_MOVE_FUNCTION_ELF;
 use nssa::{PublicTransaction, program::Program, public_transaction};
+use sequencer_service_rpc::RpcClient as _;
 use wallet::{PrivacyPreservingAccount, WalletCore};
 
 #[path = "../lib.rs"]
@@ -69,12 +70,12 @@ async fn main() -> anyhow::Result<()> {
             let tx = PublicTransaction::new(message, witness_set);
             let response = wallet_core
                 .sequencer_client
-                .send_tx_public(tx)
+                .send_transaction(tx.into())
                 .await
                 .context("failed to submit public transaction to localnet")?;
             println!(
-                "submitted transaction: status={} tx_hash={}",
-                response.status, response.tx_hash
+                "submitted transaction: tx_hash={}",
+                hex::encode(response.0)
             );
             println!("verification hint: wallet account get --account-id {account_id}");
         }
@@ -95,8 +96,8 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .map_err(|err| anyhow::anyhow!("failed to submit private transaction: {err}"))?;
             println!(
-                "submitted transaction: status={} tx_hash={}",
-                response.status, response.tx_hash
+                "submitted transaction: tx_hash={}",
+                hex::encode(response.0)
             );
             println!("verification hint: wallet account sync-private");
         }
@@ -115,12 +116,12 @@ async fn main() -> anyhow::Result<()> {
             let tx = PublicTransaction::new(message, witness_set);
             let response = wallet_core
                 .sequencer_client
-                .send_tx_public(tx)
+                .send_transaction(tx.into())
                 .await
                 .context("failed to submit public transaction to localnet")?;
             println!(
-                "submitted transaction: status={} tx_hash={}",
-                response.status, response.tx_hash
+                "submitted transaction: tx_hash={}",
+                hex::encode(response.0)
             );
             println!("verification hint: wallet account get --account-id {from}");
             println!("verification hint: wallet account get --account-id {to}");
@@ -143,8 +144,8 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .map_err(|err| anyhow::anyhow!("failed to submit private transaction: {err}"))?;
             println!(
-                "submitted transaction: status={} tx_hash={}",
-                response.status, response.tx_hash
+                "submitted transaction: tx_hash={}",
+                hex::encode(response.0)
             );
             println!("verification hint: wallet account sync-private");
         }
