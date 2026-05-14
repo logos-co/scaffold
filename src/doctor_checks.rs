@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
-use crate::constants::DEFAULT_LEZ_PIN;
+use crate::constants::DEFAULT_LEZ;
 use crate::model::{CheckRow, CheckStatus};
 use crate::process::{port_open, which};
 use crate::repo::{git_clean, git_head_sha};
@@ -172,7 +172,7 @@ pub(crate) fn check_standalone_support(lez_path: &Path) -> CheckRow {
         detail: "could not find `standalone` marker in lez repo".to_string(),
         remediation: Some(format!(
             "Use a logos-execution-zone source that contains standalone mode and pin {}",
-            DEFAULT_LEZ_PIN
+            DEFAULT_LEZ.sha
         )),
     }
 }

@@ -1,0 +1,12 @@
+# GitHub usernames exempt from the PR rate limit in .github/workflows/pr-rate-limit.yml.
+# Public members of the logos-co GitHub org are auto-exempted and do not need to be listed here.
+# Use this file for private org members or trusted external contributors.
+# One username per line. Lines starting with # are ignored.
+marclawclaw
+fryorcraken
+danisharora099
+weboko
+jimmy-claw
+jzaki
+vpavlink
+wozos

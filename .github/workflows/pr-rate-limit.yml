@@ -1,0 +1,126 @@
+name: PR Rate Limit
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  enforce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Enforce rate limit
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const org = 'logos-co';
+            const threshold = 3;
+            const windowDays = 7;
+
+            const pr = context.payload.pull_request;
+            const login = pr.user.login;
+            const prNumber = pr.number;
+            const { owner, repo } = context.repo;
+
+            core.info(`Checking PR #${prNumber} by ${login}`);
+
+            // Exemption: bots (dependabot, renovate, etc.) — automated PR floods
+            // are expected and should not be rate-limited like human contributors.
+            if (pr.user.type === 'Bot') {
+              core.info(`${login} is a bot — exempt.`);
+              return;
+            }
+
+            // Exemption A: public logos-co org member.
+            try {
+              await github.rest.orgs.checkPublicMembershipForUser({ org, username: login });
+              core.info(`${login} is a public member of ${org} — exempt.`);
+              return;
+            } catch (err) {
+              if (err.status === 404) {
+                // Not a public member; continue to file allowlist check.
+              } else {
+                // Fail open on transient API errors rather than incorrectly
+                // rate-limiting a legitimate org member during GitHub flakes.
+                core.warning(`Org membership check failed with status ${err.status}; skipping rate limit enforcement for this PR.`);
+                return;
+              }
+            }
+
+            // Exemption B: file allowlist.
+            const allowlistPath = path.join('.github', 'rate-limit-allowlist.txt');
+            if (fs.existsSync(allowlistPath)) {
+              const allowed = fs.readFileSync(allowlistPath, 'utf8')
+                .split('\n')
+                .map(l => l.trim())
+                .filter(l => l && !l.startsWith('#'));
+              if (allowed.includes(login)) {
+                core.info(`${login} is in ${allowlistPath} — exempt.`);
+                return;
+              }
+            }
+
+            // Count this author's PRs in the last `windowDays` days.
+            const since = new Date(Date.now() - windowDays * 24 * 3600 * 1000)
+              .toISOString()
+              .split('T')[0];
+            const q = `repo:${owner}/${repo} is:pr author:${login} created:>=${since}`;
+            let search;
+            try {
+              search = await github.rest.search.issuesAndPullRequests({ q, per_page: 100 });
+            } catch (err) {
+              // Fail open on transient API errors, mirroring the org-membership check above.
+              core.warning(`Search API failed with status ${err.status}; skipping rate limit enforcement for this PR.`);
+              return;
+            }
+            let count = search.data.total_count;
+            const currentIncluded = search.data.items.some(it => it.number === prNumber);
+            if (!currentIncluded) {
+              // Search indexing can lag just-opened PRs; include it explicitly.
+              count += 1;
+            }
+            core.info(`${login} has opened ${count} PR(s) in the last ${windowDays} days (threshold: ${threshold}).`);
+
+            if (count <= threshold) {
+              return;
+            }
+
+            const repoUrl = context.payload.repository.html_url;
+            const defaultBranch = context.payload.repository.default_branch;
+            const body = [
+              `Thanks for the contribution, @${login}.`,
+              ``,
+              `This PR exceeds the rate limit of **${threshold} PRs per contributor per rolling ${windowDays}-day window**.`,
+              `You currently have ${count} PR(s) opened in that window against this repo.`,
+              ``,
+              `See [CONTRIBUTING.md](${repoUrl}/blob/${defaultBranch}/CONTRIBUTING.md#rate-limit) for the policy.`,
+              `If you need to exceed the cap for a coordinated change, please open an issue first.`,
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: prNumber,
+              body,
+            });
+
+            await github.rest.pulls.update({
+              owner,
+              repo,
+              pull_number: prNumber,
+              state: 'closed',
+            });
+
+            core.notice(`Closed PR #${prNumber} by ${login} (over rate limit).`);
