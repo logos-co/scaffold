@@ -1,6 +1,62 @@
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub(crate) const LEZ_URL: &str = "https://github.com/logos-blockchain/logos-execution-zone.git";
-pub(crate) const DEFAULT_LEZ_PIN: &str = "35d8df0d031315219f94d1546ceb862b0e5b208f";
+/// Schema version persisted as `[scaffold].version` in `scaffold.toml`.
+/// Bumped when the file's section/field shape changes in a way that requires
+/// a one-shot migration through `init`. Parsers reject any other value with
+/// a targeted error pointing at `init`.
+pub(crate) const SCAFFOLD_TOML_SCHEMA_VERSION: &str = "0.2.0";
+/// Default `source` for `[repos.lez]`. Single field — `url` was dropped in
+/// the 0.2.0 schema after audit confirmed `LEZ_URL == lez.source` in every
+/// production code path.
+pub(crate) const LEZ_SOURCE: &str = "https://github.com/logos-blockchain/logos-execution-zone.git";
+pub(crate) const SPEL_SOURCE: &str = "https://github.com/logos-co/spel.git";
+
+/// Two-form git pin: SHA (used in scaffold.toml `[repos.*].pin` and in
+/// `check_repo` git-head comparisons) plus tag (used by `check_spel_lez_alignment`
+/// and by user-project Cargo.toml git-dep substitution).
+pub(crate) struct GitRef {
+    pub(crate) sha: &'static str,
+    pub(crate) tag: &'static str,
+}
+
+// Cross-framework invariant: DEFAULT_SPEL must point at a spel commit
+// whose `spel-cli/Cargo.toml` vendors LEZ at the same ref as DEFAULT_LEZ.
+// Otherwise spel's sequencer-RPC client speaks a different protocol than
+// scaffold's own wallet/sequencer build. `check_spel_lez_alignment` in
+// `commands/doctor.rs` enforces this at runtime — re-run `doctor` after
+// bumping either pin.
+//
+// Special note on DEFAULT_SPEL: the unsuffixed `v0.2.0` tag (commit
+// `72fc22…`) is *older* than `v0.2.0-rc.5` (commit `ed3bbe…`). rc.5 is
+// the one we want because its vendored LEZ tag matches DEFAULT_LEZ.tag.
+pub(crate) const DEFAULT_LEZ: GitRef = GitRef {
+    sha: "35d8df0d031315219f94d1546ceb862b0e5b208f",
+    tag: "v0.2.0-rc1",
+};
+pub(crate) const DEFAULT_SPEL: GitRef = GitRef {
+    sha: "ed3bbedb4b684645da05455d30a4a0be7cc4dfe0",
+    tag: "v0.2.0-rc.5",
+};
+
+/// `logos-blockchain-circuits` GitHub release version that contains the
+/// proving/verification keys and witness generators every
+/// `logos-blockchain-{pol,poc,poq,zksign}` build script reads at compile time
+/// via `logos-blockchain-circuits-utils::circuits_dir()`.
+///
+/// Pinned to the version LEZ rc1's `flake.lock` resolves to (its
+/// `logos-blockchain-circuits` input is `ec7d298…`, whose `flake.nix` declares
+/// `circuitsVersion = "0.4.1"`). A mismatched circuits release silently
+/// produces incompatible verifier keys, so bump this in lock-step with
+/// `DEFAULT_LB_PIN` / `DEFAULT_LEZ`.
+///
+/// Materialised on demand into `<cache_root>/circuits/v<ver>-<triple>/` by
+/// `circuits::ensure_circuits_for_subprocess`. Override the version hop by
+/// setting `LOGOS_BLOCKCHAIN_CIRCUITS` to a populated checkout; the env var
+/// short-circuits the download.
+pub(crate) const DEFAULT_CIRCUITS_VERSION: &str = "0.4.1";
+pub(crate) const LOGOS_BLOCKCHAIN_CIRCUITS_ENV: &str = "LOGOS_BLOCKCHAIN_CIRCUITS";
+pub(crate) const CIRCUITS_RELEASE_BASE_URL: &str =
+    "https://github.com/logos-blockchain/logos-blockchain-circuits/releases/download";
+
 pub(crate) const DEFAULT_HELLO_WORLD_IMAGE_ID_HEX: &str =
     "4880b298f59699c1e4263c5c2245c80123632d608b9116f4b253c63e6c340771";
 pub(crate) const DEFAULT_WALLET_PASSWORD: &str = "logos-scaffold-v0";
@@ -18,9 +74,18 @@ pub(crate) const SEQUENCER_BIN_REL_PATH: &str = "target/release/sequencer_servic
 pub(crate) const METHODS_DIR: &str = "methods";
 pub(crate) const SEQUENCER_CONFIG_REL_PATH: &str =
     "sequencer/service/configs/debug/sequencer_config.json";
-pub(crate) const BASECAMP_URL: &str = "https://github.com/logos-co/logos-basecamp.git";
+pub(crate) const SPEL_BIN_REL_PATH: &str = "target/release/spel";
+/// Default seconds to wait for the sequencer to become ready when `lgs run`
+/// has to start localnet itself. Cold first runs (fresh repo clone, cold
+/// nix/cargo caches) routinely overshoot the previous 20s ceiling. Override
+/// per invocation with `lgs run --localnet-timeout <SECS>`.
+pub(crate) const DEFAULT_RUN_LOCALNET_TIMEOUT_SEC: u64 = 120;
+/// Default `source` for `[repos.basecamp]`. Built via `nix build .#app`,
+/// hence `BASECAMP_ATTR = "app"`.
+pub(crate) const BASECAMP_SOURCE: &str = "https://github.com/logos-co/logos-basecamp.git";
+pub(crate) const BASECAMP_ATTR: &str = "app";
 /// Basecamp commit pin — `logos-basecamp` tag `v0.1.1`.
-/// Projects can override via `[basecamp].pin` in `scaffold.toml`.
+/// Projects can override via `[repos.basecamp].pin` in `scaffold.toml`.
 pub(crate) const DEFAULT_BASECAMP_PIN: &str = "a746cdbc521f72ee22c5a4856fd17a9802bb9d69";
 pub(crate) const BASECAMP_PROFILE_ALICE: &str = "alice";
 pub(crate) const BASECAMP_PROFILE_BOB: &str = "bob";
@@ -40,9 +105,10 @@ pub(crate) const BASECAMP_AUTODISCOVER_SKIP_SUBDIRS: &[&str] =
 /// so lgpm must install under `LogosBasecampDev` for basecamp to discover
 /// the installed modules at launch.
 pub(crate) const BASECAMP_XDG_APP_SUBPATH: &str = "Logos/LogosBasecampDev";
-/// Default flake ref for the `lgpm` CLI. The basecamp flake does not expose `lgpm`;
-/// it lives in a separate repo (`logos-package-manager`). Pin alongside basecamp
-/// so dogfooding is reproducible. Override via `[basecamp].lgpm_flake` in scaffold.toml.
+/// Default `source` / `pin` / `attr` for `[repos.lgpm]`. The `lgpm` CLI
+/// lives in a separate repo (`logos-package-manager`) from basecamp; pin
+/// alongside basecamp so dogfooding is reproducible. Built via
+/// `nix build <source>/<pin>#<attr>`.
 ///
 /// Pinned to `logos-package-manager` tag `tutorial-v1` (the last pre-validation
 /// commit). PR #8 introduced content-hash validation in the manifest; later
@@ -50,8 +116,9 @@ pub(crate) const BASECAMP_XDG_APP_SUBPATH: &str = "Logos/LogosBasecampDev";
 /// `.lgx` files emitted by `logos-module-builder` tag `tutorial-v1`, which
 /// does not populate content hashes. Revisit when module-builder starts
 /// emitting hashes (or lgpm gains a compatibility mode).
-pub(crate) const DEFAULT_LGPM_FLAKE: &str =
-    "github:logos-co/logos-package-manager/e5c25989861f4487c3dc8c7b3bc0062bcbc3221f#cli";
+pub(crate) const LGPM_SOURCE: &str = "github:logos-co/logos-package-manager";
+pub(crate) const DEFAULT_LGPM_PIN: &str = "e5c25989861f4487c3dc8c7b3bc0062bcbc3221f";
+pub(crate) const LGPM_ATTR: &str = "cli";
 
 /// Scaffold-level default pins for runtime companion modules that basecamp
 /// v0.1.1 does NOT preinstall (listed in the Package Manager UI catalog but

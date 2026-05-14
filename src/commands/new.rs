@@ -4,17 +4,21 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context};
 
-use crate::config::serialize_config;
-use crate::constants::{
-    DEFAULT_FRAMEWORK_IDL_PATH, DEFAULT_FRAMEWORK_IDL_SPEC, DEFAULT_FRAMEWORK_VERSION,
-    DEFAULT_LEZ_PIN, FRAMEWORK_KIND_DEFAULT, FRAMEWORK_KIND_LEZ_FRAMEWORK, LEZ_URL, VERSION,
+use crate::config::{
+    default_basecamp_repo, default_lez_repo, default_lgpm_repo, default_spel_repo, serialize_config,
 };
-use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RepoRef};
+use crate::constants::{
+    DEFAULT_BASECAMP_PIN, DEFAULT_FRAMEWORK_IDL_PATH, DEFAULT_FRAMEWORK_IDL_SPEC,
+    DEFAULT_FRAMEWORK_VERSION, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL, FRAMEWORK_KIND_DEFAULT,
+    FRAMEWORK_KIND_LEZ_FRAMEWORK, LEZ_SOURCE, SCAFFOLD_TOML_SCHEMA_VERSION,
+};
+use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RunConfig};
 use crate::project::default_cache_root;
 use crate::repo::{sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
 use crate::state::write_text;
 use crate::template::copy::{copy_dir_contents, patch_simple_tail_call_program_id};
 use crate::template::project::{apply_overlay, OverlayRenderContext};
+use crate::template::skills::apply_skills;
 use crate::DynResult;
 
 #[derive(Debug)]
@@ -60,7 +64,7 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
     let lez_source = cmd
         .lez_path
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|| LEZ_URL.to_string());
+        .unwrap_or_else(|| LEZ_SOURCE.to_string());
 
     let lez_repo_path = if cmd.vendor_deps {
         let root = target.join(".scaffold/repos");
@@ -69,32 +73,54 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
         sync_repo_to_pin_at_path_with_opts(
             &lez_vendor,
             &lez_source,
-            DEFAULT_LEZ_PIN,
+            DEFAULT_LEZ.sha,
             "lez",
             RepoSyncOptions::fail_on_source_mismatch(),
         )?;
         lez_vendor
     } else {
-        let lez_cached = bootstrap_cache.join("repos/lez").join(DEFAULT_LEZ_PIN);
+        let lez_cached = bootstrap_cache.join("repos/lez").join(DEFAULT_LEZ.sha);
         sync_repo_to_pin_at_path_with_opts(
             &lez_cached,
             &lez_source,
-            DEFAULT_LEZ_PIN,
+            DEFAULT_LEZ.sha,
             "lez",
             RepoSyncOptions::auto_reclone_cache_repo(),
         )?;
         lez_cached
     };
 
+    // spel is recorded in scaffold.toml here but actually cloned + built by
+    // `setup`. Persist `path` only for vendored projects (relative,
+    // project-local). Cache-managed projects leave it empty so scaffold.toml
+    // stays portable; `resolve_repo_path` derives the on-disk location from
+    // cache_root + pin at runtime.
+    let (lez_persisted_path, spel_persisted_path) = if cmd.vendor_deps {
+        (
+            ".scaffold/repos/lez".to_string(),
+            ".scaffold/repos/spel".to_string(),
+        )
+    } else {
+        (String::new(), String::new())
+    };
+
+    let mut lez = default_lez_repo(DEFAULT_LEZ.sha);
+    lez.source = lez_source;
+    lez.path = lez_persisted_path;
+    let mut spel = default_spel_repo(DEFAULT_SPEL.sha);
+    spel.path = spel_persisted_path;
+
     let cfg = Config {
-        version: VERSION.to_string(),
+        version: SCAFFOLD_TOML_SCHEMA_VERSION.to_string(),
         cache_root: String::new(),
-        lez: RepoRef {
-            url: LEZ_URL.to_string(),
-            source: lez_source,
-            path: lez_repo_path.display().to_string(),
-            pin: DEFAULT_LEZ_PIN.to_string(),
-        },
+        lez,
+        spel,
+        // Default scaffolded projects don't pin basecamp/lgpm — only
+        // projects building Logos modules need them. `lgs basecamp setup`
+        // is the entry point that backfills those sections, mirroring how
+        // `lgs init` backfills `[repos.spel]` for pre-spel projects.
+        basecamp_repo: Some(default_basecamp_repo(DEFAULT_BASECAMP_PIN)),
+        lgpm_repo: Some(default_lgpm_repo(DEFAULT_LGPM_PIN)),
         wallet_home_dir: ".scaffold/wallet".to_string(),
         framework: FrameworkConfig {
             kind: template_variant.clone(),
@@ -105,7 +131,9 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
             },
         },
         localnet: LocalnetConfig::default(),
+        modules: std::collections::BTreeMap::new(),
         basecamp: None,
+        run: RunConfig::default(),
     };
 
     let template_root = lez_repo_path.join("examples/program_deployment");
@@ -120,12 +148,14 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
     let overlay_ctx = OverlayRenderContext {
         crate_name: &crate_name,
         lez_pin: &cfg.lez.pin,
+        spel_tag: DEFAULT_SPEL.tag,
     };
     apply_overlay(&target, &template_variant, &overlay_ctx)?;
     if template_variant == FRAMEWORK_KIND_LEZ_FRAMEWORK {
         cleanup_lez_hello_artifacts(&target)?;
     }
     write_text(&target.join("scaffold.toml"), &serialize_config(&cfg)?)?;
+    apply_skills(&target)?;
 
     let old_getting_started = target.join("GETTING_STARTED.md");
     if old_getting_started.exists() {
@@ -139,6 +169,7 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
     );
     println!("Pinned lez: {}", cfg.lez.pin);
     println!("Template variant: {}", cfg.framework.kind);
+    println!("AI skills installed under .claude/skills/, .cursor/rules/, and AGENTS.md.");
 
     Ok(())
 }

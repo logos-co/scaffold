@@ -18,7 +18,7 @@ use crate::model::{
     CollectedItem, RedactionSummary, ReportManifest, SkippedItem, ToolCommandResult,
 };
 use crate::process::{set_command_echo, which};
-use crate::project::load_project;
+use crate::project::{load_project, resolve_repo_path};
 use crate::state::write_text;
 use crate::DynResult;
 
@@ -746,7 +746,13 @@ fn collect_tool_versions(
         results.push(result);
     }
 
-    let lez = PathBuf::from(&project.config.lez.path);
+    let lez = match resolve_repo_path(project, &project.config.lez, "lez") {
+        Ok(p) => p,
+        Err(err) => {
+            warnings.push(format!("could not resolve lez repo path: {err}"));
+            return (results, redaction_replacements, warnings);
+        }
+    };
     let wallet_binary = lez.join(crate::constants::WALLET_BIN_REL_PATH);
     let wallet_binary_str = wallet_binary.display().to_string();
     let (wallet_result, wallet_replacements) = collect_tool_command(

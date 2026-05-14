@@ -5,17 +5,23 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail};
 
 use crate::config::{parse_config, serialize_config};
-use crate::model::Project;
+use crate::model::{Project, RepoRef};
 use crate::state::write_text_atomic;
 use crate::DynResult;
 
 pub(crate) fn load_project() -> DynResult<Project> {
     let cwd = env::current_dir()?;
     let root = find_project_root(cwd.clone()).ok_or_else(|| {
-        anyhow!(
-            "Not a logos-scaffold project at {}. Run `logos-scaffold create <name>` (or `logos-scaffold new <name>`) first.",
-            cwd.display()
-        )
+        {
+            let bin = std::env::args()
+                .next()
+                .and_then(|p| std::path::Path::new(&p).file_name().map(|n| n.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| "logos-scaffold".to_string());
+            anyhow!(
+                "Not a logos-scaffold project at {}. Run `{bin} create <name>` (or `{bin} new <name>`) first.",
+                cwd.display()
+            )
+        }
     })?;
 
     let config_path = root.join("scaffold.toml");
@@ -37,6 +43,13 @@ pub(crate) fn run_in_project_dir(
     result
 }
 
+/// Rewrite `scaffold.toml` from scratch using the current `project.config`.
+///
+/// This is a destructive serialization: user comments, key ordering, and any
+/// hand-formatting are lost. Callers should only invoke it when the config
+/// has actually changed and the rewrite carries meaningful state. The
+/// comment-preserving path is `init`'s in-place `toml_edit` migration —
+/// not this function.
 pub(crate) fn save_project_config(project: &Project) -> DynResult<()> {
     write_text_atomic(
         &project.root.join("scaffold.toml"),
@@ -137,6 +150,41 @@ pub(crate) fn default_cache_root() -> DynResult<(PathBuf, CacheRootSource)> {
     ))
 }
 
+/// Resolves the on-disk location of a pinned repo (lez, spel).
+///
+/// - If `repo.path` is set, it's authoritative — used literally if absolute, or
+///   joined to `project.root` if relative. Covers `--vendor-deps` projects and
+///   any user-edited override.
+/// - If `repo.path` is empty, derive `<cache_root>/repos/<name>/<repo.pin>`.
+///   This is the portable default written by `new` / `init`: scaffold.toml
+///   stays byte-identical across machines, and the host's cache_root chain
+///   (env → `[scaffold].cache_root` → XDG default) decides the actual
+///   location at runtime.
+///
+/// Mirrors the basecamp pattern in `cmd_basecamp_setup`, which never persists
+/// a path and always derives from cache_root + pin.
+pub(crate) fn resolve_repo_path(
+    project: &Project,
+    repo: &RepoRef,
+    name: &str,
+) -> DynResult<PathBuf> {
+    if !repo.path.is_empty() {
+        let p = PathBuf::from(&repo.path);
+        return Ok(if p.is_absolute() {
+            p
+        } else {
+            project.root.join(p)
+        });
+    }
+    if repo.pin.is_empty() {
+        bail!(
+            "cannot resolve repo path for `{name}`: both path and pin are empty in scaffold.toml"
+        );
+    }
+    let (cache_root, _) = resolve_cache_root(project)?;
+    Ok(cache_root.join("repos").join(name).join(&repo.pin))
+}
+
 pub(crate) fn home_dir() -> DynResult<PathBuf> {
     if let Ok(home) = env::var("HOME") {
         return Ok(PathBuf::from(home));
@@ -164,14 +212,12 @@ mod tests {
         Project {
             root,
             config: Config {
-                version: "0.1.0".into(),
+                version: "0.2.0".into(),
                 cache_root: cache_root.to_string(),
-                lez: RepoRef {
-                    url: String::new(),
-                    source: String::new(),
-                    path: String::new(),
-                    pin: String::new(),
-                },
+                lez: RepoRef::default(),
+                spel: RepoRef::default(),
+                basecamp_repo: None,
+                lgpm_repo: None,
                 wallet_home_dir: ".scaffold/wallet".into(),
                 framework: FrameworkConfig {
                     kind: String::new(),
@@ -182,7 +228,9 @@ mod tests {
                     },
                 },
                 localnet: LocalnetConfig::default(),
+                modules: std::collections::BTreeMap::new(),
                 basecamp: None,
+                run: crate::model::RunConfig::default(),
             },
         }
     }
@@ -219,6 +267,58 @@ mod tests {
 
         assert_eq!(path, PathBuf::from("/abs/cache"));
         assert_eq!(source, CacheRootSource::Config);
+    }
+
+    #[test]
+    fn resolve_repo_path_uses_literal_absolute_path_when_set() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        env::remove_var("LOGOS_SCAFFOLD_CACHE_ROOT");
+        let mut project = fixture_project(PathBuf::from("/proj"), "");
+        project.config.lez = RepoRef {
+            path: "/abs/lez".into(),
+            pin: "deadbeef".into(),
+            ..Default::default()
+        };
+        let path = resolve_repo_path(&project, &project.config.lez, "lez").expect("resolve");
+        assert_eq!(path, PathBuf::from("/abs/lez"));
+    }
+
+    #[test]
+    fn resolve_repo_path_joins_relative_path_to_project_root() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        env::remove_var("LOGOS_SCAFFOLD_CACHE_ROOT");
+        let mut project = fixture_project(PathBuf::from("/proj"), "");
+        project.config.lez = RepoRef {
+            path: ".scaffold/repos/lez".into(),
+            pin: "deadbeef".into(),
+            ..Default::default()
+        };
+        let path = resolve_repo_path(&project, &project.config.lez, "lez").expect("resolve");
+        assert_eq!(path, PathBuf::from("/proj/.scaffold/repos/lez"));
+    }
+
+    #[test]
+    fn resolve_repo_path_derives_from_cache_root_when_path_empty() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        env::set_var("LOGOS_SCAFFOLD_CACHE_ROOT", "/tmp/cache");
+        let mut project = fixture_project(PathBuf::from("/proj"), "");
+        project.config.spel = RepoRef {
+            pin: "cafef00d".into(),
+            ..Default::default()
+        };
+        let path = resolve_repo_path(&project, &project.config.spel, "spel").expect("resolve");
+        env::remove_var("LOGOS_SCAFFOLD_CACHE_ROOT");
+        assert_eq!(path, PathBuf::from("/tmp/cache/repos/spel/cafef00d"));
+    }
+
+    #[test]
+    fn resolve_repo_path_errors_when_both_path_and_pin_empty() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        env::remove_var("LOGOS_SCAFFOLD_CACHE_ROOT");
+        let project = fixture_project(PathBuf::from("/proj"), "");
+        // both lez.path and lez.pin are empty in fixture
+        let err = resolve_repo_path(&project, &project.config.lez, "lez").unwrap_err();
+        assert!(err.to_string().contains("lez"), "{err}");
     }
 
     #[test]

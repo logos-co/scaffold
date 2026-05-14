@@ -6,7 +6,6 @@ use std::process::Command;
 
 use anyhow::bail;
 
-use crate::model::RepoRef;
 use crate::process::{run_capture, run_checked};
 use crate::DynResult;
 
@@ -36,17 +35,6 @@ impl RepoSyncOptions {
     }
 }
 
-pub(crate) fn sync_repo_to_pin(
-    repo: &mut RepoRef,
-    label: &str,
-    opts: RepoSyncOptions,
-) -> DynResult<()> {
-    let path = PathBuf::from(&repo.path);
-    sync_repo_to_pin_at_path_with_opts(&path, &repo.source, &repo.pin, label, opts)?;
-    repo.pin = git_head_sha(&path)?;
-    Ok(())
-}
-
 pub(crate) fn sync_repo_to_pin_at_path_with_opts(
     path: &Path,
     source: &str,
@@ -65,7 +53,7 @@ pub(crate) fn sync_repo_to_pin_at_path_with_opts(
         &format!("git fetch ({label})"),
     );
 
-    ensure_pin_exists(path, source, pin, label)?;
+    let resolved_pin = ensure_pin_exists(path, source, pin, label)?;
 
     run_checked(
         Command::new("git")
@@ -76,9 +64,13 @@ pub(crate) fn sync_repo_to_pin_at_path_with_opts(
     )?;
 
     let head = git_head_sha(path)?;
-    if head != pin {
+    if head != resolved_pin {
+        // Comparison is against the resolved SHA, not the raw `pin` string —
+        // otherwise tag/branch pins (e.g. `pin = "v0.2.0"`) always trip this
+        // assertion even though the checkout succeeded.
         bail!(
-            "{label} pin mismatch after checkout (expected {}, got {})",
+            "{label} pin mismatch after checkout (expected {} resolved from {}, got {})",
+            resolved_pin,
             pin,
             head
         );
@@ -87,30 +79,31 @@ pub(crate) fn sync_repo_to_pin_at_path_with_opts(
     Ok(())
 }
 
+/// Verify that `pin` exists in the repo at `path` and return its resolved
+/// commit SHA. Accepts any revision spec `git rev-parse` understands (SHA,
+/// short SHA, tag, branch); the returned value is always a 40-hex SHA so
+/// callers can compare it byte-for-byte against `HEAD`.
 pub(crate) fn ensure_pin_exists(
     path: &Path,
     source: &str,
     pin: &str,
     label: &str,
-) -> DynResult<()> {
+) -> DynResult<String> {
     let rev = format!("{pin}^{{commit}}");
-    if run_capture(
+    match run_capture(
         Command::new("git")
             .current_dir(path)
             .arg("rev-parse")
             .arg("--verify")
             .arg(&rev),
         &format!("verify pin ({label})"),
-    )
-    .is_err()
-    {
-        bail!(
+    ) {
+        Ok(captured) => Ok(captured.stdout.trim().to_string()),
+        Err(_) => bail!(
             "configured {label} pin {pin} is not available in {} from source `{source}`. Ensure the repo source contains this commit (try `--lez-path` pointing to a repo that has it).",
             path.display(),
-        );
+        ),
     }
-
-    Ok(())
 }
 
 pub(crate) fn ensure_repo_present(
@@ -135,6 +128,7 @@ pub(crate) fn ensure_repo_present(
         Command::new("git")
             .arg("clone")
             .arg("--no-hardlinks")
+            .arg("--")
             .arg(source)
             .arg(path),
         &format!("clone {label}"),
@@ -173,6 +167,7 @@ fn reconcile_repo_source(
                 Command::new("git")
                     .arg("clone")
                     .arg("--no-hardlinks")
+                    .arg("--")
                     .arg(source)
                     .arg(path),
                 &format!("refresh clone {label}"),
@@ -331,6 +326,33 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("does not match requested source"));
         assert!(msg.contains("Refusing to reuse this repo"));
+    }
+
+    #[test]
+    fn pin_as_tag_succeeds_with_resolved_sha_check() {
+        // Regression: when `[repos.*].pin` is a tag (or any non-SHA ref), the
+        // post-checkout assertion used to compare the raw `pin` string against
+        // the 40-hex HEAD SHA and always fail. Now we compare against the
+        // SHA resolved by `git rev-parse <pin>^{commit}`.
+        let temp = tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let cache_repo = temp.path().join("cache/repo");
+
+        let sha = init_repo_with_commit(&source, "a.txt", "a");
+        run_git(&source, &["tag", "v0.2.0"]);
+        git_clone(&source, &cache_repo);
+
+        sync_repo_to_pin_at_path_with_opts(
+            &cache_repo,
+            &source.display().to_string(),
+            "v0.2.0",
+            "lez",
+            RepoSyncOptions::fail_on_source_mismatch(),
+        )
+        .expect("tag-as-pin sync must succeed");
+
+        let head = git_head_sha(&cache_repo).expect("head");
+        assert_eq!(head, sha, "HEAD must resolve to the tagged commit");
     }
 
     #[test]

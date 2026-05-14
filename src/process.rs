@@ -17,6 +17,30 @@ pub(crate) fn set_command_echo(enabled: bool) {
     ECHO_COMMANDS.store(enabled, Ordering::Relaxed);
 }
 
+/// RAII guard that suppresses subprocess command echo for the duration of its
+/// scope. On drop, restores `ECHO_COMMANDS` to whatever it was when the guard
+/// was constructed — so nesting (or already-suppressed outer scopes) round-trip
+/// correctly. Use this instead of paired `set_command_echo(false)` /
+/// `set_command_echo(true)` calls so a `?` propagation or panic doesn't leave
+/// echo permanently disabled for the rest of the process.
+pub(crate) struct EchoGuard {
+    restore_to: bool,
+}
+
+impl EchoGuard {
+    pub(crate) fn suppress() -> Self {
+        let restore_to = ECHO_COMMANDS.load(Ordering::Relaxed);
+        ECHO_COMMANDS.store(false, Ordering::Relaxed);
+        Self { restore_to }
+    }
+}
+
+impl Drop for EchoGuard {
+    fn drop(&mut self) {
+        ECHO_COMMANDS.store(self.restore_to, Ordering::Relaxed);
+    }
+}
+
 fn should_echo() -> bool {
     ECHO_COMMANDS.load(Ordering::Relaxed)
 }
@@ -385,6 +409,33 @@ mod logged_tests {
         assert!(!is_truthy_env_value(OsStr::new("no")));
         assert!(!is_truthy_env_value(OsStr::new("yes")));
         assert!(!is_truthy_env_value(OsStr::new("on")));
+    }
+
+    #[test]
+    fn echo_guard_restores_previous_state_on_drop() {
+        // Verify the RAII guard's contract: capture-then-restore, so a `?`
+        // propagation inside a `--json` block never leaves echo permanently
+        // suppressed for subsequent commands. The guard captures the *current*
+        // state at construction (not a hardcoded `true`), so nesting works.
+        // NOTE: `ECHO_COMMANDS` is a process-global; this test cannot be run
+        // concurrently with other tests that toggle it. The default is `true`.
+        let initial = ECHO_COMMANDS.load(Ordering::Relaxed);
+        // Force a known starting state.
+        ECHO_COMMANDS.store(true, Ordering::Relaxed);
+        {
+            let _g = EchoGuard::suppress();
+            assert!(!ECHO_COMMANDS.load(Ordering::Relaxed));
+        }
+        assert!(ECHO_COMMANDS.load(Ordering::Relaxed));
+        // Outer-suppressed → guard suppresses → drop restores to suppressed.
+        ECHO_COMMANDS.store(false, Ordering::Relaxed);
+        {
+            let _g = EchoGuard::suppress();
+            assert!(!ECHO_COMMANDS.load(Ordering::Relaxed));
+        }
+        assert!(!ECHO_COMMANDS.load(Ordering::Relaxed));
+        // Restore for any tests that follow.
+        ECHO_COMMANDS.store(initial, Ordering::Relaxed);
     }
 
     #[test]

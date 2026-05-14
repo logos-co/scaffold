@@ -2,12 +2,50 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
-#[derive(Clone, Debug)]
+/// A pinned external git dependency.
+///
+/// `source` is a clone URL or, for `RepoBuild::NixFlake`, a flake-style ref
+/// (e.g. `github:owner/repo`). `pin` is the git SHA. `attr` is the flake
+/// output attribute when `build == NixFlake`, otherwise empty (cargo build
+/// targets are decided code-side, not data-driven).
+///
+/// `path` is an optional override for the on-disk clone location:
+/// - `Some` (non-empty after construction): authoritative — used literally
+///   if absolute, joined to `project.root` if relative. Set by
+///   `--vendor-deps`, hand-edited overrides, or pre-portability scaffold.toml
+///   files in the wild (back-compat).
+/// - `None` / empty: derive `<cache_root>/repos/<name>/<pin>` at runtime.
+#[derive(Clone, Debug, Default)]
 pub(crate) struct RepoRef {
-    pub(crate) url: String,
     pub(crate) source: String,
-    pub(crate) path: String,
     pub(crate) pin: String,
+    pub(crate) build: RepoBuild,
+    pub(crate) attr: String,
+    pub(crate) path: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum RepoBuild {
+    #[default]
+    Cargo,
+    NixFlake,
+}
+
+impl RepoBuild {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Cargo => "cargo",
+            Self::NixFlake => "nix-flake",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "cargo" => Some(Self::Cargo),
+            "nix-flake" => Some(Self::NixFlake),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -30,10 +68,24 @@ pub(crate) struct Config {
     pub(crate) version: String,
     pub(crate) cache_root: String,
     pub(crate) lez: RepoRef,
+    pub(crate) spel: RepoRef,
+    /// `[repos.basecamp]`. Optional — projects that don't use basecamp can
+    /// omit the section. When `None`, basecamp commands fail with a hint
+    /// pointing at `init`.
+    pub(crate) basecamp_repo: Option<RepoRef>,
+    /// `[repos.lgpm]`. Optional, same reasoning as `basecamp_repo`.
+    pub(crate) lgpm_repo: Option<RepoRef>,
     pub(crate) wallet_home_dir: String,
     pub(crate) framework: FrameworkConfig,
     pub(crate) localnet: LocalnetConfig,
+    /// `[modules.<name>]` — top-level Logos module catalog (was
+    /// `[basecamp.modules.<name>]` pre-consolidation).
+    pub(crate) modules: std::collections::BTreeMap<String, ModuleEntry>,
+    /// `[basecamp]` — runtime config only (port_base, port_stride). Pin and
+    /// source moved to `[repos.basecamp]`; modules moved to `[modules.*]`.
     pub(crate) basecamp: Option<BasecampConfig>,
+    /// `[run]` — `lgs run` pipeline config (post-deploy hooks).
+    pub(crate) run: RunConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,29 +105,20 @@ pub(crate) struct ModuleEntry {
     pub(crate) role: ModuleRole,
 }
 
+/// `[basecamp]` runtime config only. Pin and source moved to
+/// `[repos.basecamp]`; lgpm moved to `[repos.lgpm]`; modules moved to
+/// `[modules.*]`.
 #[derive(Clone, Debug)]
 pub(crate) struct BasecampConfig {
-    pub(crate) pin: String,
-    pub(crate) source: String,
-    pub(crate) lgpm_flake: String,
     pub(crate) port_base: u16,
     pub(crate) port_stride: u16,
-    /// Captured module set keyed by `module_name` (matches `metadata.json`
-    /// `name` for the declaring source, and `dependencies` entries for
-    /// anything that references it). Parsed from `[basecamp.modules.<name>]`
-    /// sub-sections. Sole source of truth for what `install` / `launch` build.
-    pub(crate) modules: std::collections::BTreeMap<String, ModuleEntry>,
 }
 
 impl Default for BasecampConfig {
     fn default() -> Self {
         Self {
-            pin: String::new(),
-            source: "https://github.com/logos-co/logos-basecamp".to_string(),
-            lgpm_flake: String::new(),
             port_base: 60000,
             port_stride: 10,
-            modules: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -216,4 +259,14 @@ pub(crate) struct FrameworkConfig {
 pub(crate) struct FrameworkIdlConfig {
     pub(crate) spec: String,
     pub(crate) path: String,
+}
+
+/// `[run]` — config for the `lgs run` pipeline. Branch-1 surface is the
+/// minimal inline `post_deploy` hook(s); profile/reset support arrives in
+/// later branches of the run-command stack.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RunConfig {
+    /// Inline `[run].post_deploy` — string (single hook) or array (multiple).
+    /// Empty when not configured.
+    pub(crate) post_deploy: Vec<String>,
 }

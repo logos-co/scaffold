@@ -11,6 +11,7 @@ include = [
   "/src/**",
   "/templates/**",
   "/templates/**/.*",
+  "/skills/**",
   "/tests/**",
   "/Cargo.toml",
   "/Cargo.lock",
@@ -36,9 +37,11 @@ indicatif = "0.17"
 flate2 = "1.1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.140"
+sha2 = "0.10"
 tar = "0.4.44"
 tempfile = "3.18.0"
 thiserror = "2.0"
+toml_edit = "0.22"
 ureq = { version = "2.12", features = ["json"] }
 libc = "0.2.183"
 walkdir = "2"
