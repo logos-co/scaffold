@@ -23,11 +23,6 @@ use crate::project::{load_project, resolve_repo_path, run_in_project_dir};
 use crate::state::prepare_wallet_home;
 use crate::DynResult;
 
-/// Number of seconds to wait for block production after a reset before
-/// considering the freshly-started localnet healthy. Matches the upper
-/// envelope of `cmd_localnet_reset`'s default verification timeout.
-const RESET_VERIFY_TIMEOUT_SEC: u64 = 30;
-
 /// All knobs that control a `lgs run` invocation. Built by `cli.rs` from
 /// the parsed `RunArgs` (with conflicting-flag resolution into `Option<bool>`)
 /// and consumed by `cmd_run`. Grouping the fields together prevents the
@@ -83,6 +78,17 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
     let total_steps: u32 = if has_hooks { 6 } else { 5 };
     let effective_reset = params.reset_override.unwrap_or(params.resolved.reset);
 
+    // Surface destructive intent up front when reset comes from config
+    // (not from the CLI flag). With --reset the user already typed the
+    // word, so re-stating it is noise; with `reset = true` in scaffold.toml
+    // they may not realize step 3 will wipe rocksdb + wallet, so warn
+    // before step 1 instead of after the build has run.
+    if effective_reset && params.reset_override.is_none() {
+        eprintln!(
+            "warning: scaffold.toml requested reset = true; step 3 will wipe sequencer state + wallet. Pass --no-reset to override."
+        );
+    }
+
     // Step 1: Build (chains setup internally)
     println!("[1/{total_steps}] Building...");
     cmd_build_shortcut(None)?;
@@ -94,7 +100,7 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
     // Step 3: Reset OR ensure localnet.
     if effective_reset {
         println!("[3/{total_steps}] Resetting localnet (wipes sequencer + wallet)...");
-        reset_for_run(project)?;
+        reset_for_run(project, params.localnet_timeout_sec)?;
         // A reset wipes on-chain state, so any prior deploy is gone:
         // the next deploy must run regardless of hash equality. Tolerate
         // NotFound (no prior run); surface anything else.
@@ -178,7 +184,7 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
     Ok(())
 }
 
-fn reset_for_run(project: &Project) -> DynResult<()> {
+fn reset_for_run(project: &Project, verify_timeout_sec: u64) -> DynResult<()> {
     let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
     let state_path = project.root.join(".scaffold/state/localnet.state");
     let log_path = project.root.join(".scaffold/logs/sequencer.log");
@@ -192,7 +198,7 @@ fn reset_for_run(project: &Project) -> DynResult<()> {
         false, // dry_run — actually perform the reset
         true,  // yes — non-interactive; run is the user-initiated action that authorizes it
         true,  // reset_wallet — full wipe; reseed_after_wipe re-seeds below
-        RESET_VERIFY_TIMEOUT_SEC,
+        verify_timeout_sec,
     )?;
     // The wipe deleted the wallet directory and state file; the next pipeline
     // step (topup) would fail without a re-seed. Recover by calling the same
@@ -1081,19 +1087,15 @@ mod tests {
         // already lock in the user-visible output shape.
     }
 
-    /// After `lgs run --reset`, `wallet.state` must be byte-equivalent to a
-    /// freshly-seeded clean-setup baseline. This test enforces the
-    /// "reuse, don't duplicate" contract on the re-seed path: if anyone
-    /// reaches into `reset_for_run` and adds a parallel seed implementation,
-    /// the byte comparison breaks.
-    ///
-    /// We exercise the same primitives `cmd_setup` calls
-    /// (`prepare_wallet_home` + `ensure_default_wallet_seeded`) twice
-    /// against fresh state — once standing in for `cmd_setup`, once
-    /// standing in for the post-reset re-seed — and assert byte equality.
-    /// Booting a real sequencer is intentionally out of scope; this is the
-    /// part of the chain that isn't already covered by `cmd_localnet_reset`'s
-    /// own tests.
+    /// Asserts that `reseed_after_wipe` produces a `wallet.state` byte-equivalent
+    /// to a fresh setup. The test does not exercise `reset_for_run` itself —
+    /// `cmd_localnet_reset` requires a real sequencer and isn't reachable from
+    /// unit-test scope. What this *does* lock down: if `reseed_after_wipe`
+    /// drifts away from calling the same primitives `cmd_setup` uses
+    /// (`prepare_wallet_home` + `ensure_default_wallet_seeded`), the byte
+    /// comparison breaks. `reset_for_run` itself must keep calling
+    /// `reseed_after_wipe` (not inline a parallel seed) — that contract is
+    /// enforced by code review, not by this test.
     #[test]
     fn reseed_after_wipe_matches_setup_baseline() {
         use crate::commands::setup::ensure_default_wallet_seeded;
@@ -1128,10 +1130,7 @@ mod tests {
             ensure_default_wallet_seeded(baseline.path(), &wallet_home).expect("baseline seed");
         }
 
-        // Post-reset: drive the actual helper `reset_for_run` calls.
-        // If anyone reaches into `reset_for_run` and adds a parallel seed
-        // implementation, this test breaks — that's the contract this
-        // assertion enforces over time.
+        // Post-reset: drive `reseed_after_wipe` directly.
         // The fixture sets `lez.path = "lez"` (relative); make it absolute
         // so the helper doesn't depend on cwd (tests run in parallel and
         // can't share cwd).

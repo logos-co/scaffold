@@ -4163,27 +4163,37 @@ fn run_with_reset_flag_starts_pipeline() {
     let temp = tempdir().expect("tempdir");
     setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
 
+    // --reset on the CLI: no banner (user typed the word) and pipeline
+    // enters step 1 before the build fails on this mock project.
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(temp.path())
         .arg("run")
         .arg("--reset")
         .assert()
         .failure()
-        .stdout(predicate::str::contains("[1/5] Building..."));
+        .stdout(predicate::str::contains("[1/5] Building..."))
+        .stderr(predicate::str::contains("scaffold.toml requested reset = true").not());
 }
 
 #[test]
-fn run_with_reset_in_config_starts_pipeline() {
+fn run_with_reset_in_config_emits_destructive_intent_warning() {
     let temp = tempdir().expect("tempdir");
     setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
     append_run_config_full(temp.path(), true, &[]);
 
+    // reset = true in scaffold.toml without --reset on the CLI: the
+    // destructive-intent warning must fire on stderr before step 1, so a
+    // user who didn't realize `lgs run` would wipe their state finds out
+    // before the build runs.
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(temp.path())
         .arg("run")
         .assert()
         .failure()
-        .stdout(predicate::str::contains("[1/5] Building..."));
+        .stdout(predicate::str::contains("[1/5] Building..."))
+        .stderr(predicate::str::contains(
+            "scaffold.toml requested reset = true",
+        ));
 }
 
 #[test]
@@ -4192,14 +4202,15 @@ fn run_no_reset_flag_overrides_config_reset_true() {
     setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
     append_run_config_full(temp.path(), true, &[]);
 
-    // --no-reset must beat the config field (CLI overrides config).
-    // We can't observe the reset wasn't called from a mock project, but we
-    // can confirm the pipeline starts (no panic from conflicting parses).
+    // --no-reset must beat the config field (CLI overrides config). When
+    // effective_reset is false, the destructive-intent banner must NOT
+    // fire — that's the observable signal proving the override took effect.
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(temp.path())
         .arg("run")
         .arg("--no-reset")
         .assert()
         .failure()
-        .stdout(predicate::str::contains("[1/5] Building..."));
+        .stdout(predicate::str::contains("[1/5] Building..."))
+        .stderr(predicate::str::contains("scaffold.toml requested reset = true").not());
 }

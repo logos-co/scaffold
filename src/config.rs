@@ -1057,6 +1057,23 @@ role = "project"
         assert!(r.post_deploy.is_empty());
     }
 
+    /// When `[run].default_profile` resolves, inline `[run]` values are
+    /// fully shadowed — they do not merge. Mirrors the `--profile X`
+    /// behavior so the two ways of selecting a profile have identical
+    /// semantics.
+    #[test]
+    fn resolve_profile_default_profile_fully_shadows_inline() {
+        let toml = minimal_v0_2_0()
+            + "[run]\ndefault_profile = \"dev\"\npost_deploy = [\"echo inline\"]\nreset = true\n[run.profiles.dev]\npost_deploy = [\"echo dev\"]\n";
+        let cfg = parse_config(&toml).expect("parse");
+        let r = cfg.run.resolve_profile(None).expect("resolve");
+        assert_eq!(r.post_deploy, vec!["echo dev".to_string()]);
+        assert!(
+            !r.reset,
+            "inline reset must not bleed into resolved profile"
+        );
+    }
+
     #[test]
     fn run_profiles_round_trip_through_parse_serialize() {
         let toml = minimal_v0_2_0()
