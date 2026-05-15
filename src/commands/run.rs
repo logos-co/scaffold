@@ -91,7 +91,7 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
 
     // Step 1: Build (chains setup internally)
     println!("[1/{total_steps}] Building...");
-    cmd_build_shortcut(None)?;
+    cmd_build_shortcut(None, false)?;
 
     // Step 2: Build IDL (no-op for non-lez-framework projects)
     println!("[2/{total_steps}] Building IDL...");

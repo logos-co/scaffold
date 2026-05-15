@@ -132,7 +132,7 @@ Use `new` for the main runnable project and `create` as the lightweight alias-pa
 ### Expected Success Signals
 
 - Project creation succeeds and prints the destination path, pinned LEZ commit, and cache root.
-- `setup` completes after syncing LEZ to the configured pin, building both `sequencer_service` and `wallet` inside the project's LEZ tree, and either seeding the default wallet or reporting that a default wallet is already configured.
+- `setup` completes after syncing LEZ to the configured pin, building both `sequencer_service` and `wallet` inside the project's LEZ tree, and either seeding the default wallet or reporting that a default wallet is already configured. With `--prebuilt`: `sequencer_service` is downloaded instead of built from source (falls back to source build if no artifact is published); `wallet` is always built from source regardless of `--prebuilt`.
 - `localnet start` reports a ready localnet rather than only a spawned PID.
 - `build` exits successfully after preparing the project workspace, and — when the project has a `methods/Cargo.toml` (Risc0 guest crate excluded from the main workspace) — also prints `Building guest methods...` and produces a `methods/target/.../release` artifact.
 - `deploy` prints a submission summary with zero failures when built binaries are present.

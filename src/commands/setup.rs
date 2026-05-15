@@ -213,32 +213,61 @@ mod tests {
             "default_address=Public/8zxWNm1qh6FLsJpVBuDxdxcTm55qHPgFEdqJpPVu1fuy\n"
         );
     }
+
+    #[test]
+    fn prebuilt_tag_format() {
+        let pin = "35d8df0d031315219f94d1546ceb862b0e5b208f";
+        let commit = &pin[..8];
+        let tag = format!("lssa-prebuilt-{commit}-x86_64-linux");
+        assert_eq!(tag, "lssa-prebuilt-35d8df0d-x86_64-linux");
+    }
+
+    #[test]
+    fn prebuilt_tag_short_pin() {
+        let pin = "abc123";
+        let commit = &pin[..8.min(pin.len())];
+        assert_eq!(commit, "abc123");
+    }
+
+    #[test]
+    fn prebuilt_url_contains_tag_and_binary() {
+        let tag = "lssa-prebuilt-35d8df0d-x86_64-linux";
+        let url = format!(
+            "https://github.com/logos-co/logos-scaffold/releases/download/{tag}/sequencer_service"
+        );
+        assert!(url.contains("lssa-prebuilt-35d8df0d"));
+        assert!(url.contains("sequencer_service"));
+    }
 }
 
 fn try_download_prebuilt(lez: &Path, pin: &str) -> crate::DynResult<bool> {
-    let commit = &pin[..8.min(pin.len())];
     let arch = if cfg!(target_arch = "x86_64") {
         "x86_64"
-    } else {
+    } else if cfg!(target_arch = "aarch64") {
         "aarch64"
+    } else {
+        eprintln!(
+            "warning: --prebuilt not supported on this architecture, falling back to source build"
+        );
+        return Ok(false);
     };
     let os = if cfg!(target_os = "linux") {
         "linux"
-    } else {
+    } else if cfg!(target_os = "macos") {
         "macos"
+    } else {
+        eprintln!("warning: --prebuilt not supported on this OS, falling back to source build");
+        return Ok(false);
     };
-    let tag = format!("lez-prebuilt-{commit}-{arch}-{os}");
-
+    let commit = &pin[..8.min(pin.len())];
+    let tag = format!("lssa-prebuilt-{commit}-{arch}-{os}");
     println!("Checking for prebuilt binaries (tag: {tag})...");
-
     let url = format!(
         "https://github.com/logos-co/logos-scaffold/releases/download/{tag}/sequencer_service"
     );
-
     let bin_dir = lez.join("target/release");
     std::fs::create_dir_all(&bin_dir)?;
     let dest = bin_dir.join("sequencer_service");
-
     match ureq::get(&url).call() {
         Ok(resp) => {
             let mut reader = resp.into_reader();
@@ -253,8 +282,12 @@ fn try_download_prebuilt(lez: &Path, pin: &str) -> crate::DynResult<bool> {
             println!("prebuilt sequencer_service downloaded successfully");
             Ok(true)
         }
-        Err(_) => {
-            println!("no prebuilt found for tag {tag}, falling back to source build...");
+        Err(ureq::Error::Status(404, _)) => {
+            println!("no prebuilt published yet for tag {tag}, falling back to source build");
+            Ok(false)
+        }
+        Err(e) => {
+            eprintln!("warning: --prebuilt download failed ({e}), falling back to source build");
             Ok(false)
         }
     }
