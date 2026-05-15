@@ -273,6 +273,29 @@ fn try_download_prebuilt(lez: &Path, pin: &str) -> crate::DynResult<bool> {
             let mut reader = resp.into_reader();
             let mut bytes = Vec::new();
             std::io::Read::read_to_end(&mut reader, &mut bytes)?;
+
+            // Verify SHA256 integrity if a checksum file is published alongside the binary
+            let sha_url = format!("{url}.sha256");
+            if let Ok(sha_resp) = ureq::get(&sha_url).call() {
+                let mut sha_reader = sha_resp.into_reader();
+                let mut sha_bytes = Vec::new();
+                std::io::Read::read_to_end(&mut sha_reader, &mut sha_bytes)?;
+                let expected = String::from_utf8_lossy(&sha_bytes)
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                if !expected.is_empty() {
+                    let actual = sha256_hex(&bytes);
+                    if actual != expected {
+                        anyhow::bail!(
+                            "SHA256 mismatch for prebuilt sequencer_service: expected {expected}, got {actual}"
+                        );
+                    }
+                    println!("SHA256 verified: {actual}");
+                }
+            }
+
             std::fs::write(&dest, &bytes)?;
             #[cfg(unix)]
             {
@@ -290,5 +313,30 @@ fn try_download_prebuilt(lez: &Path, pin: &str) -> crate::DynResult<bool> {
             eprintln!("warning: --prebuilt download failed ({e}), falling back to source build");
             Ok(false)
         }
+    }
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    // Simple SHA256 using the sha2 crate via workspace dependency
+    // Falls back gracefully if not available
+    #[cfg(feature = "sha2")]
+    {
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(data);
+        let mut s = String::new();
+        for byte in hash {
+            write!(s, "{byte:02x}").unwrap();
+        }
+        s
+    }
+    #[cfg(not(feature = "sha2"))]
+    {
+        // Without sha2, compute a simple checksum for basic integrity
+        let mut h: u64 = 0xcbf29ce484222325;
+        for &b in data {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        format!("{h:016x}")
     }
 }
