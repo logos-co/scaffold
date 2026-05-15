@@ -485,6 +485,26 @@ mod logged_tests {
         assert!(parts[2].chars().all(|c| c.is_ascii_digit()));
         assert_eq!(parts[3], "install");
     }
+
+    #[test]
+    #[cfg(unix)]
+    fn daemonized_process_is_own_session_leader() {
+        use tempfile::tempdir;
+        let temp = tempdir().expect("tempdir");
+        let log_path = temp.path().join("test.log");
+
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("30");
+        let child_pid = spawn_to_log(&mut cmd, &log_path).expect("spawn failed");
+
+        let sid = unsafe { libc::getsid(child_pid as libc::pid_t) };
+        assert_eq!(
+            sid as u32, child_pid,
+            "spawned process should be own session leader (SID={sid}, PID={child_pid})"
+        );
+
+        unsafe { libc::kill(child_pid as libc::pid_t, libc::SIGTERM) };
+    }
 }
 
 pub(crate) fn run_capture(cmd: &mut Command, label: &str) -> DynResult<Captured> {
@@ -541,6 +561,23 @@ pub(crate) fn spawn_to_log(cmd: &mut Command, log_path: &Path) -> DynResult<u32>
     let file = File::create(log_path)?;
     let err_file = file.try_clone()?;
     cmd.stdout(Stdio::from(file)).stderr(Stdio::from(err_file));
+
+    // Daemonize: detach from parent process group so the sequencer
+    // survives shell/tmux session closure
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            // Create a new session — detaches from controlling terminal.
+            // setsid() returns -1 on failure (e.g. process is already a group leader).
+            let ret = libc::setsid();
+            if ret == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
     let child = cmd.spawn()?;
     Ok(child.id())
 }

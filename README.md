@@ -100,7 +100,7 @@ Each subcommand documents copy-paste examples under `--help`. Global `-q` / `--q
 - `deploy [program-name]` deploys one or all guest programs discovered in `methods/guest/src/bin/*.rs` using prebuilt `.bin` artifacts. After each successful submission it prints `program_id: <hex>` (the risc0 image ID, computed locally from the submitted ELF) and includes it in `--program-path … --json` output. Use `--json` for machine-readable output (recommended for automation).
 - `build idl [project-path]` regenerates the IDL from the project source using the vendored `spel` binary.
 - `build client [project-path]` regenerates client bindings from the current IDL using the vendored `spel` binary.
-- `localnet start` waits until localnet is actually ready (`pid alive` + `127.0.0.1:3040` reachable), otherwise fails with diagnostics.
+- `localnet start` waits until localnet is actually ready (`pid alive` + `127.0.0.1:3040` reachable), otherwise fails with diagnostics. The sequencer is daemonized via `setsid` so it survives shell/tmux session closure — closing the terminal or detaching a tmux session does not kill the localnet.
 - `localnet status` distinguishes managed process, stale state, and foreign listeners.
 - `localnet reset` stops the sequencer, clears sequencer chain state, restarts, and verifies blocks. Destructive: `--yes` is required unless `--dry-run` is passed (`--dry-run` prints the plan without changing anything). `--reset-wallet` also deletes the project wallet home and default-address state (irrecoverable).
 - `wallet list` shows known wallet accounts (`wallet account list`).

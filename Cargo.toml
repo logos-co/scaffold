@@ -43,6 +43,7 @@ tempfile = "3.18.0"
 thiserror = "2.0"
 toml_edit = "0.22"
 ureq = { version = "2.12", features = ["json"] }
+libc = "0.2.183"
 walkdir = "2"
 
 [dev-dependencies]
