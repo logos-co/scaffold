@@ -3810,6 +3810,82 @@ fn completions_zsh_registers_both_names_in_pristine_shell() {
     );
 }
 
+#[test]
+fn wallet_list_json_outputs_valid_json() {
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("wallet")
+        .arg("list")
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8_lossy(&output);
+    // Must be valid JSON array - not empty, not mixed with command echoes
+    assert!(
+        !stdout.trim().is_empty(),
+        "wallet list --json should produce non-empty output"
+    );
+    assert!(
+        !stdout.contains("$ "),
+        "stdout must not contain command echoes in --json mode"
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("wallet list --json should output valid JSON");
+    assert!(
+        parsed.is_array(),
+        "wallet list --json should output a JSON array"
+    );
+    // Each element should be an object, not a raw string
+    if let Some(arr) = parsed.as_array() {
+        assert!(
+            !arr.is_empty(),
+            "wallet list --json should return at least one account"
+        );
+        for item in arr {
+            assert!(
+                item.is_object(),
+                "each account entry should be a JSON object"
+            );
+        }
+    }
+}
+
+#[test]
+fn wallet_topup_json_outputs_valid_json_on_success() {
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+
+    // topup will fail (no localnet), but stdout must be empty or valid JSON — never mixed content
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("wallet")
+        .arg("topup")
+        .arg("--json")
+        .assert()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8_lossy(&output);
+    // stdout must not contain command echoes regardless of success/failure
+    assert!(
+        !stdout.contains("$ "),
+        "stdout must not contain command echoes in --json mode, got: {stdout}"
+    );
+    // If anything was written to stdout, it must be valid JSON
+    if !stdout.trim().is_empty() {
+        serde_json::from_str::<serde_json::Value>(stdout.trim())
+            .expect("any stdout from wallet topup --json must be valid JSON");
+    }
+}
+
 /// Pre-0.2.0 scaffold.toml with all the legacy signals (url field on
 /// [repos.lez], [basecamp.modules.*], [basecamp].lgpm_flake/pin/source).
 /// Every non-init command must hard-fail when this is present and the

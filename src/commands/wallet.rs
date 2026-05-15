@@ -2,7 +2,7 @@ use std::process::Command;
 
 use anyhow::{bail, Context};
 
-use crate::process::{render_command, run_forwarded, run_with_stdin};
+use crate::process::{render_command, run_forwarded, run_with_stdin, set_command_echo};
 use crate::project::load_project;
 use crate::DynResult;
 
@@ -27,6 +27,7 @@ pub(crate) enum TopupOutcome {
 pub(crate) enum WalletAction {
     List {
         long: bool,
+        json: bool,
     },
     Proxy {
         args: Vec<String>,
@@ -34,6 +35,7 @@ pub(crate) enum WalletAction {
     Topup {
         address: Option<String>,
         dry_run: bool,
+        json: bool,
     },
     DefaultSet {
         address: String,
@@ -46,14 +48,18 @@ pub(crate) fn cmd_wallet(action: WalletAction) -> DynResult<()> {
     )?;
 
     match action {
-        WalletAction::List { long } => cmd_wallet_list(&project, long),
+        WalletAction::List { long, json } => cmd_wallet_list(&project, long, json),
         WalletAction::Proxy { args } => cmd_wallet_proxy(&project, &args),
-        WalletAction::Topup { address, dry_run } => cmd_wallet_topup(&project, address, dry_run),
+        WalletAction::Topup {
+            address,
+            dry_run,
+            json,
+        } => cmd_wallet_topup(&project, address, dry_run, json),
         WalletAction::DefaultSet { address } => cmd_wallet_default_set(&project, &address),
     }
 }
 
-fn cmd_wallet_list(project: &crate::model::Project, long: bool) -> DynResult<()> {
+fn cmd_wallet_list(project: &crate::model::Project, long: bool, json: bool) -> DynResult<()> {
     let wallet = load_wallet_runtime(project)?;
 
     let mut command = Command::new(&wallet.wallet_binary);
@@ -65,12 +71,34 @@ fn cmd_wallet_list(project: &crate::model::Project, long: bool) -> DynResult<()>
         .arg("account")
         .arg("list");
 
-    if long {
+    if long || json {
         command.arg("--long");
     }
 
-    run_forwarded(&mut command, "wallet account list")
-        .context("failed to execute wallet list command")?;
+    if json {
+        // Capture output and format as JSON
+        let output = command
+            .output()
+            .context("failed to execute wallet account list")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("{}", serde_json::json!({ "error": stderr.trim() }));
+            bail!("wallet account list failed");
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let accounts: Vec<serde_json::Value> = stdout
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|line| serde_json::json!({ "account": line.trim() }))
+            .collect();
+
+        println!("{}", serde_json::to_string_pretty(&accounts)?);
+    } else {
+        run_forwarded(&mut command, "wallet account list")
+            .context("failed to execute wallet list command")?;
+    }
 
     Ok(())
 }
@@ -97,12 +125,27 @@ fn cmd_wallet_proxy(project: &crate::model::Project, args: &[String]) -> DynResu
     Ok(())
 }
 
+/// In JSON mode, progress messages go to stderr so stdout stays valid JSON.
+macro_rules! progress {
+    ($json:expr, $($arg:tt)*) => {
+        if $json {
+            eprintln!($($arg)*);
+        } else {
+            println!($($arg)*);
+        }
+    };
+}
+
 fn cmd_wallet_topup(
     project: &crate::model::Project,
     address: Option<String>,
     dry_run: bool,
+    json: bool,
 ) -> DynResult<()> {
-    match cmd_wallet_topup_inner(project, address, dry_run)? {
+    if json {
+        set_command_echo(false);
+    }
+    match cmd_wallet_topup_inner(project, address, dry_run, json)? {
         TopupOutcome::Success => Ok(()),
         TopupOutcome::ConfirmationTimeout { message } => bail!("{message}"),
     }
@@ -112,6 +155,7 @@ pub(crate) fn cmd_wallet_topup_inner(
     project: &crate::model::Project,
     address: Option<String>,
     dry_run: bool,
+    json: bool,
 ) -> DynResult<TopupOutcome> {
     let wallet = load_wallet_runtime(project)?;
     let default_address = read_default_wallet_address(&project.root)?;
@@ -198,7 +242,10 @@ pub(crate) fn cmd_wallet_topup_inner(
                 );
             }
             if is_already_initialized_failure(&combined) {
-                println!("wallet topup preflight: destination already initialized; continuing");
+                progress!(
+                    json,
+                    "wallet topup preflight: destination already initialized; continuing"
+                );
             } else {
                 bail!("wallet topup failed while initializing destination wallet: {summary}");
             }
@@ -231,12 +278,23 @@ pub(crate) fn cmd_wallet_topup_inner(
         );
     }
 
-    println!("wallet topup complete");
-    println!("  Address: {resolved_to}");
-    println!("  Method: pinata faucet claim");
-    println!("  Network: local sequencer ({sequencer_addr})");
-    if let Some(tx) = extract_tx_identifier(&output.stdout, &output.stderr) {
-        println!("  Tx: {tx}");
+    if json {
+        let tx = extract_tx_identifier(&output.stdout, &output.stderr);
+        let json_out = serde_json::json!({
+            "status": "ok",
+            "address": resolved_to,
+            "method": "pinata",
+            "tx": tx,
+        });
+        println!("{}", serde_json::to_string(&json_out)?);
+    } else {
+        println!("wallet topup complete");
+        println!("  Address: {resolved_to}");
+        println!("  Method: pinata faucet claim");
+        println!("  Network: local sequencer ({sequencer_addr})");
+        if let Some(tx) = extract_tx_identifier(&output.stdout, &output.stderr) {
+            println!("  Tx: {tx}");
+        }
     }
 
     Ok(TopupOutcome::Success)
