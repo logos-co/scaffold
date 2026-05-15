@@ -48,28 +48,17 @@ pub(crate) fn cmd_setup(prebuilt: bool) -> DynResult<()> {
                 .arg("sequencer_service"),
             "build sequencer_service (standalone)",
         )?;
-
-        run_checked(
-            Command::new("cargo")
-                .current_dir(&lez)
-                .arg("build")
-                .arg("--release")
-                .arg("-p")
-                .arg("wallet"),
-            "build wallet",
-        )?;
     }
 
-    sync_pinned_repo(&project.config.spel, &spel, "spel")?;
-    ensure_dir_exists(&spel, "spel")?;
+    // wallet is always built from source — prebuilt download only covers sequencer_service
     run_checked(
         Command::new("cargo")
-            .current_dir(&spel)
+            .current_dir(&lez)
             .arg("build")
             .arg("--release")
             .arg("-p")
-            .arg("spel"),
-        "build spel",
+            .arg("wallet"),
+        "build wallet",
     )?;
 
     sync_pinned_repo(&project.config.spel, &spel, "spel")?;
