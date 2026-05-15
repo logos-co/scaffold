@@ -5,7 +5,7 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context};
+use anyhow::{anyhow, bail, Context};
 use serde_json::Value;
 
 use crate::circuits::ensure_circuits_for_subprocess;
@@ -214,16 +214,24 @@ fn cmd_localnet_start(
         bail!("{message}");
     }
 
-    patch_sequencer_port(lez, localnet_port)?;
+    let state_dir = state_path.parent().ok_or_else(|| {
+        anyhow!(
+            "localnet state path has no parent directory: {}",
+            state_path.display()
+        )
+    })?;
+    let patched_config_path = prepare_sequencer_config(lez, state_dir, localnet_port)?;
 
     // Use a path relative to lez (the child's cwd), not relative to the
     // parent's cwd.  `current_dir(lez)` applies before exec, so a parent-
     // relative path like `.scaffold/cache/repos/lez/target/release/…`
-    // would be resolved inside lez and fail with ENOENT.
+    // would be resolved inside lez and fail with ENOENT. The patched config
+    // path is absolute (under the project's `.scaffold/state/`), so it is
+    // unaffected by the cwd switch.
     let sequencer_pid = spawn_to_log(
         Command::new(format!("./{SEQUENCER_BIN_REL_PATH}"))
             .current_dir(lez)
-            .arg(SEQUENCER_CONFIG_REL_PATH)
+            .arg(&patched_config_path)
             .env("RUST_LOG", "info")
             .env("RISC0_DEV_MODE", if risc0_dev_mode { "1" } else { "0" }),
         log_path,
@@ -490,29 +498,57 @@ fn build_status_report(
     }
 }
 
-/// Update the port in `sequencer_config.json` so the sequencer listens on the
-/// configured port.  The pinned LEZ version does not accept `--port` as a CLI
-/// flag — it reads the port from this file.
-fn patch_sequencer_port(lez: &Path, port: u16) -> DynResult<()> {
-    let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
-    let text = fs::read_to_string(&config_path)
-        .with_context(|| format!("failed to read {}", config_path.display()))?;
+/// Produce a sequencer config patched for scaffold's localnet — port set to
+/// the project's configured port and `max_block_size` widened so the bundled
+/// deploy flow fits in a single block — and return the absolute path to the
+/// patched file. The pinned LEZ version does not accept `--port` as a CLI flag
+/// — it reads everything from the config file passed as its first argument.
+///
+/// The patched copy is written under `dest_dir` (the project's
+/// `.scaffold/state/`), **not** back into the vendored LEZ checkout. Writing
+/// into the vendored repo would silently break three invariants the rest of
+/// scaffold relies on:
+///   1. `git_clean(lez)` would always report dirty, disabling the
+///      `AutoRecloneIfClean` safety net in `reconcile_repo_source` for cache
+///      repos.
+///   2. A `git checkout` during a pin bump would discard the patch, leaving
+///      the next `localnet start` running against unmodified upstream config
+///      until scaffold re-patches.
+///   3. `git status` in the LEZ tree would be permanently dirty after the
+///      first `localnet start`, hiding genuine local edits.
+///
+/// Block-size bump: the upstream debug config caps `max_block_size` at 1 MiB,
+/// which a `lgs deploy` of the default template (5 risc0 guest ELFs ≈ 360 KiB
+/// each) overflows on the second block — and the pinned sequencer crashes
+/// rather than carrying the deferred tx forward. Until LEZ stops aborting on
+/// deferral, scaffold widens the limit so the documented first-success path
+/// fits in a single block.
+fn prepare_sequencer_config(lez: &Path, dest_dir: &Path, port: u16) -> DynResult<PathBuf> {
+    let src_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
+    let text = fs::read_to_string(&src_path)
+        .with_context(|| format!("failed to read {}", src_path.display()))?;
     let mut doc: Value =
         serde_json::from_str(&text).context("failed to parse sequencer_config.json")?;
 
-    if let Some(obj) = doc.as_object_mut() {
-        obj.insert("port".to_string(), Value::Number(port.into()));
-    } else {
+    let Some(obj) = doc.as_object_mut() else {
         bail!(
             "sequencer_config.json is not a JSON object: {}",
-            config_path.display()
+            src_path.display()
         );
-    }
+    };
+    obj.insert("port".to_string(), Value::Number(port.into()));
+    obj.insert(
+        "max_block_size".to_string(),
+        Value::String("8 MiB".to_string()),
+    );
 
+    fs::create_dir_all(dest_dir)
+        .with_context(|| format!("failed to create {}", dest_dir.display()))?;
+    let dest_path = dest_dir.join("sequencer_config.json");
     let updated = serde_json::to_string_pretty(&doc).context("failed to serialize config")?;
-    fs::write(&config_path, format!("{updated}\n"))
-        .with_context(|| format!("failed to write {}", config_path.display()))?;
-    Ok(())
+    fs::write(&dest_path, format!("{updated}\n"))
+        .with_context(|| format!("failed to write {}", dest_path.display()))?;
+    Ok(dest_path)
 }
 
 fn read_log_tail(log_path: &Path, tail: usize) -> String {
@@ -829,12 +865,18 @@ mod tests {
     use std::net::TcpListener;
     use std::time::Duration;
 
-    use super::{reset_cleanup, verify_block_production, wait_for_pid_exit, wait_for_port_free};
+    use super::{
+        prepare_sequencer_config, reset_cleanup, verify_block_production, wait_for_pid_exit,
+        wait_for_port_free,
+    };
     use crate::commands::wallet_support::wallet_state_path;
+    use crate::constants::SEQUENCER_CONFIG_REL_PATH;
     use crate::error::ResetError;
     use crate::model::{
         Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, Project, RepoRef, RunConfig,
     };
+    use crate::repo::git_clean;
+    use std::process::Command;
 
     fn make_test_project(temp: &tempfile::TempDir) -> (Project, PathBuf) {
         let lez_dir = temp.path().join(".scaffold/cache/repos/lez");
@@ -960,6 +1002,90 @@ mod tests {
         let err = wait_for_port_free(&addr, Duration::from_millis(300));
         drop(listener);
         assert!(err.is_err(), "expected timeout while listener was open");
+    }
+
+    /// Regression test for #114. `prepare_sequencer_config` must write the
+    /// patched copy under `dest_dir` (project-owned state) and leave the
+    /// vendored LEZ checkout byte-identical — otherwise `git_clean(lez)`
+    /// reports dirty and the `AutoRecloneIfClean` safety net in
+    /// `reconcile_repo_source` is silently disabled for cache repos.
+    #[test]
+    fn prepare_sequencer_config_does_not_dirty_vendored_lez_repo() {
+        let temp = tempdir().unwrap();
+        let lez = temp.path().join("lez");
+        let state_dir = temp.path().join(".scaffold/state");
+
+        // Build a real git repo under `lez` with the sequencer config committed
+        // at its real relative path, so `git status --porcelain` is initially
+        // empty and we can see any write-back to that file as a dirty diff.
+        let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(&config_path, "{\n  \"port\": 3040\n}\n").unwrap();
+
+        let git_init = Command::new("git")
+            .args(["init", "--quiet", "--initial-branch=main"])
+            .current_dir(&lez)
+            .status()
+            .unwrap();
+        assert!(git_init.success(), "git init failed");
+        // Local identity so `git commit` doesn't require system-level config.
+        for (k, v) in [("user.email", "t@example.com"), ("user.name", "test")] {
+            Command::new("git")
+                .args(["config", k, v])
+                .current_dir(&lez)
+                .status()
+                .unwrap();
+        }
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&lez)
+            .status()
+            .unwrap();
+        let commit = Command::new("git")
+            .args(["commit", "--quiet", "-m", "seed"])
+            .current_dir(&lez)
+            .status()
+            .unwrap();
+        assert!(commit.success(), "git commit failed");
+
+        assert!(
+            git_clean(&lez).unwrap(),
+            "test precondition: seeded lez tree should be clean"
+        );
+
+        let dest = prepare_sequencer_config(&lez, &state_dir, 4040).unwrap();
+
+        assert_eq!(
+            dest,
+            state_dir.join("sequencer_config.json"),
+            "patched config must land under the project state dir, not the lez repo"
+        );
+
+        let dest_json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
+        assert_eq!(dest_json["port"], serde_json::json!(4040));
+        assert_eq!(
+            dest_json["max_block_size"],
+            serde_json::json!("8 MiB"),
+            "patched copy should carry the widened max_block_size override"
+        );
+
+        let src_after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(
+            src_after["port"],
+            serde_json::json!(3040),
+            "vendored sequencer_config.json must be left untouched"
+        );
+        assert!(
+            src_after.get("max_block_size").is_none(),
+            "vendored sequencer_config.json must be left untouched (no max_block_size injected)"
+        );
+
+        assert!(
+            git_clean(&lez).unwrap(),
+            "lez tree must remain clean after prepare_sequencer_config"
+        );
     }
 
     #[test]

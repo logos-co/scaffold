@@ -266,7 +266,19 @@ struct ReportArgs {
 
 #[derive(Debug, clap::Args)]
 struct RunArgs {
-    /// Skip post-deploy hooks even if scaffold.toml configures them
+    /// Select a named profile from `[run.profiles.<name>]`
+    #[arg(long, value_name = "NAME")]
+    profile: Option<String>,
+    /// Wipe rocksdb + wallet, restart sequencer, re-seed default wallet
+    /// (overrides scaffold.toml). Broader than `lgs localnet reset`: this
+    /// re-establishes the documented fresh-project state for the full
+    /// deploy cycle.
+    #[arg(long)]
+    reset: bool,
+    /// Skip the run-level reset even if scaffold.toml says true
+    #[arg(long, conflicts_with = "reset")]
+    no_reset: bool,
+    /// Skip post-deploy hooks even if the resolved profile defines them
     #[arg(long)]
     no_post_deploy: bool,
     /// Override post-deploy hooks (repeatable). Replaces config-defined hooks
@@ -621,6 +633,13 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
         }
         Some(Commands::Doctor(args)) => cmd_doctor(args.json),
         Some(Commands::Run(args)) => {
+            let reset = if args.reset {
+                Some(true)
+            } else if args.no_reset {
+                Some(false)
+            } else {
+                None
+            };
             let post_deploy = if args.no_post_deploy {
                 Some(Vec::new())
             } else if !args.post_deploy.is_empty() {
@@ -629,6 +648,8 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 None
             };
             cmd_run(RunInvocation {
+                profile: args.profile,
+                reset,
                 post_deploy_override: post_deploy,
                 localnet_timeout_sec: args.localnet_timeout,
             })

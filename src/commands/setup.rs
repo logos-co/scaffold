@@ -96,7 +96,10 @@ fn sync_pinned_repo(repo: &RepoRef, path: &Path, label: &str) -> DynResult<()> {
     sync_repo_to_pin_at_path_with_opts(path, &repo.source, &repo.pin, label, opts)
 }
 
-fn ensure_default_wallet_seeded(project_root: &Path, wallet_home: &Path) -> DynResult<()> {
+pub(crate) fn ensure_default_wallet_seeded(
+    project_root: &Path,
+    wallet_home: &Path,
+) -> DynResult<()> {
     let should_seed = match read_default_wallet_address(project_root) {
         Ok(Some(existing)) => {
             println!("default wallet already configured: {existing}");
@@ -212,7 +215,7 @@ mod tests {
 }
 
 fn try_download_prebuilt(lez: &Path, pin: &str) -> crate::DynResult<bool> {
-    let commit = &pin[..8];
+    let commit = &pin[..8.min(pin.len())];
     let arch = if cfg!(target_arch = "x86_64") {
         "x86_64"
     } else {
@@ -235,8 +238,7 @@ fn try_download_prebuilt(lez: &Path, pin: &str) -> crate::DynResult<bool> {
     std::fs::create_dir_all(&bin_dir)?;
     let dest = bin_dir.join("sequencer_service");
 
-    let response = ureq::get(&url).call();
-    match response {
+    match ureq::get(&url).call() {
         Ok(resp) => {
             let mut reader = resp.into_reader();
             let mut bytes = Vec::new();

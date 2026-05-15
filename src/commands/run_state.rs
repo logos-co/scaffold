@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::commands::deploy::{discover_deployable_programs, discover_program_binaries};
+use crate::commands::idl::sanitize_file_stem;
 use crate::commands::wallet_support::load_wallet_runtime;
 use crate::constants::FRAMEWORK_KIND_LEZ_FRAMEWORK;
 use crate::model::Project;
@@ -103,8 +104,12 @@ pub(crate) fn compute_program_hashes(project: &Project) -> DynResult<BTreeMap<St
         hasher.update(cfg_digest.as_bytes());
         // Fold the corresponding IDL JSON (if any) into the program's
         // hash so that an ABI-only edit invalidates the cached deploy
-        // even when the compiled binary is byte-identical.
-        let idl_path = idl_dir.join(format!("{stem}.json"));
+        // even when the compiled binary is byte-identical. Use the
+        // same name-sanitizer as `build_idl_for_current_project`, since
+        // that's the path the IDL was actually written to: a raw stem
+        // like `my-program` would miss the on-disk `my_program.json`
+        // and bail with a misleading "run `lgs build idl`" error.
+        let idl_path = idl_dir.join(format!("{}.json", sanitize_file_stem(&stem)));
         if idl_path.exists() {
             let idl_bytes = std::fs::read(&idl_path)
                 .with_context(|| format!("read {} for hashing", idl_path.display()))?;
@@ -447,6 +452,29 @@ mod tests {
         assert_eq!(hashes.len(), 2);
         assert!(hashes.contains_key("alpha"));
         assert!(hashes.contains_key("beta"));
+    }
+
+    #[test]
+    fn compute_hashes_finds_sanitized_idl_for_dashed_program_name() {
+        // `build_idl_for_current_project` writes the IDL at
+        // `<sanitize_file_stem(stem)>.json` (e.g. `my-program.rs` →
+        // `my_program.json`). The hash lookup must use the same
+        // sanitizer; otherwise lez-framework projects with a `-` in the
+        // program filename bail with a misleading "run `lgs build idl`"
+        // message even though `build idl` ran successfully.
+        let temp = tempfile::tempdir().expect("tempdir");
+        stage_guest_program(temp.path(), "my-program", true);
+        let idl_dir = temp.path().join("idl");
+        std::fs::create_dir_all(&idl_dir).expect("create idl dir");
+        std::fs::write(idl_dir.join("my_program.json"), br#"{"abi": []}"#)
+            .expect("stage sanitized IDL");
+
+        let mut project = make_test_project(temp.path().to_path_buf());
+        project.config.framework.kind = FRAMEWORK_KIND_LEZ_FRAMEWORK.to_string();
+
+        let hashes =
+            compute_program_hashes(&project).expect("must succeed with the sanitized IDL on disk");
+        assert!(hashes.contains_key("my-program"));
     }
 
     #[test]
