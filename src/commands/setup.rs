@@ -72,6 +72,18 @@ pub(crate) fn cmd_setup(prebuilt: bool) -> DynResult<()> {
         "build spel",
     )?;
 
+    sync_pinned_repo(&project.config.spel, &spel, "spel")?;
+    ensure_dir_exists(&spel, "spel")?;
+    run_checked(
+        Command::new("cargo")
+            .current_dir(&spel)
+            .arg("build")
+            .arg("--release")
+            .arg("-p")
+            .arg("spel"),
+        "build spel",
+    )?;
+
     let wallet_home = project.root.join(&project.config.wallet_home_dir);
     prepare_wallet_home(&lez, &wallet_home)?;
     ensure_default_wallet_seeded(&project.root, &wallet_home)?;

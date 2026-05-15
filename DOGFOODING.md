@@ -61,6 +61,9 @@ Do not run project-scoped commands from the repository root unless the scenario 
 - Network access available for setup/build flows that fetch dependencies.
 - No preinstalled `wallet` binary is required. If one exists on `PATH`, do not treat it as the runtime under test for scaffold wallet scenarios.
 - Optional but supported: `LOGOS_SCAFFOLD_WALLET_PASSWORD` when validating password override behavior.
+- For `B`-series (basecamp) scenarios: Nix with flakes enabled, plus a module project on disk whose `flake.nix` exposes a `packages.<system>.lgx` output (e.g., a `tictactoe`-style project built against the `logos-module-builder` `tutorial-v1` convention). `docs/basecamp-module-requirements.md` (also reachable via `"$SCAFFOLD_BIN" basecamp docs`) is the canonical contract.
+
+The `lgs` binary is a short alias for `logos-scaffold` produced by the same crate; `"$SCAFFOLD_BIN"` and `lgs` are interchangeable in the commands below.
 
 ## Scenario Index
 
@@ -72,12 +75,19 @@ Do not run project-scoped commands from the repository root unless the scenario 
 | D4 | `default` | Core | Wallet management, default-address behavior, and passthrough UX | `wallet list`, `wallet default set`, `wallet topup --dry-run`, `wallet topup`, `wallet -- ...` |
 | D5 | `default` | Advanced | Diagnostics bundle and support artifact hygiene | `report`, `report --out`, `report --tail` |
 | D6 | `default` | Core | Example runner interaction and account state verification | `cargo run --bin run_hello_world`, `cargo run --bin run_hello_world_with_move_function`, `wallet -- account get` |
+| D7 | `default` | Core | One-step `run` pipeline and post-deploy hooks | `run`, `run --post-deploy`, `run --no-post-deploy`, `[run]` config |
 | L1 | `lez-framework` | Core | Fresh LEZ project bootstrap to ready state | `new --template lez-framework`, `setup`, `localnet start`, `doctor`, `build` |
 | L2 | `lez-framework` | Core | LEZ IDL regeneration | `build idl` |
 | L3 | `lez-framework` | Advanced | LEZ client generation from current IDL | `build client` |
 | L4 | `lez-framework` | Core | LEZ deploy and counter interaction | `deploy`, `cargo run --bin run_lez_counter` |
 | E1 | N/A | Core | CLI discoverability and error quality | `--help`, `help`, `--version`, unknown commands, out-of-project errors |
 | E2 | N/A | Advanced | Project creation with advanced flags and invalid inputs | `new --template`, `new --vendor-deps`, `new --cache-root` |
+| E3 | N/A | Core | AI skills materialized into generated and adopted projects | `new`, `new --template lez-framework`, `init`, `init` re-run |
+| B1 | external module project | Core | Basecamp + lgpm setup and idempotent re-run | `init`, `basecamp setup`, `basecamp doctor`, `basecamp docs` |
+| B2 | external module project | Core | Module capture, install, and single-instance launch | `basecamp modules`, `basecamp modules --show`, `basecamp install`, `basecamp launch alice` |
+| B3 | external module project | Core | Two-instance p2p dogfooding | `basecamp launch alice`, `basecamp launch bob` (parallel) |
+| B4 | external module project | Advanced | Clean-slate scrub semantics on relaunch | `basecamp launch alice`, `basecamp launch alice --no-clean` |
+| B5 | external module project | Advanced | Portable artefact build for AppImage hand-loading | `basecamp build-portable` |
 
 ## Standing Validation Notes
 
@@ -124,7 +134,7 @@ Use `new` for the main runnable project and `create` as the lightweight alias-pa
 - Project creation succeeds and prints the destination path, pinned LEZ commit, and cache root.
 - `setup` completes after syncing LEZ to the configured pin, building both `sequencer_service` and `wallet` inside the project's LEZ tree, and either seeding the default wallet or reporting that a default wallet is already configured.
 - `localnet start` reports a ready localnet rather than only a spawned PID.
-- `build` exits successfully after preparing the project workspace.
+- `build` exits successfully after preparing the project workspace, and — when the project has a `methods/Cargo.toml` (Risc0 guest crate excluded from the main workspace) — also prints `Building guest methods...` and produces a `methods/target/.../release` artifact.
 - `deploy` prints a submission summary with zero failures when built binaries are present.
 - `wallet topup` succeeds without an explicit address because the project default wallet was seeded during setup.
 - `wallet -- check-health` succeeds against the running localnet without requiring a global `wallet` install or manual `PATH` changes.
@@ -431,6 +441,70 @@ The first runner (`run_hello_world`) submits a basic public transaction. The sec
 - `NSSA_WALLET_HOME_DIR` must be set for runners that initialize `WalletCore::from_env()`. The scaffold wallet commands set this automatically, but direct `cargo run` does not.
 - Use the fresh public account created in the preconditions rather than reusing accounts from other scenarios. This avoids confusion about pre-existing state.
 - If additional runners are available (e.g., `run_hello_world_private`, `run_hello_world_through_tail_call`), exercising them is valuable but not required for this scenario.
+
+## D7. `run` Pipeline and Post-Deploy Hooks
+
+### Goal
+
+Validate that `lgs run` collapses the build → IDL → localnet → topup → deploy chain into a single command, fires `[run].post_deploy` hooks with the documented environment, and that `--post-deploy` / `--no-post-deploy` flags override the configured hooks correctly.
+
+### Preconditions
+
+- A default-template project exists at `$SCRATCH_ROOT/dogfood-default` with `setup` already complete.
+- No existing scaffold localnet running on the configured port (the scenario will start one). If one exists from a prior scenario, stop it first.
+- `wallet topup` has worked at least once for this project (D1 or D4 covers this).
+
+### Commands / Actions
+
+From the project root, exercise the bare pipeline:
+
+```bash
+"$SCAFFOLD_BIN" run
+```
+
+Then add a `[run]` section to `scaffold.toml` and re-run with hooks:
+
+```toml
+[run]
+post_deploy = [
+  "echo 'sequencer:' $SEQUENCER_URL",
+  "echo 'idl:' $SCAFFOLD_IDL_DIR",
+  "echo 'project root:' $SCAFFOLD_PROJECT_ROOT",
+  "echo 'wallet home:' $NSSA_WALLET_HOME_DIR",
+  "echo 'program id:' ${SCAFFOLD_PROGRAM_ID:-unavailable}",
+  "echo 'guest bin:' ${SCAFFOLD_GUEST_BIN:-unavailable}",
+]
+```
+
+```bash
+"$SCAFFOLD_BIN" run
+"$SCAFFOLD_BIN" run --post-deploy "echo override"    # one-shot override
+"$SCAFFOLD_BIN" run --no-post-deploy                 # skip hooks
+"$SCAFFOLD_BIN" run --post-deploy "x" --no-post-deploy  # expect clap conflict error
+```
+
+### Expected Success Signals
+
+- The first `run` (no hooks configured) prints a numbered step header for each phase (`[1/5] Building...` through `[5/5] Deploying...`) and ends with a deployed-programs summary.
+- A second `run` reuses the running localnet (`localnet already running (sequencer pid=...)`) instead of starting a new sequencer.
+- After adding the `[run]` block, `run` reports `[6/6] Running N post-deploy hook(s)` and each hook prints a non-empty value for its env var. `cwd` for each hook is the project root (verifiable with a `pwd` hook). For a single-program project, `$SCAFFOLD_PROGRAM_ID` is the deployed program's risc0 image ID and `$SCAFFOLD_GUEST_BIN` is the absolute path to the guest binary.
+- `--post-deploy "echo override"` ignores `[run].post_deploy` and runs only the override.
+- `--no-post-deploy` skips the post-deploy step entirely; the run prints the deployed-programs summary instead.
+- `--post-deploy` with `--no-post-deploy` errors at clap parse time with a `cannot be used with` message; exit code is non-zero.
+- A non-zero hook exit aborts the run with a clear `post-deploy hook exited with status N` message.
+
+### Failure Signals / Common Pitfalls
+
+- A `run` invocation that restarts the sequencer when one is already running healthy is a regression in the localnet-reuse path.
+- Hooks running with `cwd` somewhere other than the project root, or missing any of `SEQUENCER_URL` / `NSSA_WALLET_HOME_DIR` / `SCAFFOLD_PROJECT_ROOT` / `SCAFFOLD_IDL_DIR`, is a regression in the env contract.
+- `$SCAFFOLD_PROGRAM_ID` unset after a successful deploy on a single-program project with a vendored `spel` binary is a regression. Hint: `lgs setup` builds the spel binary; if it's missing, `program_id: unavailable` will also appear in the deploy summary.
+
+### Evidence to Capture
+
+- Console output of the first `run` showing the step headers and the deployed-programs summary.
+- Output of `run` after the `[run]` block is added, showing the `===> post_deploy[i/n]:` markers and the resolved env values.
+- Output of `run --post-deploy "echo override"` showing only the override hook fires.
+- Output of `run --no-post-deploy` showing the deployed-programs summary instead of hooks.
 
 ## L1. LEZ Template Bootstrap
 
@@ -743,6 +817,347 @@ grep -n "^\[wallet\]\|^home_dir\|^binary" dogfood-cache/scaffold.toml
 - Clean up the generated projects after this scenario to avoid consuming disk space with multiple scaffolded projects.
 - The `--lez-path` flag is optional to test here because it requires a real LEZ checkout. Only probe it if one is available.
 
+## E3. AI Skills Materialized Into Every Project
+
+### Goal
+
+Validate that `lgs new` and `lgs init` both drop the canonical AI skill set
+into a generated project so that Claude Code, Cursor, and Codex pick them up
+without manual configuration. Skills are version-controlled in the generated
+project (no `.gitignore` exclusion).
+
+### Preconditions
+
+- Latest scaffold binary built from the repo root (`"$SCAFFOLD_BIN"`).
+- Scratch workspace exists.
+
+### Commands / Actions
+
+From the scratch workspace:
+
+```bash
+cd "$SCRATCH_ROOT"
+"$SCAFFOLD_BIN" new dogfood-skills-default
+"$SCAFFOLD_BIN" new dogfood-skills-lez --template lez-framework
+
+mkdir dogfood-skills-init && cd dogfood-skills-init
+"$SCAFFOLD_BIN" init
+shasum AGENTS.md .claude/skills/lgs-cli/SKILL.md .cursor/rules/lgs-cli.mdc
+"$SCAFFOLD_BIN" init   # re-init must succeed and not change skill content
+shasum AGENTS.md .claude/skills/lgs-cli/SKILL.md .cursor/rules/lgs-cli.mdc
+```
+
+Inspect the generated layout in each of the three projects:
+
+```bash
+find dogfood-skills-default/.claude/skills dogfood-skills-default/.cursor/rules -type f | sort
+find dogfood-skills-lez/.claude/skills dogfood-skills-lez/.cursor/rules -type f | sort
+ls dogfood-skills-default/AGENTS.md dogfood-skills-lez/AGENTS.md dogfood-skills-init/AGENTS.md
+```
+
+### Expected Success Signals
+
+- Every generated project (default template, lez-framework template, and `init`-adopted bare directory) contains exactly four `.claude/skills/<name>/SKILL.md` files: `lgs-cli`, `lez-template`, `lez-framework-template`, `basecamp`.
+- The same four skills appear under `.cursor/rules/<name>.mdc`.
+- `AGENTS.md` exists at every project root, lists all four skills with their descriptions, and links to `.claude/skills/<name>/SKILL.md`.
+- Re-running `init` on an already-migrated project succeeds (no longer bails) and prints `AI skills refreshed under .claude/skills/, .cursor/rules/, AGENTS.md.` The `shasum` output before and after a re-init is byte-identical for all three skill files.
+- `.claude/skills/<name>/SKILL.md` is byte-identical to the canonical source under `<scaffold-repo>/skills/<name>/SKILL.md` (run `diff` if validating against a built-from-source binary).
+- `.cursor/rules/<name>.mdc` frontmatter contains `description:` and `alwaysApply: false`, and does **not** contain a `name:` field. The body after the closing `---` is identical to the SKILL.md body.
+- The generated `.gitignore` does not exclude `.claude/`, `.cursor/`, or `AGENTS.md`.
+
+### Failure Signals / Common Pitfalls
+
+- A skill missing from one of the three locations in any generated project is a regression — every project gets the same four-skill set per the v0.1 contract.
+- A `.cursor/rules/<name>.mdc` that still carries the `name:` line from the source SKILL.md is a regression in the frontmatter rewrite.
+- A re-`init` that errors with "already at schema" is a stale build — that bail was removed when skill refresh became part of init's contract.
+- A re-`init` that mutates skill content without a corresponding canonical-source change is a regression in idempotency.
+- Skills appearing in `.gitignore` is a regression — they are version-controlled by design.
+- Hand-edited team skills under `.claude/skills/<other>/` that get clobbered by `init` are a regression — `apply_skills` only owns the four shipped names.
+
+### Evidence to Capture
+
+- File listings under `.claude/skills/`, `.cursor/rules/`, and the existence of `AGENTS.md` for each of the three project flavors.
+- One `.cursor/rules/<name>.mdc` head excerpt showing the rewritten frontmatter.
+- `AGENTS.md` excerpt showing the four-row table.
+- `shasum` pairs from the re-`init` idempotency check.
+
+### Execution Notes
+
+- This scenario does not require `setup`, `localnet`, or any network access — it validates only the materialization contract.
+- Pair with E2 when validating template-related changes; pair with B1 when validating `init` behavior alongside basecamp adoption.
+
+## B1. Basecamp Setup From a Module Project
+
+### Goal
+
+Validate that a module project can fetch the pinned basecamp + `lgpm` binaries, seed the `alice` and `bob` profiles, and that re-running `setup` is idempotent.
+
+### Preconditions
+
+- Nix with flakes enabled.
+- Latest scaffold binary built from the repo root (`"$SCAFFOLD_BIN"`).
+- A module project on disk whose `flake.nix` exposes `packages.<system>.lgx` (see `"$SCAFFOLD_BIN" basecamp docs`). Reachable as `$MODULE_PROJECT`.
+- `scaffold.toml` is present at the project root; if not, run `"$SCAFFOLD_BIN" init` once.
+
+### Commands / Actions
+
+From the module project root:
+
+```bash
+cd "$MODULE_PROJECT"
+test -f scaffold.toml || "$SCAFFOLD_BIN" init
+"$SCAFFOLD_BIN" basecamp --help
+"$SCAFFOLD_BIN" basecamp docs | head
+"$SCAFFOLD_BIN" basecamp setup
+ls .scaffold/basecamp/profiles
+"$SCAFFOLD_BIN" basecamp doctor
+"$SCAFFOLD_BIN" basecamp doctor --json
+"$SCAFFOLD_BIN" basecamp setup
+```
+
+### Expected Success Signals
+
+- `basecamp --help` lists `setup`, `modules`, `install`, `launch`, `build-portable`, `doctor`, and `docs`.
+- `basecamp docs` prints the canonical project-compatibility rules (mirrors `docs/basecamp-module-requirements.md`).
+- First `basecamp setup` clones the pinned basecamp repo into a pin-isolated cache path, builds `basecamp` and `lgpm` via Nix, seeds `.scaffold/basecamp/profiles/alice/` and `.scaffold/basecamp/profiles/bob/`, and reports completion.
+- `basecamp doctor` reports the basecamp + lgpm binaries as present and both profiles as seeded; `--json` returns parseable JSON with the same checks.
+- Second `basecamp setup` is idempotent: pin unchanged → no rebuild reported, exit 0.
+- All commands run only inside the project; running them from outside the project must fail with the existing scaffold "not a logos-scaffold project" message.
+
+### Failure Signals / Common Pitfalls
+
+- Raw nix or `lgpm` stack traces with no scaffold-side hint are a UX regression — the setup-missing path is supposed to be a single one-line hint.
+- A `setup` re-run that rebuilds when the pin has not changed is a regression in idempotency.
+- Profile directories under `.scaffold/basecamp/profiles/` missing after first `setup` is a fail.
+- If `basecamp` commands write to the user's global `~/.local/share/Logos/` or `~/Library/Application Support/Logos/`, that is a severe regression — basecamp state is project-local under `.scaffold/basecamp/`.
+- If the basecamp binary lands on `PATH`, that is a contract violation.
+
+### Evidence to Capture
+
+- `basecamp --help` output.
+- First and second `basecamp setup` output (to compare rebuild vs. no-rebuild).
+- `basecamp doctor` and `basecamp doctor --json` output.
+- Listing of `.scaffold/basecamp/profiles/`.
+
+### Execution Notes
+
+- Do not pollute the user's home; basecamp setup must stay under `<project>/.scaffold/basecamp/`. If something writes outside that root, stop and capture it before continuing.
+- Pin-changed re-runs (rebuild path) are a separate validation; capture them when intentionally bumping the pin, not as part of this scenario.
+
+## B2. Module Capture, Install, and Single-Instance Launch
+
+### Goal
+
+Validate the per-project source of truth for module identity (`[modules]` in `scaffold.toml`), the install pipeline that builds `.lgx` artefacts and loads them via `lgpm`, and a single-profile launch.
+
+### Preconditions
+
+- B1 completed in the same project.
+- Module project's `flake.nix` (root or one or more sub-flakes) exposes `packages.<system>.lgx`. Sub-flake projects (e.g., `tictactoe-ui-cpp/`, `tictactoe-ui-qml/`) are valid.
+- A graphical environment if you intend to actually drive the launched basecamp UI; `launch` itself does not require X/Wayland to start, but interactive validation does.
+
+### Commands / Actions
+
+From the module project root:
+
+```bash
+"$SCAFFOLD_BIN" basecamp modules
+grep -n '^\[modules\.' scaffold.toml
+"$SCAFFOLD_BIN" basecamp modules --show
+"$SCAFFOLD_BIN" basecamp install
+"$SCAFFOLD_BIN" basecamp install --print-output
+"$SCAFFOLD_BIN" basecamp doctor
+"$SCAFFOLD_BIN" basecamp launch alice
+```
+
+If your project does not auto-discover correctly, capture explicit sources:
+
+```bash
+"$SCAFFOLD_BIN" basecamp modules --flake "./tictactoe#lgx" --flake "./tictactoe-ui-qml#lgx"
+"$SCAFFOLD_BIN" basecamp modules --path /abs/path/to/prebuilt.lgx
+```
+
+### Expected Success Signals
+
+- `basecamp modules` either auto-discovers project sub-flakes exposing `.#lgx` or accepts explicit `--path` / `--flake` sources and writes one `[modules.<name>]` sub-section per source into `scaffold.toml`. The file remains human-editable; re-runs are byte-identical and never overwrite existing keys.
+- For each captured project source, scaffold also resolves declared `dependencies` and inserts `role = "dependency"` entries unless the dep is already keyed, is a basecamp preinstall (`capability_module`, `package_manager`, `package_manager_ui`, `counter`, `counter_qml`, `webview_app`, `basecamp_main_ui`; see `BASECAMP_PREINSTALLED_MODULES` in `src/constants.rs` for the authoritative list), or is resolvable via the source's own `flake.lock` / the scaffold-default table.
+- An unresolvable dep fails fast with a targeted error naming the dep and the two user-side fixes (capture as a project source, or add `[modules.<name>]` with `role = "dependency"`); no silent drop.
+- `basecamp modules --show` prints the captured set without mutating state.
+- `basecamp install` builds each project source (sibling `--override-input` rewrites apply for `path:../<sibling>` inputs in multi-flake projects) and shells out to `lgpm` to install into both `alice` and `bob`. By default it logs to `.scaffold/logs/<ts>-install.log` and prints a one-line status; `--print-output` (or `LOGOS_SCAFFOLD_PRINT_OUTPUT=1`) streams nix output directly.
+- `basecamp doctor` reports each profile's installed modules matching the captured set; drift between `[modules]` and on-disk profile state is flagged, not hidden.
+- `basecamp launch alice` kills any prior `logos_host` / `logos-basecamp` descendants for that profile, scrubs the profile's XDG dirs under `.scaffold/basecamp/profiles/alice/`, reinstalls each captured source for that profile, sets `XDG_{CONFIG,DATA,CACHE}_HOME` plus `LOGOS_PROFILE=alice`, and `exec`s basecamp.
+
+### Failure Signals / Common Pitfalls
+
+- A flake that exposes only `.#lgx-portable` and not `.#lgx` must fail explicitly with a hint pointing at `--flake <ref>#lgx-portable` for opt-in. Silent fallback is a contract violation.
+- Re-running `basecamp modules` overwriting an existing key is a regression — manual edits in `scaffold.toml` must win.
+- An unresolved transitive `logos-module-builder` input that fails without naming the missing `follows` is a regression.
+- `install` succeeding when a build or `lgpm install` step actually failed is a fail; exit codes must be non-zero on any source failure.
+- `launch alice` with an empty `[modules]` and without `--no-clean` must bail (rather than scrubbing the profile and leaving it empty).
+- Sibling `--override-input` not being applied at probe time would surface as a build that resolves the wrong sibling pin during `basecamp modules` auto-discovery; record any such mismatch with the exact derived module names.
+
+### Evidence to Capture
+
+- `scaffold.toml` excerpt showing `[modules.<name>]` sub-sections with `flake`, `role`, and (for project sources) the in-project relative path used.
+- `basecamp modules --show` output.
+- `basecamp install` log path under `.scaffold/logs/` plus the printed one-line status, or the `--print-output` stream.
+- `basecamp doctor` output post-install.
+- The first lines of `basecamp launch alice` showing the kill → scrub → reinstall → exec sequence.
+
+### Execution Notes
+
+- `basecamp modules` is the sole automated writer of `[modules]`. If the user manually edited an entry, do not re-run `basecamp modules` mid-scenario without recording the pre-edit state — manual entries are intentionally preserved.
+- Only `path:../<sibling>` flake inputs are sibling-rewritten; `path:./sub`, `github:`, and `git+` schemes pass through. If a project uses multi-line input declarations, the line-level parser may not detect them — record any sibling-override miss along with the offending `flake.nix` excerpt.
+
+## B3. Two-Instance P2P Dogfooding
+
+### Goal
+
+Validate the canonical basecamp use case: two profiles running simultaneously on one machine and exercising p2p features (chat, delivery, storage) of the project's `.lgx` modules.
+
+### Preconditions
+
+- B1 and B2 completed in the same project.
+- `basecamp install` has captured at least one project source and produced a successful install for both `alice` and `bob`.
+- A graphical environment for both basecamp windows.
+
+### Commands / Actions
+
+From two terminals, both rooted at the module project:
+
+Terminal 1:
+
+```bash
+"$SCAFFOLD_BIN" basecamp launch alice
+```
+
+Terminal 2:
+
+```bash
+"$SCAFFOLD_BIN" basecamp launch bob
+```
+
+Within the running UIs, exercise whatever p2p surface the module exposes (chat exchange, delivery between peers, storage round-trip). Capture screenshots or short transcripts.
+
+### Expected Success Signals
+
+- Both basecamp windows open against their own profile dirs under `.scaffold/basecamp/profiles/{alice,bob}/`.
+- Each window shows the project's `.lgx` modules installed and ready.
+- `LOGOS_PROFILE=alice` and `LOGOS_PROFILE=bob` are visible in each respective process environment (helpful for debugging).
+- The two instances do not collide on Qt remote-objects or any non-module port; per-profile port-override env vars (per the spec) are set on each `launch`.
+- A p2p interaction triggered from `alice` is observable in `bob` (and vice versa) within the module's expected latency window.
+
+### Failure Signals / Common Pitfalls
+
+- Two windows opening but sharing identity keys, profile state, or message history is a clean-slate / XDG-isolation regression.
+- A non-module port collision (Qt remote objects, etc.) is a real finding — file upstream against the affected component, do not patch around it inside scaffold.
+- A module that does not honor an externally-provided port override is documented as a known gap pending an upstream fix on that module; capture the module name, the env var that should have worked, and the observed collision.
+- One window crashing while the other survives is recordable evidence; capture the crashing instance's logs from `.scaffold/basecamp/profiles/<name>/` before relaunching.
+- Running `basecamp launch alice` twice in parallel is undefined in v1 — record the behavior if you trip it accidentally, but don't treat it as a supported scenario.
+
+### Evidence to Capture
+
+- The exact two-terminal command sequence used.
+- A short transcript or screenshot pair showing a p2p interaction propagating from one instance to the other.
+- The env block of each running process (e.g., `tr '\0' '\n' < /proc/<pid>/environ | grep -E 'XDG_|LOGOS_'`).
+- Any port-collision error text verbatim, with the module that owns the colliding port.
+
+### Execution Notes
+
+- Do not start `alice` and `bob` from the same shell with `&` backgrounding unless you also redirect their logs; use two terminals for clean log separation.
+- If the underlying module surface is not yet wired for p2p between profiles, record the gap and the module's TODO state rather than declaring B3 a pass.
+
+## B4. Clean-Slate Verification
+
+### Goal
+
+Validate that `basecamp launch <profile>` scrubs profile state by default and that `--no-clean` is the only path to preserve state across launches.
+
+### Preconditions
+
+- B2 completed (alice has captured modules and at least one successful install).
+
+### Commands / Actions
+
+From the module project root:
+
+```bash
+"$SCAFFOLD_BIN" basecamp launch alice    # let it come up, then close it
+ls .scaffold/basecamp/profiles/alice
+mkdir -p .scaffold/basecamp/profiles/alice/.scaffold-xdg-data/scratch
+echo "marker-$(date -u +%s)" > .scaffold/basecamp/profiles/alice/.scaffold-xdg-data/scratch/marker.txt
+"$SCAFFOLD_BIN" basecamp launch alice    # default: scrub-and-reinstall
+test -e .scaffold/basecamp/profiles/alice/.scaffold-xdg-data/scratch/marker.txt && echo "REGRESSION: marker survived clean launch" || echo "OK: marker scrubbed"
+"$SCAFFOLD_BIN" basecamp launch alice --no-clean   # escape hatch: preserve state
+```
+
+### Expected Success Signals
+
+- The default `launch alice` removes any user-introduced files under the alice profile XDG dirs and reinstalls each captured source before `exec`ing basecamp.
+- `launch alice --no-clean` skips the scrub and reinstall; pre-existing files in the profile survive.
+- `rm -rf` on `launch` is bounded to `<project>/.scaffold/basecamp/profiles/<profile>/`. Never any path outside that root.
+- A `launch` that finds no modules in `[modules]` and is invoked without `--no-clean` bails before scrubbing (the empty-install + scrubbed profile combination is the regression we're guarding against).
+
+### Failure Signals / Common Pitfalls
+
+- The `marker.txt` file surviving the default `launch alice` is a regression: clean-slate is the v1 contract.
+- `--no-clean` triggering a scrub anyway is an escape-hatch regression.
+- A `launch` scrubbing a path outside the profile's XDG dirs is a severe safety regression — capture the offending path and stop.
+- An empty `[modules]` plus a default `launch` that wipes the profile and leaves it empty is the exact bug guarded by `fix(basecamp): bail on empty [modules] in launch without --no-clean`; if you can reproduce it, that's a real regression.
+
+### Evidence to Capture
+
+- The marker write, the post-clean-launch listing, and the post-`--no-clean` listing.
+- The exact path under which the marker was placed and the path basecamp scrubbed (verify they match the profile root).
+- Any unexpected paths touched by `launch` outside `.scaffold/basecamp/profiles/<profile>/`.
+
+### Execution Notes
+
+- Use a marker filename and timestamp you can search for after the fact; do not rely on visual inspection alone.
+- Clean-slate state is project-local; never test scrub behavior against the user's global Logos directories.
+
+## B5. Build-Portable Artefacts for AppImage Hand-Loading
+
+### Goal
+
+Validate that project sources captured under `[modules]` with `role = "project"` can be built against their `#lgx-portable` flake output for hand-loading into a basecamp AppImage, and that runtime `role = "dependency"` entries are skipped.
+
+### Preconditions
+
+- B2 completed (project sources are captured and `basecamp install` has succeeded against `.#lgx`).
+- The same flakes also expose `packages.<system>.lgx-portable`.
+
+### Commands / Actions
+
+From the module project root:
+
+```bash
+"$SCAFFOLD_BIN" basecamp build-portable
+ls .scaffold/basecamp/portable 2>/dev/null || find .scaffold -maxdepth 4 -name '*lgx-portable*' -o -name '*.tgz' | sort
+```
+
+### Expected Success Signals
+
+- `build-portable` builds `.#lgx-portable` for each `role = "project"` entry in `[modules]`, in dependency order, and writes / symlinks the resulting artefacts under `.scaffold/`.
+- `role = "dependency"` entries are skipped — the target AppImage provides its own copies.
+- A flake that does not expose `.#lgx-portable` fails with a targeted error naming the missing attribute, not a raw nix trace.
+
+### Failure Signals / Common Pitfalls
+
+- A `build-portable` that silently falls back from `.#lgx-portable` to `.#lgx` is a contract violation — the variant choice is the user's.
+- Building dependency entries (those with `role = "dependency"`) is wasted work and a behavior regression.
+- Out-of-order builds that ignore the dependency graph between project sources are a regression introduced by changes to ordering logic.
+
+### Evidence to Capture
+
+- `basecamp build-portable` output excerpt including the per-source build lines.
+- The directory listing of the produced artefacts under `.scaffold/`.
+- For any failure, the exact missing flake attribute and the offending project source.
+
+### Execution Notes
+
+- This scenario does not exercise the AppImage itself — it stops at producing artefacts. Hand-loading into a basecamp AppImage is owned by the AppImage release, not by scaffold.
+
 ## Minimum Rerun Guidance for Future Changes
 
 - Changes to onboarding, project creation, setup, localnet, or build flows: rerun `D1`, `D2`, and `D6`.
@@ -750,8 +1165,15 @@ grep -n "^\[wallet\]\|^home_dir\|^binary" dogfood-cache/scaffold.toml
 - Changes to wallet flows or wallet-related defaults: rerun `D4`.
 - Changes to diagnostics, report contents, or redaction logic: rerun `D5`.
 - Changes to example runner binaries or template `src/bin/*` code: rerun `D6`.
+- Changes to `run` step ordering, post-deploy env vars, post-deploy CLI override flag handling, or `[run]` config parsing: rerun `D7`.
 - Changes to LEZ template scaffolding or generated outputs: rerun `L1`, `L2`, `L3`, and `L4`.
 - Changes to CLI argument parsing, help text, or error messages: rerun `E1`.
 - Changes to `create`/`new` flags or template selection logic: rerun `E2`.
+- Changes to AI skill materialization (`apply_skills`, the canonical `skills/` source, frontmatter rewrite, `AGENTS.md` template, or `init` re-run semantics): rerun `E3`.
+- Changes to `basecamp setup` (pin sync, lgpm build, profile seeding, idempotency) or `basecamp doctor`: rerun `B1`.
+- Changes to `[modules]` derivation, dependency resolution, sibling `--override-input` handling, or `basecamp install` invocation of `lgpm`: rerun `B2`.
+- Changes to `basecamp launch` (kill-and-scrub semantics, XDG isolation, port-override env vars, p2p surface): rerun `B3`.
+- Changes to clean-slate / `--no-clean` semantics or the empty `[modules]` guard on `launch`: rerun `B4`.
+- Changes to `basecamp build-portable` (project/dependency role split, ordering, attr selection): rerun `B5`.
 
 When in doubt, rerun more scenarios rather than fewer.

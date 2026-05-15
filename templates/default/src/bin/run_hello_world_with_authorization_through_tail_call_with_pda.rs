@@ -6,6 +6,7 @@ use nssa::{
     public_transaction::{Message, WitnessSet},
 };
 use nssa_core::program::PdaSeed;
+use sequencer_service_rpc::RpcClient as _;
 use wallet::WalletCore;
 
 #[path = "../lib.rs"]
@@ -39,13 +40,13 @@ async fn main() -> anyhow::Result<()> {
 
     let response = wallet_core
         .sequencer_client
-        .send_tx_public(tx)
+        .send_transaction(tx.into())
         .await
         .context("failed to submit public transaction to localnet")?;
 
     println!(
-        "submitted transaction: status={} tx_hash={}",
-        response.status, response.tx_hash
+        "submitted transaction: tx_hash={}",
+        hex::encode(response.0)
     );
     println!("the program derived account id is: {pda}");
 
