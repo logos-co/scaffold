@@ -25,6 +25,7 @@ Localnet and process/port detection rely on Unix tools (lsof, ps, kill).
 - `curl` for fetching the `logos-blockchain-circuits` release on first `setup`
 - Unix process helpers: `lsof`, `ps`, `kill`
 - Container runtime for guest builds: Docker or Podman
+- `nix` (with flakes enabled) — only required for `basecamp` subcommands.
 
 ## Install
 

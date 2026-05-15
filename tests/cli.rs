@@ -22,15 +22,6 @@ const DEFAULT_WALLET_PASSWORD: &str = "logos-scaffold-v0";
 const GUEST_BIN_REL_PATH: &str =
     "target/riscv-guest/example_program_deployment_methods/example_program_deployment_programs/riscv32im-risc0-zkvm-elf/release";
 
-#[cfg(unix)]
-fn true_bin() -> &'static str {
-    if Path::new("/bin/true").exists() {
-        "/bin/true"
-    } else {
-        "/usr/bin/true"
-    }
-}
-
 /// Minimal valid `scaffold.toml` content for tests that only need the project
 /// context to exist (no basecamp section). Older tests in this file inline
 /// the same content; new tests should prefer this helper.
@@ -63,6 +54,15 @@ path = "idl"
 port = 3040
 risc0_dev_mode = true
 "#;
+
+fn fake_basecamp_state() -> String {
+    let bin = assert_cmd::cargo::cargo_bin!("logos-scaffold");
+    format!(
+        "pin=deadbeef\nbasecamp_bin={}\nlgpm_bin={}\n",
+        bin.display(),
+        bin.display()
+    )
+}
 
 #[test]
 fn root_help_lists_quiet_flag_and_examples() {
@@ -2171,6 +2171,21 @@ fn spel_without_dash_dash_suggests_passthrough_form() {
 }
 
 #[test]
+fn spel_help_accepts_clap_help_spellings() {
+    for help_arg in ["--help", "-h", "help", "-?"] {
+        Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+            .arg("spel")
+            .arg(help_arg)
+            .assert()
+            .success()
+            .stdout(
+                predicate::str::contains("Forward arguments to the project-vendored `spel` binary")
+                    .and(predicate::str::contains("logos-scaffold spel --")),
+            );
+    }
+}
+
+#[test]
 fn basecamp_help_lists_setup_install_launch_and_profile() {
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .arg("basecamp")
@@ -2557,18 +2572,11 @@ fn basecamp_launch_rejects_unknown_profile() {
     let project = temp.path();
     fs::write(project.join("scaffold.toml"), MINIMAL_SCAFFOLD_TOML).expect("write scaffold.toml");
 
-    // Fake a completed setup so we get past the first gate and reach profile validation.
-    // Use an existing true binary so the launch path reaches profile validation.
+    // Fake a completed setup so we get past the first gate and reach profile
+    // validation. Launch never reaches `exec` because the profile check fails first.
     let state_dir = project.join(".scaffold/state");
     fs::create_dir_all(&state_dir).expect("mkdir state");
-    fs::write(
-        state_dir.join("basecamp.state"),
-        &format!(
-            "pin=deadbeef\nbasecamp_bin={}\nlgpm_bin=/bin/echo\n",
-            true_bin()
-        ),
-    )
-    .expect("write state");
+    fs::write(state_dir.join("basecamp.state"), fake_basecamp_state()).expect("write state");
 
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(project)
@@ -2607,14 +2615,7 @@ fn basecamp_launch_bails_when_no_modules_captured() {
     // the early gates and reaches the modules check.
     let state_dir = project.join(".scaffold/state");
     fs::create_dir_all(&state_dir).expect("mkdir state");
-    fs::write(
-        state_dir.join("basecamp.state"),
-        &format!(
-            "pin=deadbeef\nbasecamp_bin={}\nlgpm_bin=/bin/echo\n",
-            true_bin()
-        ),
-    )
-    .expect("write state");
+    fs::write(state_dir.join("basecamp.state"), fake_basecamp_state()).expect("write state");
     fs::create_dir_all(project.join(".scaffold/basecamp/profiles/alice")).expect("mkdir profile");
 
     // `--yes` clears the C2 destructive-default gate so the assertion below
@@ -2741,7 +2742,7 @@ fn basecamp_launch_dry_run_prints_plan_without_scrubbing() {
 fn basecamp_launch_no_clean_bypasses_empty_modules_check() {
     // --no-clean is the documented escape hatch for keeping whatever's already
     // installed in the profile. It must skip the empty-modules check entirely.
-    // We don't run launch to completion (basecamp_bin is a true binary), but the
+    // We don't run launch to completion, but the
     // command should get past the modules check and fail later — not fail on
     // an "install modules first" hint.
     let temp = tempdir().expect("tempdir");
@@ -2784,14 +2785,7 @@ port_stride = 10
     .expect("write scaffold.toml");
     let state_dir = project.join(".scaffold/state");
     fs::create_dir_all(&state_dir).expect("mkdir state");
-    fs::write(
-        state_dir.join("basecamp.state"),
-        &format!(
-            "pin=deadbeef\nbasecamp_bin={}\nlgpm_bin=/bin/echo\n",
-            true_bin()
-        ),
-    )
-    .expect("write state");
+    fs::write(state_dir.join("basecamp.state"), fake_basecamp_state()).expect("write state");
     fs::create_dir_all(project.join(".scaffold/basecamp/profiles/alice")).expect("mkdir profile");
 
     let output = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))

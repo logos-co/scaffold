@@ -2,10 +2,10 @@
 //! the user-facing surface. Keeps the binary end-to-end verifiable without
 //! requiring test harnesses to invoke nix or other heavy external tools.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::process::{run_logged, set_print_output};
+use crate::process::{run_logged, set_print_output, which};
 use crate::DynResult;
 
 /// Drive `run_logged` against `true` (or `false` when `fail` is set) and
@@ -20,21 +20,11 @@ pub(crate) fn cmd_self_test_run_logged(
     if print_output {
         set_print_output(true);
     }
-    let binary = if fail {
-        portable_unix_bool_bin("false")
-    } else {
-        portable_unix_bool_bin("true")
-    };
+    let binary = test_utility(if fail { "false" } else { "true" });
     let mut cmd = Command::new(binary);
     run_logged(&mut cmd, step, log_path)
 }
 
-fn portable_unix_bool_bin(name: &str) -> &'static str {
-    match name {
-        "false" if Path::new("/bin/false").exists() => "/bin/false",
-        "false" => "/usr/bin/false",
-        "true" if Path::new("/bin/true").exists() => "/bin/true",
-        "true" => "/usr/bin/true",
-        _ => unreachable!("self-test only supports true/false"),
-    }
+fn test_utility(name: &str) -> PathBuf {
+    which(name).unwrap_or_else(|| PathBuf::from(format!("/bin/{name}")))
 }
