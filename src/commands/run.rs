@@ -8,53 +8,86 @@ use crate::commands::deploy::{
     cmd_deploy, discover_deployable_programs, discover_program_binaries, extract_program_id,
 };
 use crate::commands::idl::build_idl_for_current_project;
-use crate::commands::localnet::{build_localnet_status_for_project, cmd_localnet, LocalnetAction};
+use crate::commands::localnet::{
+    build_localnet_status_for_project, cmd_localnet, cmd_localnet_reset, LocalnetAction,
+};
 use crate::commands::run_state::{
     compute_program_hashes, current_localnet_pid, deploy_can_be_skipped, load_state, save_state,
     RunDeployState,
 };
+use crate::commands::setup::ensure_default_wallet_seeded;
 use crate::commands::wallet::{cmd_wallet_topup_inner, TopupOutcome};
 use crate::constants::{DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, SPEL_BIN_REL_PATH};
-use crate::model::{LocalnetOwnership, Project};
+use crate::model::{LocalnetOwnership, Project, RunProfile};
 use crate::project::{load_project, resolve_repo_path, run_in_project_dir};
+use crate::state::prepare_wallet_home;
 use crate::DynResult;
 
 /// All knobs that control a `lgs run` invocation. Built by `cli.rs` from
-/// the parsed `RunArgs` (with conflicting-flag resolution into `Option<Vec<_>>`)
+/// the parsed `RunArgs` (with conflicting-flag resolution into `Option<bool>`)
 /// and consumed by `cmd_run`. Grouping the fields together prevents the
 /// positional-swap class of bug.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RunInvocation {
+    pub(crate) profile: Option<String>,
+    pub(crate) reset: Option<bool>,
     pub(crate) post_deploy_override: Option<Vec<String>>,
     pub(crate) localnet_timeout_sec: Option<u64>,
 }
 
 pub(crate) fn cmd_run(inv: RunInvocation) -> DynResult<()> {
     let project = load_project()?;
+    let resolved = project.config.run.resolve_profile(inv.profile.as_deref())?;
+    if let Some(name) = inv.profile.as_deref() {
+        println!("Using [run.profiles.{name}]");
+    } else if let Some(name) = project.config.run.default_profile.as_deref() {
+        println!("Using [run.profiles.{name}] (default_profile)");
+    }
     let hooks = inv
         .post_deploy_override
-        .unwrap_or_else(|| project.config.run.post_deploy.clone());
+        .unwrap_or_else(|| resolved.post_deploy.clone());
     let localnet_timeout_sec = inv
         .localnet_timeout_sec
         .unwrap_or(DEFAULT_RUN_LOCALNET_TIMEOUT_SEC);
+
+    let params = PipelineParams {
+        resolved: resolved.clone(),
+        hooks,
+        reset_override: inv.reset,
+        localnet_timeout_sec,
+    };
 
     // Anchor the pipeline at the discovered project root. Otherwise commands
     // that resolve paths relative to cwd (`cmd_build_shortcut`,
     // `build_idl_for_current_project`, etc.) would build/deploy from whichever
     // subdirectory the user invoked `lgs run` in.
-    run_in_project_dir(Some(&project.root), || {
-        run_pipeline_once(&project, &hooks, localnet_timeout_sec)
-    })
+    run_in_project_dir(Some(&project.root), || run_pipeline_once(&project, &params))
 }
 
-fn run_pipeline_once(
-    project: &Project,
-    hooks: &[String],
+#[derive(Clone)]
+struct PipelineParams {
+    resolved: RunProfile,
+    hooks: Vec<String>,
+    reset_override: Option<bool>,
     localnet_timeout_sec: u64,
-) -> DynResult<()> {
-    let has_hooks = !hooks.is_empty();
+}
+
+fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()> {
+    let has_hooks = !params.hooks.is_empty();
     // Steps: build, build idl, localnet, topup, deploy, [+1 if hooks]
     let total_steps: u32 = if has_hooks { 6 } else { 5 };
+    let effective_reset = params.reset_override.unwrap_or(params.resolved.reset);
+
+    // Surface destructive intent up front when reset comes from config
+    // (not from the CLI flag). With --reset the user already typed the
+    // word, so re-stating it is noise; with `reset = true` in scaffold.toml
+    // they may not realize step 3 will wipe rocksdb + wallet, so warn
+    // before step 1 instead of after the build has run.
+    if effective_reset && params.reset_override.is_none() {
+        eprintln!(
+            "warning: scaffold.toml requested reset = true; step 3 will wipe sequencer state + wallet. Pass --no-reset to override."
+        );
+    }
 
     // Step 1: Build (chains setup internally)
     println!("[1/{total_steps}] Building...");
@@ -64,9 +97,27 @@ fn run_pipeline_once(
     println!("[2/{total_steps}] Building IDL...");
     build_idl_for_current_project()?;
 
-    // Step 3: Ensure localnet is running.
-    println!("[3/{total_steps}] Ensuring localnet...");
-    ensure_localnet(project, localnet_timeout_sec)?;
+    // Step 3: Reset OR ensure localnet.
+    if effective_reset {
+        println!("[3/{total_steps}] Resetting localnet (wipes sequencer + wallet)...");
+        reset_for_run(project, params.localnet_timeout_sec)?;
+        // A reset wipes on-chain state, so any prior deploy is gone:
+        // the next deploy must run regardless of hash equality. Tolerate
+        // NotFound (no prior run); surface anything else.
+        let state_file = project.root.join(".scaffold/state/run_deploy.json");
+        match std::fs::remove_file(&state_file) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!("clear stale deploy state at {}", state_file.display())
+                });
+            }
+        }
+    } else {
+        println!("[3/{total_steps}] Ensuring localnet...");
+        ensure_localnet(project, params.localnet_timeout_sec)?;
+    }
 
     // Step 4: Wallet topup
     println!("[4/{total_steps}] Topping up wallet...");
@@ -84,15 +135,15 @@ fn run_pipeline_once(
     // instance that received it. A `lgs localnet stop && start` cycle
     // changes the sequencer PID and wipes on-chain state, so PID equality
     // is the gate that prevents stale-deploy false positives. To force a
-    // re-deploy without restarting localnet, delete
-    // `.scaffold/state/run_deploy.json` manually (a `--reset` switch
-    // arrives in a later branch of this stack).
+    // re-deploy without restarting localnet, use `--reset` (which also
+    // clears the cache) or delete `.scaffold/state/run_deploy.json`
+    // manually.
     let current_hashes = compute_program_hashes(project)?;
     let current_pid = current_localnet_pid(project);
     let prior = load_state(project);
     let deploy_skipped = if deploy_can_be_skipped(&current_hashes, current_pid, &prior) {
         println!(
-            "[5/{total_steps}] Deploy skipped (guest binaries + IDL + config + sequencer unchanged; delete `.scaffold/state/run_deploy.json` to force a re-deploy)"
+            "[5/{total_steps}] Deploy skipped (guest binaries + IDL + config + sequencer unchanged; pass `--reset` to wipe and re-deploy, or delete `.scaffold/state/run_deploy.json` to force a re-deploy without a wipe)"
         );
         true
     } else {
@@ -117,11 +168,11 @@ fn run_pipeline_once(
 
     // Step 6: Post-deploy hooks (or summary)
     if has_hooks {
-        let n = hooks.len();
+        let n = params.hooks.len();
         println!("[6/{total_steps}] Running {n} post-deploy hook(s)...");
         check_env_var_suffix_collisions(&deployed.programs)?;
         warn_on_rewritten_program_names(&deployed.programs);
-        for (i, hook) in hooks.iter().enumerate() {
+        for (i, hook) in params.hooks.iter().enumerate() {
             println!("===> post_deploy[{}/{n}]: {hook}", i + 1);
             run_post_deploy_hook(project, hook, &deployed)?;
             println!("<=== post_deploy[{}/{n}] OK", i + 1);
@@ -131,6 +182,48 @@ fn run_pipeline_once(
     }
 
     Ok(())
+}
+
+fn reset_for_run(project: &Project, verify_timeout_sec: u64) -> DynResult<()> {
+    let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
+    let state_path = project.root.join(".scaffold/state/localnet.state");
+    let log_path = project.root.join(".scaffold/logs/sequencer.log");
+    let localnet_addr = format!("127.0.0.1:{}", project.config.localnet.port);
+    cmd_localnet_reset(
+        project,
+        &lez,
+        &state_path,
+        &log_path,
+        &localnet_addr,
+        false, // dry_run — actually perform the reset
+        true,  // yes — non-interactive; run is the user-initiated action that authorizes it
+        true,  // reset_wallet — full wipe; reseed_after_wipe re-seeds below
+        verify_timeout_sec,
+    )?;
+    // The wipe deleted the wallet directory and state file; the next pipeline
+    // step (topup) would fail without a re-seed. Recover by calling the same
+    // primitives `cmd_setup` invokes when the wallet is absent. If the
+    // re-seed itself fails, stop the sequencer we just started so we don't
+    // strand the project in a half-wiped state with a running daemon.
+    if let Err(err) = reseed_after_wipe(project) {
+        let _ = cmd_localnet(LocalnetAction::Stop);
+        return Err(err.context(
+            "post-reset wallet re-seed failed; sequencer was stopped to avoid leaving a half-wiped project",
+        ));
+    }
+    Ok(())
+}
+
+/// Re-seed the project's default wallet after `cmd_localnet_reset` wiped
+/// it. Reuses the same primitives `cmd_setup` calls so the resulting
+/// `wallet.state` is byte-equivalent to a fresh `lgs setup`. Extracted as
+/// its own helper so the byte-equivalence test can drive it directly
+/// without booting a real sequencer.
+fn reseed_after_wipe(project: &Project) -> DynResult<()> {
+    let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
+    let wallet_home = project.root.join(&project.config.wallet_home_dir);
+    prepare_wallet_home(&lez, &wallet_home)?;
+    ensure_default_wallet_seeded(&project.root, &wallet_home)
 }
 
 /// Per-program metadata exposed to post-deploy hooks via env vars.
@@ -992,5 +1085,82 @@ mod tests {
         // No assertion: the contract is "doesn't panic, prints only for
         // rewritten names". The print_deploy_summary integration tests
         // already lock in the user-visible output shape.
+    }
+
+    /// Asserts that `reseed_after_wipe` produces a `wallet.state` byte-equivalent
+    /// to a fresh setup. The test does not exercise `reset_for_run` itself —
+    /// `cmd_localnet_reset` requires a real sequencer and isn't reachable from
+    /// unit-test scope. What this *does* lock down: if `reseed_after_wipe`
+    /// drifts away from calling the same primitives `cmd_setup` uses
+    /// (`prepare_wallet_home` + `ensure_default_wallet_seeded`), the byte
+    /// comparison breaks. `reset_for_run` itself must keep calling
+    /// `reseed_after_wipe` (not inline a parallel seed) — that contract is
+    /// enforced by code review, not by this test.
+    #[test]
+    fn reseed_after_wipe_matches_setup_baseline() {
+        use crate::commands::setup::ensure_default_wallet_seeded;
+        use crate::commands::wallet_support::{wallet_state_path, WALLET_CONFIG_PRIMARY};
+        use crate::state::prepare_wallet_home;
+
+        // Two parallel project trees with identical fake LEZ wallet configs.
+        // Both start from the same state a freshly-wiped project would: LEZ
+        // bundled wallet config exists on disk, but no `.scaffold/wallet/`.
+        let baseline = tempfile::tempdir().expect("baseline tempdir");
+        let post_reset = tempfile::tempdir().expect("post_reset tempdir");
+
+        for root in [baseline.path(), post_reset.path()] {
+            let lez_cfg_dir = root.join("lez/wallet/configs/debug");
+            std::fs::create_dir_all(&lez_cfg_dir).expect("create lez cfg dir");
+            std::fs::write(
+                lez_cfg_dir.join("wallet_config.json"),
+                r#"{
+  "initial_accounts": [
+    { "Public": { "account_id": "6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV" } }
+  ]
+}"#,
+            )
+            .expect("write lez wallet config");
+        }
+
+        // Baseline: drive `cmd_setup`'s seed primitives directly.
+        {
+            let lez = baseline.path().join("lez");
+            let wallet_home = baseline.path().join(".scaffold/wallet");
+            prepare_wallet_home(&lez, &wallet_home).expect("baseline prepare");
+            ensure_default_wallet_seeded(baseline.path(), &wallet_home).expect("baseline seed");
+        }
+
+        // Post-reset: drive `reseed_after_wipe` directly.
+        // The fixture sets `lez.path = "lez"` (relative); make it absolute
+        // so the helper doesn't depend on cwd (tests run in parallel and
+        // can't share cwd).
+        let mut project = make_test_project(post_reset.path().to_path_buf());
+        project.config.lez.path = post_reset.path().join("lez").to_string_lossy().to_string();
+        reseed_after_wipe(&project).expect("post-reset reseed");
+
+        let baseline_state =
+            std::fs::read(wallet_state_path(baseline.path())).expect("read baseline state");
+        let post_reset_state =
+            std::fs::read(wallet_state_path(post_reset.path())).expect("read post-reset state");
+        assert_eq!(
+            baseline_state, post_reset_state,
+            "post-reset wallet.state must be byte-equivalent to clean-setup baseline"
+        );
+
+        let baseline_cfg = std::fs::read(
+            baseline
+                .path()
+                .join(".scaffold/wallet")
+                .join(WALLET_CONFIG_PRIMARY),
+        )
+        .expect("read baseline cfg");
+        let post_reset_cfg = std::fs::read(
+            post_reset
+                .path()
+                .join(".scaffold/wallet")
+                .join(WALLET_CONFIG_PRIMARY),
+        )
+        .expect("read post-reset cfg");
+        assert_eq!(baseline_cfg, post_reset_cfg);
     }
 }

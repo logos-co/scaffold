@@ -4150,9 +4150,94 @@ fn run_post_deploy_flag_overrides_configured_hooks() {
 }
 
 fn append_run_config(project_root: &Path, post_deploy: &[&str]) {
+    append_run_config_full(project_root, false, post_deploy);
+}
+
+fn append_run_config_full(project_root: &Path, reset: bool, post_deploy: &[&str]) {
     let toml_path = project_root.join("scaffold.toml");
     let mut content = fs::read_to_string(&toml_path).expect("read scaffold.toml");
     let quoted: Vec<String> = post_deploy.iter().map(|c| format!("\"{c}\"")).collect();
-    content.push_str(&format!("\n[run]\npost_deploy = [{}]\n", quoted.join(", ")));
+    content.push_str(&format!(
+        "\n[run]\nreset = {reset}\npost_deploy = [{}]\n",
+        quoted.join(", ")
+    ));
     fs::write(toml_path, content).expect("write scaffold.toml");
+}
+
+#[test]
+fn run_rejects_both_reset_flags() {
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .arg("run")
+        .arg("--reset")
+        .arg("--no-reset")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn run_help_lists_reset_flags() {
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .arg("run")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--reset").and(predicate::str::contains("--no-reset")));
+}
+
+#[test]
+fn run_with_reset_flag_starts_pipeline() {
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+
+    // --reset on the CLI: no banner (user typed the word) and pipeline
+    // enters step 1 before the build fails on this mock project.
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("run")
+        .arg("--reset")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("[1/5] Building..."))
+        .stderr(predicate::str::contains("scaffold.toml requested reset = true").not());
+}
+
+#[test]
+fn run_with_reset_in_config_emits_destructive_intent_warning() {
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+    append_run_config_full(temp.path(), true, &[]);
+
+    // reset = true in scaffold.toml without --reset on the CLI: the
+    // destructive-intent warning must fire on stderr before step 1, so a
+    // user who didn't realize `lgs run` would wipe their state finds out
+    // before the build runs.
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("run")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("[1/5] Building..."))
+        .stderr(predicate::str::contains(
+            "scaffold.toml requested reset = true",
+        ));
+}
+
+#[test]
+fn run_no_reset_flag_overrides_config_reset_true() {
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+    append_run_config_full(temp.path(), true, &[]);
+
+    // --no-reset must beat the config field (CLI overrides config). When
+    // effective_reset is false, the destructive-intent banner must NOT
+    // fire — that's the observable signal proving the override took effect.
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("run")
+        .arg("--no-reset")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("[1/5] Building..."))
+        .stderr(predicate::str::contains("scaffold.toml requested reset = true").not());
 }
