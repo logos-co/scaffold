@@ -73,9 +73,16 @@ pub(crate) fn build_idl_for_current_project() -> DynResult<()> {
     }
 
     blocks.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut seen_stems: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     for (name, json_text) in blocks {
         let canonical = canonical_json(&json_text)?;
-        let file_name = format!("{}.json", sanitize_file_stem(&name));
+        let stem = sanitize_file_stem(&name);
+        if let Some(prev_name) = seen_stems.get(&stem) {
+            bail!("IDL name collision: `{name}` and `{prev_name}` both sanitize to `{stem}.json`");
+        }
+        seen_stems.insert(stem.clone(), name.clone());
+        let file_name = format!("{stem}.json");
         let path = idl_dir.join(file_name);
         write_text(&path, &canonical)?;
         println!("Wrote IDL {}", path.display());
