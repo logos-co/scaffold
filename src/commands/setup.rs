@@ -1,8 +1,11 @@
 use std::path::Path;
 use std::process::Command;
 
+use anyhow::bail;
+
 use crate::circuits::ensure_circuits_for_subprocess;
-use crate::model::RepoRef;
+use crate::doctor_checks::check_logos_blockchain_circuits;
+use crate::model::{CheckStatus, RepoRef};
 use crate::process::run_checked;
 use crate::project::{ensure_dir_exists, load_project, resolve_cache_root, resolve_repo_path};
 use crate::repo::{sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
@@ -15,7 +18,12 @@ use super::wallet_support::{
 };
 
 pub(crate) fn cmd_setup() -> DynResult<()> {
+    // Load project first so an outdated scaffold.toml gets the canonical
+    // "run `lgs init`" hint before we surface unrelated environment
+    // gripes (circuits artifact, etc.). Tests assert the migration hint
+    // wins on pre-v0.2.0 configs.
     let project = load_project()?;
+    ensure_logos_blockchain_circuits_present()?;
     let lez = resolve_repo_path(&project, &project.config.lez, "lez")?;
     let spel = resolve_repo_path(&project, &project.config.spel, "spel")?;
 
@@ -70,6 +78,24 @@ pub(crate) fn cmd_setup() -> DynResult<()> {
 
     println!("setup complete");
 
+    Ok(())
+}
+
+/// Bail before any cargo work if the `logos-blockchain-circuits` artifact
+/// the LEZ build chain depends on isn't reachable. Without this the build
+/// fails deep inside `logos-blockchain-pol`'s build script with a raw
+/// panic backtrace; the user has no signal that the missing piece is a
+/// scaffold prerequisite.
+fn ensure_logos_blockchain_circuits_present() -> DynResult<()> {
+    let row = check_logos_blockchain_circuits();
+    if matches!(row.status, CheckStatus::Fail) {
+        let remediation = row.remediation.as_deref().unwrap_or("");
+        bail!(
+            "{}. {} Run `logos-scaffold doctor` for the full prerequisite list.",
+            row.detail,
+            remediation
+        );
+    }
     Ok(())
 }
 

@@ -116,7 +116,23 @@ fn cmd_basecamp_docs() -> DynResult<()> {
     Ok(())
 }
 
+/// Bail before any nix invocation if `nix` isn't on PATH. Without this,
+/// `run_logged` surfaces `os error 2` from the spawn failure with no
+/// signal that the missing executable is `nix` — a documented UX
+/// regression in DOGFOODING.md B1.
+fn ensure_nix_present() -> DynResult<()> {
+    if crate::process::which("nix").is_none() {
+        bail!(
+            "this command requires Nix (with flakes enabled) on PATH. \
+             Install Nix from https://nixos.org/download.html, then re-run."
+        );
+    }
+    Ok(())
+}
+
 fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
+    ensure_nix_present()?;
+
     // Pull or default-fill [repos.basecamp]. If the project has never been
     // through `lgs new` post-0.2.0 and lacks the section, fill it with the
     // canonical default and persist back.
@@ -732,6 +748,11 @@ fn cmd_basecamp_build_portable(project: Project) -> DynResult<()> {
         );
     }
 
+    // Nix preflight comes after the modules-empty guard so a user without
+    // nix who has nothing captured still gets the more specific
+    // "run basecamp modules" hint first.
+    ensure_nix_present()?;
+
     // Order project modules so each appears AFTER its own project-internal
     // deps (leaves first). Basecamp loads `.lgx` artefacts in the order the
     // user hands them to it — emitting bottom-up means a module's deps are
@@ -1067,6 +1088,11 @@ fn cmd_basecamp_modules(
     if show {
         print_modules_table("captured modules", &existing_modules);
         return Ok(());
+    }
+    // Production probes shell out to nix, so keep the missing-nix UX local to
+    // the modules implementation. Unit-test probes opt out below.
+    if probe.requires_nix() {
+        ensure_nix_present()?;
     }
 
     let explicit = !paths.is_empty() || !flakes.is_empty();
@@ -1464,6 +1490,11 @@ fn cmd_basecamp_install(project: Project, probe: &dyn LgxFlakeProbe) -> DynResul
     if !Path::new(&state.basecamp_bin).exists() || !Path::new(&state.lgpm_bin).exists() {
         bail!("basecamp not set up yet; run: logos-scaffold basecamp setup");
     }
+
+    // Nix preflight comes after the setup-state guard so a user without
+    // nix who hasn't run `basecamp setup` still gets the more specific
+    // "run basecamp setup" hint first.
+    ensure_nix_present()?;
 
     // If scaffold.toml has no captured modules, run `modules` in
     // auto-discover mode transparently, then reload the project config.
@@ -2156,11 +2187,13 @@ fn cmd_basecamp_doctor(project: Project, as_json: bool) -> DynResult<()> {
     let mut rows = Vec::new();
     push_basecamp_doctor_rows(&project, &mut rows);
 
-    // If there are no rows at all, state is absent or empty — emit a single
-    // Pass row so the output is never confusingly blank.
+    // If there are no rows at all, state is absent or empty. Emit a Warn
+    // row — `print_rows` only surfaces remediation lines for Warn/Fail,
+    // so a Pass row would suppress the "run basecamp setup" hint and
+    // leave the user with a contradictory PASS-with-remediation line.
     if rows.is_empty() {
         rows.push(crate::model::CheckRow {
-            status: CheckStatus::Pass,
+            status: CheckStatus::Warn,
             name: "basecamp state".to_string(),
             detail: "not set up yet (no basecamp.state)".to_string(),
             remediation: Some("run `logos-scaffold basecamp setup`".to_string()),
@@ -2411,6 +2444,10 @@ fn collect_api_headers(alice_modules: &Path, module_name: &str) -> Vec<PathBuf> 
 /// resolves under `/nix/store/` rather than the real project tree. Mirrors the
 /// sibling-override plumbing already applied at build time.
 trait LgxFlakeProbe {
+    fn requires_nix(&self) -> bool {
+        true
+    }
+
     fn package_names(
         &self,
         flake_ref: &str,
@@ -2758,6 +2795,10 @@ mod tests {
     }
 
     impl LgxFlakeProbe for FakeProbe {
+        fn requires_nix(&self) -> bool {
+            false
+        }
+
         fn package_names(
             &self,
             flake_ref: &str,

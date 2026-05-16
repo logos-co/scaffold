@@ -57,6 +57,7 @@ Do not run project-scoped commands from the repository root unless the scenario 
 
 - Unix-like environment with `git`, `rustc`, `cargo`, `lsof`, `ps`, and `kill`.
 - Docker or Podman available for guest builds.
+- `logos-blockchain-circuits` release on disk: `LOGOS_BLOCKCHAIN_CIRCUITS=<path>` or `~/.logos-blockchain-circuits/`. Required by the LEZ standalone build chain that `setup` invokes; absence causes a scaffold-side precheck error before any cargo work.
 - No conflicting listener on the scaffold localnet port before `localnet start`.
 - Network access available for setup/build flows that fetch dependencies.
 - No preinstalled `wallet` binary is required. If one exists on `PATH`, do not treat it as the runtime under test for scaffold wallet scenarios.
