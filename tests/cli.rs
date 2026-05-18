@@ -2624,7 +2624,10 @@ fn basecamp_launch_bails_when_no_modules_captured() {
         .arg("alice")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("basecamp modules"));
+        .stderr(
+            predicate::str::contains("basecamp modules")
+                .and(predicate::str::contains("destructive by default").not()),
+        );
 }
 
 #[test]

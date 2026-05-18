@@ -241,10 +241,8 @@ fn resolve_basecamp_binary(app_link: &Path) -> DynResult<PathBuf> {
     )
 }
 
-// Concurrent `launch <same-profile>` is undefined per spec §2.3 ("v1 does not
-// lock; document as 'don't do that'"). The code below assumes a single launcher
-// per profile at a time — scrub, re-seed, replay install, and PID write are all
-// non-atomic. If two invocations race, expect partial state.
+// Concurrent `launch <same-profile>` is undefined per spec §2.3: no lock; two
+// racing invocations leave partial state.
 fn cmd_basecamp_launch(project: Project, profile: String) -> DynResult<()> {
     let state_path = project.root.join(".scaffold/state/basecamp.state");
     let state = match read_basecamp_state(&state_path).ok() {
@@ -296,8 +294,9 @@ fn cmd_basecamp_launch(project: Project, profile: String) -> DynResult<()> {
         bail!("no modules captured — run `logos-scaffold basecamp modules` before launching.");
     }
 
-    // seed_profiles is idempotent (tested) and cheap — always run it so a prior
-    // crash mid-scrub doesn't leave the profile without its xdg subdirs.
+    // Pre-seed in case a prior crash between scrub and re-seed left the profile
+    // without its xdg subdirs; scrub assumes both exist. seed_profiles is
+    // idempotent and cheap.
     seed_profiles(&profiles_root, &[profile.as_str()])?;
     scrub_profile_data_and_cache(&project.root, &profile_dir)?;
     // Re-seed after scrub: scrub removed xdg-data + xdg-cache; put their
