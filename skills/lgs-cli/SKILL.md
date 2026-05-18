@@ -43,7 +43,7 @@ Once a project exists on disk, also pull in the matching template / integration 
 | Modules | `basecamp setup` | One-time: pin basecamp + lgpm, build, seed `alice` / `bob` profiles. |
 | Modules | `basecamp modules [--show] [--flake REF]… [--path PATH]…` | Sole writer of `[basecamp.modules.<name>]` in `scaffold.toml`. |
 | Modules | `basecamp install [--print-output]` | Build captured sources and install via `lgpm` into both profiles. |
-| Modules | `basecamp launch <profile> [--no-clean]` | Scrub profile, replay modules, exec basecamp. Profiles: `alice`, `bob`. |
+| Modules | `basecamp launch <profile>` | Scrub profile, replay modules, exec basecamp. Profiles: `alice`, `bob`. |
 | Modules | `basecamp build-portable` | Build `.#lgx-portable` for `role = "project"` entries; symlink under `.scaffold/basecamp/portable/`. |
 | Modules | `basecamp doctor [--json]` | Basecamp-specific health (modules, variant check, dep drift, discovery drift). |
 | Modules | `basecamp docs` | Print canonical `docs/basecamp-module-requirements.md`. |

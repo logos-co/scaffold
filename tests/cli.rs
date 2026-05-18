@@ -2583,10 +2583,10 @@ fn basecamp_launch_rejects_unknown_profile() {
 #[cfg(unix)]
 #[test]
 fn basecamp_launch_bails_when_no_modules_captured() {
-    // launch without --no-clean scrubs and replays the captured module set.
-    // If [basecamp.modules] is empty, the replay is silently a no-op — the
-    // profile comes up with zero modules installed, which violates the
-    // clean-slate guarantee. Surface as an error with a concrete hint.
+    // launch scrubs and replays the captured module set. If [basecamp.modules]
+    // is empty, the replay is silently a no-op — the profile comes up with
+    // zero modules installed, which violates the clean-slate guarantee.
+    // Surface as an error with a concrete hint.
     let temp = tempdir().expect("tempdir");
     let project = temp.path();
     let scaffold_toml = format!(
@@ -2617,196 +2617,14 @@ fn basecamp_launch_bails_when_no_modules_captured() {
     .expect("write state");
     fs::create_dir_all(project.join(".scaffold/basecamp/profiles/alice")).expect("mkdir profile");
 
-    // `--yes` clears the C2 destructive-default gate so the assertion below
-    // exercises the no-modules-captured bail (which still fires on a clean
-    // launch with an empty module set, regardless of the gate).
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(project)
         .arg("basecamp")
         .arg("launch")
         .arg("alice")
-        .arg("--yes")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("basecamp modules"))
-        .stderr(predicate::str::contains("--no-clean"));
-}
-
-#[cfg(unix)]
-#[test]
-fn basecamp_launch_without_safety_flag_refuses_default_scrub() {
-    // C2: a bare `basecamp launch <profile>` used to silently scrub the
-    // profile's xdg-data and xdg-cache. Now the destructive default refuses
-    // unless the caller passes one of --yes, --no-clean, or --dry-run. The
-    // error advertises all three so a wrong invocation is corrected by
-    // copy-paste.
-    let temp = tempdir().expect("tempdir");
-    let project = temp.path();
-    let scaffold_toml = format!(
-        "{MINIMAL_SCAFFOLD_TOML}\n\
-         [repos.basecamp]\n\
-         source = \"https://example/basecamp\"\n\
-         pin = \"deadbeef\"\n\
-         build = \"nix-flake\"\n\
-         attr = \"app\"\n\
-         \n\
-         [basecamp]\n\
-         port_base = 60000\n\
-         port_stride = 10\n"
-    );
-    fs::write(project.join("scaffold.toml"), scaffold_toml).expect("write scaffold.toml");
-
-    // Pre-seed everything needed to clear the early gates so we land on the
-    // new yes/no-clean/dry-run check. /bin/echo + /bin/sh exist on every Unix
-    // and pass the path-exists checks; the command never actually exec()s.
-    let state_dir = project.join(".scaffold/state");
-    fs::create_dir_all(&state_dir).expect("mkdir state");
-    fs::write(
-        state_dir.join("basecamp.state"),
-        "pin=deadbeef\nbasecamp_bin=/bin/echo\nlgpm_bin=/bin/sh\n",
-    )
-    .expect("write state");
-    let profile_dir = project.join(".scaffold/basecamp/profiles/alice");
-    fs::create_dir_all(profile_dir.join("xdg-data")).expect("mkdir xdg-data");
-    fs::write(profile_dir.join("xdg-data/sentinel"), b"do-not-scrub").expect("seed sentinel");
-
-    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
-        .current_dir(project)
-        .args(["basecamp", "launch", "alice"])
-        .assert()
-        .failure()
-        .stderr(
-            predicate::str::contains("destructive by default")
-                .and(predicate::str::contains("--yes"))
-                .and(predicate::str::contains("--no-clean"))
-                .and(predicate::str::contains("--dry-run")),
-        );
-
-    assert!(
-        profile_dir.join("xdg-data/sentinel").exists(),
-        "refusal must leave profile data untouched"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn basecamp_launch_dry_run_prints_plan_without_scrubbing() {
-    // C2: --dry-run lists what the destructive default would scrub and
-    // reinstall, without mutating the profile or attempting to exec basecamp.
-    let temp = tempdir().expect("tempdir");
-    let project = temp.path();
-    let scaffold_toml = format!(
-        "{MINIMAL_SCAFFOLD_TOML}\n\
-         [repos.basecamp]\n\
-         source = \"https://example/basecamp\"\n\
-         pin = \"deadbeef\"\n\
-         build = \"nix-flake\"\n\
-         attr = \"app\"\n\
-         \n\
-         [basecamp]\n\
-         port_base = 60000\n\
-         port_stride = 10\n"
-    );
-    fs::write(project.join("scaffold.toml"), scaffold_toml).expect("write scaffold.toml");
-
-    let state_dir = project.join(".scaffold/state");
-    fs::create_dir_all(&state_dir).expect("mkdir state");
-    fs::write(
-        state_dir.join("basecamp.state"),
-        "pin=deadbeef\nbasecamp_bin=/bin/echo\nlgpm_bin=/bin/sh\n",
-    )
-    .expect("write state");
-    let profile_dir = project.join(".scaffold/basecamp/profiles/alice");
-    fs::create_dir_all(profile_dir.join("xdg-data")).expect("mkdir xdg-data");
-    fs::write(profile_dir.join("xdg-data/sentinel"), b"do-not-scrub").expect("seed sentinel");
-
-    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
-        .current_dir(project)
-        .args(["basecamp", "launch", "alice", "--dry-run"])
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("dry-run: basecamp launch alice")
-                .and(predicate::str::contains("planned: scrub")),
-        );
-
-    assert!(
-        profile_dir.join("xdg-data/sentinel").exists(),
-        "dry-run must not scrub profile data"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn basecamp_launch_no_clean_bypasses_empty_modules_check() {
-    // --no-clean is the documented escape hatch for keeping whatever's already
-    // installed in the profile. It must skip the empty-modules check entirely.
-    // We don't run launch to completion (basecamp_bin is a true binary), but the
-    // command should get past the modules check and fail later — not fail on
-    // an "install modules first" hint.
-    let temp = tempdir().expect("tempdir");
-    let project = temp.path();
-    fs::write(
-        project.join("scaffold.toml"),
-        r#"[scaffold]
-version = "0.1.0"
-cache_root = "cache"
-
-[repos.lez]
-url = "https://example/lez.git"
-source = "https://example/lez.git"
-path = "lez"
-pin = "deadbeef"
-
-[wallet]
-home_dir = ".scaffold/wallet"
-
-[framework]
-kind = "default"
-version = "0.1.0"
-
-[framework.idl]
-spec = "lssa-idl/0.1.0"
-path = "idl"
-
-[localnet]
-port = 3040
-risc0_dev_mode = true
-
-[basecamp]
-pin = "deadbeef"
-source = "https://example/basecamp"
-lgpm_flake = ""
-port_base = 60000
-port_stride = 10
-"#,
-    )
-    .expect("write scaffold.toml");
-    let state_dir = project.join(".scaffold/state");
-    fs::create_dir_all(&state_dir).expect("mkdir state");
-    fs::write(
-        state_dir.join("basecamp.state"),
-        &format!(
-            "pin=deadbeef\nbasecamp_bin={}\nlgpm_bin=/bin/echo\n",
-            true_bin()
-        ),
-    )
-    .expect("write state");
-    fs::create_dir_all(project.join(".scaffold/basecamp/profiles/alice")).expect("mkdir profile");
-
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
-        .current_dir(project)
-        .arg("basecamp")
-        .arg("launch")
-        .arg("alice")
-        .arg("--no-clean")
-        .output()
-        .expect("run launch");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !stderr.contains("basecamp modules") || !stderr.contains("--no-clean"),
-        "--no-clean should not trigger the empty-modules hint, got stderr:\n{stderr}"
-    );
+        .stderr(predicate::str::contains("basecamp modules"));
 }
 
 #[test]

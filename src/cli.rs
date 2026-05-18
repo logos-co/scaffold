@@ -425,7 +425,7 @@ enum BasecampSubcommand {
     )]
     Install(BasecampInstallArgs),
     #[command(
-        about = "Launch basecamp for a named profile with clean-slate semantics. Destructive by default (scrubs xdg-data/xdg-cache); requires --yes, --no-clean, or --dry-run. See `basecamp docs` for project requirements."
+        about = "Launch basecamp for a named profile with clean-slate semantics. Scrubs the profile's xdg-data/xdg-cache and replays the captured module set on every invocation. See `basecamp docs` for project requirements."
     )]
     Launch(BasecampLaunchArgs),
     #[command(
@@ -485,19 +485,6 @@ struct BasecampInstallArgs {
 struct BasecampLaunchArgs {
     #[arg(value_name = "PROFILE")]
     profile: String,
-    /// Skip the clean-slate scrub and reinstall step
-    #[arg(long)]
-    no_clean: bool,
-    #[arg(
-        long,
-        help = "Confirm the clean-slate scrub of the profile's xdg-data and xdg-cache. Required for the destructive default launch unless --no-clean or --dry-run is passed."
-    )]
-    yes: bool,
-    #[arg(
-        long,
-        help = "Print what would be scrubbed and reinstalled without touching the profile or launching basecamp."
-    )]
-    dry_run: bool,
 }
 
 pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
@@ -616,9 +603,6 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 },
                 BasecampSubcommand::Launch(args) => BasecampAction::Launch {
                     profile: args.profile,
-                    no_clean: args.no_clean,
-                    yes: args.yes,
-                    dry_run: args.dry_run,
                 },
                 BasecampSubcommand::BuildPortable(_) => BasecampAction::BuildPortable,
                 BasecampSubcommand::Doctor(args) => BasecampAction::Doctor { json: args.json },
