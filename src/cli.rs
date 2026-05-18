@@ -282,6 +282,11 @@ struct RunArgs {
     post_deploy: Vec<String>,
     #[arg(long, value_name = "SECS", help = RUN_LOCALNET_TIMEOUT_HELP.as_str())]
     localnet_timeout: Option<u64>,
+    /// After the initial run, watch the project for file changes and
+    /// re-run the pipeline (build + idl + deploy + hooks) on each change.
+    /// Localnet is reused; reset is skipped on re-runs.
+    #[arg(long)]
+    watch: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -647,6 +652,7 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 reset,
                 post_deploy_override: post_deploy,
                 localnet_timeout_sec: args.localnet_timeout,
+                watch: args.watch,
             })
         }
         Some(Commands::Report(args)) => cmd_report(args.out, args.tail),
