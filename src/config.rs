@@ -165,70 +165,77 @@ fn parse_post_deploy(item: Option<&Item>) -> DynResult<Vec<String>> {
     bail!("invalid scaffold.toml: post_deploy must be a string or array of strings")
 }
 
-/// Reject pre-0.2.0 schemas with a targeted error naming the section that's
-/// stale and `init` as the fix. Detection is pragmatic: any single old-shape
-/// signal is enough.
-fn detect_old_schema(doc: &DocumentMut, version: &str) -> DynResult<()> {
-    let mut markers: Vec<&str> = Vec::new();
+/// Per-shape markers returned by `detect_old_schema_markers`. The
+/// user-facing error doesn't enumerate these — they're a structured signal
+/// for tests and any future verbose log path.
+#[derive(Debug, Default, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct OldSchemaMarkers {
+    pub(crate) version_stale: bool,
+    pub(crate) has_lssa: bool,
+    pub(crate) has_repo_url: bool,
+    pub(crate) has_old_basecamp_keys: bool,
+    pub(crate) has_old_basecamp_modules: bool,
+}
 
-    // Old version stamp. Any other version mismatch (e.g. prerelease tags or
-    // hand-edits) is caught downstream in `parse_config` with a more specific
-    // "this build expects X" message; `init`'s migrator bumps the version
-    // regardless of origin.
-    if version != SCAFFOLD_TOML_SCHEMA_VERSION
-        && (version.starts_with("0.1.") || version == "0.1" || version == "0.0")
-    {
-        markers.push("[scaffold].version is pre-0.2.0");
+impl OldSchemaMarkers {
+    pub(crate) fn any(&self) -> bool {
+        self.version_stale
+            || self.has_lssa
+            || self.has_repo_url
+            || self.has_old_basecamp_keys
+            || self.has_old_basecamp_modules
     }
+}
 
-    // [repos.lssa] — pre-spel-era alias for [repos.lez]. Even if no other
-    // signals fire (e.g. the user hand-bumped the version stamp), the
-    // canonical name has changed and `init` is responsible for the rename.
+/// Pragmatic detection of pre-0.2.0 schemas. Returns a flag-per-shape so the
+/// caller can decide what (if anything) to surface. `init`'s migrator handles
+/// every variant we detect here, so the user-facing error in
+/// `detect_old_schema` does not enumerate them.
+pub(crate) fn detect_old_schema_markers(doc: &DocumentMut, version: &str) -> OldSchemaMarkers {
+    let mut m = OldSchemaMarkers::default();
+
+    // Old version stamp. Other version mismatches (prerelease tags, hand-edits)
+    // are caught downstream in `parse_config` with a more specific "this build
+    // expects X" message; `init`'s migrator bumps the version regardless of
+    // origin.
+    m.version_stale = version != SCAFFOLD_TOML_SCHEMA_VERSION
+        && (version.starts_with("0.1.") || version == "0.1" || version == "0.0");
+
     let repos_table = doc.get("repos").and_then(Item::as_table);
-    if let Some(repos) = repos_table {
-        if repos.get("lssa").is_some() {
-            markers.push("[repos.lssa] renamed to [repos.lez] in 0.2.0");
-        }
-    }
-
+    // [repos.lssa] — pre-spel-era alias for [repos.lez].
+    m.has_lssa = repos_table.is_some_and(|t| t.get("lssa").is_some());
     // [repos.{lez,spel}].url — dropped in 0.2.0; source is the single field.
-    // (lssa is checked above as its own signal.)
-    for name in ["lez", "spel"] {
-        let table = repos_table.and_then(|t| t.get(name).and_then(Item::as_table));
-        if let Some(table) = table {
-            if table.get("url").is_some() {
-                markers.push("[repos.lez|spel].url is removed in 0.2.0 (use `source` only)");
-                break;
-            }
-        }
-    }
-
+    m.has_repo_url = ["lez", "spel"].iter().any(|name| {
+        repos_table
+            .and_then(|t| t.get(name).and_then(Item::as_table))
+            .is_some_and(|tbl| tbl.get("url").is_some())
+    });
+    let basecamp_table = doc.get("basecamp").and_then(Item::as_table);
     // Old [basecamp] shape: pin / source / lgpm_flake at the root.
-    if let Some(bc) = doc.get("basecamp").and_then(Item::as_table) {
-        for stale in ["pin", "source", "lgpm_flake"] {
-            if bc.get(stale).is_some() {
-                markers.push("[basecamp] has pin/source/lgpm_flake (moved to [repos.basecamp] / [repos.lgpm])");
-                break;
-            }
-        }
-    }
-
+    m.has_old_basecamp_keys = basecamp_table.is_some_and(|t| {
+        ["pin", "source", "lgpm_flake"]
+            .iter()
+            .any(|k| t.get(k).is_some())
+    });
     // [basecamp.modules.*] — moved to [modules.*].
-    if let Some(bc) = doc.get("basecamp").and_then(Item::as_table) {
-        if let Some(modules) = bc.get("modules").and_then(Item::as_table) {
-            if modules.iter().next().is_some() {
-                markers.push("[basecamp.modules.*] moved to [modules.*]");
-            }
-        }
-    }
+    m.has_old_basecamp_modules = basecamp_table
+        .and_then(|t| t.get("modules").and_then(Item::as_table))
+        .is_some_and(|m| m.iter().next().is_some());
 
-    if markers.is_empty() {
+    m
+}
+
+/// Reject pre-0.2.0 schemas with a one-line, action-only error pointing at
+/// `init`. The migrator handles every variant we detect, so the user only
+/// needs to know that a migration is required — not which specific shape
+/// tripped the check.
+fn detect_old_schema(doc: &DocumentMut, version: &str) -> DynResult<()> {
+    if !detect_old_schema_markers(doc, version).any() {
         return Ok(());
     }
-
-    let detail = markers.join("; ");
     bail!(
-        "scaffold.toml uses an old schema ({detail}). \
+        "scaffold.toml uses an old schema. \
          Run `logos-scaffold init` to migrate to v{SCAFFOLD_TOML_SCHEMA_VERSION}; \
          existing settings are preserved."
     );
@@ -806,12 +813,10 @@ pin = "deadbeef"
 source = "https://example/basecamp"
 "#;
         let err = parse_config(&toml).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("logos-scaffold init"), "{msg}");
-        assert!(
-            msg.contains("[basecamp]") || msg.contains("[repos.basecamp]"),
-            "{msg}"
-        );
+        assert!(err.to_string().contains("logos-scaffold init"), "{err}");
+        let doc: DocumentMut = toml.parse().expect("re-parse for markers");
+        let markers = detect_old_schema_markers(&doc, "0.2.0");
+        assert!(markers.has_old_basecamp_keys, "{markers:?}");
     }
 
     #[test]
@@ -823,9 +828,10 @@ flake = "path:./foo"
 role = "project"
 "#;
         let err = parse_config(&toml).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("[modules"), "{msg}");
-        assert!(msg.contains("logos-scaffold init"), "{msg}");
+        assert!(err.to_string().contains("logos-scaffold init"), "{err}");
+        let doc: DocumentMut = toml.parse().expect("re-parse for markers");
+        let markers = detect_old_schema_markers(&doc, "0.2.0");
+        assert!(markers.has_old_basecamp_modules, "{markers:?}");
     }
 
     #[test]
@@ -899,9 +905,10 @@ role = "project"
     fn rejects_legacy_repos_lssa_section() {
         let toml = minimal_v0_2_0().replace("[repos.lez]", "[repos.lssa]");
         let err = parse_config(&toml).expect_err("lssa section should be rejected");
-        let msg = err.to_string();
-        assert!(msg.contains("lssa"), "{msg}");
-        assert!(msg.contains("init"), "{msg}");
+        assert!(err.to_string().contains("init"), "{err}");
+        let doc: DocumentMut = toml.parse().expect("re-parse for markers");
+        let markers = detect_old_schema_markers(&doc, "0.2.0");
+        assert!(markers.has_lssa, "{markers:?}");
     }
 
     #[test]

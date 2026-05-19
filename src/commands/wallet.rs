@@ -41,9 +41,7 @@ pub(crate) enum WalletAction {
 }
 
 pub(crate) fn cmd_wallet(action: WalletAction) -> DynResult<()> {
-    let project = load_project().context(
-        "This command must be run inside a logos-scaffold project.\nNext step: cd into your scaffolded project directory and retry.",
-    )?;
+    let project = load_project()?;
 
     match action {
         WalletAction::List { long } => cmd_wallet_list(&project, long),

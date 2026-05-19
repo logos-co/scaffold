@@ -3889,6 +3889,46 @@ fn setup_hard_fails_on_pre_v0_2_0_scaffold_toml() {
     assert_pre_v0_2_0_rejection(&["setup"]);
 }
 
+/// Regression: commands that go through `load_project()` (basecamp, wallet,
+/// deploy, report) used to wrap any `load_project` failure with the
+/// "This command must be run inside a logos-scaffold project — cd into …"
+/// hint. That was a lie when the user *was* inside a project but the
+/// schema was stale; the only fix is `lgs init`. The wrap is removed and
+/// `load_project` itself produces the right message for each branch.
+#[test]
+fn load_project_commands_in_stale_schema_project_show_init_hint_not_cd_hint() {
+    let temp = tempdir().expect("tempdir");
+    fs::write(temp.path().join("scaffold.toml"), PRE_V0_2_0_SCAFFOLD_TOML)
+        .expect("seed pre-v0.2.0 scaffold.toml");
+
+    for args in [
+        &["basecamp", "setup"][..],
+        &["wallet", "list"][..],
+        &["deploy"][..],
+        &["report"][..],
+    ] {
+        let output = Command::new(assert_cmd::cargo::cargo_bin!("lgs"))
+            .current_dir(temp.path())
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("run lgs {args:?}: {e}"));
+        assert!(
+            !output.status.success(),
+            "lgs {args:?} must fail on pre-0.2.0 scaffold.toml"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("logos-scaffold init"),
+            "lgs {args:?} stderr must point at `init`; got:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("cd into your scaffolded project"),
+            "lgs {args:?} stderr must not show the cd-into-project hint when \
+             the user is already inside a project; got:\n{stderr}"
+        );
+    }
+}
+
 #[test]
 fn build_idl_fails_loudly_on_default_framework() {
     // C4: explicit `build idl` against a non-lez-framework project used to
@@ -4027,7 +4067,9 @@ fn run_outside_project_fails_with_project_scoped_message() {
         .arg("run")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Not a logos-scaffold project"));
+        .stderr(predicate::str::contains(
+            "This command must be run inside a logos-scaffold project",
+        ));
 }
 
 #[test]

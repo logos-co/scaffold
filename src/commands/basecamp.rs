@@ -70,9 +70,7 @@ pub(crate) fn cmd_basecamp(action: BasecampAction) -> DynResult<()> {
         return cmd_basecamp_docs();
     }
 
-    let project = load_project().context(
-        "This command must be run inside a logos-scaffold project.\nNext step: cd into your scaffolded project directory and retry.",
-    )?;
+    let project = load_project()?;
 
     match action {
         BasecampAction::Setup => cmd_basecamp_setup(project),
