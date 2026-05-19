@@ -775,9 +775,7 @@ fn report_fails_outside_project_with_project_scoped_message() {
         .arg("report")
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "Not a logos-scaffold project at",
-        ));
+        .stderr(predicate::str::contains("Not a logos-scaffold project at"));
 }
 
 #[test]
@@ -1472,9 +1470,7 @@ fn wallet_topup_fails_outside_project_with_project_scoped_message() {
         .arg(VALID_PUBLIC_ADDRESS)
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "Not a logos-scaffold project at",
-        ));
+        .stderr(predicate::str::contains("Not a logos-scaffold project at"));
 }
 
 #[test]
@@ -2417,9 +2413,7 @@ fn basecamp_setup_outside_project_errors() {
         .arg("setup")
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "Not a logos-scaffold project at",
-        ));
+        .stderr(predicate::str::contains("Not a logos-scaffold project at"));
 }
 
 #[test]
@@ -2431,9 +2425,7 @@ fn basecamp_install_outside_project_errors() {
         .arg("install")
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "Not a logos-scaffold project at",
-        ));
+        .stderr(predicate::str::contains("Not a logos-scaffold project at"));
 }
 
 #[test]
@@ -2446,9 +2438,7 @@ fn basecamp_build_portable_outside_project_errors() {
         .args(["basecamp", "build-portable"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "Not a logos-scaffold project at",
-        ));
+        .stderr(predicate::str::contains("Not a logos-scaffold project at"));
 }
 
 #[test]
@@ -2819,9 +2809,7 @@ fn basecamp_launch_outside_project_errors() {
         .arg("alice")
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "Not a logos-scaffold project at",
-        ));
+        .stderr(predicate::str::contains("Not a logos-scaffold project at"));
 }
 
 fn find_single_report_archive(reports_dir: &Path) -> PathBuf {
