@@ -388,6 +388,7 @@ mod tests {
         run_git(path, &["init"]);
         run_git(path, &["config", "user.email", "test@example.com"]);
         run_git(path, &["config", "user.name", "Test User"]);
+        run_git(path, &["config", "commit.gpgsign", "false"]);
         fs::write(path.join(file), contents).expect("write file");
         run_git(path, &["add", "."]);
         run_git(path, &["commit", "-m", "init"]);

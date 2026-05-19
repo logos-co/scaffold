@@ -82,13 +82,19 @@ enum Commands {
     #[command(about = "Alias for `create`")]
     #[command(before_long_help = NEW_ABOUT.as_str())]
     New(NewArgs),
+    #[command(about = "Sync dependencies and build project-local binaries (sequencer, wallet, spel)")]
     Setup(SetupArgs),
+    #[command(about = "Build the project workspace and guest programs")]
     Build(BuildArgs),
+    #[command(about = "Deploy guest programs to the running localnet")]
     Deploy(DeployArgs),
+    #[command(about = "Manage the local sequencer (start, stop, status, logs, reset)")]
     Localnet(LocalnetArgs),
+    #[command(about = "Manage project wallet accounts and faucet top-ups")]
     Wallet(WalletArgs),
     #[command(about = "Manage pre-seeded basecamp profiles for p2p dogfooding")]
     Basecamp(BasecampArgs),
+    #[command(about = "Check project health and report actionable next steps")]
     Doctor(DoctorArgs),
     #[command(about = "Build, start localnet, top up wallet, deploy, and run post-deploy hook")]
     Run(RunArgs),
@@ -188,6 +194,10 @@ struct NewArgs {
     lez_path: Option<PathBuf>,
     #[arg(long, default_value = "default", help = TEMPLATE_HELP.as_str())]
     template: String,
+    /// Override the cache root used for non-vendored dependencies. Written to
+    /// scaffold.toml so subsequent commands reuse the same location.
+    #[arg(long, value_name = "PATH")]
+    cache_root: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -552,6 +562,7 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
             vendor_deps: args.vendor_deps,
             lez_path: args.lez_path,
             template: args.template,
+            cache_root: args.cache_root,
         }),
         Some(Commands::Setup(_)) => cmd_setup(),
         Some(Commands::Build(args)) => match args.subcommand {

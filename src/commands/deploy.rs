@@ -36,9 +36,7 @@ pub(crate) fn cmd_deploy(
     program_path: Option<PathBuf>,
     json: bool,
 ) -> DynResult<()> {
-    let project = load_project().context(
-        "This command must be run inside a logos-scaffold project.\nNext step: cd into your scaffolded project directory and retry.",
-    )?;
+    let project = load_project()?;
     let wallet = load_wallet_runtime(&project)?;
     let spel_bin =
         resolve_repo_path(&project, &project.config.spel, "spel")?.join(SPEL_BIN_REL_PATH);

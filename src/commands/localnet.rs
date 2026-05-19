@@ -1107,7 +1107,11 @@ mod tests {
             .unwrap();
         assert!(git_init.success(), "git init failed");
         // Local identity so `git commit` doesn't require system-level config.
-        for (k, v) in [("user.email", "t@example.com"), ("user.name", "test")] {
+        for (k, v) in [
+            ("user.email", "t@example.com"),
+            ("user.name", "test"),
+            ("commit.gpgsign", "false"),
+        ] {
             Command::new("git")
                 .args(["config", k, v])
                 .current_dir(&lez)

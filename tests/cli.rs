@@ -776,7 +776,7 @@ fn report_fails_outside_project_with_project_scoped_message() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "This command must be run inside a logos-scaffold project.",
+            "Not a logos-scaffold project at",
         ));
 }
 
@@ -1473,7 +1473,7 @@ fn wallet_topup_fails_outside_project_with_project_scoped_message() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "This command must be run inside a logos-scaffold project.",
+            "Not a logos-scaffold project at",
         ));
 }
 
@@ -2418,7 +2418,7 @@ fn basecamp_setup_outside_project_errors() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "This command must be run inside a logos-scaffold project.",
+            "Not a logos-scaffold project at",
         ));
 }
 
@@ -2432,7 +2432,7 @@ fn basecamp_install_outside_project_errors() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "This command must be run inside a logos-scaffold project.",
+            "Not a logos-scaffold project at",
         ));
 }
 
@@ -2447,7 +2447,7 @@ fn basecamp_build_portable_outside_project_errors() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "This command must be run inside a logos-scaffold project.",
+            "Not a logos-scaffold project at",
         ));
 }
 
@@ -2820,7 +2820,7 @@ fn basecamp_launch_outside_project_errors() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "This command must be run inside a logos-scaffold project.",
+            "Not a logos-scaffold project at",
         ));
 }
 
