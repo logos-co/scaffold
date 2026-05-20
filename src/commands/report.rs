@@ -25,9 +25,7 @@ use crate::DynResult;
 const REPORT_WARNING: &str = "WARNING: This diagnostics bundle is sanitized on a best-effort basis and may still contain sensitive data. Inspect every file before sharing it publicly.";
 
 pub(crate) fn cmd_report(out: Option<PathBuf>, tail: usize) -> DynResult<()> {
-    let project = load_project().context(
-        "This command must be run inside a logos-scaffold project.\nNext step: cd into your scaffolded project directory and retry.",
-    )?;
+    let project = load_project()?;
 
     let now = unix_timestamp_now()?;
     let output_path = resolve_output_path(&project.root, out, now)?;
