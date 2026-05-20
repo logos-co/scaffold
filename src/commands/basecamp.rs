@@ -229,7 +229,7 @@ fn resolve_basecamp_binary(app_link: &Path) -> DynResult<PathBuf> {
     }
     let platform_hint = if cfg!(target_os = "macos") {
         "\nNote: on macOS, `nix build .#app` produces an app bundle under Applications/. \
-         v0.1.x does not yet expose a CLI-invocable binary on macOS; track basecamp-profiles spec §6."
+         v0.1.x does not yet expose a CLI-invocable binary on macOS."
     } else {
         ""
     };
@@ -239,8 +239,8 @@ fn resolve_basecamp_binary(app_link: &Path) -> DynResult<PathBuf> {
     )
 }
 
-// Concurrent `launch <same-profile>` is undefined per spec §2.3: no lock; two
-// racing invocations leave partial state.
+// Concurrent `launch <same-profile>` is undefined: no lock; two racing
+// invocations leave partial state.
 fn cmd_basecamp_launch(project: Project, profile: String) -> DynResult<()> {
     let state_path = project.root.join(".scaffold/state/basecamp.state");
     let state = match read_basecamp_state(&state_path).ok() {
@@ -340,10 +340,10 @@ fn cmd_basecamp_launch(project: Project, profile: String) -> DynResult<()> {
     for (k, v) in &env {
         cmd.env(k, v);
     }
-    // Per-module port-override env vars (spec §3.4) are owned by each module and
-    // flow in via a registry — empty in v1 since no modules have published names.
+    // Per-module port-override env vars are owned by each module and flow in
+    // via a registry — empty in v1 since no modules have published names.
     // Concurrent alice/bob on the same host may collide on module-level ports
-    // until upstreams adopt overrides; see basecamp-profiles §3.4.
+    // until upstreams adopt overrides.
     write_launch_pid(&launch_state_path, std::process::id())?;
     let err = cmd.exec();
     // exec() only returns on failure. On Linux/Unix exec preserves the PID, so
@@ -354,8 +354,8 @@ fn cmd_basecamp_launch(project: Project, profile: String) -> DynResult<()> {
     bail!("failed to exec basecamp at {}: {err}", state.basecamp_bin);
 }
 
-/// Env map exported to the basecamp child on launch. Scaffold-owned names only
-/// (spec §3.4); module port-override vars are not yet registered.
+/// Env map exported to the basecamp child on launch. Scaffold-owned names only;
+/// module port-override vars are not yet registered.
 fn launch_env(profile_dir: &Path, profile_name: &str) -> BTreeMap<String, OsString> {
     let mut env = BTreeMap::new();
     env.insert(
@@ -2333,7 +2333,7 @@ trait LgxFlakeProbe {
 
 /// Resolves the set of `.lgx` sources to install from explicit args and project auto-discovery.
 ///
-/// Precedence (matches §2.2 of the basecamp-profiles spec):
+/// Precedence:
 /// 1. Explicit `--path` / `--flake` — wins if supplied.
 /// 2. Project root `flake.nix` exposing `packages.<system>.<attr>` — build that attribute.
 /// 3. Sub-directories with a `flake.nix` exposing the same.
