@@ -261,7 +261,19 @@ struct ReportArgs {
 
 #[derive(Debug, clap::Args)]
 struct RunArgs {
-    /// Skip post-deploy hooks even if scaffold.toml configures them
+    /// Select a named profile from `[run.profiles.<name>]`
+    #[arg(long, value_name = "NAME")]
+    profile: Option<String>,
+    /// Wipe rocksdb + wallet, restart sequencer, re-seed default wallet
+    /// (overrides scaffold.toml). Broader than `lgs localnet reset`: this
+    /// re-establishes the documented fresh-project state for the full
+    /// deploy cycle.
+    #[arg(long)]
+    reset: bool,
+    /// Skip the run-level reset even if scaffold.toml says true
+    #[arg(long, conflicts_with = "reset")]
+    no_reset: bool,
+    /// Skip post-deploy hooks even if the resolved profile defines them
     #[arg(long)]
     no_post_deploy: bool,
     /// Override post-deploy hooks (repeatable). Replaces config-defined hooks
@@ -270,6 +282,11 @@ struct RunArgs {
     post_deploy: Vec<String>,
     #[arg(long, value_name = "SECS", help = RUN_LOCALNET_TIMEOUT_HELP.as_str())]
     localnet_timeout: Option<u64>,
+    /// After the initial run, watch the project for file changes and
+    /// re-run the pipeline (build + idl + deploy + hooks) on each change.
+    /// Localnet is reused; reset is skipped on re-runs.
+    #[arg(long)]
+    watch: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -413,7 +430,7 @@ enum BasecampSubcommand {
     )]
     Install(BasecampInstallArgs),
     #[command(
-        about = "Launch basecamp for a named profile with clean-slate semantics. Destructive by default (scrubs xdg-data/xdg-cache); requires --yes, --no-clean, or --dry-run. See `basecamp docs` for project requirements."
+        about = "Launch basecamp for a named profile with clean-slate semantics. Scrubs the profile's xdg-data/xdg-cache and replays the captured module set on every invocation. See `basecamp docs` for project requirements."
     )]
     Launch(BasecampLaunchArgs),
     #[command(
@@ -473,19 +490,6 @@ struct BasecampInstallArgs {
 struct BasecampLaunchArgs {
     #[arg(value_name = "PROFILE")]
     profile: String,
-    /// Skip the clean-slate scrub and reinstall step
-    #[arg(long)]
-    no_clean: bool,
-    #[arg(
-        long,
-        help = "Confirm the clean-slate scrub of the profile's xdg-data and xdg-cache. Required for the destructive default launch unless --no-clean or --dry-run is passed."
-    )]
-    yes: bool,
-    #[arg(
-        long,
-        help = "Print what would be scrubbed and reinstalled without touching the profile or launching basecamp."
-    )]
-    dry_run: bool,
 }
 
 pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
@@ -604,9 +608,6 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 },
                 BasecampSubcommand::Launch(args) => BasecampAction::Launch {
                     profile: args.profile,
-                    no_clean: args.no_clean,
-                    yes: args.yes,
-                    dry_run: args.dry_run,
                 },
                 BasecampSubcommand::BuildPortable(_) => BasecampAction::BuildPortable,
                 BasecampSubcommand::Doctor(args) => BasecampAction::Doctor { json: args.json },
@@ -616,6 +617,13 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
         }
         Some(Commands::Doctor(args)) => cmd_doctor(args.json),
         Some(Commands::Run(args)) => {
+            let reset = if args.reset {
+                Some(true)
+            } else if args.no_reset {
+                Some(false)
+            } else {
+                None
+            };
             let post_deploy = if args.no_post_deploy {
                 Some(Vec::new())
             } else if !args.post_deploy.is_empty() {
@@ -624,8 +632,11 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 None
             };
             cmd_run(RunInvocation {
+                profile: args.profile,
+                reset,
                 post_deploy_override: post_deploy,
                 localnet_timeout_sec: args.localnet_timeout,
+                watch: args.watch,
             })
         }
         Some(Commands::Report(args)) => cmd_report(args.out, args.tail),

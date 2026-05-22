@@ -123,7 +123,7 @@ fn canonical_json(text: &str) -> DynResult<String> {
     Ok(format!("{pretty}\n"))
 }
 
-fn sanitize_file_stem(name: &str) -> String {
+pub(crate) fn sanitize_file_stem(name: &str) -> String {
     let mut out = String::new();
     let mut prev_sep = false;
 

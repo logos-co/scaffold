@@ -985,18 +985,45 @@ fn localnet_start_patches_config_and_uses_configured_port() {
         .assert()
         .success();
 
-    // Verify sequencer_config.json was patched with the configured port
-    let patched_config = fs::read_to_string(&config_path).expect("read patched config");
+    // The vendored config in the lez checkout must be left untouched.
+    // Regression for #114: in-place mutation broke `git_clean(lez)` and
+    // silently disabled the cache-repo auto-reclone safety net.
+    let vendored_after = fs::read_to_string(&config_path).expect("read vendored config");
+    let vendored_json: serde_json::Value =
+        serde_json::from_str(&vendored_after).expect("parse vendored config");
+    assert_eq!(
+        vendored_json["port"],
+        serde_json::Value::Number(3040.into()),
+        "vendored sequencer_config.json must not be mutated, got: {vendored_after}"
+    );
+
+    // The patched copy lives under the project's `.scaffold/state/`.
+    let patched_path = temp.path().join(".scaffold/state/sequencer_config.json");
+    let patched_config = fs::read_to_string(&patched_path).expect("read patched config");
     let config_json: serde_json::Value =
         serde_json::from_str(&patched_config).expect("parse patched config");
     assert_eq!(
         config_json["port"],
         serde_json::Value::Number(localnet_port.into()),
-        "expected port in sequencer_config.json to be patched to {localnet_port}, got: {patched_config}"
+        "expected port in patched sequencer_config.json to be {localnet_port}, got: {patched_config}"
+    );
+    assert_eq!(
+        config_json["max_block_size"],
+        serde_json::Value::String("8 MiB".to_string()),
+        "expected max_block_size in patched sequencer_config.json to be widened so multi-program deploys fit, got: {patched_config}"
+    );
+
+    // The sequencer must have been invoked with the absolute path to the
+    // patched copy, not the in-repo relative path.
+    let args = fs::read_to_string(&args_log).expect("read args log");
+    assert!(
+        args.lines()
+            .any(|line| line == patched_path.to_string_lossy()),
+        "expected sequencer to receive patched config path {}, got args: {args}",
+        patched_path.display()
     );
 
     // Verify --port was NOT passed as a CLI arg
-    let args = fs::read_to_string(&args_log).expect("read args log");
     assert!(
         !args.contains("--port"),
         "expected --port NOT to appear in sequencer args, got: {args}"
@@ -1110,6 +1137,30 @@ fn wallet_passthrough_requires_args_after_double_dash() {
         .stderr(predicate::str::contains(
             "wallet passthrough requires at least one argument after `--`",
         ));
+}
+
+#[test]
+fn wallet_topup_dry_run_planned_network_uses_localnet_port_without_wallet_sequencer_addr() {
+    let temp = tempdir().expect("tempdir");
+    let lez_path = temp.path().join("lez");
+    fs::create_dir_all(&lez_path).expect("create lez path");
+    write_wallet_stub(&lez_path);
+    let port = unused_local_port();
+    write_scaffold_toml_with_localnet(temp.path(), &lez_path, Some(port), Some(true));
+    write_wallet_config(temp.path(), None);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("wallet")
+        .arg("topup")
+        .arg("--address")
+        .arg(VALID_PUBLIC_ADDRESS)
+        .arg("--dry-run")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "planned network: local sequencer (http://127.0.0.1:{port})"
+        )));
 }
 
 #[test]
@@ -1595,6 +1646,32 @@ fn deploy_continues_and_summarizes_mixed_results() {
 }
 
 #[test]
+fn deploy_preflight_targets_localnet_port_when_wallet_omits_sequencer_addr() {
+    let temp = tempdir().expect("tempdir");
+    let lez_path = temp.path().join("lez");
+    fs::create_dir_all(&lez_path).expect("create lez path");
+    write_wallet_stub(&lez_path);
+    let port = unused_local_port();
+    write_scaffold_toml_with_localnet(temp.path(), &lez_path, Some(port), Some(true));
+    write_wallet_config(temp.path(), None);
+    write_guest_program(temp.path(), "hello");
+    write_guest_binary(temp.path(), "hello");
+
+    let url = format!("http://127.0.0.1:{port}");
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("deploy")
+        .arg("hello")
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("cannot deploy programs")
+                .and(predicate::str::contains(&url))
+                .and(predicate::str::contains("sequencer appears unavailable")),
+        );
+}
+
+#[test]
 fn deploy_shows_hint_when_sequencer_is_unreachable_with_configured_addr() {
     let temp = tempdir().expect("tempdir");
     setup_wallet_project(temp.path(), Some("http://127.0.0.1:65535"));
@@ -1616,8 +1693,8 @@ fn deploy_shows_hint_when_sequencer_is_unreachable_with_configured_addr() {
 
 #[test]
 fn deploy_shows_hint_when_sequencer_is_unreachable_with_fallback_addr() {
-    // This test assumes fallback `http://127.0.0.1:3040` is unreachable.
-    // Skip in environments where another process is already listening there.
+    // Wallet omits `sequencer_addr`; deploy falls back to `http://127.0.0.1:<localnet.port>`
+    // (default 3040 when `[localnet]` is omitted). Skip if something is already listening.
     if TcpStream::connect("127.0.0.1:3040").is_ok() {
         return;
     }
@@ -2556,10 +2633,10 @@ fn basecamp_launch_rejects_unknown_profile() {
 #[cfg(unix)]
 #[test]
 fn basecamp_launch_bails_when_no_modules_captured() {
-    // launch without --no-clean scrubs and replays the captured module set.
-    // If [basecamp.modules] is empty, the replay is silently a no-op — the
-    // profile comes up with zero modules installed, which violates the
-    // clean-slate guarantee. Surface as an error with a concrete hint.
+    // launch scrubs and replays the captured module set. If [basecamp.modules]
+    // is empty, the replay is silently a no-op — the profile comes up with
+    // zero modules installed, which violates the clean-slate guarantee.
+    // Surface as an error with a concrete hint.
     let temp = tempdir().expect("tempdir");
     let project = temp.path();
     let scaffold_toml = format!(
@@ -2590,196 +2667,17 @@ fn basecamp_launch_bails_when_no_modules_captured() {
     .expect("write state");
     fs::create_dir_all(project.join(".scaffold/basecamp/profiles/alice")).expect("mkdir profile");
 
-    // `--yes` clears the C2 destructive-default gate so the assertion below
-    // exercises the no-modules-captured bail (which still fires on a clean
-    // launch with an empty module set, regardless of the gate).
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(project)
         .arg("basecamp")
         .arg("launch")
         .arg("alice")
-        .arg("--yes")
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("basecamp modules"))
-        .stderr(predicate::str::contains("--no-clean"));
-}
-
-#[cfg(unix)]
-#[test]
-fn basecamp_launch_without_safety_flag_refuses_default_scrub() {
-    // C2: a bare `basecamp launch <profile>` used to silently scrub the
-    // profile's xdg-data and xdg-cache. Now the destructive default refuses
-    // unless the caller passes one of --yes, --no-clean, or --dry-run. The
-    // error advertises all three so a wrong invocation is corrected by
-    // copy-paste.
-    let temp = tempdir().expect("tempdir");
-    let project = temp.path();
-    let scaffold_toml = format!(
-        "{MINIMAL_SCAFFOLD_TOML}\n\
-         [repos.basecamp]\n\
-         source = \"https://example/basecamp\"\n\
-         pin = \"deadbeef\"\n\
-         build = \"nix-flake\"\n\
-         attr = \"app\"\n\
-         \n\
-         [basecamp]\n\
-         port_base = 60000\n\
-         port_stride = 10\n"
-    );
-    fs::write(project.join("scaffold.toml"), scaffold_toml).expect("write scaffold.toml");
-
-    // Pre-seed everything needed to clear the early gates so we land on the
-    // new yes/no-clean/dry-run check. /bin/echo + /bin/sh exist on every Unix
-    // and pass the path-exists checks; the command never actually exec()s.
-    let state_dir = project.join(".scaffold/state");
-    fs::create_dir_all(&state_dir).expect("mkdir state");
-    fs::write(
-        state_dir.join("basecamp.state"),
-        "pin=deadbeef\nbasecamp_bin=/bin/echo\nlgpm_bin=/bin/sh\n",
-    )
-    .expect("write state");
-    let profile_dir = project.join(".scaffold/basecamp/profiles/alice");
-    fs::create_dir_all(profile_dir.join("xdg-data")).expect("mkdir xdg-data");
-    fs::write(profile_dir.join("xdg-data/sentinel"), b"do-not-scrub").expect("seed sentinel");
-
-    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
-        .current_dir(project)
-        .args(["basecamp", "launch", "alice"])
         .assert()
         .failure()
         .stderr(
-            predicate::str::contains("destructive by default")
-                .and(predicate::str::contains("--yes"))
-                .and(predicate::str::contains("--no-clean"))
-                .and(predicate::str::contains("--dry-run")),
+            predicate::str::contains("basecamp modules")
+                .and(predicate::str::contains("destructive by default").not()),
         );
-
-    assert!(
-        profile_dir.join("xdg-data/sentinel").exists(),
-        "refusal must leave profile data untouched"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn basecamp_launch_dry_run_prints_plan_without_scrubbing() {
-    // C2: --dry-run lists what the destructive default would scrub and
-    // reinstall, without mutating the profile or attempting to exec basecamp.
-    let temp = tempdir().expect("tempdir");
-    let project = temp.path();
-    let scaffold_toml = format!(
-        "{MINIMAL_SCAFFOLD_TOML}\n\
-         [repos.basecamp]\n\
-         source = \"https://example/basecamp\"\n\
-         pin = \"deadbeef\"\n\
-         build = \"nix-flake\"\n\
-         attr = \"app\"\n\
-         \n\
-         [basecamp]\n\
-         port_base = 60000\n\
-         port_stride = 10\n"
-    );
-    fs::write(project.join("scaffold.toml"), scaffold_toml).expect("write scaffold.toml");
-
-    let state_dir = project.join(".scaffold/state");
-    fs::create_dir_all(&state_dir).expect("mkdir state");
-    fs::write(
-        state_dir.join("basecamp.state"),
-        "pin=deadbeef\nbasecamp_bin=/bin/echo\nlgpm_bin=/bin/sh\n",
-    )
-    .expect("write state");
-    let profile_dir = project.join(".scaffold/basecamp/profiles/alice");
-    fs::create_dir_all(profile_dir.join("xdg-data")).expect("mkdir xdg-data");
-    fs::write(profile_dir.join("xdg-data/sentinel"), b"do-not-scrub").expect("seed sentinel");
-
-    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
-        .current_dir(project)
-        .args(["basecamp", "launch", "alice", "--dry-run"])
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("dry-run: basecamp launch alice")
-                .and(predicate::str::contains("planned: scrub")),
-        );
-
-    assert!(
-        profile_dir.join("xdg-data/sentinel").exists(),
-        "dry-run must not scrub profile data"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn basecamp_launch_no_clean_bypasses_empty_modules_check() {
-    // --no-clean is the documented escape hatch for keeping whatever's already
-    // installed in the profile. It must skip the empty-modules check entirely.
-    // We don't run launch to completion (basecamp_bin is a true binary), but the
-    // command should get past the modules check and fail later — not fail on
-    // an "install modules first" hint.
-    let temp = tempdir().expect("tempdir");
-    let project = temp.path();
-    fs::write(
-        project.join("scaffold.toml"),
-        r#"[scaffold]
-version = "0.1.0"
-cache_root = "cache"
-
-[repos.lez]
-url = "https://example/lez.git"
-source = "https://example/lez.git"
-path = "lez"
-pin = "deadbeef"
-
-[wallet]
-home_dir = ".scaffold/wallet"
-
-[framework]
-kind = "default"
-version = "0.1.0"
-
-[framework.idl]
-spec = "lssa-idl/0.1.0"
-path = "idl"
-
-[localnet]
-port = 3040
-risc0_dev_mode = true
-
-[basecamp]
-pin = "deadbeef"
-source = "https://example/basecamp"
-lgpm_flake = ""
-port_base = 60000
-port_stride = 10
-"#,
-    )
-    .expect("write scaffold.toml");
-    let state_dir = project.join(".scaffold/state");
-    fs::create_dir_all(&state_dir).expect("mkdir state");
-    fs::write(
-        state_dir.join("basecamp.state"),
-        &format!(
-            "pin=deadbeef\nbasecamp_bin={}\nlgpm_bin=/bin/echo\n",
-            true_bin()
-        ),
-    )
-    .expect("write state");
-    fs::create_dir_all(project.join(".scaffold/basecamp/profiles/alice")).expect("mkdir profile");
-
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
-        .current_dir(project)
-        .arg("basecamp")
-        .arg("launch")
-        .arg("alice")
-        .arg("--no-clean")
-        .output()
-        .expect("run launch");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !stderr.contains("basecamp modules") || !stderr.contains("--no-clean"),
-        "--no-clean should not trigger the empty-modules hint, got stderr:\n{stderr}"
-    );
 }
 
 #[test]
@@ -3862,6 +3760,46 @@ fn setup_hard_fails_on_pre_v0_2_0_scaffold_toml() {
     assert_pre_v0_2_0_rejection(&["setup"]);
 }
 
+/// Regression: commands that go through `load_project()` (basecamp, wallet,
+/// deploy, report) used to wrap any `load_project` failure with the
+/// "This command must be run inside a logos-scaffold project — cd into …"
+/// hint. That was a lie when the user *was* inside a project but the
+/// schema was stale; the only fix is `lgs init`. The wrap is removed and
+/// `load_project` itself produces the right message for each branch.
+#[test]
+fn load_project_commands_in_stale_schema_project_show_init_hint_not_cd_hint() {
+    let temp = tempdir().expect("tempdir");
+    fs::write(temp.path().join("scaffold.toml"), PRE_V0_2_0_SCAFFOLD_TOML)
+        .expect("seed pre-v0.2.0 scaffold.toml");
+
+    for args in [
+        &["basecamp", "setup"][..],
+        &["wallet", "list"][..],
+        &["deploy"][..],
+        &["report"][..],
+    ] {
+        let output = Command::new(assert_cmd::cargo::cargo_bin!("lgs"))
+            .current_dir(temp.path())
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("run lgs {args:?}: {e}"));
+        assert!(
+            !output.status.success(),
+            "lgs {args:?} must fail on pre-0.2.0 scaffold.toml"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("logos-scaffold init"),
+            "lgs {args:?} stderr must point at `init`; got:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("cd into your scaffolded project"),
+            "lgs {args:?} stderr must not show the cd-into-project hint when \
+             the user is already inside a project; got:\n{stderr}"
+        );
+    }
+}
+
 #[test]
 fn build_idl_fails_loudly_on_default_framework() {
     // C4: explicit `build idl` against a non-lez-framework project used to
@@ -4000,7 +3938,9 @@ fn run_outside_project_fails_with_project_scoped_message() {
         .arg("run")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Not a logos-scaffold project"));
+        .stderr(predicate::str::contains(
+            "This command must be run inside a logos-scaffold project",
+        ));
 }
 
 #[test]
@@ -4123,9 +4063,94 @@ fn run_post_deploy_flag_overrides_configured_hooks() {
 }
 
 fn append_run_config(project_root: &Path, post_deploy: &[&str]) {
+    append_run_config_full(project_root, false, post_deploy);
+}
+
+fn append_run_config_full(project_root: &Path, reset: bool, post_deploy: &[&str]) {
     let toml_path = project_root.join("scaffold.toml");
     let mut content = fs::read_to_string(&toml_path).expect("read scaffold.toml");
     let quoted: Vec<String> = post_deploy.iter().map(|c| format!("\"{c}\"")).collect();
-    content.push_str(&format!("\n[run]\npost_deploy = [{}]\n", quoted.join(", ")));
+    content.push_str(&format!(
+        "\n[run]\nreset = {reset}\npost_deploy = [{}]\n",
+        quoted.join(", ")
+    ));
     fs::write(toml_path, content).expect("write scaffold.toml");
+}
+
+#[test]
+fn run_rejects_both_reset_flags() {
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .arg("run")
+        .arg("--reset")
+        .arg("--no-reset")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn run_help_lists_reset_flags() {
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .arg("run")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--reset").and(predicate::str::contains("--no-reset")));
+}
+
+#[test]
+fn run_with_reset_flag_starts_pipeline() {
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+
+    // --reset on the CLI: no banner (user typed the word) and pipeline
+    // enters step 1 before the build fails on this mock project.
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("run")
+        .arg("--reset")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("[1/5] Building..."))
+        .stderr(predicate::str::contains("scaffold.toml requested reset = true").not());
+}
+
+#[test]
+fn run_with_reset_in_config_emits_destructive_intent_warning() {
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+    append_run_config_full(temp.path(), true, &[]);
+
+    // reset = true in scaffold.toml without --reset on the CLI: the
+    // destructive-intent warning must fire on stderr before step 1, so a
+    // user who didn't realize `lgs run` would wipe their state finds out
+    // before the build runs.
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("run")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("[1/5] Building..."))
+        .stderr(predicate::str::contains(
+            "scaffold.toml requested reset = true",
+        ));
+}
+
+#[test]
+fn run_no_reset_flag_overrides_config_reset_true() {
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+    append_run_config_full(temp.path(), true, &[]);
+
+    // --no-reset must beat the config field (CLI overrides config). When
+    // effective_reset is false, the destructive-intent banner must NOT
+    // fire — that's the observable signal proving the override took effect.
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("run")
+        .arg("--no-reset")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("[1/5] Building..."))
+        .stderr(predicate::str::contains("scaffold.toml requested reset = true").not());
 }

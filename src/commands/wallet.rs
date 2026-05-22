@@ -7,10 +7,11 @@ use crate::project::load_project;
 use crate::DynResult;
 
 use super::wallet_support::{
-    extract_tx_identifier, is_already_initialized_failure, is_confirmation_timeout_failure,
-    is_connectivity_failure, is_uninitialized_account_output, load_wallet_runtime,
-    read_default_wallet_address, resolve_wallet_address, sequencer_unreachable_hint,
-    summarize_command_failure, wallet_password, wallet_state_path, write_default_wallet_address,
+    default_sequencer_http_url_for_project, extract_tx_identifier, is_already_initialized_failure,
+    is_confirmation_timeout_failure, is_connectivity_failure, is_uninitialized_account_output,
+    load_wallet_runtime, read_default_wallet_address, resolve_wallet_address,
+    sequencer_unreachable_hint, summarize_command_failure, wallet_password, wallet_state_path,
+    write_default_wallet_address,
 };
 
 /// Result of a wallet topup attempt. `cmd_run` distinguishes the
@@ -41,9 +42,7 @@ pub(crate) enum WalletAction {
 }
 
 pub(crate) fn cmd_wallet(action: WalletAction) -> DynResult<()> {
-    let project = load_project().context(
-        "This command must be run inside a logos-scaffold project.\nNext step: cd into your scaffolded project directory and retry.",
-    )?;
+    let project = load_project()?;
 
     match action {
         WalletAction::List { long } => cmd_wallet_list(&project, long),
@@ -119,7 +118,7 @@ pub(crate) fn cmd_wallet_topup_inner(
     let sequencer_addr = wallet
         .sequencer_addr
         .clone()
-        .unwrap_or_else(|| "http://127.0.0.1:3040".to_string());
+        .unwrap_or_else(|| default_sequencer_http_url_for_project(project));
     let wallet_home = wallet.wallet_home.as_os_str().to_string_lossy().to_string();
     let password_input = format!("{}\n", wallet_password());
 

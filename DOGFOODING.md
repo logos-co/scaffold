@@ -86,7 +86,7 @@ The `lgs` binary is a short alias for `logos-scaffold` produced by the same crat
 | B1 | external module project | Core | Basecamp + lgpm setup and idempotent re-run | `init`, `basecamp setup`, `basecamp doctor`, `basecamp docs` |
 | B2 | external module project | Core | Module capture, install, and single-instance launch | `basecamp modules`, `basecamp modules --show`, `basecamp install`, `basecamp launch alice` |
 | B3 | external module project | Core | Two-instance p2p dogfooding | `basecamp launch alice`, `basecamp launch bob` (parallel) |
-| B4 | external module project | Advanced | Clean-slate scrub semantics on relaunch | `basecamp launch alice`, `basecamp launch alice --no-clean` |
+| B4 | external module project | Advanced | Clean-slate scrub semantics on relaunch | `basecamp launch alice` (×2) |
 | B5 | external module project | Advanced | Portable artefact build for AppImage hand-loading | `basecamp build-portable` |
 
 ## Standing Validation Notes
@@ -994,7 +994,7 @@ If your project does not auto-discover correctly, capture explicit sources:
 - Re-running `basecamp modules` overwriting an existing key is a regression — manual edits in `scaffold.toml` must win.
 - An unresolved transitive `logos-module-builder` input that fails without naming the missing `follows` is a regression.
 - `install` succeeding when a build or `lgpm install` step actually failed is a fail; exit codes must be non-zero on any source failure.
-- `launch alice` with an empty `[modules]` and without `--no-clean` must bail (rather than scrubbing the profile and leaving it empty).
+- `launch alice` with an empty `[modules]` must bail (rather than scrubbing the profile and leaving it empty).
 - Sibling `--override-input` not being applied at probe time would surface as a build that resolves the wrong sibling pin during `basecamp modules` auto-discovery; record any such mismatch with the exact derived module names.
 
 ### Evidence to Capture
@@ -1072,7 +1072,7 @@ Within the running UIs, exercise whatever p2p surface the module exposes (chat e
 
 ### Goal
 
-Validate that `basecamp launch <profile>` scrubs profile state by default and that `--no-clean` is the only path to preserve state across launches.
+Validate that `basecamp launch <profile>` scrubs profile state on every invocation — clean-slate is the v1 contract.
 
 ### Preconditions
 
@@ -1087,28 +1087,25 @@ From the module project root:
 ls .scaffold/basecamp/profiles/alice
 mkdir -p .scaffold/basecamp/profiles/alice/.scaffold-xdg-data/scratch
 echo "marker-$(date -u +%s)" > .scaffold/basecamp/profiles/alice/.scaffold-xdg-data/scratch/marker.txt
-"$SCAFFOLD_BIN" basecamp launch alice    # default: scrub-and-reinstall
+"$SCAFFOLD_BIN" basecamp launch alice    # scrub-and-reinstall
 test -e .scaffold/basecamp/profiles/alice/.scaffold-xdg-data/scratch/marker.txt && echo "REGRESSION: marker survived clean launch" || echo "OK: marker scrubbed"
-"$SCAFFOLD_BIN" basecamp launch alice --no-clean   # escape hatch: preserve state
 ```
 
 ### Expected Success Signals
 
-- The default `launch alice` removes any user-introduced files under the alice profile XDG dirs and reinstalls each captured source before `exec`ing basecamp.
-- `launch alice --no-clean` skips the scrub and reinstall; pre-existing files in the profile survive.
+- `launch alice` removes any user-introduced files under the alice profile XDG dirs and reinstalls each captured source before `exec`ing basecamp.
 - `rm -rf` on `launch` is bounded to `<project>/.scaffold/basecamp/profiles/<profile>/`. Never any path outside that root.
-- A `launch` that finds no modules in `[modules]` and is invoked without `--no-clean` bails before scrubbing (the empty-install + scrubbed profile combination is the regression we're guarding against).
+- A `launch` that finds no modules in `[modules]` bails before scrubbing (the empty-install + scrubbed profile combination is the regression we're guarding against).
 
 ### Failure Signals / Common Pitfalls
 
-- The `marker.txt` file surviving the default `launch alice` is a regression: clean-slate is the v1 contract.
-- `--no-clean` triggering a scrub anyway is an escape-hatch regression.
+- The `marker.txt` file surviving `launch alice` is a regression: clean-slate is the v1 contract.
 - A `launch` scrubbing a path outside the profile's XDG dirs is a severe safety regression — capture the offending path and stop.
-- An empty `[modules]` plus a default `launch` that wipes the profile and leaves it empty is the exact bug guarded by `fix(basecamp): bail on empty [modules] in launch without --no-clean`; if you can reproduce it, that's a real regression.
+- An empty `[modules]` plus a `launch` that wipes the profile and leaves it empty is a real regression; the empty-modules bail must fire first.
 
 ### Evidence to Capture
 
-- The marker write, the post-clean-launch listing, and the post-`--no-clean` listing.
+- The marker write and the post-launch listing showing it was scrubbed.
 - The exact path under which the marker was placed and the path basecamp scrubbed (verify they match the profile root).
 - Any unexpected paths touched by `launch` outside `.scaffold/basecamp/profiles/<profile>/`.
 
@@ -1174,7 +1171,7 @@ ls .scaffold/basecamp/portable 2>/dev/null || find .scaffold -maxdepth 4 -name '
 - Changes to `basecamp setup` (pin sync, lgpm build, profile seeding, idempotency) or `basecamp doctor`: rerun `B1`.
 - Changes to `[modules]` derivation, dependency resolution, sibling `--override-input` handling, or `basecamp install` invocation of `lgpm`: rerun `B2`.
 - Changes to `basecamp launch` (kill-and-scrub semantics, XDG isolation, port-override env vars, p2p surface): rerun `B3`.
-- Changes to clean-slate / `--no-clean` semantics or the empty `[modules]` guard on `launch`: rerun `B4`.
+- Changes to clean-slate scrub semantics or the empty `[modules]` guard on `launch`: rerun `B4`.
 - Changes to `basecamp build-portable` (project/dependency role split, ordering, attr selection): rerun `B5`.
 
 When in doubt, rerun more scenarios rather than fewer.
