@@ -21,6 +21,12 @@ pub(crate) struct WalletRuntimeContext {
     pub(crate) sequencer_addr: Option<String>,
 }
 
+/// When `wallet_config.json` omits `sequencer_addr`, RPC calls should target the same host/port
+/// as `logos-scaffold localnet` (`[localnet] port` in `scaffold.toml`, default 3040).
+pub(crate) fn default_sequencer_http_url_for_project(project: &Project) -> String {
+    format!("http://127.0.0.1:{}", project.config.localnet.port)
+}
+
 pub(crate) fn load_wallet_runtime(project: &Project) -> DynResult<WalletRuntimeContext> {
     let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
     let wallet_binary = lez.join(WALLET_BIN_REL_PATH);
