@@ -161,6 +161,8 @@ logos-scaffold basecamp build-portable
 
 `build-portable` does not touch profiles, `basecamp.state`, or the AppImage itself — it only produces artefacts. Load them into your AppImage in the printed order via its "install lgx" button; scaffold is intentionally unaware of the AppImage's install path.
 
+If you launch the AppImage with `--user-dir <path>` (the `bin-macos-app` flag that sets `LOGOS_USER_DIR`), the AppImage stores its state at `<path>` rather than its default XDG data root — orthogonal to scaffold's per-profile XDG isolation under `.scaffold/basecamp/profiles/{alice,bob}/`. The two are independent mechanisms at different layers: scaffold's profiles isolate dev-stack runs; `--user-dir` isolates a single AppImage launch's installed-modules + identity state.
+
 The `.scaffold/basecamp/portable/` directory is wiped and recreated on every `build-portable` run, so re-running after you've removed a module via `basecamp modules` doesn't leave stale symlinks behind.
 
 If a flake exposes only `lgx` (not `lgx-portable`), `build-portable` fails with a targeted hint — mirror of the `install` portable-only failure, in reverse.
