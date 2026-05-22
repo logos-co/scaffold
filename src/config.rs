@@ -699,7 +699,7 @@ pub(crate) fn default_lgpm_repo(pin: &str) -> RepoRef {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{DEFAULT_BASECAMP_PIN, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL};
+    use crate::constants::{DEFAULT_BASECAMP_PIN, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL_PIN};
 
     fn base_config() -> Config {
         parse_config(&minimal_v0_2_0()).expect("parse minimal v0.2.0")
@@ -736,7 +736,7 @@ risc0_dev_mode = true
             lez_src = LEZ_SOURCE,
             lez_pin = DEFAULT_LEZ.sha,
             spel_src = SPEL_SOURCE,
-            spel_pin = DEFAULT_SPEL.sha,
+            spel_pin = DEFAULT_SPEL_PIN,
         )
     }
 

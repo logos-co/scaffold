@@ -9,8 +9,8 @@ use crate::config::{
 };
 use crate::constants::{
     DEFAULT_BASECAMP_PIN, DEFAULT_FRAMEWORK_IDL_PATH, DEFAULT_FRAMEWORK_IDL_SPEC,
-    DEFAULT_FRAMEWORK_VERSION, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL, FRAMEWORK_KIND_DEFAULT,
-    FRAMEWORK_KIND_LEZ_FRAMEWORK, LEZ_SOURCE, SCAFFOLD_TOML_SCHEMA_VERSION,
+    DEFAULT_FRAMEWORK_VERSION, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL_PIN,
+    FRAMEWORK_KIND_DEFAULT, FRAMEWORK_KIND_LEZ_FRAMEWORK, LEZ_SOURCE, SCAFFOLD_TOML_SCHEMA_VERSION,
 };
 use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RunConfig};
 use crate::project::default_cache_root;
@@ -107,7 +107,7 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
     let mut lez = default_lez_repo(DEFAULT_LEZ.sha);
     lez.source = lez_source;
     lez.path = lez_persisted_path;
-    let mut spel = default_spel_repo(DEFAULT_SPEL.sha);
+    let mut spel = default_spel_repo(DEFAULT_SPEL_PIN);
     spel.path = spel_persisted_path;
 
     let cfg = Config {
@@ -148,7 +148,6 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
     let overlay_ctx = OverlayRenderContext {
         crate_name: &crate_name,
         lez_pin: &cfg.lez.pin,
-        spel_tag: DEFAULT_SPEL.tag,
     };
     apply_overlay(&target, &template_variant, &overlay_ctx)?;
     if template_variant == FRAMEWORK_KIND_LEZ_FRAMEWORK {
