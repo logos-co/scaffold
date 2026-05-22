@@ -1,18 +1,21 @@
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context};
+use anyhow::{anyhow, bail, Context};
 use serde_json::Value;
 
+use crate::circuits::ensure_circuits_for_subprocess;
 use crate::constants::{SEQUENCER_BIN_REL_PATH, SEQUENCER_CONFIG_REL_PATH};
 use crate::error::{LocalnetError, ResetError};
 use crate::model::{LocalnetOwnership, LocalnetState, LocalnetStatusReport, Project};
 use crate::process::{listener_pid, pid_alive, pid_command, pid_running, port_open, spawn_to_log};
-use crate::project::{ensure_dir_exists, find_project_root, load_project, resolve_repo_path};
+use crate::project::{
+    ensure_dir_exists, find_project_root, load_project, resolve_cache_root, resolve_repo_path,
+};
 use crate::state::{read_localnet_state, write_localnet_state};
 use crate::DynResult;
 
@@ -33,6 +36,8 @@ pub(crate) enum LocalnetAction {
         tail: usize,
     },
     Reset {
+        dry_run: bool,
+        yes: bool,
         reset_wallet: bool,
         verify_timeout_sec: u64,
     },
@@ -77,6 +82,19 @@ fn cmd_localnet_in_project(project: &Project, action: LocalnetAction) -> DynResu
     let log_path = logs_dir.join("sequencer.log");
     fs::create_dir_all(&logs_dir)?;
 
+    // The standalone `sequencer_service` binary calls into the
+    // `logos-blockchain-zksign` runtime, which loads circuit witness
+    // generators from `LOGOS_BLOCKCHAIN_CIRCUITS` (or `~/.logos-blockchain-circuits`)
+    // and panics if neither exists. Materialise the release if absent and
+    // export the env var so any subprocess we spawn here inherits it.
+    if matches!(
+        action,
+        LocalnetAction::Start { .. } | LocalnetAction::Reset { .. }
+    ) {
+        let (cache_root, _) = resolve_cache_root(project)?;
+        ensure_circuits_for_subprocess(&cache_root)?;
+    }
+
     match action {
         LocalnetAction::Start { timeout_sec } => cmd_localnet_start(
             &lez,
@@ -93,6 +111,8 @@ fn cmd_localnet_in_project(project: &Project, action: LocalnetAction) -> DynResu
         }
         LocalnetAction::Logs { tail } => cmd_localnet_logs(&log_path, tail),
         LocalnetAction::Reset {
+            dry_run,
+            yes,
             reset_wallet,
             verify_timeout_sec,
         } => cmd_localnet_reset(
@@ -101,6 +121,8 @@ fn cmd_localnet_in_project(project: &Project, action: LocalnetAction) -> DynResu
             &state_path,
             &log_path,
             &localnet_addr,
+            dry_run,
+            yes,
             reset_wallet,
             verify_timeout_sec,
         ),
@@ -192,21 +214,43 @@ fn cmd_localnet_start(
         bail!("{message}");
     }
 
-    patch_sequencer_port(lez, localnet_port)?;
-    patch_sequencer_config_for_standalone(lez)?;
+    let state_dir = state_path.parent().ok_or_else(|| {
+        anyhow!(
+            "localnet state path has no parent directory: {}",
+            state_path.display()
+        )
+    })?;
+    let patched_config_path = prepare_sequencer_config(lez, state_dir, localnet_port)?;
 
     // Use a path relative to lez (the child's cwd), not relative to the
     // parent's cwd.  `current_dir(lez)` applies before exec, so a parent-
     // relative path like `.scaffold/cache/repos/lez/target/release/…`
-    // would be resolved inside lez and fail with ENOENT.
-    let sequencer_pid = spawn_to_log(
-        Command::new(format!("./{SEQUENCER_BIN_REL_PATH}"))
-            .current_dir(lez)
-            .arg(SEQUENCER_CONFIG_REL_PATH)
-            .env("RUST_LOG", "info")
-            .env("RISC0_DEV_MODE", if risc0_dev_mode { "1" } else { "0" }),
-        log_path,
-    )?;
+    // would be resolved inside lez and fail with ENOENT. The patched config
+    // path is absolute (under the project's `.scaffold/state/`), so it is
+    // unaffected by the cwd switch.
+    let mut sequencer_cmd = Command::new(format!("./{SEQUENCER_BIN_REL_PATH}"));
+    sequencer_cmd
+        .current_dir(lez)
+        .arg(&patched_config_path)
+        .env("RUST_LOG", "info")
+        .env("RISC0_DEV_MODE", if risc0_dev_mode { "1" } else { "0" });
+
+    // Auto-detect r0vm path from rzup installation if RISC0_SERVER_PATH is not set.
+    // On macOS, rzup installs r0vm under ~/.risc0/extensions/<version>/r0vm but does
+    // not add it to PATH. The sequencer needs RISC0_SERVER_PATH to locate it.
+    // We derive the exact risc0-zkvm version from the LEZ Cargo.lock so we never
+    // hand the sequencer a mismatched r0vm binary.
+    if std::env::var("RISC0_SERVER_PATH").is_err() {
+        if let Some(r0vm_path) = find_r0vm_path_for_lez(lez) {
+            sequencer_cmd.env("RISC0_SERVER_PATH", &r0vm_path);
+        } else {
+            eprintln!(
+                "warning: RISC0_SERVER_PATH is not set and r0vm was not found in the                  rzup extensions directory for the LEZ-pinned risc0 version.                  If transaction execution fails, set RISC0_SERVER_PATH to the r0vm                  binary installed by rzup."
+            );
+        }
+    }
+
+    let sequencer_pid = spawn_to_log(&mut sequencer_cmd, log_path)?;
 
     state.sequencer_pid = Some(sequencer_pid);
     write_localnet_state(state_path, &state)?;
@@ -272,7 +316,38 @@ fn cmd_localnet_stop(state_path: &Path, localnet_port: u16) -> DynResult<()> {
     if let Some(pid) = report.tracked_pid {
         if report.tracked_running {
             println!("$ kill {pid} # sequencer");
-            let _ = Command::new("kill").arg(pid.to_string()).status();
+            let kill_output = Command::new("kill")
+                .arg(pid.to_string())
+                .output()
+                .context("failed to spawn `kill`")?;
+            let kill_succeeded = kill_output.status.success();
+
+            // Wait for the process to actually exit, regardless of `kill`'s
+            // exit code: TERM may have been delivered even if `kill` returned
+            // non-zero (race with reaping). If the process is still alive
+            // after the deadline, do not remove the state file — we still
+            // legitimately track this pid.
+            let pid_timeout = Duration::from_secs(5);
+            if !wait_for_pid_exit(pid, pid_timeout) {
+                if !kill_succeeded {
+                    let stderr = String::from_utf8_lossy(&kill_output.stderr)
+                        .trim()
+                        .to_string();
+                    return Err(LocalnetError::StopKillFailed { pid, stderr }.into());
+                }
+                return Err(LocalnetError::StopTimeout {
+                    pid,
+                    timeout_sec: pid_timeout.as_secs(),
+                }
+                .into());
+            }
+
+            // Process exited; wait briefly for the bound socket to be released
+            // so an immediate `localnet start` doesn't race the still-bound
+            // port. A timeout here is not fatal — the port may be held by a
+            // foreign listener that survived our sequencer, and `localnet
+            // start` will surface that with a more specific error.
+            let _ = wait_for_port_free(&localnet_addr, Duration::from_secs(5));
         } else {
             println!("sequencer state is stale (pid={pid} not running)");
         }
@@ -438,71 +513,57 @@ fn build_status_report(
     }
 }
 
-/// Update the port in `sequencer_config.json` so the sequencer listens on the
-/// configured port.  The pinned LEZ version does not accept `--port` as a CLI
-/// flag — it reads the port from this file.
-
-/// Patch `sequencer_config.json` for standalone (scaffold localnet) mode.
+/// Produce a sequencer config patched for scaffold's localnet — port set to
+/// the project's configured port and `max_block_size` widened so the bundled
+/// deploy flow fits in a single block — and return the absolute path to the
+/// patched file. The pinned LEZ version does not accept `--port` as a CLI flag
+/// — it reads everything from the config file passed as its first argument.
 ///
-/// The default config references an indexer and bedrock node that are not
-/// available in scaffold localnet. The `standalone` feature uses mock clients
-/// but the config parser still requires these fields to be present and valid.
-/// We patch them to point at localhost addresses that won't be dialed at runtime.
-fn patch_sequencer_config_for_standalone(lez: &Path) -> DynResult<()> {
-    let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
-    let text = fs::read_to_string(&config_path)
-        .with_context(|| format!("failed to read {}", config_path.display()))?;
+/// The patched copy is written under `dest_dir` (the project's
+/// `.scaffold/state/`), **not** back into the vendored LEZ checkout. Writing
+/// into the vendored repo would silently break three invariants the rest of
+/// scaffold relies on:
+///   1. `git_clean(lez)` would always report dirty, disabling the
+///      `AutoRecloneIfClean` safety net in `reconcile_repo_source` for cache
+///      repos.
+///   2. A `git checkout` during a pin bump would discard the patch, leaving
+///      the next `localnet start` running against unmodified upstream config
+///      until scaffold re-patches.
+///   3. `git status` in the LEZ tree would be permanently dirty after the
+///      first `localnet start`, hiding genuine local edits.
+///
+/// Block-size bump: the upstream debug config caps `max_block_size` at 1 MiB,
+/// which a `lgs deploy` of the default template (5 risc0 guest ELFs ≈ 360 KiB
+/// each) overflows on the second block — and the pinned sequencer crashes
+/// rather than carrying the deferred tx forward. Until LEZ stops aborting on
+/// deferral, scaffold widens the limit so the documented first-success path
+/// fits in a single block.
+fn prepare_sequencer_config(lez: &Path, dest_dir: &Path, port: u16) -> DynResult<PathBuf> {
+    let src_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
+    let text = fs::read_to_string(&src_path)
+        .with_context(|| format!("failed to read {}", src_path.display()))?;
     let mut doc: Value =
         serde_json::from_str(&text).context("failed to parse sequencer_config.json")?;
 
-    if let Some(obj) = doc.as_object_mut() {
-        // Keep required fields present but point them at localhost so config parsing succeeds.
-        // The standalone build uses mock clients and never actually connects to these.
-        // Always overwrite — the default config points at real services unavailable in standalone mode.
-        obj.insert(
-            "indexer_rpc_url".to_string(),
-            serde_json::json!("ws://127.0.0.1:8779"),
-        );
-        obj.insert(
-            "bedrock_config".to_string(),
-            serde_json::json!({
-                "channel_id": "0101010101010101010101010101010101010101010101010101010101010101",
-                "node_url": "http://127.0.0.1:8080"
-            }),
-        );
-    } else {
+    let Some(obj) = doc.as_object_mut() else {
         bail!(
             "sequencer_config.json is not a JSON object: {}",
-            config_path.display()
+            src_path.display()
         );
-    }
+    };
+    obj.insert("port".to_string(), Value::Number(port.into()));
+    obj.insert(
+        "max_block_size".to_string(),
+        Value::String("8 MiB".to_string()),
+    );
 
+    fs::create_dir_all(dest_dir)
+        .with_context(|| format!("failed to create {}", dest_dir.display()))?;
+    let dest_path = dest_dir.join("sequencer_config.json");
     let updated = serde_json::to_string_pretty(&doc).context("failed to serialize config")?;
-    fs::write(&config_path, format!("{updated}\n"))
-        .with_context(|| format!("failed to write {}", config_path.display()))?;
-    Ok(())
-}
-
-fn patch_sequencer_port(lez: &Path, port: u16) -> DynResult<()> {
-    let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
-    let text = fs::read_to_string(&config_path)
-        .with_context(|| format!("failed to read {}", config_path.display()))?;
-    let mut doc: Value =
-        serde_json::from_str(&text).context("failed to parse sequencer_config.json")?;
-
-    if let Some(obj) = doc.as_object_mut() {
-        obj.insert("port".to_string(), Value::Number(port.into()));
-    } else {
-        bail!(
-            "sequencer_config.json is not a JSON object: {}",
-            config_path.display()
-        );
-    }
-
-    let updated = serde_json::to_string_pretty(&doc).context("failed to serialize config")?;
-    fs::write(&config_path, format!("{updated}\n"))
-        .with_context(|| format!("failed to write {}", config_path.display()))?;
-    Ok(())
+    fs::write(&dest_path, format!("{updated}\n"))
+        .with_context(|| format!("failed to write {}", dest_path.display()))?;
+    Ok(dest_path)
 }
 
 fn read_log_tail(log_path: &Path, tail: usize) -> String {
@@ -521,20 +582,152 @@ fn read_log_tail(log_path: &Path, tail: usize) -> String {
 
 // ─── reset ───────────────────────────────────────────────────────────────────
 
+fn cmd_localnet_reset_dry_run(
+    project: &Project,
+    lez: &Path,
+    state_path: &Path,
+    log_path: &Path,
+    localnet_addr: &str,
+    localnet_port: u16,
+    reset_wallet: bool,
+    verify_timeout_sec: u64,
+    sequencer_bin: &Path,
+) -> DynResult<()> {
+    // `lez` and `sequencer_bin` come out of the cache-root resolver, which can
+    // return either an absolute path (env override, explicit absolute
+    // `[repos.lez].path`, or scaffold default cache layer) or a path relative
+    // to `project.root` (the portable default for vendored / new projects).
+    // State / wallet paths are already joined onto `project.root`. Pass
+    // every lez-derived path through `abs` so the dry-run output stays
+    // copy-pasteable into a shell regardless of which case applied.
+    let abs = |p: &Path| -> PathBuf {
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            project.root.join(p)
+        }
+    };
+    let rocksdb_path = abs(&lez.join("rocksdb"));
+    let sequencer_bin_abs = abs(sequencer_bin);
+
+    println!("dry-run: localnet reset (no changes made)");
+    println!(
+        "planned: stop sequencer if tracked (state file: {})",
+        state_path.display()
+    );
+    println!(
+        "planned: delete sequencer DB at {} (exists: {})",
+        rocksdb_path.display(),
+        rocksdb_path.exists()
+    );
+    if reset_wallet {
+        let wallet_path = project.root.join(&project.config.wallet_home_dir);
+        let wallet_state = wallet_state_path(&project.root);
+        println!(
+            "planned: delete wallet home at {} (exists: {})",
+            wallet_path.display(),
+            wallet_path.exists()
+        );
+        println!(
+            "planned: delete wallet state at {} (exists: {})",
+            wallet_state.display(),
+            wallet_state.exists()
+        );
+    } else {
+        println!("planned: preserve wallet home (pass --reset-wallet to also remove wallet)");
+    }
+    println!(
+        "planned: delete localnet state file {} (exists: {})",
+        state_path.display(),
+        state_path.exists()
+    );
+    println!(
+        "planned: start sequencer (log: {}), then verify block production (timeout {}s)",
+        log_path.display(),
+        verify_timeout_sec
+    );
+    if !sequencer_bin_abs.exists() {
+        println!(
+            "warning: missing sequencer binary at {}; a real reset would fail before any destructive step",
+            sequencer_bin_abs.display()
+        );
+    } else {
+        println!(
+            "prerequisite ok: sequencer binary exists at {}",
+            sequencer_bin_abs.display()
+        );
+    }
+    let state = read_localnet_state(state_path).unwrap_or_default();
+    if let Some(pid) = state.sequencer_pid {
+        println!(
+            "current tracked sequencer pid: {pid} (running: {})",
+            pid_running(pid)
+        );
+    } else {
+        println!("current tracked sequencer pid: none");
+    }
+    if port_open(localnet_addr) {
+        // Foreign-listener case: nothing tracked but the port is held. The
+        // real reset stops nothing, then `wait_for_port_free` times out and
+        // returns `ResetError::ForeignListener` before any cleanup. Surface
+        // that here so the dry-run doesn't silently imply a clean run.
+        if state.sequencer_pid.is_none() {
+            println!(
+                "warning: foreign listener on {localnet_addr} (port {localnet_port}); a real reset would abort with foreign-listener error before any destructive step"
+            );
+        } else {
+            println!("note: listener currently on {localnet_addr} (port {localnet_port})");
+        }
+    } else {
+        println!("note: no listener on {localnet_addr} currently");
+    }
+    Ok(())
+}
+
 pub(crate) fn cmd_localnet_reset(
     project: &Project,
     lez: &Path,
     state_path: &Path,
     log_path: &Path,
     localnet_addr: &str,
+    dry_run: bool,
+    yes: bool,
     reset_wallet: bool,
     verify_timeout_sec: u64,
 ) -> DynResult<()> {
     let localnet_port = project.config.localnet.port;
 
-    // Prerequisite: the sequencer binary must already be built. If not, setup
-    // would fail later and we'd have already deleted data with no way to start.
     let sequencer_bin = lez.join(SEQUENCER_BIN_REL_PATH);
+    if dry_run {
+        return cmd_localnet_reset_dry_run(
+            project,
+            lez,
+            state_path,
+            log_path,
+            localnet_addr,
+            localnet_port,
+            reset_wallet,
+            verify_timeout_sec,
+            &sequencer_bin,
+        );
+    }
+
+    if !yes {
+        let wallet_hint = if reset_wallet {
+            " (with --reset-wallet, also deletes wallet keypairs irrecoverably)"
+        } else {
+            ""
+        };
+        bail!(
+            "localnet reset is destructive: it wipes the sequencer chain DB{wallet_hint}.\n\
+             Pass --yes to confirm, or --dry-run to preview the plan first.\n\
+             Examples:\n  \
+             logos-scaffold localnet reset --dry-run\n  \
+             logos-scaffold localnet reset --yes\n  \
+             logos-scaffold localnet reset --reset-wallet --yes"
+        );
+    }
+
     if !sequencer_bin.exists() {
         return Err(LocalnetError::MissingSequencerBinary {
             path: sequencer_bin.display().to_string(),
@@ -617,6 +810,21 @@ fn remove_file_if_exists(path: &Path, label: &str) -> DynResult<()> {
     Ok(())
 }
 
+/// Poll `pid` until it is no longer running (exited or zombie), or `timeout`
+/// elapses. Returns `true` if the process exited within the deadline.
+fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !pid_running(pid) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Poll `localnet_addr` until no listener is accepting, or `timeout` elapses.
 fn wait_for_port_free(localnet_addr: &str, timeout: Duration) -> Result<(), ()> {
     let deadline = Instant::now() + timeout;
@@ -662,6 +870,69 @@ fn verify_block_production(localnet_addr: &str, timeout_sec: u64) -> DynResult<(
     }
 }
 
+/// Resolve the r0vm binary path from the rzup installation that matches the LEZ risc0 version.
+///
+/// Reads the risc0-zkvm version from the LEZ Cargo.lock, then looks for an exact-version
+/// rzup-managed extension dir: ~/.risc0/extensions/v<version>-cargo-risczero-<arch>-<os>/r0vm.
+/// Returns None (without guessing) if the version cannot be determined or the exact path
+/// does not exist. The caller should error with a clear diagnostic if None is returned.
+fn find_r0vm_path_for_lez(lez: &std::path::Path) -> Option<std::path::PathBuf> {
+    // Read risc0-zkvm version from LEZ Cargo.lock
+    let lockfile = lez.join("Cargo.lock");
+    let lock_content = std::fs::read_to_string(&lockfile).ok()?;
+    let risc0_version = parse_risc0_version(&lock_content)?;
+
+    // Determine platform triple (rzup naming convention)
+    let arch = if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else {
+        "aarch64"
+    };
+    let os = if cfg!(target_os = "macos") {
+        "apple-darwin"
+    } else {
+        "unknown-linux-gnu"
+    };
+    let ext_name = format!("v{risc0_version}-cargo-risczero-{arch}-{os}");
+
+    let home = std::env::var("HOME").ok()?;
+    let r0vm = std::path::Path::new(&home)
+        .join(".risc0")
+        .join("extensions")
+        .join(&ext_name)
+        .join("r0vm");
+
+    if r0vm.exists() {
+        Some(r0vm)
+    } else {
+        None
+    }
+}
+
+/// Extract risc0-zkvm version from Cargo.lock content.
+fn parse_risc0_version(lock_content: &str) -> Option<String> {
+    let mut in_risc0_zkvm = false;
+    for line in lock_content.lines() {
+        let line = line.trim();
+        if line == r#"name = "risc0-zkvm""# {
+            in_risc0_zkvm = true;
+            continue;
+        }
+        if in_risc0_zkvm {
+            if let Some(version) = line
+                .strip_prefix("version = \"")
+                .and_then(|s| s.strip_suffix('"'))
+            {
+                return Some(version.to_string());
+            }
+            if line.starts_with("name =") {
+                break;
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -672,12 +943,18 @@ mod tests {
     use std::net::TcpListener;
     use std::time::Duration;
 
-    use super::{reset_cleanup, verify_block_production, wait_for_port_free};
+    use super::{
+        prepare_sequencer_config, reset_cleanup, verify_block_production, wait_for_pid_exit,
+        wait_for_port_free,
+    };
     use crate::commands::wallet_support::wallet_state_path;
+    use crate::constants::SEQUENCER_CONFIG_REL_PATH;
     use crate::error::ResetError;
     use crate::model::{
-        Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, Project, RepoRef,
+        Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, Project, RepoRef, RunConfig,
     };
+    use crate::repo::git_clean;
+    use std::process::Command;
 
     fn make_test_project(temp: &tempfile::TempDir) -> (Project, PathBuf) {
         let lez_dir = temp.path().join(".scaffold/cache/repos/lez");
@@ -715,6 +992,7 @@ mod tests {
             },
             modules: std::collections::BTreeMap::new(),
             basecamp: None,
+            run: RunConfig::default(),
         };
 
         let project = Project {
@@ -802,6 +1080,122 @@ mod tests {
         let err = wait_for_port_free(&addr, Duration::from_millis(300));
         drop(listener);
         assert!(err.is_err(), "expected timeout while listener was open");
+    }
+
+    /// Regression test for #114. `prepare_sequencer_config` must write the
+    /// patched copy under `dest_dir` (project-owned state) and leave the
+    /// vendored LEZ checkout byte-identical — otherwise `git_clean(lez)`
+    /// reports dirty and the `AutoRecloneIfClean` safety net in
+    /// `reconcile_repo_source` is silently disabled for cache repos.
+    #[test]
+    fn prepare_sequencer_config_does_not_dirty_vendored_lez_repo() {
+        let temp = tempdir().unwrap();
+        let lez = temp.path().join("lez");
+        let state_dir = temp.path().join(".scaffold/state");
+
+        // Build a real git repo under `lez` with the sequencer config committed
+        // at its real relative path, so `git status --porcelain` is initially
+        // empty and we can see any write-back to that file as a dirty diff.
+        let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(&config_path, "{\n  \"port\": 3040\n}\n").unwrap();
+
+        let git_init = Command::new("git")
+            .args(["init", "--quiet", "--initial-branch=main"])
+            .current_dir(&lez)
+            .status()
+            .unwrap();
+        assert!(git_init.success(), "git init failed");
+        // Local identity so `git commit` doesn't require system-level config.
+        for (k, v) in [("user.email", "t@example.com"), ("user.name", "test")] {
+            Command::new("git")
+                .args(["config", k, v])
+                .current_dir(&lez)
+                .status()
+                .unwrap();
+        }
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&lez)
+            .status()
+            .unwrap();
+        let commit = Command::new("git")
+            .args(["commit", "--quiet", "-m", "seed"])
+            .current_dir(&lez)
+            .status()
+            .unwrap();
+        assert!(commit.success(), "git commit failed");
+
+        assert!(
+            git_clean(&lez).unwrap(),
+            "test precondition: seeded lez tree should be clean"
+        );
+
+        let dest = prepare_sequencer_config(&lez, &state_dir, 4040).unwrap();
+
+        assert_eq!(
+            dest,
+            state_dir.join("sequencer_config.json"),
+            "patched config must land under the project state dir, not the lez repo"
+        );
+
+        let dest_json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
+        assert_eq!(dest_json["port"], serde_json::json!(4040));
+        assert_eq!(
+            dest_json["max_block_size"],
+            serde_json::json!("8 MiB"),
+            "patched copy should carry the widened max_block_size override"
+        );
+
+        let src_after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(
+            src_after["port"],
+            serde_json::json!(3040),
+            "vendored sequencer_config.json must be left untouched"
+        );
+        assert!(
+            src_after.get("max_block_size").is_none(),
+            "vendored sequencer_config.json must be left untouched (no max_block_size injected)"
+        );
+
+        assert!(
+            git_clean(&lez).unwrap(),
+            "lez tree must remain clean after prepare_sequencer_config"
+        );
+    }
+
+    #[test]
+    fn wait_for_pid_exit_returns_true_after_process_dies() {
+        // Spawn a long sleep, then SIGKILL it. wait_for_pid_exit must observe
+        // the exit within the timeout — this is the success path that
+        // `cmd_localnet_stop` relies on before deleting the state file.
+        let mut child = std::process::Command::new("sleep")
+            .arg("10")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        child.kill().expect("kill sleep");
+        let exited = wait_for_pid_exit(pid, Duration::from_secs(2));
+        let _ = child.wait();
+        assert!(exited, "expected pid {pid} to exit within 2s after SIGKILL");
+    }
+
+    #[test]
+    fn wait_for_pid_exit_returns_false_when_pid_stays_alive() {
+        // While the child is still running, wait_for_pid_exit must time out
+        // rather than report success — this is the failure path that
+        // `cmd_localnet_stop` relies on to preserve the state file.
+        let mut child = std::process::Command::new("sleep")
+            .arg("10")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        let exited = wait_for_pid_exit(pid, Duration::from_millis(200));
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(!exited, "expected timeout while pid {pid} was still alive");
     }
 
     #[test]

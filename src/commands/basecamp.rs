@@ -43,7 +43,6 @@ pub(crate) enum BasecampAction {
     },
     Launch {
         profile: String,
-        no_clean: bool,
     },
     /// Attr-swap replay on `state.project_sources` only (`#lgx` →
     /// `#lgx-portable`). `state.dependencies` is ignored — the target AppImage
@@ -68,9 +67,7 @@ pub(crate) fn cmd_basecamp(action: BasecampAction) -> DynResult<()> {
         return cmd_basecamp_docs();
     }
 
-    let project = load_project().context(
-        "This command must be run inside a logos-scaffold project.\nNext step: cd into your scaffolded project directory and retry.",
-    )?;
+    let project = load_project()?;
 
     match action {
         BasecampAction::Setup => cmd_basecamp_setup(project),
@@ -85,9 +82,7 @@ pub(crate) fn cmd_basecamp(action: BasecampAction) -> DynResult<()> {
             }
             cmd_basecamp_install(project, &NixLgxProbe)
         }
-        BasecampAction::Launch { profile, no_clean } => {
-            cmd_basecamp_launch(project, profile, no_clean)
-        }
+        BasecampAction::Launch { profile } => cmd_basecamp_launch(project, profile),
         BasecampAction::BuildPortable => cmd_basecamp_build_portable(project),
         BasecampAction::Doctor { json } => cmd_basecamp_doctor(project, json),
         // Handled above via early return (project-context-free).
@@ -244,11 +239,9 @@ fn resolve_basecamp_binary(app_link: &Path) -> DynResult<PathBuf> {
     )
 }
 
-// Concurrent `launch <same-profile>` is undefined per spec §2.3 ("v1 does not
-// lock; document as 'don't do that'"). The code below assumes a single launcher
-// per profile at a time — scrub, re-seed, replay install, and PID write are all
-// non-atomic. If two invocations race, expect partial state.
-fn cmd_basecamp_launch(project: Project, profile: String, no_clean: bool) -> DynResult<()> {
+// Concurrent `launch <same-profile>` is undefined per spec §2.3: no lock; two
+// racing invocations leave partial state.
+fn cmd_basecamp_launch(project: Project, profile: String) -> DynResult<()> {
     let state_path = project.root.join(".scaffold/state/basecamp.state");
     let state = match read_basecamp_state(&state_path).ok() {
         Some(s) if !s.basecamp_bin.is_empty() && !s.lgpm_bin.is_empty() => s,
@@ -293,34 +286,28 @@ fn cmd_basecamp_launch(project: Project, profile: String, no_clean: bool) -> Dyn
     }
 
     // Clean-slate launch replays `[basecamp.modules]` into the freshly-scrubbed
-    // profile. An empty capture set would make that replay a silent no-op, so the
-    // profile would come up with zero modules — violating the clean-slate
-    // guarantee. Fail fast with a hint. `--no-clean` skips this check because
-    // that mode deliberately preserves whatever's already installed.
-    if !no_clean && total_captured_modules(&project) == 0 {
-        bail!(
-            "no modules captured — run `logos-scaffold basecamp modules` before launching, \
-             or pass `--no-clean` to keep the currently-installed module set."
-        );
+    // profile. An empty capture set would make that replay a silent no-op, so
+    // the profile would come up with zero modules. Fail fast with a hint.
+    if total_captured_modules(&project) == 0 {
+        bail!("no modules captured — run `logos-scaffold basecamp modules` before launching.");
     }
 
-    // seed_profiles is idempotent (tested) and cheap — always run it so a prior
-    // crash mid-scrub doesn't leave the profile without its xdg subdirs.
+    // Pre-seed in case a prior crash between scrub and re-seed left the profile
+    // without its xdg subdirs; scrub assumes both exist. seed_profiles is
+    // idempotent and cheap.
     seed_profiles(&profiles_root, &[profile.as_str()])?;
-    if !no_clean {
-        scrub_profile_data_and_cache(&project.root, &profile_dir)?;
-        // Re-seed after scrub: scrub removed xdg-data + xdg-cache; put their
-        // module/plugin subtrees back before lgpm writes into them.
-        seed_profiles(&profiles_root, &[profile.as_str()])?;
-        let (cache_root, _) = resolve_cache_root(&project)?;
-        install_sources_into_profiles(
-            &project,
-            &state,
-            &cache_root,
-            &profiles_root,
-            &[profile.clone()],
-        )?;
-    }
+    scrub_profile_data_and_cache(&project.root, &profile_dir)?;
+    // Re-seed after scrub: scrub removed xdg-data + xdg-cache; put their
+    // module/plugin subtrees back before lgpm writes into them.
+    seed_profiles(&profiles_root, &[profile.as_str()])?;
+    let (cache_root, _) = resolve_cache_root(&project)?;
+    install_sources_into_profiles(
+        &project,
+        &state,
+        &cache_root,
+        &profiles_root,
+        &[profile.clone()],
+    )?;
 
     // Variant pre-flight: warn if any installed module is missing the current
     // platform's `<plat>-dev` manifest.json `main` key. Basecamp v0.1.1's

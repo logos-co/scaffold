@@ -37,6 +37,26 @@ pub(crate) const DEFAULT_SPEL: GitRef = GitRef {
     tag: "v0.2.0-rc.5",
 };
 
+/// `logos-blockchain-circuits` GitHub release version that contains the
+/// proving/verification keys and witness generators every
+/// `logos-blockchain-{pol,poc,poq,zksign}` build script reads at compile time
+/// via `logos-blockchain-circuits-utils::circuits_dir()`.
+///
+/// Pinned to the version LEZ rc1's `flake.lock` resolves to (its
+/// `logos-blockchain-circuits` input is `ec7d298…`, whose `flake.nix` declares
+/// `circuitsVersion = "0.4.1"`). A mismatched circuits release silently
+/// produces incompatible verifier keys, so bump this in lock-step with
+/// `DEFAULT_LB_PIN` / `DEFAULT_LEZ`.
+///
+/// Materialised on demand into `<cache_root>/circuits/v<ver>-<triple>/` by
+/// `circuits::ensure_circuits_for_subprocess`. Override the version hop by
+/// setting `LOGOS_BLOCKCHAIN_CIRCUITS` to a populated checkout; the env var
+/// short-circuits the download.
+pub(crate) const DEFAULT_CIRCUITS_VERSION: &str = "0.4.1";
+pub(crate) const LOGOS_BLOCKCHAIN_CIRCUITS_ENV: &str = "LOGOS_BLOCKCHAIN_CIRCUITS";
+pub(crate) const CIRCUITS_RELEASE_BASE_URL: &str =
+    "https://github.com/logos-blockchain/logos-blockchain-circuits/releases/download";
+
 pub(crate) const DEFAULT_HELLO_WORLD_IMAGE_ID_HEX: &str =
     "4880b298f59699c1e4263c5c2245c80123632d608b9116f4b253c63e6c340771";
 pub(crate) const DEFAULT_WALLET_PASSWORD: &str = "logos-scaffold-v0";
@@ -55,6 +75,11 @@ pub(crate) const METHODS_DIR: &str = "methods";
 pub(crate) const SEQUENCER_CONFIG_REL_PATH: &str =
     "sequencer/service/configs/debug/sequencer_config.json";
 pub(crate) const SPEL_BIN_REL_PATH: &str = "target/release/spel";
+/// Default seconds to wait for the sequencer to become ready when `lgs run`
+/// has to start localnet itself. Cold first runs (fresh repo clone, cold
+/// nix/cargo caches) routinely overshoot the previous 20s ceiling. Override
+/// per invocation with `lgs run --localnet-timeout <SECS>`.
+pub(crate) const DEFAULT_RUN_LOCALNET_TIMEOUT_SEC: u64 = 120;
 /// Default `source` for `[repos.basecamp]`. Built via `nix build .#app`,
 /// hence `BASECAMP_ATTR = "app"`.
 pub(crate) const BASECAMP_SOURCE: &str = "https://github.com/logos-co/logos-basecamp.git";

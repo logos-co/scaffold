@@ -29,7 +29,7 @@ use crate::constants::{
 };
 use crate::model::{
     BasecampConfig, Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, ModuleEntry,
-    ModuleRole, RepoBuild, RepoRef,
+    ModuleRole, RepoBuild, RepoRef, RunConfig, RunProfile,
 };
 use crate::DynResult;
 
@@ -68,6 +68,7 @@ pub(crate) fn parse_config(text: &str) -> DynResult<Config> {
 
     let modules = parse_modules(&doc)?;
     let basecamp = parse_basecamp_runtime(&doc)?;
+    let run = parse_run(&doc)?;
     let framework = parse_framework(&doc);
     let localnet = parse_localnet(&doc)?;
     let wallet_home_dir = doc
@@ -88,73 +89,153 @@ pub(crate) fn parse_config(text: &str) -> DynResult<Config> {
         localnet,
         modules,
         basecamp,
+        run,
     })
 }
 
-/// Reject pre-0.2.0 schemas with a targeted error naming the section that's
-/// stale and `init` as the fix. Detection is pragmatic: any single old-shape
-/// signal is enough.
-fn detect_old_schema(doc: &DocumentMut, version: &str) -> DynResult<()> {
-    let mut markers: Vec<&str> = Vec::new();
+fn parse_run(doc: &DocumentMut) -> DynResult<RunConfig> {
+    let Some(run_table) = doc.get("run").and_then(Item::as_table) else {
+        return Ok(RunConfig::default());
+    };
 
-    // Old version stamp. Any other version mismatch (e.g. prerelease tags or
-    // hand-edits) is caught downstream in `parse_config` with a more specific
-    // "this build expects X" message; `init`'s migrator bumps the version
-    // regardless of origin.
-    if version != SCAFFOLD_TOML_SCHEMA_VERSION
-        && (version.starts_with("0.1.") || version == "0.1" || version == "0.0")
-    {
-        markers.push("[scaffold].version is pre-0.2.0");
+    let default_profile = read_string(run_table, "default_profile");
+    let inline_reset = run_table
+        .get("reset")
+        .and_then(Item::as_value)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let inline_post_deploy = parse_post_deploy(run_table.get("post_deploy"))?;
+
+    let mut profiles: std::collections::BTreeMap<String, RunProfile> =
+        std::collections::BTreeMap::new();
+    if let Some(profiles_table) = run_table.get("profiles").and_then(Item::as_table) {
+        for (name, item) in profiles_table.iter() {
+            let table = item.as_table().ok_or_else(|| {
+                anyhow!("invalid scaffold.toml: [run.profiles.{name}] is not a table")
+            })?;
+            let reset = table
+                .get("reset")
+                .and_then(Item::as_value)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let post_deploy = parse_post_deploy(table.get("post_deploy"))?;
+            profiles.insert(name.to_string(), RunProfile { reset, post_deploy });
+        }
     }
 
-    // [repos.lssa] — pre-spel-era alias for [repos.lez]. Even if no other
-    // signals fire (e.g. the user hand-bumped the version stamp), the
-    // canonical name has changed and `init` is responsible for the rename.
+    if let Some(name) = &default_profile {
+        if !profiles.contains_key(name) {
+            bail!(
+                "invalid scaffold.toml: [run].default_profile = {name:?} but no [run.profiles.{name}] section"
+            );
+        }
+    }
+
+    Ok(RunConfig {
+        default_profile,
+        inline: RunProfile {
+            reset: inline_reset,
+            post_deploy: inline_post_deploy,
+        },
+        profiles,
+    })
+}
+
+fn parse_post_deploy(item: Option<&Item>) -> DynResult<Vec<String>> {
+    let Some(item) = item else {
+        return Ok(Vec::new());
+    };
+    if let Some(s) = item.as_str() {
+        return Ok(if s.is_empty() {
+            Vec::new()
+        } else {
+            vec![s.to_string()]
+        });
+    }
+    if let Some(arr) = item.as_array() {
+        let mut out = Vec::with_capacity(arr.len());
+        for v in arr.iter() {
+            let s = v.as_str().ok_or_else(|| {
+                anyhow!("invalid scaffold.toml: post_deploy entries must be strings")
+            })?;
+            out.push(s.to_string());
+        }
+        return Ok(out);
+    }
+    bail!("invalid scaffold.toml: post_deploy must be a string or array of strings")
+}
+
+/// Per-shape markers returned by `detect_old_schema_markers`. The
+/// user-facing error doesn't enumerate these — they're a structured signal
+/// for tests and any future verbose log path.
+#[derive(Debug, Default, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct OldSchemaMarkers {
+    pub(crate) version_stale: bool,
+    pub(crate) has_lssa: bool,
+    pub(crate) has_repo_url: bool,
+    pub(crate) has_old_basecamp_keys: bool,
+    pub(crate) has_old_basecamp_modules: bool,
+}
+
+impl OldSchemaMarkers {
+    pub(crate) fn any(&self) -> bool {
+        self.version_stale
+            || self.has_lssa
+            || self.has_repo_url
+            || self.has_old_basecamp_keys
+            || self.has_old_basecamp_modules
+    }
+}
+
+/// Pragmatic detection of pre-0.2.0 schemas. Returns a flag-per-shape so the
+/// caller can decide what (if anything) to surface. `init`'s migrator handles
+/// every variant we detect here, so the user-facing error in
+/// `detect_old_schema` does not enumerate them.
+pub(crate) fn detect_old_schema_markers(doc: &DocumentMut, version: &str) -> OldSchemaMarkers {
+    let mut m = OldSchemaMarkers::default();
+
+    // Old version stamp. Other version mismatches (prerelease tags, hand-edits)
+    // are caught downstream in `parse_config` with a more specific "this build
+    // expects X" message; `init`'s migrator bumps the version regardless of
+    // origin.
+    m.version_stale = version != SCAFFOLD_TOML_SCHEMA_VERSION
+        && (version.starts_with("0.1.") || version == "0.1" || version == "0.0");
+
     let repos_table = doc.get("repos").and_then(Item::as_table);
-    if let Some(repos) = repos_table {
-        if repos.get("lssa").is_some() {
-            markers.push("[repos.lssa] renamed to [repos.lez] in 0.2.0");
-        }
-    }
-
+    // [repos.lssa] — pre-spel-era alias for [repos.lez].
+    m.has_lssa = repos_table.is_some_and(|t| t.get("lssa").is_some());
     // [repos.{lez,spel}].url — dropped in 0.2.0; source is the single field.
-    // (lssa is checked above as its own signal.)
-    for name in ["lez", "spel"] {
-        let table = repos_table.and_then(|t| t.get(name).and_then(Item::as_table));
-        if let Some(table) = table {
-            if table.get("url").is_some() {
-                markers.push("[repos.lez|spel].url is removed in 0.2.0 (use `source` only)");
-                break;
-            }
-        }
-    }
-
+    m.has_repo_url = ["lez", "spel"].iter().any(|name| {
+        repos_table
+            .and_then(|t| t.get(name).and_then(Item::as_table))
+            .is_some_and(|tbl| tbl.get("url").is_some())
+    });
+    let basecamp_table = doc.get("basecamp").and_then(Item::as_table);
     // Old [basecamp] shape: pin / source / lgpm_flake at the root.
-    if let Some(bc) = doc.get("basecamp").and_then(Item::as_table) {
-        for stale in ["pin", "source", "lgpm_flake"] {
-            if bc.get(stale).is_some() {
-                markers.push("[basecamp] has pin/source/lgpm_flake (moved to [repos.basecamp] / [repos.lgpm])");
-                break;
-            }
-        }
-    }
-
+    m.has_old_basecamp_keys = basecamp_table.is_some_and(|t| {
+        ["pin", "source", "lgpm_flake"]
+            .iter()
+            .any(|k| t.get(k).is_some())
+    });
     // [basecamp.modules.*] — moved to [modules.*].
-    if let Some(bc) = doc.get("basecamp").and_then(Item::as_table) {
-        if let Some(modules) = bc.get("modules").and_then(Item::as_table) {
-            if modules.iter().next().is_some() {
-                markers.push("[basecamp.modules.*] moved to [modules.*]");
-            }
-        }
-    }
+    m.has_old_basecamp_modules = basecamp_table
+        .and_then(|t| t.get("modules").and_then(Item::as_table))
+        .is_some_and(|m| m.iter().next().is_some());
 
-    if markers.is_empty() {
+    m
+}
+
+/// Reject pre-0.2.0 schemas with a one-line, action-only error pointing at
+/// `init`. The migrator handles every variant we detect, so the user only
+/// needs to know that a migration is required — not which specific shape
+/// tripped the check.
+fn detect_old_schema(doc: &DocumentMut, version: &str) -> DynResult<()> {
+    if !detect_old_schema_markers(doc, version).any() {
         return Ok(());
     }
-
-    let detail = markers.join("; ");
     bail!(
-        "scaffold.toml uses an old schema ({detail}). \
+        "scaffold.toml uses an old schema. \
          Run `logos-scaffold init` to migrate to v{SCAFFOLD_TOML_SCHEMA_VERSION}; \
          existing settings are preserved."
     );
@@ -189,6 +270,7 @@ fn parse_repo_ref(doc: &DocumentMut, name: &str) -> DynResult<Option<RepoRef>> {
     check_toml_value(&format!("repos.{name}.pin"), &pin)?;
     check_toml_value(&format!("repos.{name}.attr"), &attr)?;
     check_toml_value(&format!("repos.{name}.path"), &path)?;
+    check_repo_source(name, &source)?;
 
     Ok(Some(RepoRef {
         source,
@@ -197,6 +279,52 @@ fn parse_repo_ref(doc: &DocumentMut, name: &str) -> DynResult<Option<RepoRef>> {
         attr,
         path,
     }))
+}
+
+/// Reject `[repos.<name>].source` values that would let a malicious
+/// `scaffold.toml` execute code on contributor machines via `git clone`.
+///
+/// Two classes are covered here, both reachable from `ensure_repo_present`:
+///
+/// - Leading `-` is treated by `git clone` as an option, not a positional
+///   `<repository>`. Even with the `--` separator the clone call sites pass
+///   defensively, parse-time rejection gives a clear error pointing at the
+///   offending key instead of a confusing subprocess failure.
+/// - `ext::` (and other remote-helper transports written as `<helper>::...`)
+///   invoke `git-remote-<helper>`, which for `ext` runs an arbitrary shell
+///   command — the CVE-2017-1000117 class. None of scaffold's flows need
+///   it, so refusing it at parse time is strictly safer.
+fn check_repo_source(name: &str, source: &str) -> DynResult<()> {
+    let trimmed = source.trim();
+    if trimmed.is_empty() {
+        bail!("invalid scaffold.toml: [repos.{name}].source is empty");
+    }
+    if trimmed.starts_with('-') {
+        bail!(
+            "invalid scaffold.toml: [repos.{name}].source starts with '-' ({source:?}); \
+             refusing — git would treat this as an option, not a repository"
+        );
+    }
+    if is_dangerous_transport(trimmed) {
+        bail!(
+            "invalid scaffold.toml: [repos.{name}].source uses a dangerous git transport ({source:?}); \
+             `ext::` and other remote-helper transports can execute arbitrary commands at clone time and are not allowed"
+        );
+    }
+    Ok(())
+}
+
+/// Match the `<helper>::<rest>` remote-helper syntax for transports that can
+/// execute code. `ext::` is the canonical RCE vector (CVE-2017-1000117); the
+/// rest of the recognized list mirrors transports whose helpers historically
+/// shipped shell-out behavior or are otherwise unsuitable for an untrusted
+/// `scaffold.toml`.
+fn is_dangerous_transport(source: &str) -> bool {
+    const BANNED_PREFIXES: &[&str] = &["ext::", "ext ::", "transport-helper::"];
+    let lowered = source.to_ascii_lowercase();
+    BANNED_PREFIXES
+        .iter()
+        .any(|prefix| lowered.starts_with(prefix))
 }
 
 fn parse_modules(doc: &DocumentMut) -> DynResult<std::collections::BTreeMap<String, ModuleEntry>> {
@@ -387,7 +515,72 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
         basecamp_table["port_stride"] = value(i64::from(bc.port_stride));
     }
 
+    // [run] — only emit when non-default to keep fresh scaffold.toml minimal.
+    write_run_config(&mut doc, &cfg.run)?;
+
     Ok(doc.to_string())
+}
+
+fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
+    let has_inline = run.inline.reset || !run.inline.post_deploy.is_empty();
+    let has_default_profile = run.default_profile.is_some();
+    let has_profiles = !run.profiles.is_empty();
+    if !has_inline && !has_default_profile && !has_profiles {
+        return Ok(());
+    }
+
+    let run_item = doc.entry("run").or_insert(Item::Table(Table::new()));
+    let run_table = run_item.as_table_mut().expect("run table");
+    if let Some(name) = &run.default_profile {
+        check_toml_value("run.default_profile", name)?;
+        run_table["default_profile"] = value(name);
+    }
+    if run.inline.reset {
+        run_table["reset"] = value(true);
+    }
+    if !run.inline.post_deploy.is_empty() {
+        for hook in &run.inline.post_deploy {
+            check_toml_value("run.post_deploy", hook)?;
+        }
+        run_table["post_deploy"] = post_deploy_value(&run.inline.post_deploy);
+    }
+
+    if has_profiles {
+        for (name, profile) in &run.profiles {
+            check_toml_value(&format!("run.profiles.{name}"), name)?;
+            for hook in &profile.post_deploy {
+                check_toml_value(&format!("run.profiles.{name}.post_deploy"), hook)?;
+            }
+            let table = ensure_subtable(doc, "run", "profiles");
+            // ensure_subtable returns the `profiles` table; we need a
+            // sub-sub-table keyed by `name`.
+            table.set_implicit(true);
+            let profile_table = table
+                .entry(name)
+                .or_insert(Item::Table(Table::new()))
+                .as_table_mut()
+                .expect("profile table");
+            if profile.reset {
+                profile_table["reset"] = value(true);
+            }
+            if !profile.post_deploy.is_empty() {
+                profile_table["post_deploy"] = post_deploy_value(&profile.post_deploy);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn post_deploy_value(hooks: &[String]) -> Item {
+    if hooks.len() == 1 {
+        value(&hooks[0])
+    } else {
+        let mut arr = toml_edit::Array::new();
+        for h in hooks {
+            arr.push(h.as_str());
+        }
+        value(arr)
+    }
 }
 
 fn write_repo_ref(doc: &mut DocumentMut, name: &str, repo: &RepoRef) -> DynResult<()> {
@@ -508,6 +701,10 @@ mod tests {
     use super::*;
     use crate::constants::{DEFAULT_BASECAMP_PIN, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL};
 
+    fn base_config() -> Config {
+        parse_config(&minimal_v0_2_0()).expect("parse minimal v0.2.0")
+    }
+
     fn minimal_v0_2_0() -> String {
         format!(
             r#"[scaffold]
@@ -616,12 +813,10 @@ pin = "deadbeef"
 source = "https://example/basecamp"
 "#;
         let err = parse_config(&toml).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("logos-scaffold init"), "{msg}");
-        assert!(
-            msg.contains("[basecamp]") || msg.contains("[repos.basecamp]"),
-            "{msg}"
-        );
+        assert!(err.to_string().contains("logos-scaffold init"), "{err}");
+        let doc: DocumentMut = toml.parse().expect("re-parse for markers");
+        let markers = detect_old_schema_markers(&doc, "0.2.0");
+        assert!(markers.has_old_basecamp_keys, "{markers:?}");
     }
 
     #[test]
@@ -633,9 +828,10 @@ flake = "path:./foo"
 role = "project"
 "#;
         let err = parse_config(&toml).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("[modules"), "{msg}");
-        assert!(msg.contains("logos-scaffold init"), "{msg}");
+        assert!(err.to_string().contains("logos-scaffold init"), "{err}");
+        let doc: DocumentMut = toml.parse().expect("re-parse for markers");
+        let markers = detect_old_schema_markers(&doc, "0.2.0");
+        assert!(markers.has_old_basecamp_modules, "{markers:?}");
     }
 
     #[test]
@@ -709,9 +905,10 @@ role = "project"
     fn rejects_legacy_repos_lssa_section() {
         let toml = minimal_v0_2_0().replace("[repos.lez]", "[repos.lssa]");
         let err = parse_config(&toml).expect_err("lssa section should be rejected");
-        let msg = err.to_string();
-        assert!(msg.contains("lssa"), "{msg}");
-        assert!(msg.contains("init"), "{msg}");
+        assert!(err.to_string().contains("init"), "{err}");
+        let doc: DocumentMut = toml.parse().expect("re-parse for markers");
+        let markers = detect_old_schema_markers(&doc, "0.2.0");
+        assert!(markers.has_lssa, "{markers:?}");
     }
 
     #[test]
@@ -725,6 +922,79 @@ role = "project"
     }
 
     #[test]
+    fn rejects_repo_source_starting_with_dash() {
+        let toml = minimal_v0_2_0().replace(
+            &format!("source = \"{}\"\npin = \"{}\"", LEZ_SOURCE, DEFAULT_LEZ.sha),
+            &format!(
+                "source = \"-upload-pack=evil\"\npin = \"{}\"",
+                DEFAULT_LEZ.sha
+            ),
+        );
+        let err = parse_config(&toml).expect_err("dash-prefixed source must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("repos.lez"), "{msg}");
+        assert!(msg.contains("starts with '-'"), "{msg}");
+    }
+
+    #[test]
+    fn rejects_repo_source_with_ext_transport() {
+        let toml = minimal_v0_2_0().replace(
+            &format!("source = \"{}\"\npin = \"{}\"", LEZ_SOURCE, DEFAULT_LEZ.sha),
+            &format!("source = \"ext::sh -c id\"\npin = \"{}\"", DEFAULT_LEZ.sha),
+        );
+        let err = parse_config(&toml).expect_err("ext:: transport must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("repos.lez"), "{msg}");
+        assert!(msg.contains("dangerous git transport"), "{msg}");
+    }
+
+    #[test]
+    fn rejects_repo_source_with_ext_transport_case_insensitive() {
+        let toml = minimal_v0_2_0().replace(
+            &format!("source = \"{}\"\npin = \"{}\"", LEZ_SOURCE, DEFAULT_LEZ.sha),
+            &format!("source = \"EXT::sh -c id\"\npin = \"{}\"", DEFAULT_LEZ.sha),
+        );
+        let err = parse_config(&toml).expect_err("upper-case ext:: must be rejected");
+        assert!(err.to_string().contains("dangerous git transport"), "{err}");
+    }
+
+    #[test]
+    fn rejects_repo_source_with_transport_helper_prefix() {
+        let toml = minimal_v0_2_0().replace(
+            &format!("source = \"{}\"\npin = \"{}\"", LEZ_SOURCE, DEFAULT_LEZ.sha),
+            &format!(
+                "source = \"transport-helper::evil\"\npin = \"{}\"",
+                DEFAULT_LEZ.sha
+            ),
+        );
+        let err = parse_config(&toml).expect_err("transport-helper:: must be rejected");
+        assert!(err.to_string().contains("dangerous git transport"), "{err}");
+    }
+
+    #[test]
+    fn accepts_ordinary_repo_sources() {
+        // Defense-in-depth: the rejection path is selective. Confirm the
+        // common, benign source shapes still parse — https, ssh, git@, plain
+        // paths.
+        for source in [
+            "https://github.com/example/repo.git",
+            "http://example.com/repo",
+            "ssh://git@example.com/repo.git",
+            "git@github.com:example/repo.git",
+            "/abs/local/repo",
+            "./relative/repo",
+            "extender/repo",
+        ] {
+            let toml = minimal_v0_2_0().replace(
+                &format!("source = \"{}\"\npin = \"{}\"", LEZ_SOURCE, DEFAULT_LEZ.sha),
+                &format!("source = \"{}\"\npin = \"{}\"", source, DEFAULT_LEZ.sha),
+            );
+            parse_config(&toml)
+                .unwrap_or_else(|e| panic!("benign source {source:?} rejected: {e}"));
+        }
+    }
+
+    #[test]
     fn parses_path_override_for_back_compat() {
         let toml = minimal_v0_2_0().replace(
             "[repos.lez]\nsource",
@@ -732,5 +1002,116 @@ role = "project"
         );
         let cfg = parse_config(&toml).expect("parse");
         assert_eq!(cfg.lez.path, "/abs/lez");
+    }
+
+    #[test]
+    fn parse_config_with_run_profile_subsection() {
+        let toml = minimal_v0_2_0()
+            + "[run.profiles.e2e]\nreset = true\npost_deploy = [\"scripts/e2e.sh\"]\n";
+        let cfg = parse_config(&toml).expect("parse");
+        let prof = cfg.run.profiles.get("e2e").expect("e2e present");
+        assert!(prof.reset);
+        assert_eq!(prof.post_deploy, vec!["scripts/e2e.sh".to_string()]);
+    }
+
+    #[test]
+    fn parse_config_default_profile_must_exist() {
+        let toml = minimal_v0_2_0() + "[run]\ndefault_profile = \"missing\"\n";
+        let err = parse_config(&toml).unwrap_err();
+        assert!(
+            err.to_string().contains("missing")
+                && err.to_string().contains("[run.profiles.missing]"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn parse_config_default_profile_resolves() {
+        let toml = minimal_v0_2_0()
+            + "[run]\ndefault_profile = \"play\"\n[run.profiles.play]\npost_deploy = \"echo play\"\n";
+        let cfg = parse_config(&toml).expect("parse");
+        assert_eq!(cfg.run.default_profile.as_deref(), Some("play"));
+        let resolved = cfg.run.resolve_profile(None).expect("resolve");
+        assert_eq!(resolved.post_deploy, vec!["echo play".to_string()]);
+    }
+
+    #[test]
+    fn resolve_profile_explicit_selector_wins() {
+        let toml = minimal_v0_2_0()
+            + "[run]\npost_deploy = [\"echo inline\"]\ndefault_profile = \"play\"\n[run.profiles.play]\npost_deploy = \"echo play\"\n[run.profiles.e2e]\npost_deploy = \"echo e2e\"\n";
+        let cfg = parse_config(&toml).expect("parse");
+        let r = cfg.run.resolve_profile(Some("e2e")).expect("resolve");
+        assert_eq!(r.post_deploy, vec!["echo e2e".to_string()]);
+    }
+
+    #[test]
+    fn resolve_profile_unknown_name_errors_with_known_list() {
+        let toml = minimal_v0_2_0()
+            + "[run.profiles.play]\npost_deploy = \"echo play\"\n[run.profiles.e2e]\npost_deploy = \"echo e2e\"\n";
+        let cfg = parse_config(&toml).expect("parse");
+        let err = cfg.run.resolve_profile(Some("missing")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("missing"), "{msg}");
+        assert!(msg.contains("play") && msg.contains("e2e"), "{msg}");
+    }
+
+    #[test]
+    fn resolve_profile_falls_back_to_inline_when_no_default() {
+        let toml = minimal_v0_2_0() + "[run]\nreset = true\n";
+        let cfg = parse_config(&toml).expect("parse");
+        let r = cfg.run.resolve_profile(None).expect("resolve");
+        assert!(r.reset);
+        assert!(r.post_deploy.is_empty());
+    }
+
+    /// When `[run].default_profile` resolves, inline `[run]` values are
+    /// fully shadowed — they do not merge. Mirrors the `--profile X`
+    /// behavior so the two ways of selecting a profile have identical
+    /// semantics.
+    #[test]
+    fn resolve_profile_default_profile_fully_shadows_inline() {
+        let toml = minimal_v0_2_0()
+            + "[run]\ndefault_profile = \"dev\"\npost_deploy = [\"echo inline\"]\nreset = true\n[run.profiles.dev]\npost_deploy = [\"echo dev\"]\n";
+        let cfg = parse_config(&toml).expect("parse");
+        let r = cfg.run.resolve_profile(None).expect("resolve");
+        assert_eq!(r.post_deploy, vec!["echo dev".to_string()]);
+        assert!(
+            !r.reset,
+            "inline reset must not bleed into resolved profile"
+        );
+    }
+
+    #[test]
+    fn run_profiles_round_trip_through_parse_serialize() {
+        let toml = minimal_v0_2_0()
+            + "[run]\ndefault_profile = \"dev\"\n[run.profiles.dev]\npost_deploy = [\"echo dev\"]\n[run.profiles.e2e]\nreset = true\npost_deploy = [\"echo e2e\"]\n";
+        let cfg1 = parse_config(&toml).expect("parse");
+        let serialized = serialize_config(&cfg1).expect("serialize");
+        let cfg2 = parse_config(&serialized).expect("re-parse");
+        assert_eq!(cfg2.run.default_profile.as_deref(), Some("dev"));
+        assert_eq!(cfg2.run.profiles.len(), 2);
+        let e2e = cfg2.run.profiles.get("e2e").expect("e2e");
+        assert!(e2e.reset);
+        assert_eq!(e2e.post_deploy, vec!["echo e2e".to_string()]);
+    }
+
+    #[test]
+    fn serialize_rejects_newline_in_profile_post_deploy() {
+        let mut cfg = base_config();
+        let mut profiles = std::collections::BTreeMap::new();
+        profiles.insert(
+            "dev".to_string(),
+            RunProfile {
+                reset: false,
+                post_deploy: vec!["echo a\n[run.profiles.evil]".to_string()],
+            },
+        );
+        cfg.run = RunConfig {
+            profiles,
+            ..RunConfig::default()
+        };
+        let err = serialize_config(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("post_deploy") && msg.contains("dev"), "{msg}");
     }
 }

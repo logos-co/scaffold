@@ -147,6 +147,7 @@ pub(crate) fn available_templates() -> Vec<String> {
 mod tests {
     use std::fs;
     use std::path::PathBuf;
+    use std::str::FromStr;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{apply_overlay, render_template_text, OverlayRenderContext};
@@ -256,6 +257,42 @@ mod tests {
         assert!(!cargo.contains("{{"));
 
         fs::remove_dir_all(&target).expect("failed to cleanup temporary test directory");
+    }
+
+    #[test]
+    fn generated_cargo_toml_does_not_self_patch_logos_blockchain() {
+        // Regression guard: an earlier templates change pinned every
+        // `logos-blockchain-*` crate via a `[patch."<lb-url>"]` table that
+        // pointed back at the same git URL. Cargo treats a self-source patch
+        // as a no-op and refuses to resolve, breaking `lgs build` on every
+        // freshly-scaffolded project. The user-side build-script panic the
+        // patch was meant to mitigate is now handled by
+        // `circuits::ensure_circuits_for_subprocess` (which exports
+        // `LOGOS_BLOCKCHAIN_CIRCUITS` and bypasses the version check inside
+        // every `logos-blockchain` rev's circuits-utils crate).
+        for variant in ["default", "lez-framework"] {
+            let target = mk_temp_dir(&format!("no-self-patch-{variant}"));
+            let ctx = OverlayRenderContext {
+                crate_name: "my-app",
+                lez_pin: "abc123",
+                spel_tag: "v0.0.0-test",
+            };
+            apply_overlay(&target, variant, &ctx)
+                .unwrap_or_else(|e| panic!("apply_overlay({variant}) failed: {e}"));
+            let cargo = fs::read_to_string(target.join("Cargo.toml"))
+                .expect("failed to read generated Cargo.toml");
+            assert!(
+                !cargo.contains(
+                    "[patch.\"https://github.com/logos-blockchain/logos-blockchain.git\"]"
+                ),
+                "{variant}: generated Cargo.toml must not self-patch the logos-blockchain git URL; got:\n{cargo}"
+            );
+            // Final guard: the rendered Cargo.toml must still parse as TOML.
+            toml_edit::DocumentMut::from_str(&cargo).unwrap_or_else(|e| {
+                panic!("{variant}: generated Cargo.toml is not valid TOML: {e}\n---\n{cargo}")
+            });
+            fs::remove_dir_all(&target).expect("failed to cleanup temporary test directory");
+        }
     }
 
     #[test]

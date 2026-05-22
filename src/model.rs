@@ -84,6 +84,8 @@ pub(crate) struct Config {
     /// `[basecamp]` — runtime config only (port_base, port_stride). Pin and
     /// source moved to `[repos.basecamp]`; modules moved to `[modules.*]`.
     pub(crate) basecamp: Option<BasecampConfig>,
+    /// `[run]` — `lgs run` pipeline config (post-deploy hooks).
+    pub(crate) run: RunConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -257,4 +259,54 @@ pub(crate) struct FrameworkConfig {
 pub(crate) struct FrameworkIdlConfig {
     pub(crate) spec: String,
     pub(crate) path: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RunProfile {
+    /// Wipe rocksdb + wallet, restart sequencer, re-seed default wallet.
+    /// Broader than `lgs localnet reset`: re-establishes the documented
+    /// fresh-project state for the full deploy cycle. Suitable both as
+    /// a manual recovery and as the per-run default for fixture-based
+    /// deterministic test suites where PDA-key collisions force a wipe.
+    pub(crate) reset: bool,
+    pub(crate) post_deploy: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RunConfig {
+    /// Name of a profile in `profiles` to use when no `--profile` flag is
+    /// passed. If `Some` and the named profile exists, it shadows
+    /// `inline`.
+    pub(crate) default_profile: Option<String>,
+    /// Inline `[run]` keys parsed flat (not under a `[run.profiles.*]`
+    /// section) — the unnamed/legacy profile used when no `--profile`
+    /// flag and no `default_profile` resolves.
+    pub(crate) inline: RunProfile,
+    /// Named profiles parsed from `[run.profiles.<name>]` sub-sections.
+    pub(crate) profiles: std::collections::BTreeMap<String, RunProfile>,
+}
+
+impl RunConfig {
+    /// Resolve the effective `RunProfile` for a given `--profile` selector.
+    /// `Some(name)` errors if the profile is absent. `None` falls back to
+    /// `default_profile` if set, else the inline values.
+    pub(crate) fn resolve_profile(&self, selector: Option<&str>) -> anyhow::Result<RunProfile> {
+        match selector {
+            Some(name) => self.profiles.get(name).cloned().ok_or_else(|| {
+                let known: Vec<&str> = self.profiles.keys().map(String::as_str).collect();
+                anyhow::anyhow!(
+                    "scaffold.toml has no [run.profiles.{name}] section. Known profiles: [{}]",
+                    known.join(", ")
+                )
+            }),
+            None => match self.default_profile.as_deref() {
+                Some(name) => self.profiles.get(name).cloned().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "scaffold.toml `[run].default_profile = \"{name}\"` but no matching [run.profiles.{name}] section"
+                    )
+                }),
+                None => Ok(self.inline.clone()),
+            },
+        }
+    }
 }

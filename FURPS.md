@@ -66,6 +66,54 @@
 - Wallet available for signing transactions initiated by CLI interaction commands.
 - Network-aware wallet configuration to prevent cross-network key misuse.
 
+## FURPS+ — `lgs run`
+
+### Functionality
+
+1. `lgs run` collapses the inner-loop sequence — build → IDL build → ensure-localnet → wallet topup → deploy → optional post-deploy hooks — into one command. Every step's failure aborts the pipeline with a numbered step header (`[3/N] …`) so the failing phase is unambiguous in console output.
+2. Source edits drive fresh on-chain program identity automatically: when the guest ELF changes, its risc0 image ID changes, and the new program's storage starts empty. Scaffold relies on this for the default cycle and adds no per-run reset.
+3. Post-deploy hooks: `[run].post_deploy` is a list of shell commands executed in order via `sh -c` with `cwd` set to the project root. Hooks see a documented env contract: `SEQUENCER_URL`, `NSSA_WALLET_HOME_DIR`, `SCAFFOLD_PROJECT_ROOT`, `SCAFFOLD_IDL_DIR`, plus single-program shortcuts `SCAFFOLD_PROGRAM_ID` / `SCAFFOLD_GUEST_BIN` (set only when exactly one program is deployable).
+4. CLI overrides: `--post-deploy <cmd>` (repeatable) replaces `[run].post_deploy` for one invocation. `--no-post-deploy` skips hooks entirely. The two flags conflict and are rejected at clap parse time.
+5. Localnet reuse: if a managed sequencer is already running, the run reuses it. If the configured port is held by an unrelated process, the run aborts with a diagnostic naming the foreign PID.
+6. Topup safety: a wallet-topup confirmation timeout aborts before deploy so the developer is never left wondering whether deploy used a half-funded wallet.
+
+### Usability
+
+1. The command produces a single human-readable output stream with numbered step headers and one-line summaries per phase. No JSON output flag — `--json` is reserved for `deploy`'s programmatic consumers.
+2. The single-program shortcuts (`SCAFFOLD_PROGRAM_ID` / `SCAFFOLD_GUEST_BIN`) cover the most common dogfooding shape (one guest program per project) without leaking ambiguous values into multi-program projects — they're unset when the project has more than one deployable program.
+3. Hook log markers (`===> post_deploy[i/n]:` and `<=== post_deploy[i/n] OK`) frame each hook's stdout for grep-friendly log reading.
+
+### Reliability
+
+1. The conflicting flag pair (`--post-deploy --no-post-deploy`) is rejected at parse time, not silently coerced.
+2. The pipeline anchors itself at the discovered project root: `lgs run` from a subdirectory builds and deploys from the project root, not from cwd.
+
+### Performance
+
+1. The run is bounded by the underlying tools (cargo build, IDL test harness, sequencer startup, wallet topup, wallet deploy-program); scaffold adds no waiting steps beyond what each underlying command already imposes.
+2. Single-program metadata (program ID, guest binary path) is resolved once per invocation and reused across every post-deploy hook, so multiple hooks don't multiply `spel inspect` cost.
+
+### Supportability
+
+1. `[run]` round-trips cleanly through `parse_config` / `serialize_config`. Default values are omitted from the serialized output to keep diffs minimal.
+2. The hook env contract is documented in `README.md` and validated by unit and integration tests in `src/commands/run.rs::tests` and `tests/cli.rs`.
+3. Flag-conflict rejection messages list the conflicting flags and exit non-zero, matching clap's standard error format.
+
+### + (Privacy, Anonymity, Censorship-Resistance)
+
+- Hooks run locally with the developer's own wallet; no network egress beyond what the deploy step already needs.
+- Post-deploy hooks have direct access to the deployer's wallet home via `NSSA_WALLET_HOME_DIR`. Hooks are user-authored and trusted — same threat model as `scaffold.toml` itself.
+
+### Dependencies
+
+#### Internal Dependencies
+
+- `cmd_build_shortcut` for the build phase.
+- `build_idl_for_current_project` for IDL generation (no-op for non-lez-framework projects).
+- `cmd_localnet` (start) for localnet lifecycle when no managed sequencer is already running.
+- `cmd_wallet_topup_inner` for the topup phase.
+- `cmd_deploy` for deploy submission and `extract_program_id` for image-ID extraction.
+
 ## FURPS+ — Basecamp
 
 ### Functionality

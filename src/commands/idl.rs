@@ -4,9 +4,10 @@ use std::process::Command;
 
 use anyhow::{anyhow, bail};
 
+use crate::circuits::ensure_circuits_for_subprocess;
 use crate::constants::FRAMEWORK_KIND_LEZ_FRAMEWORK;
 use crate::process::run_capture;
-use crate::project::{load_project, run_in_project_dir};
+use crate::project::{load_project, resolve_cache_root, run_in_project_dir};
 use crate::state::write_text;
 use crate::DynResult;
 
@@ -31,16 +32,28 @@ pub(crate) fn cmd_idl(args: &[String]) -> DynResult<()> {
 pub(crate) fn build_idl_for_current_project() -> DynResult<()> {
     let project = load_project()?;
     if project.config.framework.kind != FRAMEWORK_KIND_LEZ_FRAMEWORK {
-        println!(
-            "Skipping IDL build for framework kind `{}`",
+        // Explicit `build idl` only applies to lez-framework projects. The
+        // `lgs build` shortcut already gates on framework kind and won't
+        // call this for `default` projects, so reaching this branch means
+        // the user typed `build idl` against an incompatible framework.
+        // Fail loudly instead of silently no-op'ing — agents that piped
+        // `lgs build idl && next-step` would otherwise carry on with no IDL.
+        bail!(
+            "`build idl` is only supported for `lez-framework` projects (current framework.kind = `{}`).\n\
+             Use `logos-scaffold build` for the framework-agnostic build, \
+             or set `framework.kind = \"lez-framework\"` in scaffold.toml.",
             project.config.framework.kind
         );
-        return Ok(());
     }
 
     let idl_dir = project.root.join(&project.config.framework.idl.path);
     fs::create_dir_all(&idl_dir)?;
     clear_existing_json_files(&idl_dir)?;
+
+    // Same rationale as `setup`: the workspace test build pulls in the
+    // logos-blockchain crates that need a populated circuits release.
+    let (cache_root, _) = resolve_cache_root(&project)?;
+    ensure_circuits_for_subprocess(&cache_root)?;
 
     let out = run_capture(
         Command::new("cargo")
@@ -110,7 +123,7 @@ fn canonical_json(text: &str) -> DynResult<String> {
     Ok(format!("{pretty}\n"))
 }
 
-fn sanitize_file_stem(name: &str) -> String {
+pub(crate) fn sanitize_file_stem(name: &str) -> String {
     let mut out = String::new();
     let mut prev_sep = false;
 
