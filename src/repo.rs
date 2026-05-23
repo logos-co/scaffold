@@ -168,7 +168,7 @@ fn reconcile_repo_source(
             // valid invocation. Now we bail with the cache intact.
             if !source_is_reachable(source) {
                 bail!(
-                    "{label} source `{source}` is not reachable (path does not exist or remote refused HEAD probe). \
+                    "{label} source `{source}` is not reachable (path does not exist, is not a git repo, or remote refused HEAD probe). \
                      Refusing to discard the existing cache at {} — fix the path/URL and retry.",
                     path.display(),
                 );
@@ -252,8 +252,12 @@ fn looks_like_url(source: &str) -> bool {
 
 /// Cheap probe: does this source point at something git can talk to?
 /// For URL sources, `git ls-remote --exit-code <source> HEAD` works
-/// without cloning. We disable credential prompts so a typo on a
-/// private/typo'd URL doesn't hang at a `Username:` prompt.
+/// without cloning. We disable credential prompts (HTTPS via
+/// `GIT_TERMINAL_PROMPT`/`GIT_ASKPASS`/`GCM_INTERACTIVE`; SSH via
+/// `SSH_ASKPASS*` plus `GIT_SSH_COMMAND="ssh -o BatchMode=yes
+/// -o ConnectTimeout=10"`) and bound HTTPS DNS/transport stalls
+/// (`GIT_HTTP_LOW_SPEED_*`) so a typo on a private or unreachable URL
+/// doesn't hang at a credential prompt or on DNS lookup.
 /// For local paths, check the directory looks like a git repo (worktree
 /// `.git`, bare repo `HEAD` + `objects`).
 fn source_is_reachable(source: &str) -> bool {
@@ -264,6 +268,17 @@ fn source_is_reachable(source: &str) -> bool {
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_ASKPASS", "/bin/false")
             .env("GCM_INTERACTIVE", "Never")
+            // Block SSH askpass fallbacks (gnome-ssh-askpass etc. that
+            // OpenSSH spawns when $DISPLAY is set) and force batch + a
+            // short connect timeout so an SSH typo can't hang the CLI.
+            .env("SSH_ASKPASS", "/bin/false")
+            .env("SSH_ASKPASS_REQUIRE", "never")
+            .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=10")
+            // Bound HTTPS stalls: abort if the transfer is below 1 B/s for
+            // more than 10 s. Together with `GIT_TERMINAL_PROMPT=0` this
+            // covers unreachable hosts and silently-dropped connections.
+            .env("GIT_HTTP_LOW_SPEED_LIMIT", "1")
+            .env("GIT_HTTP_LOW_SPEED_TIME", "10")
             .arg("ls-remote")
             .arg("--exit-code")
             .arg(source)
@@ -463,6 +478,8 @@ mod tests {
         run_git(path, &["init"]);
         run_git(path, &["config", "user.email", "test@example.com"]);
         run_git(path, &["config", "user.name", "Test User"]);
+        run_git(path, &["config", "commit.gpgsign", "false"]);
+        run_git(path, &["config", "tag.gpgsign", "false"]);
         fs::write(path.join(file), contents).expect("write file");
         run_git(path, &["add", "."]);
         run_git(path, &["commit", "-m", "init"]);
