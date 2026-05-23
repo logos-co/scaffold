@@ -22,15 +22,6 @@ const DEFAULT_WALLET_PASSWORD: &str = "logos-scaffold-v0";
 const GUEST_BIN_REL_PATH: &str =
     "target/riscv-guest/example_program_deployment_methods/example_program_deployment_programs/riscv32im-risc0-zkvm-elf/release";
 
-#[cfg(unix)]
-fn true_bin() -> &'static str {
-    if Path::new("/bin/true").exists() {
-        "/bin/true"
-    } else {
-        "/usr/bin/true"
-    }
-}
-
 /// Minimal valid `scaffold.toml` content for tests that only need the project
 /// context to exist (no basecamp section). Older tests in this file inline
 /// the same content; new tests should prefer this helper.
@@ -63,6 +54,15 @@ path = "idl"
 port = 3040
 risc0_dev_mode = true
 "#;
+
+fn fake_basecamp_state() -> String {
+    let bin = assert_cmd::cargo::cargo_bin!("logos-scaffold");
+    format!(
+        "pin=deadbeef\nbasecamp_bin={}\nlgpm_bin={}\n",
+        bin.display(),
+        bin.display()
+    )
+}
 
 #[test]
 fn root_help_lists_quiet_flag_and_examples() {
@@ -2221,6 +2221,21 @@ fn spel_without_dash_dash_suggests_passthrough_form() {
 }
 
 #[test]
+fn spel_help_accepts_clap_help_spellings() {
+    for help_arg in ["--help", "-h", "help", "-?"] {
+        Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+            .arg("spel")
+            .arg(help_arg)
+            .assert()
+            .success()
+            .stdout(
+                predicate::str::contains("Forward arguments to the project-vendored `spel` binary")
+                    .and(predicate::str::contains("logos-scaffold spel --")),
+            );
+    }
+}
+
+#[test]
 fn basecamp_help_lists_setup_install_launch_and_profile() {
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .arg("basecamp")
@@ -2607,18 +2622,11 @@ fn basecamp_launch_rejects_unknown_profile() {
     let project = temp.path();
     fs::write(project.join("scaffold.toml"), MINIMAL_SCAFFOLD_TOML).expect("write scaffold.toml");
 
-    // Fake a completed setup so we get past the first gate and reach profile validation.
-    // Use an existing true binary so the launch path reaches profile validation.
+    // Fake a completed setup so we get past the first gate and reach profile
+    // validation. Launch never reaches `exec` because the profile check fails first.
     let state_dir = project.join(".scaffold/state");
     fs::create_dir_all(&state_dir).expect("mkdir state");
-    fs::write(
-        state_dir.join("basecamp.state"),
-        &format!(
-            "pin=deadbeef\nbasecamp_bin={}\nlgpm_bin=/bin/echo\n",
-            true_bin()
-        ),
-    )
-    .expect("write state");
+    fs::write(state_dir.join("basecamp.state"), fake_basecamp_state()).expect("write state");
 
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(project)
@@ -2657,14 +2665,7 @@ fn basecamp_launch_bails_when_no_modules_captured() {
     // the early gates and reaches the modules check.
     let state_dir = project.join(".scaffold/state");
     fs::create_dir_all(&state_dir).expect("mkdir state");
-    fs::write(
-        state_dir.join("basecamp.state"),
-        &format!(
-            "pin=deadbeef\nbasecamp_bin={}\nlgpm_bin=/bin/echo\n",
-            true_bin()
-        ),
-    )
-    .expect("write state");
+    fs::write(state_dir.join("basecamp.state"), fake_basecamp_state()).expect("write state");
     fs::create_dir_all(project.join(".scaffold/basecamp/profiles/alice")).expect("mkdir profile");
 
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
@@ -3758,6 +3759,62 @@ fn assert_pre_v0_2_0_rejection(args: &[&str]) {
 #[test]
 fn setup_hard_fails_on_pre_v0_2_0_scaffold_toml() {
     assert_pre_v0_2_0_rejection(&["setup"]);
+}
+
+/// F1: `setup` must bail with the scaffold-styled circuits-prereq error
+/// before any cargo work when neither `LOGOS_BLOCKCHAIN_CIRCUITS` nor
+/// `~/.logos-blockchain-circuits/` is reachable. End-to-end check that the
+/// `check_logos_blockchain_circuits` precheck is wired into `cmd_setup`.
+#[test]
+fn setup_bails_with_scaffold_styled_error_when_circuits_missing() {
+    let temp = tempdir().expect("tempdir");
+    let project = temp.path();
+    fs::write(project.join("scaffold.toml"), MINIMAL_SCAFFOLD_TOML).expect("write scaffold.toml");
+
+    // Point HOME at a directory with no `.logos-blockchain-circuits` so the
+    // home-dir fallback also fails — otherwise the developer running the
+    // suite would silently pass via their real $HOME.
+    let fake_home = project.join("fake-home");
+    fs::create_dir_all(&fake_home).expect("mkdir fake home");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(project)
+        .env("HOME", &fake_home)
+        .env_remove("LOGOS_BLOCKCHAIN_CIRCUITS")
+        .arg("setup")
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("logos-blockchain-circuits")
+                .and(predicate::str::contains("$LOGOS_BLOCKCHAIN_CIRCUITS unset"))
+                .and(predicate::str::contains("logos-scaffold doctor"))
+                // Must NOT surface a raw cargo build-script panic.
+                .and(predicate::str::contains("logos-blockchain-pol").not())
+                .and(predicate::str::contains("build script").not()),
+        );
+}
+
+/// F4: clap's leading `error: ` is stripped before we re-wrap with anyhow,
+/// so the user sees a single `error:` prefix instead of `error: error: ...`.
+#[test]
+fn unrecognized_subcommand_produces_single_error_prefix() {
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .arg("bogus-subcommand")
+        .output()
+        .expect("run lgs");
+    assert!(
+        !output.status.success(),
+        "unrecognized subcommand must exit non-zero"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unrecognized subcommand"),
+        "stderr must surface the unrecognized-subcommand message, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("error: error:"),
+        "stderr must not double-wrap the error prefix, got:\n{stderr}"
+    );
 }
 
 /// Regression: commands that go through `load_project()` (basecamp, wallet,

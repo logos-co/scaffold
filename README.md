@@ -17,7 +17,6 @@ Localnet and process/port detection rely on Unix tools (lsof, ps, kill).
 - Single external dependency: [LEZ](https://github.com/logos-blockchain/logos-execution-zone/)
 - Standalone sequencer flow only
 - No `logos-blockchain` dependency
-- No full-stack/circuits management
 
 ## Prerequisites
 
@@ -25,6 +24,11 @@ Localnet and process/port detection rely on Unix tools (lsof, ps, kill).
 - `curl` for fetching the `logos-blockchain-circuits` release on first `setup`
 - Unix process helpers: `lsof`, `ps`, `kill`
 - Container runtime for guest builds: Docker or Podman
+- `logos-blockchain-circuits` release on disk: either set
+  `LOGOS_BLOCKCHAIN_CIRCUITS=<path>` or place the release at
+  `~/.logos-blockchain-circuits/`. Required by the LEZ standalone build
+  chain that `setup` invokes.
+- `nix` (with flakes enabled) — only required for `basecamp` subcommands.
 
 ## Install
 
