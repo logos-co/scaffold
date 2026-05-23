@@ -273,7 +273,10 @@ fn source_is_reachable(source: &str) -> bool {
             // short connect timeout so an SSH typo can't hang the CLI.
             .env("SSH_ASKPASS", "/bin/false")
             .env("SSH_ASKPASS_REQUIRE", "never")
-            .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=10")
+            .env(
+                "GIT_SSH_COMMAND",
+                "ssh -o BatchMode=yes -o ConnectTimeout=10",
+            )
             // Bound HTTPS stalls: abort if the transfer is below 1 B/s for
             // more than 10 s. Together with `GIT_TERMINAL_PROMPT=0` this
             // covers unreachable hosts and silently-dropped connections.
