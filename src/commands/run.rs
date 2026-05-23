@@ -1,60 +1,114 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use anyhow::{bail, Context};
+use notify::{RecursiveMode, Watcher};
 
 use crate::commands::build::cmd_build_shortcut;
 use crate::commands::deploy::{
     cmd_deploy, discover_deployable_programs, discover_program_binaries, extract_program_id,
 };
 use crate::commands::idl::build_idl_for_current_project;
-use crate::commands::localnet::{build_localnet_status_for_project, cmd_localnet, LocalnetAction};
+use crate::commands::localnet::{
+    build_localnet_status_for_project, cmd_localnet, cmd_localnet_reset, LocalnetAction,
+};
 use crate::commands::run_state::{
     compute_program_hashes, current_localnet_pid, deploy_can_be_skipped, load_state, save_state,
     RunDeployState,
 };
+use crate::commands::setup::ensure_default_wallet_seeded;
 use crate::commands::wallet::{cmd_wallet_topup_inner, TopupOutcome};
 use crate::constants::{DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, SPEL_BIN_REL_PATH};
-use crate::model::{LocalnetOwnership, Project};
+use crate::model::{LocalnetOwnership, Project, RunProfile};
 use crate::project::{load_project, resolve_repo_path, run_in_project_dir};
+use crate::state::prepare_wallet_home;
 use crate::DynResult;
 
+/// Debounce window for the watch loop. Filesystem events from a single
+/// editor save typically arrive in a flurry; sleep this long after the
+/// first event before re-running so we coalesce them.
+const WATCH_DEBOUNCE_MS: u64 = 500;
+
 /// All knobs that control a `lgs run` invocation. Built by `cli.rs` from
-/// the parsed `RunArgs` (with conflicting-flag resolution into `Option<Vec<_>>`)
+/// the parsed `RunArgs` (with conflicting-flag resolution into `Option<bool>`)
 /// and consumed by `cmd_run`. Grouping the fields together prevents the
 /// positional-swap class of bug.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RunInvocation {
+    pub(crate) profile: Option<String>,
+    pub(crate) reset: Option<bool>,
     pub(crate) post_deploy_override: Option<Vec<String>>,
     pub(crate) localnet_timeout_sec: Option<u64>,
+    pub(crate) watch: bool,
 }
 
 pub(crate) fn cmd_run(inv: RunInvocation) -> DynResult<()> {
     let project = load_project()?;
+    let resolved = project.config.run.resolve_profile(inv.profile.as_deref())?;
+    if let Some(name) = inv.profile.as_deref() {
+        println!("Using [run.profiles.{name}]");
+    } else if let Some(name) = project.config.run.default_profile.as_deref() {
+        println!("Using [run.profiles.{name}] (default_profile)");
+    }
     let hooks = inv
         .post_deploy_override
-        .unwrap_or_else(|| project.config.run.post_deploy.clone());
+        .unwrap_or_else(|| resolved.post_deploy.clone());
     let localnet_timeout_sec = inv
         .localnet_timeout_sec
         .unwrap_or(DEFAULT_RUN_LOCALNET_TIMEOUT_SEC);
+
+    let mut params = PipelineParams {
+        resolved: resolved.clone(),
+        hooks,
+        reset_override: inv.reset,
+        localnet_timeout_sec,
+    };
 
     // Anchor the pipeline at the discovered project root. Otherwise commands
     // that resolve paths relative to cwd (`cmd_build_shortcut`,
     // `build_idl_for_current_project`, etc.) would build/deploy from whichever
     // subdirectory the user invoked `lgs run` in.
     run_in_project_dir(Some(&project.root), || {
-        run_pipeline_once(&project, &hooks, localnet_timeout_sec)
+        run_pipeline_once(&project, &params)?;
+
+        if inv.watch {
+            // Subsequent iterations share the same hook/profile selection but
+            // never reset the localnet again — that would clobber the state
+            // hook code is verifying.
+            params.reset_override = Some(false);
+            watch_loop(&project, &params)?;
+        }
+
+        Ok(())
     })
 }
 
-fn run_pipeline_once(
-    project: &Project,
-    hooks: &[String],
+#[derive(Clone)]
+struct PipelineParams {
+    resolved: RunProfile,
+    hooks: Vec<String>,
+    reset_override: Option<bool>,
     localnet_timeout_sec: u64,
-) -> DynResult<()> {
-    let has_hooks = !hooks.is_empty();
+}
+
+fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()> {
+    let has_hooks = !params.hooks.is_empty();
     // Steps: build, build idl, localnet, topup, deploy, [+1 if hooks]
     let total_steps: u32 = if has_hooks { 6 } else { 5 };
+    let effective_reset = params.reset_override.unwrap_or(params.resolved.reset);
+
+    // Surface destructive intent up front when reset comes from config
+    // (not from the CLI flag). With --reset the user already typed the
+    // word, so re-stating it is noise; with `reset = true` in scaffold.toml
+    // they may not realize step 3 will wipe rocksdb + wallet, so warn
+    // before step 1 instead of after the build has run.
+    if effective_reset && params.reset_override.is_none() {
+        eprintln!(
+            "warning: scaffold.toml requested reset = true; step 3 will wipe sequencer state + wallet. Pass --no-reset to override."
+        );
+    }
 
     // Step 1: Build (chains setup internally)
     println!("[1/{total_steps}] Building...");
@@ -64,9 +118,27 @@ fn run_pipeline_once(
     println!("[2/{total_steps}] Building IDL...");
     build_idl_for_current_project()?;
 
-    // Step 3: Ensure localnet is running.
-    println!("[3/{total_steps}] Ensuring localnet...");
-    ensure_localnet(project, localnet_timeout_sec)?;
+    // Step 3: Reset OR ensure localnet.
+    if effective_reset {
+        println!("[3/{total_steps}] Resetting localnet (wipes sequencer + wallet)...");
+        reset_for_run(project, params.localnet_timeout_sec)?;
+        // A reset wipes on-chain state, so any prior deploy is gone:
+        // the next deploy must run regardless of hash equality. Tolerate
+        // NotFound (no prior run); surface anything else.
+        let state_file = project.root.join(".scaffold/state/run_deploy.json");
+        match std::fs::remove_file(&state_file) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!("clear stale deploy state at {}", state_file.display())
+                });
+            }
+        }
+    } else {
+        println!("[3/{total_steps}] Ensuring localnet...");
+        ensure_localnet(project, params.localnet_timeout_sec)?;
+    }
 
     // Step 4: Wallet topup
     println!("[4/{total_steps}] Topping up wallet...");
@@ -84,15 +156,15 @@ fn run_pipeline_once(
     // instance that received it. A `lgs localnet stop && start` cycle
     // changes the sequencer PID and wipes on-chain state, so PID equality
     // is the gate that prevents stale-deploy false positives. To force a
-    // re-deploy without restarting localnet, delete
-    // `.scaffold/state/run_deploy.json` manually (a `--reset` switch
-    // arrives in a later branch of this stack).
+    // re-deploy without restarting localnet, use `--reset` (which also
+    // clears the cache) or delete `.scaffold/state/run_deploy.json`
+    // manually.
     let current_hashes = compute_program_hashes(project)?;
     let current_pid = current_localnet_pid(project);
     let prior = load_state(project);
     let deploy_skipped = if deploy_can_be_skipped(&current_hashes, current_pid, &prior) {
         println!(
-            "[5/{total_steps}] Deploy skipped (guest binaries + IDL + config + sequencer unchanged; delete `.scaffold/state/run_deploy.json` to force a re-deploy)"
+            "[5/{total_steps}] Deploy skipped (guest binaries + IDL + config + sequencer unchanged; pass `--reset` to wipe and re-deploy, or delete `.scaffold/state/run_deploy.json` to force a re-deploy without a wipe)"
         );
         true
     } else {
@@ -108,17 +180,22 @@ fn run_pipeline_once(
         false
     };
 
+    // Collect deployed-program metadata for hook env injection regardless
+    // of whether deploy ran or was skipped — hooks address programs by
+    // name and shouldn't have to care about cache state.
+    // `extract_program_id` shells out to `spel inspect` once per program
+    // here so the per-hook loop doesn't multiply latency by hook count.
+    let deployed = collect_deployed_programs(project, deploy_skipped)?;
+
     // Step 6: Post-deploy hooks (or summary)
     if has_hooks {
-        let n = hooks.len();
+        let n = params.hooks.len();
         println!("[6/{total_steps}] Running {n} post-deploy hook(s)...");
-        // Resolve the single-program shortcut metadata once: `extract_program_id`
-        // shells out to `spel inspect` with a per-call timeout, so doing it
-        // inside the loop would multiply latency by the hook count.
-        let single_program = resolve_single_program_metadata(project)?;
-        for (i, hook) in hooks.iter().enumerate() {
+        check_env_var_suffix_collisions(&deployed.programs)?;
+        warn_on_rewritten_program_names(&deployed.programs);
+        for (i, hook) in params.hooks.iter().enumerate() {
             println!("===> post_deploy[{}/{n}]: {hook}", i + 1);
-            run_post_deploy_hook(project, hook, single_program.as_ref(), deploy_skipped)?;
+            run_post_deploy_hook(project, hook, &deployed)?;
             println!("<=== post_deploy[{}/{n}] OK", i + 1);
         }
     } else {
@@ -128,23 +205,279 @@ fn run_pipeline_once(
     Ok(())
 }
 
-/// Single-program shortcut metadata exposed to post-deploy hooks via env vars.
-/// Resolved once per `run` invocation and reused across hooks.
-struct SingleProgram {
-    binary_path: PathBuf,
-    program_id: Option<String>,
+fn reset_for_run(project: &Project, verify_timeout_sec: u64) -> DynResult<()> {
+    let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
+    let state_path = project.root.join(".scaffold/state/localnet.state");
+    let log_path = project.root.join(".scaffold/logs/sequencer.log");
+    let localnet_addr = format!("127.0.0.1:{}", project.config.localnet.port);
+    cmd_localnet_reset(
+        project,
+        &lez,
+        &state_path,
+        &log_path,
+        &localnet_addr,
+        false, // dry_run — actually perform the reset
+        true,  // yes — non-interactive; run is the user-initiated action that authorizes it
+        true,  // reset_wallet — full wipe; reseed_after_wipe re-seeds below
+        verify_timeout_sec,
+    )?;
+    // The wipe deleted the wallet directory and state file; the next pipeline
+    // step (topup) would fail without a re-seed. Recover by calling the same
+    // primitives `cmd_setup` invokes when the wallet is absent. If the
+    // re-seed itself fails, stop the sequencer we just started so we don't
+    // strand the project in a half-wiped state with a running daemon.
+    if let Err(err) = reseed_after_wipe(project) {
+        let _ = cmd_localnet(LocalnetAction::Stop);
+        return Err(err.context(
+            "post-reset wallet re-seed failed; sequencer was stopped to avoid leaving a half-wiped project",
+        ));
+    }
+    Ok(())
 }
 
-fn resolve_single_program_metadata(project: &Project) -> DynResult<Option<SingleProgram>> {
-    let Some(binary_path) = single_program_binary(project)? else {
-        return Ok(None);
+/// Re-seed the project's default wallet after `cmd_localnet_reset` wiped
+/// it. Reuses the same primitives `cmd_setup` calls so the resulting
+/// `wallet.state` is byte-equivalent to a fresh `lgs setup`. Extracted as
+/// its own helper so the byte-equivalence test can drive it directly
+/// without booting a real sequencer.
+fn watch_loop(project: &Project, params: &PipelineParams) -> DynResult<()> {
+    let (tx, rx) = mpsc::channel();
+    let mut watcher = notify::recommended_watcher(move |res| {
+        let _ = tx.send(res);
+    })
+    .context("create filesystem watcher")?;
+    watcher
+        .watch(&project.root, RecursiveMode::Recursive)
+        .context("watch project root")?;
+
+    // The IDL build writes JSON files into framework.idl.path on every
+    // iteration. Without ignoring that directory, those writes fire
+    // their own notify events → infinite loop. Resolve once before
+    // entering the loop. Use the project-relative form so we match
+    // both canonical and non-canonical event paths.
+    let idl_rel = PathBuf::from(&project.config.framework.idl.path);
+    let watch_ctx = WatchIgnore { idl_rel };
+
+    println!();
+    println!(
+        "===> watching {} for changes (Ctrl-C to exit)",
+        project.root.display()
+    );
+
+    loop {
+        let event = match rx.recv() {
+            Ok(Ok(ev)) => ev,
+            Ok(Err(err)) => {
+                eprintln!("watch error: {err}");
+                continue;
+            }
+            Err(_) => {
+                eprintln!("===> watcher channel disconnected; exiting watch loop");
+                break;
+            }
+        };
+        if !is_watched_event(project, &watch_ctx, &event) {
+            continue;
+        }
+        // Debounce: sleep then drain the rest of the burst.
+        std::thread::sleep(Duration::from_millis(WATCH_DEBOUNCE_MS));
+        while rx.try_recv().is_ok() {}
+        println!();
+        println!("===> change detected, re-running pipeline");
+        if let Err(err) = run_pipeline_once(project, params) {
+            eprintln!("pipeline failed: {err:#}");
+            eprintln!("===> waiting for next change");
+        }
+    }
+
+    Ok(())
+}
+
+struct WatchIgnore {
+    idl_rel: PathBuf,
+}
+
+fn is_watched_event(project: &Project, ctx: &WatchIgnore, event: &notify::Event) -> bool {
+    for path in &event.paths {
+        if !is_ignored_path(&project.root, ctx, path) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_ignored_path(project_root: &Path, ctx: &WatchIgnore, path: &Path) -> bool {
+    // `notify` may emit canonical (symlinks resolved) or non-canonical paths
+    // depending on the platform and how the project root was registered.
+    // Try both forms so we never silently *ignore* a project edit just
+    // because the OS canonicalized one side and not the other. Fail-open:
+    // a path we can't classify is treated as "watched" so the worst case
+    // is a spurious re-run, never a missed edit.
+    let canonical_root = project_root.canonicalize().ok();
+    let rel = path.strip_prefix(project_root).ok().or_else(|| {
+        canonical_root
+            .as_deref()
+            .and_then(|r| path.strip_prefix(r).ok())
+    });
+    let Some(rel) = rel else {
+        // Path doesn't belong to the project tree under either form. Ignore
+        // — this is a notify event from outside the watched directory.
+        return true;
     };
-    let program_id =
-        resolve_spel_bin(project).and_then(|spel_bin| extract_program_id(&spel_bin, &binary_path));
-    Ok(Some(SingleProgram {
-        binary_path,
-        program_id,
-    }))
+    for component in rel.components() {
+        let s = component.as_os_str().to_string_lossy();
+        if matches!(s.as_ref(), ".scaffold" | "target" | ".git") {
+            return true;
+        }
+    }
+    if rel.starts_with(&ctx.idl_rel) {
+        return true;
+    }
+    false
+}
+
+fn reseed_after_wipe(project: &Project) -> DynResult<()> {
+    let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
+    let wallet_home = project.root.join(&project.config.wallet_home_dir);
+    prepare_wallet_home(&lez, &wallet_home)?;
+    ensure_default_wallet_seeded(&project.root, &wallet_home)
+}
+
+/// Per-program metadata exposed to post-deploy hooks via env vars.
+/// `program_id` may be `None` when `spel inspect` fails (missing vendored
+/// binary, unreadable ELF).
+#[derive(Clone, Debug)]
+pub(crate) struct DeployedProgram {
+    pub(crate) name: String,
+    pub(crate) program_id: Option<String>,
+    pub(crate) binary_path: PathBuf,
+}
+
+/// Run-level outcome of step 5 plus per-program metadata. `skipped` is
+/// run-level (the cache either short-circuited the whole deploy or not),
+/// so it lives here rather than on each `DeployedProgram`.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct DeployedPrograms {
+    pub(crate) skipped: bool,
+    pub(crate) programs: Vec<DeployedProgram>,
+}
+
+/// Errors from `discover_deployable_programs` or `resolve_repo_path` are
+/// propagated rather than swallowed: an unreadable bin dir or a
+/// misconfigured `[repos.spel]` would otherwise silently strip
+/// `SCAFFOLD_PROGRAMS` and all indexed env vars from hooks. The
+/// missing-bin-dir case stays a successful empty result, because step 1
+/// (build) is the layer that validates project layout.
+fn collect_deployed_programs(project: &Project, skipped: bool) -> DynResult<DeployedPrograms> {
+    let programs_dir = project.root.join("methods/guest/src/bin");
+    if !programs_dir.exists() {
+        return Ok(DeployedPrograms {
+            skipped,
+            programs: Vec::new(),
+        });
+    }
+    let programs = discover_deployable_programs(&project.root)
+        .context("failed to discover deployable programs for run post-deploy env")?;
+    let binaries = discover_program_binaries(&project.root, &programs);
+    let spel_repo = resolve_repo_path(project, &project.config.spel, "spel")
+        .context("failed to resolve spel repo path for run post-deploy env")?;
+    let spel_bin = spel_repo.join(SPEL_BIN_REL_PATH);
+
+    let mut out = Vec::new();
+    for stem in programs {
+        let Some(bin_path) = binaries.get(&stem).cloned() else {
+            continue;
+        };
+        let program_id = extract_program_id(&spel_bin, &bin_path);
+        out.push(DeployedProgram {
+            name: stem,
+            program_id,
+            binary_path: bin_path,
+        });
+    }
+    Ok(DeployedPrograms {
+        skipped,
+        programs: out,
+    })
+}
+
+/// Bail when two raw program names sanitize to the same env-var suffix
+/// (e.g. `my-program.rs` and `my_program.rs` both map to `my_program`).
+/// Without this, the second `cmd.env()` would silently shadow the first
+/// and hooks would see the wrong program_id/binary_path for one of them.
+fn check_env_var_suffix_collisions(programs: &[DeployedProgram]) -> DynResult<()> {
+    use std::collections::BTreeMap;
+    let mut groups: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+    for p in programs {
+        groups
+            .entry(env_var_suffix(&p.name))
+            .or_default()
+            .push(p.name.as_str());
+    }
+    let collisions: Vec<(String, Vec<&str>)> = groups
+        .into_iter()
+        .filter(|(_, raws)| raws.len() > 1)
+        .collect();
+    if collisions.is_empty() {
+        return Ok(());
+    }
+    let mut msg = String::from(
+        "post-deploy env vars: program names collide after sanitization to [A-Za-z0-9_]:",
+    );
+    for (suffix, raws) in collisions {
+        msg.push_str(&format!("\n  {} -> {}", raws.join(", "), suffix));
+    }
+    msg.push_str(
+        "\nRename one of the program source files in methods/guest/src/bin/ to disambiguate.",
+    );
+    bail!("{msg}")
+}
+
+/// Replace any character that isn't `[A-Za-z0-9_]` with `_` so the result
+/// is a legal POSIX env var name suffix. Program names from
+/// `methods/guest/src/bin/*.rs` are typically already snake_case, but
+/// nothing prevents `my-program.rs` from existing — sanitize defensively.
+fn env_var_suffix(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// When a program filename contains characters that get rewritten in env
+/// var names (anything outside `[A-Za-z0-9_]`), the indexed forms
+/// `SCAFFOLD_PROGRAM_ID_<name>` use the rewritten suffix while
+/// `$SCAFFOLD_PROGRAMS` round-trips the raw filename. A hook that interpolates
+/// `$SCAFFOLD_PROGRAM_ID_my-program` would parse as
+/// `${SCAFFOLD_PROGRAM_ID_my}-program` and silently produce wrong output.
+/// Print one line per rewritten name so the user sees the actual var name to
+/// reference before the hook runs.
+fn warn_on_rewritten_program_names(deployed: &[DeployedProgram]) {
+    let rewrites: Vec<(&str, String)> = deployed
+        .iter()
+        .filter_map(|d| {
+            let suffix = env_var_suffix(&d.name);
+            if suffix == d.name {
+                None
+            } else {
+                Some((d.name.as_str(), suffix))
+            }
+        })
+        .collect();
+    if rewrites.is_empty() {
+        return;
+    }
+    println!(
+        "      note: program name(s) rewritten for env-var legality (any char outside [A-Za-z0-9_] becomes _):"
+    );
+    for (raw, suffix) in rewrites {
+        println!("        {raw} -> SCAFFOLD_PROGRAM_ID_{suffix} (and SCAFFOLD_GUEST_BIN_{suffix}, SCAFFOLD_DEPLOY_SKIPPED_{suffix})");
+    }
 }
 
 fn ensure_localnet(project: &Project, timeout_sec: u64) -> DynResult<()> {
@@ -206,8 +539,7 @@ fn print_deploy_summary(project: &Project) -> DynResult<()> {
 fn build_hook_command(
     project: &Project,
     hook_command: &str,
-    single_program: Option<&SingleProgram>,
-    deploy_skipped: bool,
+    deployed: &DeployedPrograms,
 ) -> Command {
     let port = project.config.localnet.port;
     let sequencer_url = format!("http://127.0.0.1:{port}");
@@ -226,6 +558,8 @@ fn build_hook_command(
         .canonicalize()
         .unwrap_or_else(|_| project.root.join(&project.config.framework.idl.path));
 
+    let run_deploy_skipped = deployed.skipped;
+
     let mut cmd = Command::new("sh");
     cmd.arg("-c")
         .arg(hook_command)
@@ -238,67 +572,47 @@ fn build_hook_command(
         // it just as much as single-program ones.
         .env(
             "SCAFFOLD_DEPLOY_SKIPPED",
-            if deploy_skipped { "1" } else { "0" },
+            if run_deploy_skipped { "1" } else { "0" },
         )
         .current_dir(&project.root);
 
-    // Single-program shortcut: when there's exactly one deployable program,
-    // expose its program-id and guest-binary path as env vars so simple
-    // hooks can call `spel` or the dogfood client without parsing the
-    // deploy summary.
-    if let Some(sp) = single_program {
-        if let Some(id) = &sp.program_id {
+    // Per-program metadata: `SCAFFOLD_PROGRAMS` holds the space-separated
+    // list of names, with parallel `SCAFFOLD_PROGRAM_ID_<name>`,
+    // `SCAFFOLD_GUEST_BIN_<name>`, `SCAFFOLD_DEPLOY_SKIPPED_<name>` per
+    // entry. Names are sanitized for env-var-suffix legality.
+    let names: Vec<&str> = deployed.programs.iter().map(|d| d.name.as_str()).collect();
+    cmd.env("SCAFFOLD_PROGRAMS", names.join(" "));
+    for d in &deployed.programs {
+        let suffix = env_var_suffix(&d.name);
+        if let Some(id) = &d.program_id {
+            cmd.env(format!("SCAFFOLD_PROGRAM_ID_{suffix}"), id);
+        }
+        cmd.env(format!("SCAFFOLD_GUEST_BIN_{suffix}"), &d.binary_path);
+        cmd.env(
+            format!("SCAFFOLD_DEPLOY_SKIPPED_{suffix}"),
+            if run_deploy_skipped { "1" } else { "0" },
+        );
+    }
+    // Single-program shortcut: only set when there's exactly one program.
+    // Hooks that handle multi-program projects must use the indexed forms.
+    // `SCAFFOLD_DEPLOY_SKIPPED` is set unconditionally above (run-level),
+    // so it's not duplicated here.
+    if let [single] = deployed.programs.as_slice() {
+        cmd.env("SCAFFOLD_PROGRAM_NAME", &single.name);
+        if let Some(id) = &single.program_id {
             cmd.env("SCAFFOLD_PROGRAM_ID", id);
         }
-        cmd.env("SCAFFOLD_GUEST_BIN", &sp.binary_path);
+        cmd.env("SCAFFOLD_GUEST_BIN", &single.binary_path);
     }
     cmd
-}
-
-fn single_program_binary(project: &Project) -> DynResult<Option<PathBuf>> {
-    let programs_dir = project.root.join("methods/guest/src/bin");
-    if !programs_dir.exists() {
-        return Ok(None);
-    }
-    // Propagate I/O failures rather than treating them as "no programs":
-    // an unreadable bin dir is a real error, and silently dropping it
-    // strips the SCAFFOLD_GUEST_BIN env var from post-deploy hooks
-    // without ever surfacing the cause.
-    let programs = discover_deployable_programs(&project.root)
-        .context("failed to discover deployable programs for run")?;
-    if programs.len() != 1 {
-        return Ok(None);
-    }
-    let binaries = discover_program_binaries(&project.root, &programs);
-    Ok(binaries.get(&programs[0]).cloned())
-}
-
-fn resolve_spel_bin(project: &Project) -> Option<PathBuf> {
-    // Surface resolver failures rather than silently dropping them: the most
-    // common reasons `resolve_repo_path` errors here are exactly the cases
-    // the user cares about (misconfigured `[repos.spel]`, missing
-    // `cache_root`, broken pin). Without this warning, deploy succeeds and
-    // every post-deploy hook runs with `SCAFFOLD_PROGRAM_ID` /
-    // `SCAFFOLD_GUEST_BIN` mysteriously unset.
-    match resolve_repo_path(project, &project.config.spel, "spel") {
-        Ok(p) => Some(p.join(SPEL_BIN_REL_PATH)),
-        Err(e) => {
-            eprintln!(
-                "warning: cannot resolve spel binary: {e}; \
-                 SCAFFOLD_PROGRAM_ID will be unset for post-deploy hooks"
-            );
-            None
-        }
-    }
 }
 
 fn run_post_deploy_hook(
     project: &Project,
     hook_command: &str,
-    single_program: Option<&SingleProgram>,
-    deploy_skipped: bool,
+    deployed: &DeployedPrograms,
 ) -> DynResult<()> {
-    let status = build_hook_command(project, hook_command, single_program, deploy_skipped)
+    let status = build_hook_command(project, hook_command, deployed)
         .status()
         .context("failed to execute post-deploy hook")?;
 
@@ -365,7 +679,8 @@ mod tests {
         let project = make_test_project(temp.path().to_path_buf());
 
         let hook = format!("echo \"$SEQUENCER_URL\" > '{}'", env_file.display());
-        run_post_deploy_hook(&project, &hook, None, false).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+            .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content.trim(), "http://127.0.0.1:3040");
@@ -378,7 +693,8 @@ mod tests {
         let project = make_test_project(temp.path().to_path_buf());
 
         let hook = format!("echo \"$NSSA_WALLET_HOME_DIR\" > '{}'", env_file.display());
-        run_post_deploy_hook(&project, &hook, None, false).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+            .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert!(
@@ -394,7 +710,8 @@ mod tests {
         let project = make_test_project(temp.path().to_path_buf());
 
         let hook = format!("echo \"$SCAFFOLD_PROJECT_ROOT\" > '{}'", env_file.display());
-        run_post_deploy_hook(&project, &hook, None, false).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+            .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         let canonical = temp
@@ -411,7 +728,8 @@ mod tests {
         let project = make_test_project(temp.path().to_path_buf());
 
         let hook = format!("echo \"$SCAFFOLD_IDL_DIR\" > '{}'", env_file.display());
-        run_post_deploy_hook(&project, &hook, None, false).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+            .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert!(
@@ -428,7 +746,8 @@ mod tests {
         project.config.localnet.port = 9999;
 
         let hook = format!("echo \"$SEQUENCER_URL\" > '{}'", env_file.display());
-        run_post_deploy_hook(&project, &hook, None, false).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+            .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content.trim(), "http://127.0.0.1:9999");
@@ -439,7 +758,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let project = make_test_project(temp.path().to_path_buf());
 
-        let result = run_post_deploy_hook(&project, "exit 42", None, false);
+        let result = run_post_deploy_hook(&project, "exit 42", &DeployedPrograms::default());
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -455,7 +774,8 @@ mod tests {
         let project = make_test_project(temp.path().to_path_buf());
 
         let hook = format!("pwd > '{}'", pwd_file.display());
-        run_post_deploy_hook(&project, &hook, None, false).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+            .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&pwd_file).expect("read pwd output");
         let canonical = temp
@@ -523,7 +843,8 @@ mod tests {
             }} > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, None, false).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+            .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         let canonical = temp
@@ -549,24 +870,43 @@ mod tests {
         );
     }
 
+    fn fake_deployed(name: &str, id: Option<&str>) -> DeployedProgram {
+        DeployedProgram {
+            name: name.to_string(),
+            program_id: id.map(str::to_string),
+            binary_path: PathBuf::from(format!("/fake/{name}.bin")),
+        }
+    }
+
+    fn programs(progs: Vec<DeployedProgram>, skipped: bool) -> DeployedPrograms {
+        DeployedPrograms {
+            skipped,
+            programs: progs,
+        }
+    }
+
     #[test]
     fn hook_receives_single_program_env_when_provided() {
-        // When `SingleProgram` is passed, `SCAFFOLD_PROGRAM_ID` and
-        // `SCAFFOLD_GUEST_BIN` reach the hook environment.
+        // When a single `DeployedProgram` is passed, `SCAFFOLD_PROGRAM_ID`
+        // and `SCAFFOLD_GUEST_BIN` reach the hook environment.
         let temp = tempfile::tempdir().expect("tempdir");
         let env_file = temp.path().join("env_out.txt");
         let project = make_test_project(temp.path().to_path_buf());
 
-        let single = SingleProgram {
-            binary_path: temp.path().join("counter.bin"),
-            program_id: Some("deadbeef".to_string()),
-        };
+        let deployed = programs(
+            vec![DeployedProgram {
+                name: "counter".to_string(),
+                program_id: Some("deadbeef".to_string()),
+                binary_path: temp.path().join("counter.bin"),
+            }],
+            false,
+        );
 
         let hook = format!(
             "echo \"$SCAFFOLD_PROGRAM_ID|$SCAFFOLD_GUEST_BIN\" > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, Some(&single), false).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &deployed).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         let expected_bin = temp.path().join("counter.bin");
@@ -585,51 +925,29 @@ mod tests {
         let env_file = temp.path().join("env_out.txt");
         let project = make_test_project(temp.path().to_path_buf());
 
-        let single = SingleProgram {
-            binary_path: temp.path().join("counter.bin"),
-            program_id: None,
-        };
+        let deployed = programs(
+            vec![DeployedProgram {
+                name: "counter".to_string(),
+                program_id: None,
+                binary_path: temp.path().join("counter.bin"),
+            }],
+            false,
+        );
 
         let hook = format!(
             "if [ -z \"${{SCAFFOLD_PROGRAM_ID+set}}\" ]; then echo unset; else echo set; fi > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, Some(&single), false).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &deployed).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content.trim(), "unset");
     }
 
     #[test]
-    fn resolve_spel_bin_returns_none_when_repo_unresolvable() {
-        // Regression for the silent-error-swallowing bug: when
-        // `[repos.spel]` is misconfigured (both path and pin empty),
-        // `resolve_spel_bin` must return `None` rather than panic, so the
-        // caller can still produce a `SingleProgram` with `program_id: None`
-        // and the post-deploy hook keeps running. The accompanying stderr
-        // warning is exercised in the binary via `eprintln!` and isn't
-        // captured here — what we lock in is that the failure mode stays
-        // `None`, not a panic.
-        let temp = tempfile::tempdir().expect("tempdir");
-        let mut project = make_test_project(temp.path().to_path_buf());
-        // Force `resolve_repo_path` to error: path empty AND pin empty.
-        project.config.spel = RepoRef {
-            source: "spel".to_string(),
-            path: String::new(),
-            pin: String::new(),
-            ..Default::default()
-        };
-        // Also blank the cache_root so the env layer doesn't accidentally
-        // succeed in a sandbox.
-        project.config.cache_root = String::new();
-
-        assert!(resolve_spel_bin(&project).is_none());
-    }
-
-    #[test]
     fn hook_omits_single_program_env_when_metadata_absent() {
-        // Multi-program (or no-program) projects pass `None`, and the
-        // single-program shortcut env vars must not be set.
+        // No-program projects pass `&[]`, and the single-program shortcut
+        // env vars must not be set.
         let temp = tempfile::tempdir().expect("tempdir");
         let env_file = temp.path().join("env_out.txt");
         let project = make_test_project(temp.path().to_path_buf());
@@ -638,35 +956,45 @@ mod tests {
             "echo \"id=${{SCAFFOLD_PROGRAM_ID+set}}|bin=${{SCAFFOLD_GUEST_BIN+set}}\" > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, None, false).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+            .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content.trim(), "id=|bin=");
     }
 
     #[test]
-    fn hook_receives_deploy_skipped_env_without_single_program() {
-        // `SCAFFOLD_DEPLOY_SKIPPED` is run-level state and must reach the
-        // hook even when there's no single-program shortcut to ride on
-        // (i.e. multi-program projects). Pre-fix, the env var was only
-        // exported inside the `if let Some(single_program)` block, so
-        // multi-program hooks never saw it.
+    fn hook_receives_deploy_skipped_env_for_multiprogram_run() {
+        // `SCAFFOLD_DEPLOY_SKIPPED` is run-level state and must reach
+        // multi-program hooks too — the env var is set unconditionally
+        // (driven by `deployed[0].skipped`), not gated on the
+        // single-program shortcut block.
         let temp = tempfile::tempdir().expect("tempdir");
         let env_file = temp.path().join("env_out.txt");
         let project = make_test_project(temp.path().to_path_buf());
+        let deployed = programs(
+            vec![
+                fake_deployed("a", Some("h1")),
+                fake_deployed("b", Some("h2")),
+            ],
+            true,
+        );
 
         let hook = format!(
             "echo \"$SCAFFOLD_DEPLOY_SKIPPED\" > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, None, true).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &deployed).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content.trim(), "1");
     }
 
     #[test]
-    fn hook_receives_deploy_skipped_zero_when_deploy_ran() {
+    fn hook_receives_deploy_skipped_zero_when_no_programs() {
+        // Empty `deployed` (no programs at all) still sets the env var,
+        // surfacing "0" rather than leaving it unset — hooks shouldn't
+        // need to disambiguate "deploy ran" from "no programs".
         let temp = tempfile::tempdir().expect("tempdir");
         let env_file = temp.path().join("env_out.txt");
         let project = make_test_project(temp.path().to_path_buf());
@@ -675,9 +1003,281 @@ mod tests {
             "echo \"$SCAFFOLD_DEPLOY_SKIPPED\" > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, None, false).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+            .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content.trim(), "0");
+    }
+
+    #[test]
+    fn hook_receives_program_id_indexed_by_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env_file = temp.path().join("env_out.txt");
+        let project = make_test_project(temp.path().to_path_buf());
+        let deployed = programs(vec![fake_deployed("counter", Some("deadbeef"))], false);
+
+        let hook = format!(
+            "echo \"$SCAFFOLD_PROGRAM_ID_counter\" > '{}'",
+            env_file.display()
+        );
+        run_post_deploy_hook(&project, &hook, &deployed).expect("hook should succeed");
+
+        let content = std::fs::read_to_string(&env_file).expect("read env output");
+        assert_eq!(content.trim(), "deadbeef");
+    }
+
+    #[test]
+    fn hook_receives_single_program_shortcut_when_one_program() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env_file = temp.path().join("env_out.txt");
+        let project = make_test_project(temp.path().to_path_buf());
+        let deployed = programs(vec![fake_deployed("counter", Some("abc123"))], false);
+
+        let hook = format!(
+            "printf '%s|%s|%s' \"$SCAFFOLD_PROGRAM_NAME\" \"$SCAFFOLD_PROGRAM_ID\" \"$SCAFFOLD_DEPLOY_SKIPPED\" > '{}'",
+            env_file.display()
+        );
+        run_post_deploy_hook(&project, &hook, &deployed).expect("hook should succeed");
+
+        let content = std::fs::read_to_string(&env_file).expect("read env output");
+        assert_eq!(content, "counter|abc123|0");
+    }
+
+    #[test]
+    fn hook_omits_single_program_shortcut_when_multiple() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env_file = temp.path().join("env_out.txt");
+        let project = make_test_project(temp.path().to_path_buf());
+        let deployed = programs(
+            vec![
+                fake_deployed("counter", Some("h1")),
+                fake_deployed("greeter", Some("h2")),
+            ],
+            false,
+        );
+
+        let hook = format!(
+            "echo \"[${{SCAFFOLD_PROGRAM_NAME:-unset}}]\" > '{}'",
+            env_file.display()
+        );
+        run_post_deploy_hook(&project, &hook, &deployed).expect("hook should succeed");
+
+        let content = std::fs::read_to_string(&env_file).expect("read env output");
+        assert_eq!(content.trim(), "[unset]");
+    }
+
+    #[test]
+    fn hook_receives_programs_list_and_skipped_flag() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env_file = temp.path().join("env_out.txt");
+        let project = make_test_project(temp.path().to_path_buf());
+        let deployed = programs(
+            vec![fake_deployed("a", None), fake_deployed("b", Some("h"))],
+            true,
+        );
+
+        let hook = format!(
+            "printf '%s|%s|%s' \"$SCAFFOLD_PROGRAMS\" \"$SCAFFOLD_DEPLOY_SKIPPED_a\" \"$SCAFFOLD_DEPLOY_SKIPPED_b\" > '{}'",
+            env_file.display()
+        );
+        run_post_deploy_hook(&project, &hook, &deployed).expect("hook should succeed");
+
+        let content = std::fs::read_to_string(&env_file).expect("read env output");
+        assert_eq!(content, "a b|1|1");
+    }
+
+    #[test]
+    fn hook_program_id_unset_when_extraction_failed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env_file = temp.path().join("env_out.txt");
+        let project = make_test_project(temp.path().to_path_buf());
+        let deployed = programs(vec![fake_deployed("noid", None)], false);
+
+        let hook = format!(
+            "echo \"[${{SCAFFOLD_PROGRAM_ID_noid:-unset}}]\" > '{}'",
+            env_file.display()
+        );
+        run_post_deploy_hook(&project, &hook, &deployed).expect("hook should succeed");
+
+        let content = std::fs::read_to_string(&env_file).expect("read env output");
+        assert_eq!(content.trim(), "[unset]");
+    }
+
+    #[test]
+    fn env_var_suffix_sanitizes_unsafe_characters() {
+        assert_eq!(env_var_suffix("plain"), "plain");
+        assert_eq!(env_var_suffix("with-dash"), "with_dash");
+        assert_eq!(env_var_suffix("dot.name"), "dot_name");
+        assert_eq!(env_var_suffix("a/b"), "a_b");
+    }
+
+    #[test]
+    fn collect_deployed_programs_returns_empty_ok_when_bin_dir_missing() {
+        // No `methods/guest/src/bin` directory at all: this is a valid
+        // state for non-LEZ projects, so it's Ok(empty) — not an error.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project = make_test_project(temp.path().to_path_buf());
+
+        let got = collect_deployed_programs(&project, false).expect("should be Ok");
+        assert!(got.programs.is_empty());
+        assert!(!got.skipped);
+    }
+
+    #[test]
+    fn collect_deployed_programs_propagates_spel_resolution_error() {
+        // Misconfigured `[repos.spel]` (both path and pin empty) must
+        // bubble up as a hard error rather than silently producing
+        // an empty `SCAFFOLD_PROGRAMS` for hooks.
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(temp.path().join("methods/guest/src/bin")).expect("create bin dir");
+        let mut project = make_test_project(temp.path().to_path_buf());
+        project.config.spel.path = String::new();
+        project.config.spel.pin = String::new();
+
+        let err = collect_deployed_programs(&project, false).expect_err("should be Err");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("spel"),
+            "expected error to mention spel, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn check_env_var_suffix_collisions_bails_on_collision() {
+        let progs = vec![
+            DeployedProgram {
+                name: "my-program".to_string(),
+                program_id: None,
+                binary_path: PathBuf::from("/dev/null"),
+            },
+            DeployedProgram {
+                name: "my_program".to_string(),
+                program_id: None,
+                binary_path: PathBuf::from("/dev/null"),
+            },
+        ];
+        let err = check_env_var_suffix_collisions(&progs).expect_err("should be Err");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("my-program"), "msg was: {msg}");
+        assert!(msg.contains("my_program"), "msg was: {msg}");
+    }
+
+    #[test]
+    fn check_env_var_suffix_collisions_passes_when_unique() {
+        let progs = vec![
+            DeployedProgram {
+                name: "counter".to_string(),
+                program_id: None,
+                binary_path: PathBuf::from("/dev/null"),
+            },
+            DeployedProgram {
+                name: "greeter".to_string(),
+                program_id: None,
+                binary_path: PathBuf::from("/dev/null"),
+            },
+        ];
+        check_env_var_suffix_collisions(&progs).expect("no collisions");
+    }
+
+    #[test]
+    fn warn_on_rewritten_program_names_only_lists_rewrites() {
+        // Just exercise the function on a mixed list; the println!s go to
+        // stdout (captured by `cargo test`) but we mainly want to confirm
+        // it doesn't panic and the rewrite-detection logic stays consistent
+        // with `env_var_suffix`.
+        let deployed = vec![
+            DeployedProgram {
+                name: "alphanumeric".to_string(),
+                program_id: None,
+                binary_path: PathBuf::from("/dev/null"),
+            },
+            DeployedProgram {
+                name: "with-dash".to_string(),
+                program_id: None,
+                binary_path: PathBuf::from("/dev/null"),
+            },
+        ];
+        warn_on_rewritten_program_names(&deployed);
+        // No assertion: the contract is "doesn't panic, prints only for
+        // rewritten names". The print_deploy_summary integration tests
+        // already lock in the user-visible output shape.
+    }
+
+    /// Asserts that `reseed_after_wipe` produces a `wallet.state` byte-equivalent
+    /// to a fresh setup. The test does not exercise `reset_for_run` itself —
+    /// `cmd_localnet_reset` requires a real sequencer and isn't reachable from
+    /// unit-test scope. What this *does* lock down: if `reseed_after_wipe`
+    /// drifts away from calling the same primitives `cmd_setup` uses
+    /// (`prepare_wallet_home` + `ensure_default_wallet_seeded`), the byte
+    /// comparison breaks. `reset_for_run` itself must keep calling
+    /// `reseed_after_wipe` (not inline a parallel seed) — that contract is
+    /// enforced by code review, not by this test.
+    #[test]
+    fn reseed_after_wipe_matches_setup_baseline() {
+        use crate::commands::setup::ensure_default_wallet_seeded;
+        use crate::commands::wallet_support::{wallet_state_path, WALLET_CONFIG_PRIMARY};
+        use crate::state::prepare_wallet_home;
+
+        // Two parallel project trees with identical fake LEZ wallet configs.
+        // Both start from the same state a freshly-wiped project would: LEZ
+        // bundled wallet config exists on disk, but no `.scaffold/wallet/`.
+        let baseline = tempfile::tempdir().expect("baseline tempdir");
+        let post_reset = tempfile::tempdir().expect("post_reset tempdir");
+
+        for root in [baseline.path(), post_reset.path()] {
+            let lez_cfg_dir = root.join("lez/wallet/configs/debug");
+            std::fs::create_dir_all(&lez_cfg_dir).expect("create lez cfg dir");
+            std::fs::write(
+                lez_cfg_dir.join("wallet_config.json"),
+                r#"{
+  "initial_accounts": [
+    { "Public": { "account_id": "6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV" } }
+  ]
+}"#,
+            )
+            .expect("write lez wallet config");
+        }
+
+        // Baseline: drive `cmd_setup`'s seed primitives directly.
+        {
+            let lez = baseline.path().join("lez");
+            let wallet_home = baseline.path().join(".scaffold/wallet");
+            prepare_wallet_home(&lez, &wallet_home).expect("baseline prepare");
+            ensure_default_wallet_seeded(baseline.path(), &wallet_home).expect("baseline seed");
+        }
+
+        // Post-reset: drive `reseed_after_wipe` directly.
+        // The fixture sets `lez.path = "lez"` (relative); make it absolute
+        // so the helper doesn't depend on cwd (tests run in parallel and
+        // can't share cwd).
+        let mut project = make_test_project(post_reset.path().to_path_buf());
+        project.config.lez.path = post_reset.path().join("lez").to_string_lossy().to_string();
+        reseed_after_wipe(&project).expect("post-reset reseed");
+
+        let baseline_state =
+            std::fs::read(wallet_state_path(baseline.path())).expect("read baseline state");
+        let post_reset_state =
+            std::fs::read(wallet_state_path(post_reset.path())).expect("read post-reset state");
+        assert_eq!(
+            baseline_state, post_reset_state,
+            "post-reset wallet.state must be byte-equivalent to clean-setup baseline"
+        );
+
+        let baseline_cfg = std::fs::read(
+            baseline
+                .path()
+                .join(".scaffold/wallet")
+                .join(WALLET_CONFIG_PRIMARY),
+        )
+        .expect("read baseline cfg");
+        let post_reset_cfg = std::fs::read(
+            post_reset
+                .path()
+                .join(".scaffold/wallet")
+                .join(WALLET_CONFIG_PRIMARY),
+        )
+        .expect("read post-reset cfg");
+        assert_eq!(baseline_cfg, post_reset_cfg);
     }
 }

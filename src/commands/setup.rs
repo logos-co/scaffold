@@ -114,7 +114,10 @@ fn sync_pinned_repo(repo: &RepoRef, path: &Path, label: &str) -> DynResult<()> {
     sync_repo_to_pin_at_path_with_opts(path, &repo.source, &repo.pin, label, opts)
 }
 
-fn ensure_default_wallet_seeded(project_root: &Path, wallet_home: &Path) -> DynResult<()> {
+pub(crate) fn ensure_default_wallet_seeded(
+    project_root: &Path,
+    wallet_home: &Path,
+) -> DynResult<()> {
     let should_seed = match read_default_wallet_address(project_root) {
         Ok(Some(existing)) => {
             println!("default wallet already configured: {existing}");

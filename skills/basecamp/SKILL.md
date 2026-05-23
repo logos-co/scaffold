@@ -38,7 +38,7 @@ A flake that exposes only `#lgx-portable` and not `#lgx` fails the regular insta
 | `lgs basecamp setup` | One-time: pin basecamp + lgpm, build, seed `alice` / `bob` profiles. Idempotent on unchanged pin. |
 | `lgs basecamp modules [--show] [--flake REF]… [--path PATH]…` | **Sole writer of `[basecamp.modules.*]` in `scaffold.toml`.** Auto-discovers project sub-flakes that expose `#lgx`, or takes explicit `--flake` / `--path` sources. Resolves `metadata.json` `dependencies` recursively. Manual edits in `[basecamp.modules]` are preserved across re-runs. `--show` prints the captured set without mutating state. |
 | `lgs basecamp install [--print-output]` | Build every captured source (`role = "project"` and `role = "dependency"`) and shell out to `lgpm` to install into both profiles. Logs to `.scaffold/logs/<ts>-install.log`; `--print-output` (or `LOGOS_SCAFFOLD_PRINT_OUTPUT=1`) streams nix output instead. If `[basecamp.modules]` is empty, transparently invokes `modules` in auto-discover mode first. |
-| `lgs basecamp launch <profile> [--no-clean]` | Profile is `alice` or `bob`. **Default**: kills any prior `logos_host` / `logos-basecamp` descendants for that profile, scrubs the profile's XDG dirs, replays each captured source's install, sets `LOGOS_PROFILE` + `XDG_{CONFIG,DATA,CACHE}_HOME`, and `exec`s basecamp. **`--no-clean`** is the only escape hatch — skip scrub + replay, exec against existing profile state. |
+| `lgs basecamp launch <profile>` | Profile is `alice` or `bob`. Kills any prior `logos_host` / `logos-basecamp` descendants for that profile, scrubs the profile's XDG dirs under `.scaffold/basecamp/profiles/<profile>/`, replays each captured source's install, sets `LOGOS_PROFILE` + `XDG_{CONFIG,DATA,CACHE}_HOME`, and `exec`s basecamp. Clean-slate on every launch — that's the point. |
 | `lgs basecamp build-portable` | Build `.#lgx-portable` for `role = "project"` entries only, in dependency order (leaves first); `role = "dependency"` entries are skipped (target AppImage provides them). Symlinks artefacts into `.scaffold/basecamp/portable/<NN>-<module_name>.lgx` for hand-loading via the AppImage's "install lgx" file picker. Wipes-and-recreates the portable dir each run. |
 | `lgs basecamp doctor [--json]` | Basecamp-specific health: captured-modules summary, manifest variant check per profile, drift between `[basecamp.modules]` and on-disk profile state. |
 | `lgs basecamp docs` | Print `docs/basecamp-module-requirements.md` (embedded at compile time). Runs **outside** a scaffold project too — useful for retrieving the contract before `lgs init`. |
@@ -94,16 +94,16 @@ Each `launch` also sets `LOGOS_PROFILE=<name>` for child processes. The two-inst
 
 ## Clean-Slate Semantics (B4 Guard)
 
-`lgs basecamp launch alice` (default, no `--no-clean`):
+`lgs basecamp launch alice`:
 
 1. Kill any prior `logos_host` / `logos-basecamp` descendants for the alice profile.
 2. `rm -rf` the profile's XDG dirs — **strictly bounded to** `<project>/.scaffold/basecamp/profiles/alice/`. A `launch` that scrubs anything outside that root is a severe safety regression.
 3. Replay every captured source's install (build → `lgpm install`) into the freshly-scrubbed profile.
 4. `exec` basecamp with the profile env set.
 
-`--no-clean` is the only escape hatch — skip steps 1–3, exec against whatever is on disk.
+The scrub is the point — every launch is clean-slate. The blast radius is the project's own `.scaffold/basecamp/profiles/<profile>/`; user-home XDG dirs are never touched.
 
-**Empty `[basecamp.modules]` + default `launch`** intentionally **bails before scrubbing** (the regression guard from `fix(basecamp): bail on empty [basecamp.modules] in launch without --no-clean`). The empty-install + scrubbed-profile combo is precisely what the bail prevents. To launch with no modules (rare, mostly for inspecting basecamp itself), pass `--no-clean`.
+**Empty `[basecamp.modules]` + `launch`** intentionally **bails before scrubbing**. The empty-install + scrubbed-profile combo would leave the profile with zero modules — capture modules first via `lgs basecamp modules`.
 
 ## Two-Instance P2P Dogfooding (B3)
 
@@ -158,7 +158,7 @@ Canonical scenarios in `DOGFOODING.md`:
 - **B1** — basecamp + lgpm setup and idempotent re-run.
 - **B2** — module capture, install, single-instance launch (`alice`).
 - **B3** — two-instance p2p (`alice` + `bob` parallel terminals).
-- **B4** — clean-slate scrub semantics on relaunch; `--no-clean` escape hatch; empty-`[basecamp.modules]` bail guard.
+- **B4** — clean-slate scrub semantics on relaunch; empty-`[basecamp.modules]` bail guard.
 - **B5** — `build-portable` artefact production for AppImage hand-loading.
 
 When reproducing a basecamp failure, name the matching scenario.
