@@ -10,8 +10,8 @@ use crate::config::{
 };
 use crate::constants::{
     DEFAULT_BASECAMP_PIN, DEFAULT_FRAMEWORK_IDL_PATH, DEFAULT_FRAMEWORK_IDL_SPEC,
-    DEFAULT_FRAMEWORK_VERSION, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL, FRAMEWORK_KIND_DEFAULT,
-    SCAFFOLD_TOML_SCHEMA_VERSION,
+    DEFAULT_FRAMEWORK_VERSION, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL_PIN,
+    FRAMEWORK_KIND_DEFAULT, SCAFFOLD_TOML_SCHEMA_VERSION,
 };
 use crate::migrate::migrate_to_v0_2_0;
 use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RunConfig};
@@ -216,7 +216,7 @@ fn fresh_default_config() -> Config {
         version: SCAFFOLD_TOML_SCHEMA_VERSION.to_string(),
         cache_root: String::new(),
         lez: default_lez_repo(DEFAULT_LEZ.sha),
-        spel: default_spel_repo(DEFAULT_SPEL.sha),
+        spel: default_spel_repo(DEFAULT_SPEL_PIN),
         basecamp_repo: Some(default_basecamp_repo(DEFAULT_BASECAMP_PIN)),
         lgpm_repo: Some(default_lgpm_repo(DEFAULT_LGPM_PIN)),
         wallet_home_dir: ".scaffold/wallet".to_string(),
@@ -254,7 +254,7 @@ mod tests {
 
         assert_eq!(cfg.version, SCAFFOLD_TOML_SCHEMA_VERSION);
         assert_eq!(cfg.lez.pin, DEFAULT_LEZ.sha);
-        assert_eq!(cfg.spel.pin, DEFAULT_SPEL.sha);
+        assert_eq!(cfg.spel.pin, DEFAULT_SPEL_PIN);
         assert_eq!(cfg.framework.kind, FRAMEWORK_KIND_DEFAULT);
         assert_eq!(cfg.wallet_home_dir, ".scaffold/wallet");
         assert_eq!(cfg.localnet.port, 3040);
@@ -500,7 +500,7 @@ pin = "{}"
 [wallet]
 home_dir = ".scaffold/wallet"
 "#,
-            LEZ_SOURCE, DEFAULT_LEZ.sha, SPEL_SOURCE, DEFAULT_SPEL.sha,
+            LEZ_SOURCE, DEFAULT_LEZ.sha, SPEL_SOURCE, DEFAULT_SPEL_PIN,
         );
         fs::write(target.join("scaffold.toml"), seed).expect("seed");
         cmd_init_at(target, "lgs", false, false).expect("migrate");
@@ -537,7 +537,7 @@ pin = "{}"
 [wallet]
 home_dir = ".scaffold/wallet"
 "#,
-            LEZ_SOURCE, DEFAULT_LEZ.sha, SPEL_SOURCE, DEFAULT_SPEL.sha,
+            LEZ_SOURCE, DEFAULT_LEZ.sha, SPEL_SOURCE, DEFAULT_SPEL_PIN,
         );
         fs::write(target.join("scaffold.toml"), seed).expect("seed");
         cmd_init_at(target, "lgs", false, false).expect("migrate");
@@ -570,7 +570,7 @@ pin = "{}"
 [wallet]
 home_dir = ".scaffold/wallet"
 "#,
-            LEZ_SOURCE, LEZ_SOURCE, DEFAULT_LEZ.sha, SPEL_SOURCE, DEFAULT_SPEL.sha,
+            LEZ_SOURCE, LEZ_SOURCE, DEFAULT_LEZ.sha, SPEL_SOURCE, DEFAULT_SPEL_PIN,
         );
         fs::write(target.join("scaffold.toml"), seed).expect("seed");
         cmd_init_at(target, "lgs", false, false).expect("migrate");

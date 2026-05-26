@@ -21,6 +21,12 @@ pub(crate) struct WalletRuntimeContext {
     pub(crate) sequencer_addr: Option<String>,
 }
 
+/// When `wallet_config.json` omits `sequencer_addr`, RPC calls should target the same host/port
+/// as `logos-scaffold localnet` (`[localnet] port` in `scaffold.toml`, default 3040).
+pub(crate) fn default_sequencer_http_url_for_project(project: &Project) -> String {
+    format!("http://127.0.0.1:{}", project.config.localnet.port)
+}
+
 pub(crate) fn load_wallet_runtime(project: &Project) -> DynResult<WalletRuntimeContext> {
     let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
     let wallet_binary = lez.join(WALLET_BIN_REL_PATH);
@@ -468,7 +474,8 @@ fn one_line(text: &str) -> String {
 mod tests {
     use std::fs;
     use std::io::{Read, Write};
-    use std::net::TcpStream;
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::JoinHandle;
     use std::time::Duration;
 
     use tempfile::tempdir;
@@ -482,14 +489,14 @@ mod tests {
 
     const ACCOUNT_ID: &str = "6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV";
 
-    fn spawn_json_rpc_response(body: &'static str) -> (String, std::thread::JoinHandle<()>) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    fn spawn_json_rpc_server(body: &'static str) -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("local addr");
         let url = format!("http://{addr}");
 
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
-            read_http_request(&mut stream);
+            drain_http_request(&mut stream);
 
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
@@ -503,36 +510,43 @@ mod tests {
         (url, handle)
     }
 
-    fn read_http_request(stream: &mut TcpStream) {
-        stream
-            .set_read_timeout(Some(Duration::from_secs(1)))
-            .expect("set read timeout");
+    fn drain_http_request(stream: &mut TcpStream) {
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
         let mut request = Vec::new();
         let mut buf = [0_u8; 1024];
-
         loop {
-            let n = stream.read(&mut buf).expect("read request");
-            if n == 0 {
-                break;
-            }
-            request.extend_from_slice(&buf[..n]);
-
-            if let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
-                let headers = String::from_utf8_lossy(&request[..header_end]);
-                let content_length = headers
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().ok())
-                            .flatten()
-                    })
-                    .unwrap_or(0);
-                if request.len() >= header_end + 4 + content_length {
-                    break;
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    request.extend_from_slice(&buf[..n]);
+                    if http_request_complete(&request) {
+                        break;
+                    }
                 }
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break
+                }
+                Err(err) => panic!("read request: {err}"),
             }
         }
+    }
+
+    fn http_request_complete(request: &[u8]) -> bool {
+        let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+            return false;
+        };
+        let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
+        let content_len = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        request.len() >= header_end + 4 + content_len
     }
 
     #[test]
@@ -733,7 +747,7 @@ details: [1, 2, 3]
 
     #[test]
     fn rpc_get_last_block_id_parses_valid_response() {
-        let (url, handle) = spawn_json_rpc_response(r#"{"jsonrpc":"2.0","result":42,"id":1}"#);
+        let (url, handle) = spawn_json_rpc_server(r#"{"jsonrpc":"2.0","result":42,"id":1}"#);
 
         let block =
             super::rpc_get_last_block_id(&url).expect("rpc_get_last_block_id should succeed");
@@ -753,7 +767,8 @@ details: [1, 2, 3]
 
     #[test]
     fn rpc_get_last_block_id_returns_error_on_malformed_response() {
-        let (url, handle) = spawn_json_rpc_response(r#"{"jsonrpc":"2.0","result":{},"id":1}"#);
+        // Response with non-numeric `result`
+        let (url, handle) = spawn_json_rpc_server(r#"{"jsonrpc":"2.0","result":{},"id":1}"#);
 
         let result = super::rpc_get_last_block_id(&url);
         assert!(result.is_err());
@@ -767,7 +782,7 @@ details: [1, 2, 3]
 
     #[test]
     fn rpc_get_last_block_id_returns_error_on_method_not_found() {
-        let (url, handle) = spawn_json_rpc_response(
+        let (url, handle) = spawn_json_rpc_server(
             r#"{"jsonrpc":"2.0","error":{"code":-32601,"message":"Method not found"},"id":1}"#,
         );
 

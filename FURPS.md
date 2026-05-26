@@ -53,7 +53,7 @@
 - Logos Core DevEx for overall developer journey alignment and terminology.
 - Logos Blockchain and Logos Execution Environment for functionality.
 - Wallet Module for interactions with Logos Execution Environment.
-- `logos-co/spel` CLI — vendored per project at a pinned commit (`DEFAULT_SPEL_PIN`, currently tag `v0.2.0`); supplies the `spel inspect` output that `deploy` parses for the program ID.
+- `logos-co/spel` CLI — vendored per project at a pinned commit (`DEFAULT_SPEL_PIN`, currently the public commit peeled from `v0.2.0-rc.5`); supplies the `spel inspect` output that `deploy` parses for the program ID.
 
 #### Runtime Dependencies
 

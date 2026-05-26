@@ -162,6 +162,18 @@ fn reconcile_repo_source(
                 );
             }
 
+            // Validate the new source is reachable BEFORE removing the
+            // cache. A typo on `--lez-path /nonexistent` used to wipe the
+            // populated cache and force a fresh GitHub clone on the next
+            // valid invocation. Now we bail with the cache intact.
+            if !source_is_reachable(source) {
+                bail!(
+                    "{label} source `{source}` is not reachable (path does not exist, is not a git repo, or remote refused HEAD probe). \
+                     Refusing to discard the existing cache at {} — fix the path/URL and retry.",
+                    path.display(),
+                );
+            }
+
             fs::remove_dir_all(path)?;
             run_checked(
                 Command::new("git")
@@ -236,6 +248,54 @@ fn normalize_path_source(base: &Path, source: &str) -> PathBuf {
 
 fn looks_like_url(source: &str) -> bool {
     source.contains("://") || source.starts_with("git@")
+}
+
+/// Cheap probe: does this source point at something git can talk to?
+/// For URL sources, `git ls-remote --exit-code <source> HEAD` works
+/// without cloning. We disable credential prompts (HTTPS via
+/// `GIT_TERMINAL_PROMPT`/`GIT_ASKPASS`/`GCM_INTERACTIVE`; SSH via
+/// `SSH_ASKPASS*` plus `GIT_SSH_COMMAND="ssh -o BatchMode=yes
+/// -o ConnectTimeout=10"`) and bound HTTPS DNS/transport stalls
+/// (`GIT_HTTP_LOW_SPEED_*`) so a typo on a private or unreachable URL
+/// doesn't hang at a credential prompt or on DNS lookup.
+/// For local paths, check the directory looks like a git repo (worktree
+/// `.git`, bare repo `HEAD` + `objects`).
+fn source_is_reachable(source: &str) -> bool {
+    if looks_like_url(source) {
+        // Intentionally bypass run_* helpers: this silent probe should collapse
+        // auth, DNS, and missing-remote failures into `false`.
+        std::process::Command::new("git")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "/bin/false")
+            .env("GCM_INTERACTIVE", "Never")
+            // Block SSH askpass fallbacks (gnome-ssh-askpass etc. that
+            // OpenSSH spawns when $DISPLAY is set) and force batch + a
+            // short connect timeout so an SSH typo can't hang the CLI.
+            .env("SSH_ASKPASS", "/bin/false")
+            .env("SSH_ASKPASS_REQUIRE", "never")
+            .env(
+                "GIT_SSH_COMMAND",
+                "ssh -o BatchMode=yes -o ConnectTimeout=10",
+            )
+            // Bound HTTPS stalls: abort if the transfer is below 1 B/s for
+            // more than 10 s. Together with `GIT_TERMINAL_PROMPT=0` this
+            // covers unreachable hosts and silently-dropped connections.
+            .env("GIT_HTTP_LOW_SPEED_LIMIT", "1")
+            .env("GIT_HTTP_LOW_SPEED_TIME", "10")
+            .arg("ls-remote")
+            .arg("--exit-code")
+            .arg(source)
+            .arg("HEAD")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    } else {
+        let p = Path::new(source);
+        p.exists()
+            && (p.join(".git").exists() || p.join("HEAD").exists() || p.join("objects").exists())
+    }
 }
 
 fn normalize_url(source: &str) -> String {
@@ -329,6 +389,39 @@ mod tests {
     }
 
     #[test]
+    fn source_mismatch_reclone_refuses_when_new_source_unreachable() {
+        // R-E2: a typo in --lez-path used to wipe the populated cache
+        // because reconcile_repo_source called fs::remove_dir_all(path)
+        // BEFORE git clone <new_source>. Now we probe the new source first
+        // and bail if it's unreachable, leaving the cache intact.
+        let temp = tempdir().expect("tempdir");
+        let source_a = temp.path().join("source-a");
+        let cache_repo = temp.path().join("cache/repo");
+
+        let pin_a = init_repo_with_commit(&source_a, "a.txt", "a");
+        git_clone(&source_a, &cache_repo);
+
+        let bogus_source = temp.path().join("nonexistent-source");
+
+        let err = sync_repo_to_pin_at_path_with_opts(
+            &cache_repo,
+            &bogus_source.display().to_string(),
+            &pin_a,
+            "lez",
+            RepoSyncOptions::auto_reclone_cache_repo(),
+        )
+        .expect_err("must fail");
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains("not reachable"), "got: {msg}");
+        assert!(msg.contains("Refusing to discard"), "got: {msg}");
+
+        // The cache must still be present and look like a git repo.
+        assert!(cache_repo.exists(), "cache must survive");
+        assert!(cache_repo.join(".git").exists(), "cache .git must survive");
+    }
+
+    #[test]
     fn pin_as_tag_succeeds_with_resolved_sha_check() {
         // Regression: when `[repos.*].pin` is a tag (or any non-SHA ref), the
         // post-checkout assertion used to compare the raw `pin` string against
@@ -389,6 +482,7 @@ mod tests {
         run_git(path, &["config", "user.email", "test@example.com"]);
         run_git(path, &["config", "user.name", "Test User"]);
         run_git(path, &["config", "commit.gpgsign", "false"]);
+        run_git(path, &["config", "tag.gpgsign", "false"]);
         fs::write(path.join(file), contents).expect("write file");
         run_git(path, &["add", "."]);
         run_git(path, &["commit", "-m", "init"]);

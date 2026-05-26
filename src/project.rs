@@ -12,16 +12,27 @@ use crate::DynResult;
 pub(crate) fn load_project() -> DynResult<Project> {
     let cwd = env::current_dir()?;
     let root = find_project_root(cwd.clone()).ok_or_else(|| {
-        {
-            let bin = std::env::args()
-                .next()
-                .and_then(|p| std::path::Path::new(&p).file_name().map(|n| n.to_string_lossy().into_owned()))
-                .unwrap_or_else(|| "logos-scaffold".to_string());
-            anyhow!(
-                "Not a logos-scaffold project at {}. Run `{bin} create <name>` (or `{bin} new <name>`) first.",
-                cwd.display()
-            )
-        }
+        let bin = std::env::args()
+            .next()
+            .and_then(|p| {
+                std::path::Path::new(&p)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "logos-scaffold".to_string());
+        // Two distinct failure modes share this entry point: (1) genuinely
+        // outside any project, (2) inside a project but the schema is stale.
+        // Only the first deserves the "cd into your scaffolded project" hint;
+        // the second is handled by `parse_config` and bubbled verbatim below,
+        // so call sites can use `load_project()?` without a `.context()` wrap
+        // that would misrepresent the schema-error case.
+        anyhow!(
+            "This command must be run inside a logos-scaffold project.\n\
+             Next step: cd into your scaffolded project directory and retry, \
+             or run `{bin} create <name>` (or `{bin} new <name>`) to start one. \
+             Searched from {}.",
+            cwd.display()
+        )
     })?;
 
     let config_path = root.join("scaffold.toml");

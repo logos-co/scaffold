@@ -43,9 +43,6 @@ pub(crate) enum BasecampAction {
     },
     Launch {
         profile: String,
-        no_clean: bool,
-        yes: bool,
-        dry_run: bool,
     },
     /// Attr-swap replay on `state.project_sources` only (`#lgx` →
     /// `#lgx-portable`). `state.dependencies` is ignored — the target AppImage
@@ -85,12 +82,7 @@ pub(crate) fn cmd_basecamp(action: BasecampAction) -> DynResult<()> {
             }
             cmd_basecamp_install(project, &NixLgxProbe)
         }
-        BasecampAction::Launch {
-            profile,
-            no_clean,
-            yes,
-            dry_run,
-        } => cmd_basecamp_launch(project, profile, no_clean, yes, dry_run),
+        BasecampAction::Launch { profile } => cmd_basecamp_launch(project, profile),
         BasecampAction::BuildPortable => cmd_basecamp_build_portable(project),
         BasecampAction::Doctor { json } => cmd_basecamp_doctor(project, json),
         // Handled above via early return (project-context-free).
@@ -114,7 +106,23 @@ fn cmd_basecamp_docs() -> DynResult<()> {
     Ok(())
 }
 
+/// Bail before any nix invocation if `nix` isn't on PATH. Without this,
+/// `run_logged` surfaces `os error 2` from the spawn failure with no
+/// signal that the missing executable is `nix` — a documented UX
+/// regression in DOGFOODING.md B1.
+fn ensure_nix_present() -> DynResult<()> {
+    if crate::process::which("nix").is_none() {
+        bail!(
+            "this command requires Nix (with flakes enabled) on PATH. \
+             Install Nix from https://nixos.org/download.html, then re-run."
+        );
+    }
+    Ok(())
+}
+
 fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
+    ensure_nix_present()?;
+
     // Pull or default-fill [repos.basecamp]. If the project has never been
     // through `lgs new` post-0.2.0 and lacks the section, fill it with the
     // canonical default and persist back.
@@ -247,17 +255,9 @@ fn resolve_basecamp_binary(app_link: &Path) -> DynResult<PathBuf> {
     )
 }
 
-// Concurrent `launch <same-profile>` is undefined per spec §2.3 ("v1 does not
-// lock; document as 'don't do that'"). The code below assumes a single launcher
-// per profile at a time — scrub, re-seed, replay install, and PID write are all
-// non-atomic. If two invocations race, expect partial state.
-fn cmd_basecamp_launch(
-    project: Project,
-    profile: String,
-    no_clean: bool,
-    yes: bool,
-    dry_run: bool,
-) -> DynResult<()> {
+// Concurrent `launch <same-profile>` is undefined per spec §2.3: no lock; two
+// racing invocations leave partial state.
+fn cmd_basecamp_launch(project: Project, profile: String) -> DynResult<()> {
     let state_path = project.root.join(".scaffold/state/basecamp.state");
     let state = match read_basecamp_state(&state_path).ok() {
         Some(s) if !s.basecamp_bin.is_empty() && !s.lgpm_bin.is_empty() => s,
@@ -289,26 +289,6 @@ fn cmd_basecamp_launch(
         );
     }
 
-    if dry_run {
-        return cmd_basecamp_launch_dry_run(&project, &profile, &profile_dir, &state, no_clean);
-    }
-
-    // The default launch scrubs `xdg-data` and `xdg-cache` for the profile and
-    // reinstalls captured modules from scratch. That destroys per-profile state
-    // (chat history, settings, lgpm install records) — so refuse the default
-    // form unless the caller has explicitly confirmed via `--yes`. `--no-clean`
-    // is a non-destructive launch and does not require confirmation.
-    if !no_clean && !yes {
-        bail!(
-            "basecamp launch is destructive by default: it scrubs the profile's xdg-data and xdg-cache, then reinstalls captured modules.\n\
-             Pass --yes to confirm, --dry-run to preview the plan, or --no-clean to launch without scrubbing.\n\
-             Examples:\n  \
-             logos-scaffold basecamp launch {profile} --dry-run\n  \
-             logos-scaffold basecamp launch {profile} --yes\n  \
-             logos-scaffold basecamp launch {profile} --no-clean"
-        );
-    }
-
     let launch_state_path = profile_dir.join("launch.state");
     let expected_comm = basecamp_comm_name(&state.basecamp_bin);
     if let Some(pid) = read_launch_pid(&launch_state_path) {
@@ -322,34 +302,28 @@ fn cmd_basecamp_launch(
     }
 
     // Clean-slate launch replays `[basecamp.modules]` into the freshly-scrubbed
-    // profile. An empty capture set would make that replay a silent no-op, so the
-    // profile would come up with zero modules — violating the clean-slate
-    // guarantee. Fail fast with a hint. `--no-clean` skips this check because
-    // that mode deliberately preserves whatever's already installed.
-    if !no_clean && total_captured_modules(&project) == 0 {
-        bail!(
-            "no modules captured — run `logos-scaffold basecamp modules` before launching, \
-             or pass `--no-clean` to keep the currently-installed module set."
-        );
+    // profile. An empty capture set would make that replay a silent no-op, so
+    // the profile would come up with zero modules. Fail fast with a hint.
+    if total_captured_modules(&project) == 0 {
+        bail!("no modules captured — run `logos-scaffold basecamp modules` before launching.");
     }
 
-    // seed_profiles is idempotent (tested) and cheap — always run it so a prior
-    // crash mid-scrub doesn't leave the profile without its xdg subdirs.
+    // Pre-seed in case a prior crash between scrub and re-seed left the profile
+    // without its xdg subdirs; scrub assumes both exist. seed_profiles is
+    // idempotent and cheap.
     seed_profiles(&profiles_root, &[profile.as_str()])?;
-    if !no_clean {
-        scrub_profile_data_and_cache(&project.root, &profile_dir)?;
-        // Re-seed after scrub: scrub removed xdg-data + xdg-cache; put their
-        // module/plugin subtrees back before lgpm writes into them.
-        seed_profiles(&profiles_root, &[profile.as_str()])?;
-        let (cache_root, _) = resolve_cache_root(&project)?;
-        install_sources_into_profiles(
-            &project,
-            &state,
-            &cache_root,
-            &profiles_root,
-            &[profile.clone()],
-        )?;
-    }
+    scrub_profile_data_and_cache(&project.root, &profile_dir)?;
+    // Re-seed after scrub: scrub removed xdg-data + xdg-cache; put their
+    // module/plugin subtrees back before lgpm writes into them.
+    seed_profiles(&profiles_root, &[profile.as_str()])?;
+    let (cache_root, _) = resolve_cache_root(&project)?;
+    install_sources_into_profiles(
+        &project,
+        &state,
+        &cache_root,
+        &profiles_root,
+        &[profile.clone()],
+    )?;
 
     // Variant pre-flight: warn if any installed module is missing the current
     // platform's `<plat>-dev` manifest.json `main` key. Basecamp v0.1.1's
@@ -394,49 +368,6 @@ fn cmd_basecamp_launch(
     // later launch doesn't kill whatever reuses the PID.
     let _ = fs::remove_file(&launch_state_path);
     bail!("failed to exec basecamp at {}: {err}", state.basecamp_bin);
-}
-
-fn cmd_basecamp_launch_dry_run(
-    project: &Project,
-    profile: &str,
-    profile_dir: &Path,
-    state: &BasecampState,
-    no_clean: bool,
-) -> DynResult<()> {
-    let xdg_data = profile_dir.join("xdg-data");
-    let xdg_cache = profile_dir.join("xdg-cache");
-
-    println!("dry-run: basecamp launch {profile} (no changes made)");
-    if no_clean {
-        println!("planned: skip scrub (--no-clean); preserve existing profile data");
-    } else {
-        println!(
-            "planned: scrub {} (exists: {})",
-            xdg_data.display(),
-            xdg_data.exists()
-        );
-        println!(
-            "planned: scrub {} (exists: {})",
-            xdg_cache.display(),
-            xdg_cache.exists()
-        );
-        let captured = total_captured_modules(project);
-        if captured == 0 {
-            println!(
-                "warning: no modules captured — a real launch would abort with `no modules captured` before reinstall. \
-                 Run `logos-scaffold basecamp modules` first."
-            );
-        } else {
-            println!(
-                "planned: reinstall {captured} captured module(s) into profile {profile} via lgpm"
-            );
-        }
-    }
-    println!(
-        "planned: exec basecamp at {} for profile {profile}",
-        state.basecamp_bin
-    );
-    Ok(())
 }
 
 /// Env map exported to the basecamp child on launch. Scaffold-owned names only
@@ -729,6 +660,11 @@ fn cmd_basecamp_build_portable(project: Project) -> DynResult<()> {
              operates on captured project sources only — it never discovers."
         );
     }
+
+    // Nix preflight comes after the modules-empty guard so a user without
+    // nix who has nothing captured still gets the more specific
+    // "run basecamp modules" hint first.
+    ensure_nix_present()?;
 
     // Order project modules so each appears AFTER its own project-internal
     // deps (leaves first). Basecamp loads `.lgx` artefacts in the order the
@@ -1065,6 +1001,11 @@ fn cmd_basecamp_modules(
     if show {
         print_modules_table("captured modules", &existing_modules);
         return Ok(());
+    }
+    // Production probes shell out to nix, so keep the missing-nix UX local to
+    // the modules implementation. Unit-test probes opt out below.
+    if probe.requires_nix() {
+        ensure_nix_present()?;
     }
 
     let explicit = !paths.is_empty() || !flakes.is_empty();
@@ -1462,6 +1403,11 @@ fn cmd_basecamp_install(project: Project, probe: &dyn LgxFlakeProbe) -> DynResul
     if !Path::new(&state.basecamp_bin).exists() || !Path::new(&state.lgpm_bin).exists() {
         bail!("basecamp not set up yet; run: logos-scaffold basecamp setup");
     }
+
+    // Nix preflight comes after the setup-state guard so a user without
+    // nix who hasn't run `basecamp setup` still gets the more specific
+    // "run basecamp setup" hint first.
+    ensure_nix_present()?;
 
     // If scaffold.toml has no captured modules, run `modules` in
     // auto-discover mode transparently, then reload the project config.
@@ -2154,11 +2100,13 @@ fn cmd_basecamp_doctor(project: Project, as_json: bool) -> DynResult<()> {
     let mut rows = Vec::new();
     push_basecamp_doctor_rows(&project, &mut rows);
 
-    // If there are no rows at all, state is absent or empty — emit a single
-    // Pass row so the output is never confusingly blank.
+    // If there are no rows at all, state is absent or empty. Emit a Warn
+    // row — `print_rows` only surfaces remediation lines for Warn/Fail,
+    // so a Pass row would suppress the "run basecamp setup" hint and
+    // leave the user with a contradictory PASS-with-remediation line.
     if rows.is_empty() {
         rows.push(crate::model::CheckRow {
-            status: CheckStatus::Pass,
+            status: CheckStatus::Warn,
             name: "basecamp state".to_string(),
             detail: "not set up yet (no basecamp.state)".to_string(),
             remediation: Some("run `logos-scaffold basecamp setup`".to_string()),
@@ -2409,6 +2357,10 @@ fn collect_api_headers(alice_modules: &Path, module_name: &str) -> Vec<PathBuf> 
 /// resolves under `/nix/store/` rather than the real project tree. Mirrors the
 /// sibling-override plumbing already applied at build time.
 trait LgxFlakeProbe {
+    fn requires_nix(&self) -> bool {
+        true
+    }
+
     fn package_names(
         &self,
         flake_ref: &str,
@@ -2756,6 +2708,10 @@ mod tests {
     }
 
     impl LgxFlakeProbe for FakeProbe {
+        fn requires_nix(&self) -> bool {
+            false
+        }
+
         fn package_names(
             &self,
             flake_ref: &str,

@@ -12,7 +12,6 @@ static TEMPLATES_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templates");
 pub(crate) struct OverlayRenderContext<'a> {
     pub(crate) crate_name: &'a str,
     pub(crate) lez_pin: &'a str,
-    pub(crate) spel_tag: &'a str,
 }
 
 pub(crate) fn apply_overlay(
@@ -106,8 +105,7 @@ fn normalize_template_file_name(file_name: &std::ffi::OsStr) -> std::ffi::OsStri
 fn render_template_text(raw: &str, ctx: &OverlayRenderContext<'_>) -> DynResult<String> {
     let rendered = raw
         .replace("{{crate_name}}", ctx.crate_name)
-        .replace("{{lez_pin}}", ctx.lez_pin)
-        .replace("{{spel_tag}}", ctx.spel_tag);
+        .replace("{{lez_pin}}", ctx.lez_pin);
 
     if let Some(token) = find_unresolved_placeholder(&rendered) {
         bail!("unresolved template token `{token}`");
@@ -171,7 +169,6 @@ mod tests {
         let ctx = OverlayRenderContext {
             crate_name: "my-app",
             lez_pin: "abc123",
-            spel_tag: "v0.0.0-test",
         };
 
         apply_overlay(&target, "default", &ctx).expect("failed to apply default overlay");
@@ -209,7 +206,6 @@ mod tests {
         let ctx = OverlayRenderContext {
             crate_name: "my-app",
             lez_pin: "abc123",
-            spel_tag: "v0.0.0-test",
         };
 
         apply_overlay(&target, "lez-framework", &ctx).expect("failed to apply lez-framework");
@@ -245,7 +241,6 @@ mod tests {
         let ctx = OverlayRenderContext {
             crate_name: "example-name",
             lez_pin: "deadbeef",
-            spel_tag: "v0.0.0-test",
         };
 
         apply_overlay(&target, "default", &ctx).expect("failed to apply default overlay");
@@ -275,7 +270,6 @@ mod tests {
             let ctx = OverlayRenderContext {
                 crate_name: "my-app",
                 lez_pin: "abc123",
-                spel_tag: "v0.0.0-test",
             };
             apply_overlay(&target, variant, &ctx)
                 .unwrap_or_else(|e| panic!("apply_overlay({variant}) failed: {e}"));
@@ -301,7 +295,6 @@ mod tests {
         let ctx = OverlayRenderContext {
             crate_name: "my-app",
             lez_pin: "abc123",
-            spel_tag: "v0.0.0-test",
         };
 
         apply_overlay(&target, "default", &ctx).expect("failed to apply default overlay");
@@ -333,7 +326,6 @@ mod tests {
         let ctx = OverlayRenderContext {
             crate_name: "my-app",
             lez_pin: "abc123",
-            spel_tag: "v0.0.0-test",
         };
 
         apply_overlay(&target, "default", &ctx).expect("failed to apply default overlay");
@@ -373,34 +365,10 @@ mod tests {
     }
 
     #[test]
-    fn render_substitutes_spel_tag_placeholder() {
-        // Locks the {{spel_tag}} contract for the post-PR-19 follow-up that
-        // converts the lez-framework template's literal `tag = "v0.2.0"`
-        // lines into `tag = "{{spel_tag}}"`. Until then, no template file
-        // exercises this path — keep this test alive so the wiring doesn't
-        // bit-rot before the follow-up lands.
-        let ctx = OverlayRenderContext {
-            crate_name: "my-app",
-            lez_pin: "abc123",
-            spel_tag: "v0.2.0-rc.5",
-        };
-        let rendered = render_template_text(
-            "spel-framework = { git = \"...\", tag = \"{{spel_tag}}\" }",
-            &ctx,
-        )
-        .expect("substitution should succeed");
-        assert_eq!(
-            rendered,
-            "spel-framework = { git = \"...\", tag = \"v0.2.0-rc.5\" }"
-        );
-    }
-
-    #[test]
     fn render_fails_on_unresolved_placeholder() {
         let ctx = OverlayRenderContext {
             crate_name: "my-app",
             lez_pin: "abc123",
-            spel_tag: "v0.0.0-test",
         };
 
         let err = render_template_text("name = \"{{unknown_token}}\"", &ctx)
