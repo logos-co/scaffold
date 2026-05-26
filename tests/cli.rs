@@ -775,7 +775,9 @@ fn report_fails_outside_project_with_project_scoped_message() {
         .arg("report")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Not a logos-scaffold project at"));
+        .stderr(predicate::str::contains(
+            "This command must be run inside a logos-scaffold project",
+        ));
 }
 
 #[test]
@@ -995,8 +997,15 @@ fn localnet_start_patches_config_and_uses_configured_port() {
         "vendored sequencer_config.json must not be mutated, got: {vendored_after}"
     );
 
-    // The patched copy lives under the project's `.scaffold/state/`.
-    let patched_path = temp.path().join(".scaffold/state/sequencer_config.json");
+    // The patched copy lives under the project's `.scaffold/state/`. Resolve
+    // symlinks so the comparison against the sequencer-recorded path matches
+    // on macOS, where `/var` is a symlink to `/private/var` and `current_dir`
+    // inside the CLI returns the canonical form.
+    let patched_path = temp
+        .path()
+        .join(".scaffold/state/sequencer_config.json")
+        .canonicalize()
+        .expect("canonicalize patched config path");
     let patched_config = fs::read_to_string(&patched_path).expect("read patched config");
     let config_json: serde_json::Value =
         serde_json::from_str(&patched_config).expect("parse patched config");
@@ -1494,7 +1503,9 @@ fn wallet_topup_fails_outside_project_with_project_scoped_message() {
         .arg(VALID_PUBLIC_ADDRESS)
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Not a logos-scaffold project at"));
+        .stderr(predicate::str::contains(
+            "This command must be run inside a logos-scaffold project",
+        ));
 }
 
 #[test]
@@ -2478,7 +2489,9 @@ fn basecamp_setup_outside_project_errors() {
         .arg("setup")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Not a logos-scaffold project at"));
+        .stderr(predicate::str::contains(
+            "This command must be run inside a logos-scaffold project",
+        ));
 }
 
 #[test]
@@ -2490,7 +2503,9 @@ fn basecamp_install_outside_project_errors() {
         .arg("install")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Not a logos-scaffold project at"));
+        .stderr(predicate::str::contains(
+            "This command must be run inside a logos-scaffold project",
+        ));
 }
 
 #[test]
@@ -2503,7 +2518,9 @@ fn basecamp_build_portable_outside_project_errors() {
         .args(["basecamp", "build-portable"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Not a logos-scaffold project at"));
+        .stderr(predicate::str::contains(
+            "This command must be run inside a logos-scaffold project",
+        ));
 }
 
 #[test]
@@ -2681,7 +2698,9 @@ fn basecamp_launch_outside_project_errors() {
         .arg("alice")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Not a logos-scaffold project at"));
+        .stderr(predicate::str::contains(
+            "This command must be run inside a logos-scaffold project",
+        ));
 }
 
 fn find_single_report_archive(reports_dir: &Path) -> PathBuf {
