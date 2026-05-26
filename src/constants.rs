@@ -18,24 +18,20 @@ pub(crate) struct GitRef {
     pub(crate) tag: &'static str,
 }
 
-// Cross-framework invariant: DEFAULT_SPEL_PIN must point at a spel commit
+// Cross-framework invariant: DEFAULT_SPEL must point at a spel commit
 // whose `spel-cli/Cargo.toml` vendors LEZ at the same ref as DEFAULT_LEZ.
 // Otherwise spel's sequencer-RPC client speaks a different protocol than
 // scaffold's own wallet/sequencer build. `check_spel_lez_alignment` in
 // `commands/doctor.rs` enforces this at runtime — re-run `doctor` after
 // bumping either pin.
-//
-// Special note on DEFAULT_SPEL_PIN: this is the public commit that the
-// `v0.2.0-rc.5` tag peels to on `logos-co/spel`. rc.5 is the spel release
-// whose vendored LEZ matches DEFAULT_LEZ.tag. We deliberately store the
-// commit only (not the tag) so the default cannot drift if the upstream
-// tag is ever moved or replaced. Migrating off RC-derived defaults is
-// tracked in <https://github.com/logos-co/scaffold/issues/170>.
 pub(crate) const DEFAULT_LEZ: GitRef = GitRef {
     sha: "35d8df0d031315219f94d1546ceb862b0e5b208f",
     tag: "v0.2.0-rc1",
 };
-pub(crate) const DEFAULT_SPEL_PIN: &str = "1db7c5f8af3165318f9046c13ab185e24773fd59";
+pub(crate) const DEFAULT_SPEL: GitRef = GitRef {
+    sha: "1db7c5f8af3165318f9046c13ab185e24773fd59",
+    tag: "v0.2.0-rc.5",
+};
 
 /// `logos-blockchain-circuits` GitHub release version that contains the
 /// proving/verification keys and witness generators every
@@ -172,13 +168,3 @@ pub(crate) const BASECAMP_PREINSTALLED_MODULES: &[&str] = &[
     "webview_app",
     "basecamp_main_ui",
 ];
-
-#[cfg(test)]
-mod tests {
-    use super::DEFAULT_SPEL_PIN;
-
-    #[test]
-    fn default_spel_pin_is_public_rc5_peeled_commit() {
-        assert_eq!(DEFAULT_SPEL_PIN, "1db7c5f8af3165318f9046c13ab185e24773fd59");
-    }
-}

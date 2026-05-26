@@ -6,7 +6,7 @@ use anyhow::bail;
 use super::wallet_support::wallet_password;
 use crate::commands::wallet_support::WALLET_CONFIG_PRIMARY;
 use crate::constants::{
-    DEFAULT_LEZ, DEFAULT_SPEL_PIN, SEQUENCER_BIN_REL_PATH, SPEL_BIN_REL_PATH, WALLET_BIN_REL_PATH,
+    DEFAULT_LEZ, DEFAULT_SPEL, SEQUENCER_BIN_REL_PATH, SPEL_BIN_REL_PATH, WALLET_BIN_REL_PATH,
 };
 use crate::doctor_checks::{
     check_binary, check_container_runtime, check_logos_blockchain_circuits, check_path,
@@ -119,22 +119,22 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
     rows.push(check_repo("spel", &spel, &project.config.spel.pin));
 
     rows.push(CheckRow {
-        status: if project.config.spel.pin == DEFAULT_SPEL_PIN {
+        status: if project.config.spel.pin == DEFAULT_SPEL.sha {
             CheckStatus::Pass
         } else {
             CheckStatus::Warn
         },
         name: "spel pin matches scaffold default".to_string(),
         detail: format!(
-            "configured pin={} expected={}",
-            project.config.spel.pin, DEFAULT_SPEL_PIN
+            "configured pin={} expected={} ({})",
+            project.config.spel.pin, DEFAULT_SPEL.sha, DEFAULT_SPEL.tag
         ),
-        remediation: if project.config.spel.pin == DEFAULT_SPEL_PIN {
+        remediation: if project.config.spel.pin == DEFAULT_SPEL.sha {
             None
         } else {
             Some(format!(
-                "Set repos.spel.pin in scaffold.toml to {} and run `{}`",
-                DEFAULT_SPEL_PIN, STEP_SETUP
+                "Set repos.spel.pin in scaffold.toml to {} ({}) and run `{}`",
+                DEFAULT_SPEL.sha, DEFAULT_SPEL.tag, STEP_SETUP
             ))
         },
     });

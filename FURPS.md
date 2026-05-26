@@ -36,7 +36,7 @@
 1. Scaffold version and toolchain versions are explicit in generated output so projects remain buildable over time.
 2. Network configuration for local and DevNet deployment is .env based config.
 3. The scaffolded project includes command references for build, deploy, and interaction steps.
-4. `logos-scaffold doctor` reports the `spel` repo presence and pin status, mirroring the existing LEZ checks, so drift from `DEFAULT_SPEL_PIN` is surfaced before it bites at deploy time.
+4. `logos-scaffold doctor` reports the `spel` repo presence and pin status, mirroring the existing LEZ checks, so drift from `DEFAULT_SPEL` is surfaced before it bites at deploy time.
 5. `scaffold.toml` files predating the `[repos.spel]` section produce a targeted error from the config loader pointing at `logos-scaffold init` as the fix; `init` is safe to re-run and back-fills the missing section without overwriting customized fields.
 
 ### + (Privacy, Anonymity, Censorship-Resistance)
@@ -53,7 +53,7 @@
 - Logos Core DevEx for overall developer journey alignment and terminology.
 - Logos Blockchain and Logos Execution Environment for functionality.
 - Wallet Module for interactions with Logos Execution Environment.
-- `logos-co/spel` CLI — vendored per project at a pinned commit (`DEFAULT_SPEL_PIN`, currently the public commit peeled from `v0.2.0-rc.5`); supplies the `spel inspect` output that `deploy` parses for the program ID.
+- `logos-co/spel` CLI — vendored per project at a pinned commit (`DEFAULT_SPEL`, currently tag `v0.2.0-rc.5`); supplies the `spel inspect` output that `deploy` parses for the program ID.
 
 #### Runtime Dependencies
 

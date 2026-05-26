@@ -10,8 +10,8 @@ use crate::config::{
 };
 use crate::constants::{
     DEFAULT_BASECAMP_PIN, DEFAULT_FRAMEWORK_IDL_PATH, DEFAULT_FRAMEWORK_IDL_SPEC,
-    DEFAULT_FRAMEWORK_VERSION, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL_PIN,
-    FRAMEWORK_KIND_DEFAULT, FRAMEWORK_KIND_LEZ_FRAMEWORK, LEZ_SOURCE, SCAFFOLD_TOML_SCHEMA_VERSION,
+    DEFAULT_FRAMEWORK_VERSION, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL, FRAMEWORK_KIND_DEFAULT,
+    FRAMEWORK_KIND_LEZ_FRAMEWORK, LEZ_SOURCE, SCAFFOLD_TOML_SCHEMA_VERSION,
 };
 use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RunConfig};
 use crate::project::default_cache_root;
@@ -146,7 +146,7 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
     let mut lez = default_lez_repo(DEFAULT_LEZ.sha);
     lez.source = lez_source;
     lez.path = lez_persisted_path;
-    let mut spel = default_spel_repo(DEFAULT_SPEL_PIN);
+    let mut spel = default_spel_repo(DEFAULT_SPEL.sha);
     spel.path = spel_persisted_path;
 
     let cfg = Config {
