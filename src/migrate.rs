@@ -9,7 +9,7 @@ use anyhow::{anyhow, bail};
 use toml_edit::{value, DocumentMut, Item, Table};
 
 use crate::constants::{
-    BASECAMP_ATTR, BASECAMP_SOURCE, DEFAULT_BASECAMP_PIN, DEFAULT_LGPM_PIN, DEFAULT_SPEL,
+    BASECAMP_ATTR, BASECAMP_SOURCE, DEFAULT_BASECAMP_PIN, DEFAULT_LGPM_PIN, DEFAULT_SPEL_PIN,
     LGPM_ATTR, LGPM_SOURCE, SCAFFOLD_TOML_SCHEMA_VERSION,
 };
 use crate::model::{RepoBuild, RepoRef};
@@ -129,7 +129,7 @@ pub(crate) fn migrate_to_v0_2_0(doc: &mut DocumentMut) -> DynResult<MigrationRep
             .and_then(|t| t.get("path").and_then(Item::as_str))
             .unwrap_or("")
             .to_string();
-        let mut spel = crate::config::default_spel_repo(DEFAULT_SPEL.sha);
+        let mut spel = crate::config::default_spel_repo(DEFAULT_SPEL_PIN);
         if lez_path == ".scaffold/repos/lez" {
             spel.path = ".scaffold/repos/spel".to_string();
         }
