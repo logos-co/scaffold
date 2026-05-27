@@ -1,11 +1,44 @@
 # logos-scaffold
 
-`logos-scaffold` is a Rust CLI for bootstrapping LEZ (Logos Execution Zone) `program_deployment` projects in standalone mode.
+[![crates.io](https://img.shields.io/crates/v/logos-scaffold.svg)](https://crates.io/crates/logos-scaffold)
+[![CI](https://github.com/logos-co/scaffold/actions/workflows/ci.yml/badge.svg)](https://github.com/logos-co/scaffold/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![MSRV](https://img.shields.io/badge/MSRV-1.81-orange.svg)](Cargo.toml)
+
+Rust CLI for bootstrapping Logos Execution Zone (LEZ) program-deployment projects. For developers writing RISC0 zkVM programs on Logos.
+
+## What you get
+
+- `lgs new` scaffolds a new LEZ program-deployment project
+- `lgs setup` syncs pinned LEZ + `spel` binaries and seeds a dev wallet
+- `lgs localnet start|stop|status|logs|reset` runs a local sequencer
+- `lgs build`, `lgs build idl`, `lgs build client` compile guest binaries and regenerate IDL / client bindings
+- `lgs deploy` deploys guest programs and prints each `program_id`
+- `lgs run` chains build, IDL, localnet, topup, and deploy in one command
+
+## Quick start
+
+```bash
+cargo install logos-scaffold
+lgs new my-app
+cd my-app
+lgs setup        # one-time: builds local sequencer, wallet, spel
+lgs run          # build → localnet → deploy
+```
+
+The first `lgs setup` needs Docker or Podman and a `logos-blockchain-circuits` release on disk. See [Prerequisites](#prerequisites).
+
+## If you've used Anchor or Cargo Stylus
+
+`logos-scaffold` fills the same role for [Logos Execution Zone](https://github.com/logos-blockchain/logos-execution-zone/) that [Anchor](https://github.com/coral-xyz/anchor) fills for Solana and [Cargo Stylus](https://github.com/OffchainLabs/cargo-stylus) for Arbitrum: one CLI for project bootstrap, local devnet, build, and deploy.
 
 ## Documentation
 
 - [FURPS+](FURPS.md) — Functional and non-functional requirements
 - [ADR](ADR.md) — Architecture Decision Records
+- [Contributing](CONTRIBUTING.md)
+- [Security](SECURITY.md)
+- [Dogfooding scenarios](DOGFOODING.md)
 
 ## Platform
 
@@ -30,14 +63,13 @@ Localnet and process/port detection rely on Unix tools (lsof, ps, kill).
   chain that `setup` invokes.
 - `nix` (with flakes enabled) — only required for `basecamp` subcommands.
 
-## Install
+## Install from source
 
 ```bash
 cargo install --path .
 ```
 
-This installs two binaries on your PATH: `logos-scaffold` and the shorter
-alias `lgs`. They are functionally identical; use either.
+Both this and the `cargo install logos-scaffold` line in the Quick start install two binaries on your PATH: `logos-scaffold` and the shorter alias `lgs`. They are functionally identical; use either.
 
 ### Shell completions
 
@@ -98,8 +130,8 @@ Each subcommand documents copy-paste examples under `--help`. Global `-q` / `--q
 ## Command Semantics
 
 - `create` and `new` are aliases.
-- `init` writes `scaffold.toml` (schema v0.2.0) with defaults into the current directory so an existing project can use the scaffold workflow. It creates `.scaffold/{state,logs}` and appends `.scaffold` to `.gitignore`. When `scaffold.toml` already exists at an older schema, `init` migrates it in place via `toml_edit` so comments, key ordering, and unrelated sections survive the rewrite — old `[basecamp].pin` / `.source` / `.lgpm_flake` move to `[repos.basecamp]` / `[repos.lgpm]`; old `[basecamp.modules.*]` move to top-level `[modules.*]`; legacy `url` fields on `[repos.{lez,spel}]` are dropped. Migrations write a `scaffold.toml.bak` next to the original by default (skip with `--no-backup`); preview either form with `--dry-run`. Already-current configs succeed, leave `scaffold.toml` unchanged, and refresh the shipped AI skills. Run `setup` next after a fresh init or migration.
-- `setup` syncs LEZ and `spel` to their pinned commits (read from `[repos.lez]` / `[repos.spel]`), builds the standalone `sequencer_service`, `wallet`, and `spel` binaries locally, and seeds a deterministic default wallet from preconfigured public accounts when none is set. All binaries are project-local and are not installed to PATH — use `logos-scaffold wallet ...` / `logos-scaffold spel -- ...` to interact with them. By default `[repos.lez].path` / `[repos.spel].path` are empty in `scaffold.toml`; the on-disk location is resolved at runtime from `<cache_root>/repos/<name>/<pin>`, so the file is portable across machines and CI. `--vendor-deps` projects keep relative `.scaffold/repos/{lez,spel}` literals; an explicit absolute `path` set in `scaffold.toml` is honored as-is.
+- `init` writes `scaffold.toml` (schema v0.2.0) with defaults into the current directory so an existing project can use the scaffold workflow. It creates `.scaffold/{state,logs}` and appends `.scaffold` to `.gitignore`. When `scaffold.toml` already exists at an older schema, `init` migrates it in place via `toml_edit` so comments, key ordering, and unrelated sections survive the rewrite. Old `[basecamp].pin` / `.source` / `.lgpm_flake` move to `[repos.basecamp]` / `[repos.lgpm]`; old `[basecamp.modules.*]` move to top-level `[modules.*]`; legacy `url` fields on `[repos.{lez,spel}]` are dropped. Migrations write a `scaffold.toml.bak` next to the original by default (skip with `--no-backup`); preview either form with `--dry-run`. Already-current configs succeed, leave `scaffold.toml` unchanged, and refresh the shipped AI skills. Run `setup` next after a fresh init or migration.
+- `setup` syncs LEZ and `spel` to their pinned commits (read from `[repos.lez]` / `[repos.spel]`), builds the standalone `sequencer_service`, `wallet`, and `spel` binaries locally, and seeds a deterministic default wallet from preconfigured public accounts when none is set. All binaries are project-local and are not installed to PATH. Use `logos-scaffold wallet ...` / `logos-scaffold spel -- ...` to interact with them. By default `[repos.lez].path` / `[repos.spel].path` are empty in `scaffold.toml`; the on-disk location is resolved at runtime from `<cache_root>/repos/<name>/<pin>`, so the file is portable across machines and CI. `--vendor-deps` projects keep relative `.scaffold/repos/{lez,spel}` literals; an explicit absolute `path` set in `scaffold.toml` is honored as-is.
 - `build [project-path]` runs `setup` and then `cargo build --workspace`.
 - `deploy [program-name]` deploys one or all guest programs discovered in `methods/guest/src/bin/*.rs` using prebuilt `.bin` artifacts. After each successful submission it prints `program_id: <hex>` (the risc0 image ID, computed locally from the submitted ELF) and includes it in `--program-path … --json` output. Use `--json` for machine-readable output (recommended for automation).
 - `build idl [project-path]` regenerates the IDL from the project source using the vendored `spel` binary.
@@ -113,12 +145,12 @@ Each subcommand documents copy-paste examples under `--help`. Global `-q` / `--q
 - `wallet -- ...` forwards raw wallet CLI arguments to the project-local wallet binary while preserving project wallet environment.
 - `run` combines build, IDL build, localnet start, wallet topup, and deploy into a single command. If a `[run]` section with `post_deploy` is present in `scaffold.toml`, each hook is executed after deploy via `sh -c` (cwd = project root) with `SEQUENCER_URL`, `NSSA_WALLET_HOME_DIR`, `SCAFFOLD_PROJECT_ROOT`, and `SCAFFOLD_IDL_DIR` env vars; when the project has exactly one deployable program, `SCAFFOLD_PROGRAM_ID` and `SCAFFOLD_GUEST_BIN` are also set. If a localnet is already running it is reused; otherwise it is started. `--post-deploy <cmd>` (repeatable) overrides the configured hooks; `--no-post-deploy` skips them entirely.
 - `spel -- ...` forwards raw spel CLI arguments to the project-vendored `spel` binary so any spel subcommand (`inspect`, `pda`, `generate-idl`, …) runs against the project's pinned version without a global install.
-- `basecamp setup` pins basecamp + `lgpm` (read from `[repos.basecamp]` / `[repos.lgpm]` — both `build = "nix-flake"`), builds both (logged to `.scaffold/logs/<timestamp>-setup-*.log`), and seeds per-profile XDG directories for `alice` and `bob` under `.scaffold/basecamp/profiles/`. Runtime config (`port_base`, `port_stride`) is in `[basecamp]`.
-- `basecamp modules` is the sole writer of the captured module set, which lives in top-level `[modules.<name>]` sections (each with `flake` and `role = "project" | "dependency"`). Modules aren't basecamp's property — they're the project's Logos modules, which basecamp happens to be one consumer of. Zero-arg runs auto-discovery: walks project flakes (root `.#lgx` first, else immediate sub-flakes), derives a `module_name` per source (from `metadata.json.name` for local paths; heuristic from the github repo slug for remote refs, with a one-line assumption note you can correct in `scaffold.toml`), then resolves each declared dep name by: (1) already keyed in `[modules]`, (2) basecamp preinstall list, (3) the source's own `flake.lock`, (4) scaffold-default pin. Unresolved deps **fail fast** — no silent skip. `--flake <ref>` / `--path <file>` capture explicit project sources; `--show` prints the current set without mutating. Re-runs are idempotent: existing `[modules]` entries are preserved so hand-edits survive. Project contract: see [docs/basecamp-module-requirements.md](./docs/basecamp-module-requirements.md).
-- `basecamp install` is pure replay: builds every captured source (dependencies first, then project modules — fail-fast on a broken companion pin) and installs them into both `alice` and `bob` via `lgpm`. No source-set flags. If the state is empty on first call it transparently invokes `basecamp modules` in auto-discover mode, prints what was captured, and proceeds. Each nix build logs to `.scaffold/logs/<timestamp>-install.log` with a one-line progress status (duration on both success and failure); `--print-output` (or `LOGOS_SCAFFOLD_PRINT_OUTPUT=1`) opts back into streaming nix output directly for CI.
-- `basecamp launch <profile>` scrubs the profile's data/cache under `.scaffold/basecamp/profiles/<profile>/`, replays captured modules, assigns per-profile ports, and execs `basecamp` with the profile's XDG environment. Before exec, prints a one-line variant-check summary of installed modules so the freeze-on-first-click case (upstream manifest variant mismatch) is visible. The scrub is scoped to the project's own profiles directory and is the whole point of the command — clean-slate semantics on every launch.
-- `basecamp build-portable` rebuilds every `role = "project"` entry in `[modules]` with attr-swapped `#lgx-portable` for hand-loading into a basecamp AppImage. Zero-arg: sources come from scaffold.toml (managed via `basecamp modules`). `role = "dependency"` entries are intentionally skipped — the target AppImage provides its own release companion modules via its Package Manager catalog. Output is ordered topologically by `metadata.json` dependencies (leaves first, so basecamp's AppImage can resolve each module's deps before loading it), and symlinked into `.scaffold/basecamp/portable/` as `<NN>-<module_name>.lgx` so the AppImage's "install lgx" file picker has browsable, human-named files in the right order. The directory is wiped and recreated per run.
-- `basecamp doctor` emits a basecamp-specific health report: captured modules summary (each entry's flake ref, parsed tag/commit annotation for github refs, and any API headers already installed in alice's profile), manifest variant check per seeded profile (flags modules whose `main` is missing the current-platform `-dev` key — the freeze-on-first-click failure mode), dep-pin drift (captured `role = "dependency"` rev vs. scaffold default), and auto-discovery drift (project sources discoverable today but absent from the captured set). `--json` for machine-readable output.
+- `basecamp setup` pins basecamp + `lgpm` (read from `[repos.basecamp]` / `[repos.lgpm]`, both `build = "nix-flake"`), builds both (logged to `.scaffold/logs/<timestamp>-setup-*.log`), and seeds per-profile XDG directories for `alice` and `bob` under `.scaffold/basecamp/profiles/`. Runtime config (`port_base`, `port_stride`) is in `[basecamp]`.
+- `basecamp modules` is the sole writer of the captured module set, which lives in top-level `[modules.<name>]` sections (each with `flake` and `role = "project" | "dependency"`). Modules aren't basecamp's property. They're the project's Logos modules, which basecamp happens to be one consumer of. Zero-arg runs auto-discovery: walks project flakes (root `.#lgx` first, else immediate sub-flakes), derives a `module_name` per source (from `metadata.json.name` for local paths; heuristic from the github repo slug for remote refs, with a one-line assumption note you can correct in `scaffold.toml`), then resolves each declared dep name by: (1) already keyed in `[modules]`, (2) basecamp preinstall list, (3) the source's own `flake.lock`, (4) scaffold-default pin. Unresolved deps **fail fast** with no silent skip. `--flake <ref>` / `--path <file>` capture explicit project sources; `--show` prints the current set without mutating. Re-runs are idempotent: existing `[modules]` entries are preserved so hand-edits survive. Project contract: see [docs/basecamp-module-requirements.md](./docs/basecamp-module-requirements.md).
+- `basecamp install` is pure replay: builds every captured source (dependencies first, then project modules, fail-fast on a broken companion pin) and installs them into both `alice` and `bob` via `lgpm`. No source-set flags. If the state is empty on first call it transparently invokes `basecamp modules` in auto-discover mode, prints what was captured, and proceeds. Each nix build logs to `.scaffold/logs/<timestamp>-install.log` with a one-line progress status (duration on both success and failure); `--print-output` (or `LOGOS_SCAFFOLD_PRINT_OUTPUT=1`) opts back into streaming nix output directly for CI.
+- `basecamp launch <profile>` scrubs the profile's data/cache under `.scaffold/basecamp/profiles/<profile>/`, replays captured modules, assigns per-profile ports, and execs `basecamp` with the profile's XDG environment. Before exec, prints a one-line variant-check summary of installed modules so the freeze-on-first-click case (upstream manifest variant mismatch) is visible. The scrub is scoped to the project's own profiles directory and is the whole point of the command: clean-slate semantics on every launch.
+- `basecamp build-portable` rebuilds every `role = "project"` entry in `[modules]` with attr-swapped `#lgx-portable` for hand-loading into a basecamp AppImage. Zero-arg: sources come from scaffold.toml (managed via `basecamp modules`). `role = "dependency"` entries are intentionally skipped because the target AppImage provides its own release companion modules via its Package Manager catalog. Output is ordered topologically by `metadata.json` dependencies (leaves first, so basecamp's AppImage can resolve each module's deps before loading it), and symlinked into `.scaffold/basecamp/portable/` as `<NN>-<module_name>.lgx` so the AppImage's "install lgx" file picker has browsable, human-named files in the right order. The directory is wiped and recreated per run.
+- `basecamp doctor` emits a basecamp-specific health report: captured modules summary (each entry's flake ref, parsed tag/commit annotation for github refs, and any API headers already installed in alice's profile), manifest variant check per seeded profile (flags modules whose `main` is missing the current-platform `-dev` key, the freeze-on-first-click failure mode), dep-pin drift (captured `role = "dependency"` rev vs. scaffold default), and auto-discovery drift (project sources discoverable today but absent from the captured set). `--json` for machine-readable output.
 - `doctor` prints actionable checks and next steps; `--json` is for CI/machine parsing.
 - `report` creates a `.tar.gz` diagnostics bundle for GitHub issues using strict allowlist collection with redaction and explicit skip reporting.
 - `completions <shell>` prints a shell completion script to stdout. Supported shells: `bash`, `zsh`. The generated script covers both `lgs` and `logos-scaffold`.

@@ -7,6 +7,8 @@ license = "MIT OR Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/logos-co/logos-scaffold"
 rust-version = "1.81"
+keywords = ["logos", "blockchain", "scaffold", "zkvm", "cli"]
+categories = ["command-line-utilities", "development-tools"]
 include = [
   "/src/**",
   "/templates/**",
