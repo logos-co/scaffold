@@ -24,6 +24,11 @@ pub(crate) struct GitRef {
 // scaffold's own wallet/sequencer build. `check_spel_lez_alignment` in
 // `commands/doctor.rs` enforces this at runtime — re-run `doctor` after
 // bumping either pin.
+//
+// Special note on DEFAULT_SPEL: this is the public commit that the
+// `v0.2.0-rc.5` tag peels to on `logos-co/spel`. We deliberately use the
+// commit so the default cannot drift if the upstream
+// tag is ever moved or replaced.
 pub(crate) const DEFAULT_LEZ: GitRef = GitRef {
     sha: "35d8df0d031315219f94d1546ceb862b0e5b208f",
     tag: "v0.2.0-rc1",
