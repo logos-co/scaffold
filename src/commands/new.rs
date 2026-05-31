@@ -28,6 +28,7 @@ pub(crate) struct NewCommand {
     pub(crate) template: String,
     pub(crate) vendor_deps: bool,
     pub(crate) lez_path: Option<PathBuf>,
+    pub(crate) cache_root: Option<PathBuf>,
 }
 
 pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
@@ -78,7 +79,13 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
     fs::create_dir_all(target.join(".scaffold/state"))?;
     fs::create_dir_all(target.join(".scaffold/logs"))?;
 
-    let (bootstrap_cache, _) = default_cache_root()?;
+    let (bootstrap_cache, _) = match &cmd.cache_root {
+        Some(p) => (p.clone(), ()),
+        None => {
+            let (path, _) = default_cache_root()?;
+            (path, ())
+        }
+    };
     fs::create_dir_all(bootstrap_cache.join("repos"))?;
     fs::create_dir_all(bootstrap_cache.join("state"))?;
     fs::create_dir_all(bootstrap_cache.join("logs"))?;
@@ -149,9 +156,14 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
     let mut spel = default_spel_repo(DEFAULT_SPEL_PIN);
     spel.path = spel_persisted_path;
 
+    let persisted_cache_root = match &cmd.cache_root {
+        Some(p) => p.display().to_string(),
+        None => String::new(),
+    };
+
     let cfg = Config {
         version: SCAFFOLD_TOML_SCHEMA_VERSION.to_string(),
-        cache_root: String::new(),
+        cache_root: persisted_cache_root,
         lez,
         spel,
         // Default scaffolded projects don't pin basecamp/lgpm — only
