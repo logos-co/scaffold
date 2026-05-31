@@ -172,9 +172,14 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
         "Run `logos-scaffold setup`",
     ));
 
+    // Probe the sequencer port the project actually uses (`[localnet] port`,
+    // default 3040). `deploy`/`wallet` derive the same address via
+    // `default_sequencer_http_url_for_project`, so a custom port keeps the
+    // diagnostic aligned with where those commands really connect.
+    let localnet_port = project.config.localnet.port;
     rows.push(check_port_warn(
-        "sequencer port 3040",
-        "127.0.0.1:3040",
+        &format!("sequencer port {localnet_port}"),
+        &format!("127.0.0.1:{localnet_port}"),
         "Run `logos-scaffold localnet start` (required before running example binaries)",
     ));
 
@@ -235,7 +240,9 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
     let wallet_cfg = wallet_home.join(WALLET_CONFIG_PRIMARY);
     if wallet_cfg.exists() {
         let cfg_text = fs::read_to_string(&wallet_cfg)?;
-        if cfg_text.contains("127.0.0.1:3040") || cfg_text.contains("localhost:3040") {
+        let points_local = cfg_text.contains(&format!("127.0.0.1:{localnet_port}"))
+            || cfg_text.contains(&format!("localhost:{localnet_port}"));
+        if points_local {
             rows.push(CheckRow {
                 status: CheckStatus::Pass,
                 name: "wallet network config".to_string(),
@@ -247,10 +254,9 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
                 status: CheckStatus::Warn,
                 name: "wallet network config".to_string(),
                 detail: "wallet may point to non-local sequencer".to_string(),
-                remediation: Some(
-                    "Set .scaffold/wallet/wallet_config.json sequencer_addr=http://127.0.0.1:3040"
-                        .to_string(),
-                ),
+                remediation: Some(format!(
+                    "Set .scaffold/wallet/wallet_config.json sequencer_addr=http://127.0.0.1:{localnet_port}"
+                )),
             });
         }
     } else {
@@ -301,8 +307,9 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
                     rows.push(CheckRow {
                         status: CheckStatus::Warn,
                         name: "wallet usability".to_string(),
-                        detail: "wallet cannot reach local sequencer at http://127.0.0.1:3040"
-                            .to_string(),
+                        detail: format!(
+                            "wallet cannot reach local sequencer at http://127.0.0.1:{localnet_port}"
+                        ),
                         remediation: Some(
                             "Run `logos-scaffold localnet start` (required before running example binaries), then `logos-scaffold doctor`"
                                 .to_string(),

@@ -887,6 +887,64 @@ fn doctor_uses_password_env_override_for_wallet_health() {
 }
 
 #[test]
+fn doctor_sequencer_port_and_wallet_network_track_custom_localnet_port() {
+    // PR #84 made deploy/wallet derive the sequencer URL from `[localnet]
+    // port`. Doctor's port probe and wallet-network heuristic must track the
+    // same configured port rather than a hardcoded 3040 — otherwise a project
+    // on a non-default port gets a misleading "sequencer port 3040" row and a
+    // false "wallet may point to non-local sequencer" warning.
+    let temp = tempdir().expect("tempdir");
+    let lez_path = temp.path().join("lez");
+    fs::create_dir_all(&lez_path).expect("create lez path");
+    write_wallet_stub(&lez_path);
+    let port = unused_local_port();
+    write_scaffold_toml_with_localnet(temp.path(), &lez_path, Some(port), Some(true));
+    write_wallet_config(temp.path(), Some(&format!("http://127.0.0.1:{port}")));
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("doctor")
+        .arg("--json")
+        .assert();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    let checks = value
+        .get("checks")
+        .and_then(serde_json::Value::as_array)
+        .expect("checks array");
+
+    // The sequencer-port row must name the configured port, not 3040.
+    let port_check = checks
+        .iter()
+        .find(|c| {
+            c.get("name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|n| n.starts_with("sequencer port "))
+        })
+        .expect("sequencer port check present");
+    assert_eq!(
+        port_check.get("name").and_then(serde_json::Value::as_str),
+        Some(format!("sequencer port {port}").as_str()),
+        "port check must name the configured localnet port, got: {port_check}"
+    );
+
+    // Wallet config points at the configured port, so the network heuristic
+    // must Pass rather than warn about a non-local sequencer.
+    let wallet_net = checks
+        .iter()
+        .find(|c| {
+            c.get("name").and_then(serde_json::Value::as_str) == Some("wallet network config")
+        })
+        .expect("wallet network config check present");
+    assert_eq!(
+        wallet_net.get("status").and_then(serde_json::Value::as_str),
+        Some("pass"),
+        "wallet config on the configured localnet port must pass, got: {wallet_net}"
+    );
+}
+
+#[test]
 fn localnet_start_fails_when_process_exits_before_ready() {
     let temp = tempdir().expect("tempdir");
     let lez_path = temp.path().join("lez");
