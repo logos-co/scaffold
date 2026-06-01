@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context};
@@ -27,6 +28,7 @@ pub(crate) struct NewCommand {
     pub(crate) template: String,
     pub(crate) vendor_deps: bool,
     pub(crate) lez_path: Option<PathBuf>,
+    pub(crate) cache_root: Option<PathBuf>,
 }
 
 pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
@@ -39,6 +41,32 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
 
     let cwd = env::current_dir()?;
     let target = cwd.join(&cmd.name);
+
+    if target.exists() {
+        bail!("target exists: {}", target.display());
+    }
+
+    // Run the rest in an inner function so we can clean up `target` on
+    // failure. Without this, a sync/template error (e.g. a typo on
+    // `--lez-path`) leaves a half-built project directory behind. The
+    // `target.exists()` guard above guarantees we only delete a directory
+    // we created ourselves in this run.
+    let result = cmd_new_inner(&cmd, &target, &template_variant);
+    if result.is_err() {
+        match fs::remove_dir_all(&target) {
+            Ok(()) => {}
+            // Ignore NotFound: inner may have failed before creating target.
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => eprintln!(
+                "warning: failed to clean up incomplete project directory {}: {err}",
+                target.display()
+            ),
+        }
+    }
+    result
+}
+
+fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> DynResult<()> {
     let crate_name = {
         let fallback = "app";
         let file_name = target
@@ -48,14 +76,16 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
         to_cargo_crate_name(file_name)
     };
 
-    if target.exists() {
-        bail!("target exists: {}", target.display());
-    }
-
     fs::create_dir_all(target.join(".scaffold/state"))?;
     fs::create_dir_all(target.join(".scaffold/logs"))?;
 
-    let (bootstrap_cache, _) = default_cache_root()?;
+    let (bootstrap_cache, _) = match &cmd.cache_root {
+        Some(p) => (p.clone(), ()),
+        None => {
+            let (path, _) = default_cache_root()?;
+            (path, ())
+        }
+    };
     fs::create_dir_all(bootstrap_cache.join("repos"))?;
     fs::create_dir_all(bootstrap_cache.join("state"))?;
     fs::create_dir_all(bootstrap_cache.join("logs"))?;
@@ -63,31 +93,47 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
 
     let lez_source = cmd
         .lez_path
+        .as_ref()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| LEZ_SOURCE.to_string());
 
-    let lez_repo_path = if cmd.vendor_deps {
-        let root = target.join(".scaffold/repos");
-        fs::create_dir_all(&root)?;
-        let lez_vendor = root.join("lez");
-        sync_repo_to_pin_at_path_with_opts(
-            &lez_vendor,
-            &lez_source,
-            DEFAULT_LEZ.sha,
-            "lez",
-            RepoSyncOptions::fail_on_source_mismatch(),
-        )?;
-        lez_vendor
-    } else {
-        let lez_cached = bootstrap_cache.join("repos/lez").join(DEFAULT_LEZ.sha);
-        sync_repo_to_pin_at_path_with_opts(
-            &lez_cached,
-            &lez_source,
-            DEFAULT_LEZ.sha,
-            "lez",
-            RepoSyncOptions::auto_reclone_cache_repo(),
-        )?;
-        lez_cached
+    // First-run noise reduction: scaffold normally echoes every git
+    // subprocess (`$ git clone ...`, `$ git fetch --all --tags`,
+    // `$ git checkout <pin>`). For a fresh `lgs new` that's three
+    // shell-prefixed lines before any human-friendly status. Suppress
+    // the echo for the LEZ sync only — `setup`, `localnet`, etc. keep
+    // their existing echo behavior. `git clone --no-hardlinks` still
+    // prints its own progress to stderr, which is reassuring during a
+    // slow first clone.
+    println!(
+        "Cloning lez at pin {} from {} (this may take a minute the first time)...",
+        DEFAULT_LEZ.sha, lez_source
+    );
+    let lez_repo_path = {
+        let _echo_guard = crate::process::EchoGuard::suppress();
+        if cmd.vendor_deps {
+            let root = target.join(".scaffold/repos");
+            fs::create_dir_all(&root)?;
+            let lez_vendor = root.join("lez");
+            sync_repo_to_pin_at_path_with_opts(
+                &lez_vendor,
+                &lez_source,
+                DEFAULT_LEZ.sha,
+                "lez",
+                RepoSyncOptions::fail_on_source_mismatch(),
+            )?;
+            lez_vendor
+        } else {
+            let lez_cached = bootstrap_cache.join("repos/lez").join(DEFAULT_LEZ.sha);
+            sync_repo_to_pin_at_path_with_opts(
+                &lez_cached,
+                &lez_source,
+                DEFAULT_LEZ.sha,
+                "lez",
+                RepoSyncOptions::auto_reclone_cache_repo(),
+            )?;
+            lez_cached
+        }
     };
 
     // spel is recorded in scaffold.toml here but actually cloned + built by
@@ -110,9 +156,14 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
     let mut spel = default_spel_repo(DEFAULT_SPEL.sha);
     spel.path = spel_persisted_path;
 
+    let persisted_cache_root = match &cmd.cache_root {
+        Some(p) => p.display().to_string(),
+        None => String::new(),
+    };
+
     let cfg = Config {
         version: SCAFFOLD_TOML_SCHEMA_VERSION.to_string(),
-        cache_root: String::new(),
+        cache_root: persisted_cache_root,
         lez,
         spel,
         // Default scaffolded projects don't pin basecamp/lgpm — only
@@ -123,7 +174,7 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
         lgpm_repo: Some(default_lgpm_repo(DEFAULT_LGPM_PIN)),
         wallet_home_dir: ".scaffold/wallet".to_string(),
         framework: FrameworkConfig {
-            kind: template_variant.clone(),
+            kind: template_variant.to_string(),
             version: DEFAULT_FRAMEWORK_VERSION.to_string(),
             idl: FrameworkIdlConfig {
                 spec: DEFAULT_FRAMEWORK_IDL_SPEC.to_string(),
@@ -141,18 +192,17 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
         bail!("template not found at {}", template_root.display());
     }
 
-    copy_dir_contents(&template_root, &target).context("failed to copy scaffold template")?;
+    copy_dir_contents(&template_root, target).context("failed to copy scaffold template")?;
     if template_variant == FRAMEWORK_KIND_DEFAULT {
-        patch_simple_tail_call_program_id(&target)?;
+        patch_simple_tail_call_program_id(target)?;
     }
     let overlay_ctx = OverlayRenderContext {
         crate_name: &crate_name,
         lez_pin: &cfg.lez.pin,
-        spel_tag: DEFAULT_SPEL.tag,
     };
-    apply_overlay(&target, &template_variant, &overlay_ctx)?;
+    apply_overlay(target, template_variant, &overlay_ctx)?;
     if template_variant == FRAMEWORK_KIND_LEZ_FRAMEWORK {
-        cleanup_lez_hello_artifacts(&target)?;
+        cleanup_lez_hello_artifacts(target)?;
     }
     write_text(&target.join("scaffold.toml"), &serialize_config(&cfg)?)?;
     apply_skills(&target)?;

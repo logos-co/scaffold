@@ -34,7 +34,7 @@ role = "dependency"
 - **`role = "project"`** — a module the developer is building locally. `build-portable` attr-swaps these to `#lgx-portable`.
 - **`role = "dependency"`** — a runtime companion. `install` / `launch` load them into the profile; `build-portable` skips them (the target AppImage provides its own).
 
-`basecamp modules` is the sole writer of this section. The file stays human-editable — if you disagree with a generated entry, edit it directly.
+`basecamp modules` is the primary automated writer of this section, but the table is also fully hand-authorable. The file stays human-editable — edit a generated entry to correct it, or write the entire table by hand when `basecamp modules` is the wrong fit (see "Hand-authored declarative use" below).
 
 The pre-0.2.0 schema used `[basecamp.modules.<name>]`. Projects still on that layout are rejected at parse time with a hint pointing at `lgs init`; the section has moved to the top-level `[modules.<name>]` namespace.
 
@@ -143,6 +143,18 @@ role = "dependency"
 
 `basecamp modules` preserves the entry on every subsequent run — user intent wins over derived pins.
 
+### Hand-authored declarative use
+
+You can also author the entire `[modules.*]` table by hand, with no `lgs basecamp setup` or `lgs basecamp modules` invocation. `basecamp install`, `basecamp build-portable`, and `basecamp doctor` all read whatever the table captures and don't require an automated writer to have produced it.
+
+Concrete reasons to do this:
+
+- **Drift detection only.** A project that ships its own `install` / `launch` flow (e.g. a distributed-stack project blocked on `lgpm` ↔ `bin-macos-app` variant alignment) can still seed `[modules.*]` entries by hand purely to get `lgs basecamp doctor` drift warnings against pin updates upstream.
+- **CI / sandboxed environments** where `lgs basecamp setup` can't or shouldn't run, but the resolved module set is known.
+- **Forking an existing module's flake reference** before running `modules` for the first time.
+
+`basecamp modules` re-runs over a hand-authored table are still idempotent and preserve every entry — the automated and hand-authored modes mix freely.
+
 ## AppImage testing via `build-portable`
 
 `basecamp install` / `launch` load modules into the scaffold-managed alice/bob profiles. To instead test against a released basecamp **AppImage**, use `build-portable`:
@@ -160,6 +172,8 @@ logos-scaffold basecamp build-portable
 ```
 
 `build-portable` does not touch profiles, `basecamp.state`, or the AppImage itself — it only produces artefacts. Load them into your AppImage in the printed order via its "install lgx" button; scaffold is intentionally unaware of the AppImage's install path.
+
+If you launch the AppImage with `--user-dir <path>` (the `bin-macos-app` flag that sets `LOGOS_USER_DIR`), the AppImage stores its state at `<path>` rather than its default XDG data root — orthogonal to scaffold's per-profile XDG isolation under `.scaffold/basecamp/profiles/{alice,bob}/`. The two are independent mechanisms at different layers: scaffold's profiles isolate dev-stack runs; `--user-dir` isolates a single AppImage launch's installed-modules + identity state.
 
 The `.scaffold/basecamp/portable/` directory is wiped and recreated on every `build-portable` run, so re-running after you've removed a module via `basecamp modules` doesn't leave stale symlinks behind.
 

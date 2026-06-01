@@ -17,7 +17,6 @@ Localnet and process/port detection rely on Unix tools (lsof, ps, kill).
 - Single external dependency: [LEZ](https://github.com/logos-blockchain/logos-execution-zone/)
 - Standalone sequencer flow only
 - No `logos-blockchain` dependency
-- No full-stack/circuits management
 
 ## Prerequisites
 
@@ -25,6 +24,11 @@ Localnet and process/port detection rely on Unix tools (lsof, ps, kill).
 - `curl` for fetching the `logos-blockchain-circuits` release on first `setup`
 - Unix process helpers: `lsof`, `ps`, `kill`
 - Container runtime for guest builds: Docker or Podman
+- `logos-blockchain-circuits` release on disk: either set
+  `LOGOS_BLOCKCHAIN_CIRCUITS=<path>` or place the release at
+  `~/.logos-blockchain-circuits/`. Required by the LEZ standalone build
+  chain that `setup` invokes.
+- `nix` (with flakes enabled) — only required for `basecamp` subcommands.
 
 ## Install
 
@@ -80,7 +84,7 @@ logos-scaffold spel -- <spel-command...>
 logos-scaffold basecamp setup
 logos-scaffold basecamp modules [--path PATH]... [--flake REF]... [--show]
 logos-scaffold basecamp install [--print-output]
-logos-scaffold basecamp launch <profile> (--yes | --no-clean | --dry-run)
+logos-scaffold basecamp launch <profile>
 logos-scaffold basecamp build-portable
 logos-scaffold basecamp doctor [--json]
 logos-scaffold doctor [--json]
@@ -112,7 +116,7 @@ Each subcommand documents copy-paste examples under `--help`. Global `-q` / `--q
 - `basecamp setup` pins basecamp + `lgpm` (read from `[repos.basecamp]` / `[repos.lgpm]` — both `build = "nix-flake"`), builds both (logged to `.scaffold/logs/<timestamp>-setup-*.log`), and seeds per-profile XDG directories for `alice` and `bob` under `.scaffold/basecamp/profiles/`. Runtime config (`port_base`, `port_stride`) is in `[basecamp]`.
 - `basecamp modules` is the sole writer of the captured module set, which lives in top-level `[modules.<name>]` sections (each with `flake` and `role = "project" | "dependency"`). Modules aren't basecamp's property — they're the project's Logos modules, which basecamp happens to be one consumer of. Zero-arg runs auto-discovery: walks project flakes (root `.#lgx` first, else immediate sub-flakes), derives a `module_name` per source (from `metadata.json.name` for local paths; heuristic from the github repo slug for remote refs, with a one-line assumption note you can correct in `scaffold.toml`), then resolves each declared dep name by: (1) already keyed in `[modules]`, (2) basecamp preinstall list, (3) the source's own `flake.lock`, (4) scaffold-default pin. Unresolved deps **fail fast** — no silent skip. `--flake <ref>` / `--path <file>` capture explicit project sources; `--show` prints the current set without mutating. Re-runs are idempotent: existing `[modules]` entries are preserved so hand-edits survive. Project contract: see [docs/basecamp-module-requirements.md](./docs/basecamp-module-requirements.md).
 - `basecamp install` is pure replay: builds every captured source (dependencies first, then project modules — fail-fast on a broken companion pin) and installs them into both `alice` and `bob` via `lgpm`. No source-set flags. If the state is empty on first call it transparently invokes `basecamp modules` in auto-discover mode, prints what was captured, and proceeds. Each nix build logs to `.scaffold/logs/<timestamp>-install.log` with a one-line progress status (duration on both success and failure); `--print-output` (or `LOGOS_SCAFFOLD_PRINT_OUTPUT=1`) opts back into streaming nix output directly for CI.
-- `basecamp launch <profile>` scrubs the profile's data/cache, replays captured modules, assigns per-profile ports, and execs `basecamp` with the profile's XDG environment. Before exec, prints a one-line variant-check summary of installed modules so the freeze-on-first-click case (upstream manifest variant mismatch) is visible. Destructive by default — requires one of: `--yes` (confirm scrub), `--no-clean` (launch without scrubbing), or `--dry-run` (preview the plan).
+- `basecamp launch <profile>` scrubs the profile's data/cache under `.scaffold/basecamp/profiles/<profile>/`, replays captured modules, assigns per-profile ports, and execs `basecamp` with the profile's XDG environment. Before exec, prints a one-line variant-check summary of installed modules so the freeze-on-first-click case (upstream manifest variant mismatch) is visible. The scrub is scoped to the project's own profiles directory and is the whole point of the command — clean-slate semantics on every launch.
 - `basecamp build-portable` rebuilds every `role = "project"` entry in `[modules]` with attr-swapped `#lgx-portable` for hand-loading into a basecamp AppImage. Zero-arg: sources come from scaffold.toml (managed via `basecamp modules`). `role = "dependency"` entries are intentionally skipped — the target AppImage provides its own release companion modules via its Package Manager catalog. Output is ordered topologically by `metadata.json` dependencies (leaves first, so basecamp's AppImage can resolve each module's deps before loading it), and symlinked into `.scaffold/basecamp/portable/` as `<NN>-<module_name>.lgx` so the AppImage's "install lgx" file picker has browsable, human-named files in the right order. The directory is wiped and recreated per run.
 - `basecamp doctor` emits a basecamp-specific health report: captured modules summary (each entry's flake ref, parsed tag/commit annotation for github refs, and any API headers already installed in alice's profile), manifest variant check per seeded profile (flags modules whose `main` is missing the current-platform `-dev` key — the freeze-on-first-click failure mode), dep-pin drift (captured `role = "dependency"` rev vs. scaffold default), and auto-discovery drift (project sources discoverable today but absent from the captured set). `--json` for machine-readable output.
 - `doctor` prints actionable checks and next steps; `--json` is for CI/machine parsing.

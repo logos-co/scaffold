@@ -82,13 +82,35 @@ enum Commands {
     #[command(about = "Alias for `create`")]
     #[command(before_long_help = NEW_ABOUT.as_str())]
     New(NewArgs),
+    #[command(
+        about = "Sync dependencies and build project-local binaries (sequencer, wallet, spel)"
+    )]
     Setup(SetupArgs),
+    #[command(about = "Build the project workspace and guest programs")]
     Build(BuildArgs),
+    #[command(about = "Deploy guest programs to the running localnet")]
     Deploy(DeployArgs),
+    #[command(about = "Manage the local sequencer (start, stop, status, logs, reset)")]
     Localnet(LocalnetArgs),
+    #[command(about = "Manage project wallet accounts and faucet top-ups")]
     Wallet(WalletArgs),
+    /// `spel` is dispatched via the early `spel_passthrough_args` intercept
+    /// before clap parses argv (the user types `lgs spel -- <args>`). The
+    /// variant exists so clap lists `spel` in `--help` output and renders
+    /// the `long_about` for `lgs spel --help`. The match arm below is
+    /// unreachable at runtime.
+    #[command(
+        about = "Forward arguments to the project-vendored `spel` binary",
+        long_about = "Forward arguments to the project-vendored `spel` binary.\n\n\
+                      Use the form: `logos-scaffold spel -- <spel-subcommand...>`\n\n\
+                      Examples:\n  \
+                      logos-scaffold spel -- inspect path/to/program.bin\n  \
+                      logos-scaffold spel -- generate-idl"
+    )]
+    Spel(SpelArgs),
     #[command(about = "Manage pre-seeded basecamp profiles for p2p dogfooding")]
     Basecamp(BasecampArgs),
+    #[command(about = "Check project health and report actionable next steps")]
     Doctor(DoctorArgs),
     #[command(about = "Build, start localnet, top up wallet, deploy, and run post-deploy hook")]
     Run(RunArgs),
@@ -188,6 +210,10 @@ struct NewArgs {
     lez_path: Option<PathBuf>,
     #[arg(long, default_value = "default", help = TEMPLATE_HELP.as_str())]
     template: String,
+    /// Override the cache root used for non-vendored dependencies. Written to
+    /// scaffold.toml so subsequent commands reuse the same location.
+    #[arg(long, value_name = "PATH")]
+    cache_root: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -291,6 +317,11 @@ struct RunArgs {
     post_deploy: Vec<String>,
     #[arg(long, value_name = "SECS", help = RUN_LOCALNET_TIMEOUT_HELP.as_str())]
     localnet_timeout: Option<u64>,
+    /// After the initial run, watch the project for file changes and
+    /// re-run the pipeline (build + idl + deploy + hooks) on each change.
+    /// Localnet is reused; reset is skipped on re-runs.
+    #[arg(long)]
+    watch: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -365,6 +396,13 @@ struct WalletArgs {
     command: WalletSubcommand,
 }
 
+#[derive(Debug, clap::Args)]
+struct SpelArgs {
+    /// Trailing args forwarded to the project-vendored `spel` binary.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
+}
+
 #[derive(Debug, Subcommand)]
 enum WalletSubcommand {
     #[command(about = "List wallet accounts (same as `wallet account list`)")]
@@ -434,7 +472,7 @@ enum BasecampSubcommand {
     )]
     Install(BasecampInstallArgs),
     #[command(
-        about = "Launch basecamp for a named profile with clean-slate semantics. Destructive by default (scrubs xdg-data/xdg-cache); requires --yes, --no-clean, or --dry-run. See `basecamp docs` for project requirements."
+        about = "Launch basecamp for a named profile with clean-slate semantics. Scrubs the profile's xdg-data/xdg-cache and replays the captured module set on every invocation. See `basecamp docs` for project requirements."
     )]
     Launch(BasecampLaunchArgs),
     #[command(
@@ -494,19 +532,6 @@ struct BasecampInstallArgs {
 struct BasecampLaunchArgs {
     #[arg(value_name = "PROFILE")]
     profile: String,
-    /// Skip the clean-slate scrub and reinstall step
-    #[arg(long)]
-    no_clean: bool,
-    #[arg(
-        long,
-        help = "Confirm the clean-slate scrub of the profile's xdg-data and xdg-cache. Required for the destructive default launch unless --no-clean or --dry-run is passed."
-    )]
-    yes: bool,
-    #[arg(
-        long,
-        help = "Print what would be scrubbed and reinstalled without touching the profile or launching basecamp."
-    )]
-    dry_run: bool,
 }
 
 pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
@@ -515,12 +540,6 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
     if passthrough_start > 1 {
         set_command_echo(false);
     }
-    if let Some(action) = wallet_passthrough_action(&args, passthrough_start)? {
-        return cmd_wallet(action);
-    }
-    if let Some(spel_args) = spel_passthrough_args(&args, passthrough_start)? {
-        return cmd_spel(spel_args);
-    }
 
     let bin_name = args
         .first()
@@ -528,6 +547,16 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
         .and_then(|f| f.to_str())
         .unwrap_or("logos-scaffold")
         .to_string();
+
+    if is_spel_help_request(&args, passthrough_start) {
+        return print_spel_help(&bin_name);
+    }
+    if let Some(action) = wallet_passthrough_action(&args, passthrough_start)? {
+        return cmd_wallet(action);
+    }
+    if let Some(spel_args) = spel_passthrough_args(&args, passthrough_start)? {
+        return cmd_spel(spel_args);
+    }
 
     let cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
@@ -556,6 +585,7 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
             vendor_deps: args.vendor_deps,
             lez_path: args.lez_path,
             template: args.template,
+            cache_root: args.cache_root,
         }),
         Some(Commands::Setup(args)) => cmd_setup(args.prebuilt),
         Some(Commands::Build(args)) => match args.subcommand {
@@ -588,6 +618,17 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 },
             };
             cmd_localnet(action)
+        }
+        Some(Commands::Spel(_)) => {
+            // The early `spel_passthrough_args` intercept above always
+            // wins for the runtime `spel -- <args>` form. The clap variant
+            // exists only so `--help` lists `spel` and renders its
+            // `long_about`; reaching this arm means clap parsed `spel`
+            // without `--`, which the intercept would already have
+            // rejected with a hint. Kept as `unreachable!` so a future
+            // refactor of the intercept surfaces immediately rather than
+            // silently no-op'ing.
+            unreachable!("spel is intercepted by spel_passthrough_args before clap parses argv")
         }
         Some(Commands::Wallet(args)) => {
             let action = match args.command {
@@ -625,9 +666,6 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 },
                 BasecampSubcommand::Launch(args) => BasecampAction::Launch {
                     profile: args.profile,
-                    no_clean: args.no_clean,
-                    yes: args.yes,
-                    dry_run: args.dry_run,
                 },
                 BasecampSubcommand::BuildPortable(_) => BasecampAction::BuildPortable,
                 BasecampSubcommand::Doctor(args) => BasecampAction::Doctor { json: args.json },
@@ -656,6 +694,7 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 reset,
                 post_deploy_override: post_deploy,
                 localnet_timeout_sec: args.localnet_timeout,
+                watch: args.watch,
             })
         }
         Some(Commands::Report(args)) => cmd_report(args.out, args.tail),
@@ -691,6 +730,25 @@ pub(crate) fn print_help(bin_name: &str) -> DynResult<()> {
     cmd.print_help()?;
     println!();
     Ok(())
+}
+
+fn print_spel_help(bin_name: &str) -> DynResult<()> {
+    let mut cmd = Cli::command().bin_name(bin_name);
+    if let Some(spel) = cmd.find_subcommand_mut("spel") {
+        spel.print_long_help()?;
+        println!();
+        Ok(())
+    } else {
+        print_help(bin_name)
+    }
+}
+
+fn is_spel_help_request(args: &[String], start: usize) -> bool {
+    args.len() > start + 1 && args[start] == "spel" && is_help_token(&args[start + 1])
+}
+
+fn is_help_token(token: &str) -> bool {
+    matches!(token, "--help" | "-h" | "help" | "-?")
 }
 
 fn apply_quiet_from_env() {
@@ -742,6 +800,11 @@ fn skip_inline_quiet(args: &[String], from: usize) -> (usize, bool) {
 /// is also accepted via `skip_inline_quiet`.
 fn spel_passthrough_args(args: &[String], start: usize) -> DynResult<Option<Vec<String>>> {
     if args.len() <= start || args[start] != "spel" {
+        return Ok(None);
+    }
+    // Help spellings are handled before this function so the user sees the
+    // variant's `long_about` instead of the passthrough hint.
+    if args.len() > start + 1 && is_help_token(&args[start + 1]) {
         return Ok(None);
     }
     let (sep_idx, quiet_seen) = skip_inline_quiet(args, start + 1);

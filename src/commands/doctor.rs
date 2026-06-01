@@ -9,8 +9,8 @@ use crate::constants::{
     DEFAULT_LEZ, DEFAULT_SPEL, SEQUENCER_BIN_REL_PATH, SPEL_BIN_REL_PATH, WALLET_BIN_REL_PATH,
 };
 use crate::doctor_checks::{
-    check_binary, check_container_runtime, check_path, check_port_warn, check_repo,
-    check_standalone_support, one_line, print_rows,
+    check_binary, check_container_runtime, check_logos_blockchain_circuits, check_path,
+    check_port_warn, check_repo, check_standalone_support, one_line, print_rows,
 };
 use crate::model::{CheckRow, CheckStatus, DoctorReport, DoctorSummary};
 use crate::process::{pid_running, run_capture, run_with_stdin, set_command_echo};
@@ -85,6 +85,8 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
     rows.push(check_binary("ps", true));
     rows.push(check_binary("kill", true));
     rows.push(check_container_runtime());
+    rows.push(check_binary("nix", false));
+    rows.push(check_logos_blockchain_circuits());
 
     rows.push(check_repo("lez", &lez, &project.config.lez.pin));
 
@@ -124,15 +126,15 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
         },
         name: "spel pin matches scaffold default".to_string(),
         detail: format!(
-            "configured pin={} expected={}",
-            project.config.spel.pin, DEFAULT_SPEL.sha
+            "configured pin={} expected={} ({})",
+            project.config.spel.pin, DEFAULT_SPEL.sha, DEFAULT_SPEL.tag
         ),
         remediation: if project.config.spel.pin == DEFAULT_SPEL.sha {
             None
         } else {
             Some(format!(
-                "Set repos.spel.pin in scaffold.toml to {} and run `{}`",
-                DEFAULT_SPEL.sha, STEP_SETUP
+                "Set repos.spel.pin in scaffold.toml to {} ({}) and run `{}`",
+                DEFAULT_SPEL.sha, DEFAULT_SPEL.tag, STEP_SETUP
             ))
         },
     });
@@ -170,9 +172,14 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
         "Run `logos-scaffold setup`",
     ));
 
+    // Probe the sequencer port the project actually uses (`[localnet] port`,
+    // default 3040). `deploy`/`wallet` derive the same address via
+    // `default_sequencer_http_url_for_project`, so a custom port keeps the
+    // diagnostic aligned with where those commands really connect.
+    let localnet_port = project.config.localnet.port;
     rows.push(check_port_warn(
-        "sequencer port 3040",
-        "127.0.0.1:3040",
+        &format!("sequencer port {localnet_port}"),
+        &format!("127.0.0.1:{localnet_port}"),
         "Run `logos-scaffold localnet start` (required before running example binaries)",
     ));
 
@@ -233,7 +240,9 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
     let wallet_cfg = wallet_home.join(WALLET_CONFIG_PRIMARY);
     if wallet_cfg.exists() {
         let cfg_text = fs::read_to_string(&wallet_cfg)?;
-        if cfg_text.contains("127.0.0.1:3040") || cfg_text.contains("localhost:3040") {
+        let points_local = cfg_text.contains(&format!("127.0.0.1:{localnet_port}"))
+            || cfg_text.contains(&format!("localhost:{localnet_port}"));
+        if points_local {
             rows.push(CheckRow {
                 status: CheckStatus::Pass,
                 name: "wallet network config".to_string(),
@@ -245,10 +254,9 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
                 status: CheckStatus::Warn,
                 name: "wallet network config".to_string(),
                 detail: "wallet may point to non-local sequencer".to_string(),
-                remediation: Some(
-                    "Set .scaffold/wallet/wallet_config.json sequencer_addr=http://127.0.0.1:3040"
-                        .to_string(),
-                ),
+                remediation: Some(format!(
+                    "Set .scaffold/wallet/wallet_config.json sequencer_addr=http://127.0.0.1:{localnet_port}"
+                )),
             });
         }
     } else {
@@ -299,8 +307,9 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
                     rows.push(CheckRow {
                         status: CheckStatus::Warn,
                         name: "wallet usability".to_string(),
-                        detail: "wallet cannot reach local sequencer at http://127.0.0.1:3040"
-                            .to_string(),
+                        detail: format!(
+                            "wallet cannot reach local sequencer at http://127.0.0.1:{localnet_port}"
+                        ),
                         remediation: Some(
                             "Run `logos-scaffold localnet start` (required before running example binaries), then `logos-scaffold doctor`"
                                 .to_string(),

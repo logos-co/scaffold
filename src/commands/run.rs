@@ -1,7 +1,10 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use anyhow::{bail, Context};
+use notify::{RecursiveMode, Watcher};
 
 use crate::commands::build::cmd_build_shortcut;
 use crate::commands::deploy::{
@@ -23,6 +26,11 @@ use crate::project::{load_project, resolve_repo_path, run_in_project_dir};
 use crate::state::prepare_wallet_home;
 use crate::DynResult;
 
+/// Debounce window for the watch loop. Filesystem events from a single
+/// editor save typically arrive in a flurry; sleep this long after the
+/// first event before re-running so we coalesce them.
+const WATCH_DEBOUNCE_MS: u64 = 500;
+
 /// All knobs that control a `lgs run` invocation. Built by `cli.rs` from
 /// the parsed `RunArgs` (with conflicting-flag resolution into `Option<bool>`)
 /// and consumed by `cmd_run`. Grouping the fields together prevents the
@@ -33,6 +41,7 @@ pub(crate) struct RunInvocation {
     pub(crate) reset: Option<bool>,
     pub(crate) post_deploy_override: Option<Vec<String>>,
     pub(crate) localnet_timeout_sec: Option<u64>,
+    pub(crate) watch: bool,
 }
 
 pub(crate) fn cmd_run(inv: RunInvocation) -> DynResult<()> {
@@ -50,7 +59,7 @@ pub(crate) fn cmd_run(inv: RunInvocation) -> DynResult<()> {
         .localnet_timeout_sec
         .unwrap_or(DEFAULT_RUN_LOCALNET_TIMEOUT_SEC);
 
-    let params = PipelineParams {
+    let mut params = PipelineParams {
         resolved: resolved.clone(),
         hooks,
         reset_override: inv.reset,
@@ -61,7 +70,19 @@ pub(crate) fn cmd_run(inv: RunInvocation) -> DynResult<()> {
     // that resolve paths relative to cwd (`cmd_build_shortcut`,
     // `build_idl_for_current_project`, etc.) would build/deploy from whichever
     // subdirectory the user invoked `lgs run` in.
-    run_in_project_dir(Some(&project.root), || run_pipeline_once(&project, &params))
+    run_in_project_dir(Some(&project.root), || {
+        run_pipeline_once(&project, &params)?;
+
+        if inv.watch {
+            // Subsequent iterations share the same hook/profile selection but
+            // never reset the localnet again — that would clobber the state
+            // hook code is verifying.
+            params.reset_override = Some(false);
+            watch_loop(&project, &params)?;
+        }
+
+        Ok(())
+    })
 }
 
 #[derive(Clone)]
@@ -219,6 +240,102 @@ fn reset_for_run(project: &Project, verify_timeout_sec: u64) -> DynResult<()> {
 /// `wallet.state` is byte-equivalent to a fresh `lgs setup`. Extracted as
 /// its own helper so the byte-equivalence test can drive it directly
 /// without booting a real sequencer.
+fn watch_loop(project: &Project, params: &PipelineParams) -> DynResult<()> {
+    let (tx, rx) = mpsc::channel();
+    let mut watcher = notify::recommended_watcher(move |res| {
+        let _ = tx.send(res);
+    })
+    .context("create filesystem watcher")?;
+    watcher
+        .watch(&project.root, RecursiveMode::Recursive)
+        .context("watch project root")?;
+
+    // The IDL build writes JSON files into framework.idl.path on every
+    // iteration. Without ignoring that directory, those writes fire
+    // their own notify events → infinite loop. Resolve once before
+    // entering the loop. Use the project-relative form so we match
+    // both canonical and non-canonical event paths.
+    let idl_rel = PathBuf::from(&project.config.framework.idl.path);
+    let watch_ctx = WatchIgnore { idl_rel };
+
+    println!();
+    println!(
+        "===> watching {} for changes (Ctrl-C to exit)",
+        project.root.display()
+    );
+
+    loop {
+        let event = match rx.recv() {
+            Ok(Ok(ev)) => ev,
+            Ok(Err(err)) => {
+                eprintln!("watch error: {err}");
+                continue;
+            }
+            Err(_) => {
+                eprintln!("===> watcher channel disconnected; exiting watch loop");
+                break;
+            }
+        };
+        if !is_watched_event(project, &watch_ctx, &event) {
+            continue;
+        }
+        // Debounce: sleep then drain the rest of the burst.
+        std::thread::sleep(Duration::from_millis(WATCH_DEBOUNCE_MS));
+        while rx.try_recv().is_ok() {}
+        println!();
+        println!("===> change detected, re-running pipeline");
+        if let Err(err) = run_pipeline_once(project, params) {
+            eprintln!("pipeline failed: {err:#}");
+            eprintln!("===> waiting for next change");
+        }
+    }
+
+    Ok(())
+}
+
+struct WatchIgnore {
+    idl_rel: PathBuf,
+}
+
+fn is_watched_event(project: &Project, ctx: &WatchIgnore, event: &notify::Event) -> bool {
+    for path in &event.paths {
+        if !is_ignored_path(&project.root, ctx, path) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_ignored_path(project_root: &Path, ctx: &WatchIgnore, path: &Path) -> bool {
+    // `notify` may emit canonical (symlinks resolved) or non-canonical paths
+    // depending on the platform and how the project root was registered.
+    // Try both forms so we never silently *ignore* a project edit just
+    // because the OS canonicalized one side and not the other. Fail-open:
+    // a path we can't classify is treated as "watched" so the worst case
+    // is a spurious re-run, never a missed edit.
+    let canonical_root = project_root.canonicalize().ok();
+    let rel = path.strip_prefix(project_root).ok().or_else(|| {
+        canonical_root
+            .as_deref()
+            .and_then(|r| path.strip_prefix(r).ok())
+    });
+    let Some(rel) = rel else {
+        // Path doesn't belong to the project tree under either form. Ignore
+        // — this is a notify event from outside the watched directory.
+        return true;
+    };
+    for component in rel.components() {
+        let s = component.as_os_str().to_string_lossy();
+        if matches!(s.as_ref(), ".scaffold" | "target" | ".git") {
+            return true;
+        }
+    }
+    if rel.starts_with(&ctx.idl_rel) {
+        return true;
+    }
+    false
+}
+
 fn reseed_after_wipe(project: &Project) -> DynResult<()> {
     let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
     let wallet_home = project.root.join(&project.config.wallet_home_dir);

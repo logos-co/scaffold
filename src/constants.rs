@@ -25,15 +25,16 @@ pub(crate) struct GitRef {
 // `commands/doctor.rs` enforces this at runtime — re-run `doctor` after
 // bumping either pin.
 //
-// Special note on DEFAULT_SPEL: the unsuffixed `v0.2.0` tag (commit
-// `72fc22…`) is *older* than `v0.2.0-rc.5` (commit `ed3bbe…`). rc.5 is
-// the one we want because its vendored LEZ tag matches DEFAULT_LEZ.tag.
+// Special note on DEFAULT_SPEL: this is the public commit that the
+// `v0.2.0-rc.5` tag peels to on `logos-co/spel`. We deliberately use the
+// commit so the default cannot drift if the upstream
+// tag is ever moved or replaced.
 pub(crate) const DEFAULT_LEZ: GitRef = GitRef {
     sha: "35d8df0d031315219f94d1546ceb862b0e5b208f",
     tag: "v0.2.0-rc1",
 };
 pub(crate) const DEFAULT_SPEL: GitRef = GitRef {
-    sha: "ed3bbedb4b684645da05455d30a4a0be7cc4dfe0",
+    sha: "1db7c5f8af3165318f9046c13ab185e24773fd59",
     tag: "v0.2.0-rc.5",
 };
 

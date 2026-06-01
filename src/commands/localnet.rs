@@ -228,14 +228,29 @@ fn cmd_localnet_start(
     // would be resolved inside lez and fail with ENOENT. The patched config
     // path is absolute (under the project's `.scaffold/state/`), so it is
     // unaffected by the cwd switch.
-    let sequencer_pid = spawn_to_log(
-        Command::new(format!("./{SEQUENCER_BIN_REL_PATH}"))
-            .current_dir(lez)
-            .arg(&patched_config_path)
-            .env("RUST_LOG", "info")
-            .env("RISC0_DEV_MODE", if risc0_dev_mode { "1" } else { "0" }),
-        log_path,
-    )?;
+    let mut sequencer_cmd = Command::new(format!("./{SEQUENCER_BIN_REL_PATH}"));
+    sequencer_cmd
+        .current_dir(lez)
+        .arg(&patched_config_path)
+        .env("RUST_LOG", "info")
+        .env("RISC0_DEV_MODE", if risc0_dev_mode { "1" } else { "0" });
+
+    // Auto-detect r0vm path from rzup installation if RISC0_SERVER_PATH is not set.
+    // On macOS, rzup installs r0vm under ~/.risc0/extensions/<version>/r0vm but does
+    // not add it to PATH. The sequencer needs RISC0_SERVER_PATH to locate it.
+    // We derive the exact risc0-zkvm version from the LEZ Cargo.lock so we never
+    // hand the sequencer a mismatched r0vm binary.
+    if std::env::var("RISC0_SERVER_PATH").is_err() {
+        if let Some(r0vm_path) = find_r0vm_path_for_lez(lez) {
+            sequencer_cmd.env("RISC0_SERVER_PATH", &r0vm_path);
+        } else {
+            eprintln!(
+                "warning: RISC0_SERVER_PATH is not set and r0vm was not found in the                  rzup extensions directory for the LEZ-pinned risc0 version.                  If transaction execution fails, set RISC0_SERVER_PATH to the r0vm                  binary installed by rzup."
+            );
+        }
+    }
+
+    let sequencer_pid = spawn_to_log(&mut sequencer_cmd, log_path)?;
 
     state.sequencer_pid = Some(sequencer_pid);
     write_localnet_state(state_path, &state)?;
@@ -855,6 +870,69 @@ fn verify_block_production(localnet_addr: &str, timeout_sec: u64) -> DynResult<(
     }
 }
 
+/// Resolve the r0vm binary path from the rzup installation that matches the LEZ risc0 version.
+///
+/// Reads the risc0-zkvm version from the LEZ Cargo.lock, then looks for an exact-version
+/// rzup-managed extension dir: ~/.risc0/extensions/v<version>-cargo-risczero-<arch>-<os>/r0vm.
+/// Returns None (without guessing) if the version cannot be determined or the exact path
+/// does not exist. The caller should error with a clear diagnostic if None is returned.
+fn find_r0vm_path_for_lez(lez: &std::path::Path) -> Option<std::path::PathBuf> {
+    // Read risc0-zkvm version from LEZ Cargo.lock
+    let lockfile = lez.join("Cargo.lock");
+    let lock_content = std::fs::read_to_string(&lockfile).ok()?;
+    let risc0_version = parse_risc0_version(&lock_content)?;
+
+    // Determine platform triple (rzup naming convention)
+    let arch = if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else {
+        "aarch64"
+    };
+    let os = if cfg!(target_os = "macos") {
+        "apple-darwin"
+    } else {
+        "unknown-linux-gnu"
+    };
+    let ext_name = format!("v{risc0_version}-cargo-risczero-{arch}-{os}");
+
+    let home = std::env::var("HOME").ok()?;
+    let r0vm = std::path::Path::new(&home)
+        .join(".risc0")
+        .join("extensions")
+        .join(&ext_name)
+        .join("r0vm");
+
+    if r0vm.exists() {
+        Some(r0vm)
+    } else {
+        None
+    }
+}
+
+/// Extract risc0-zkvm version from Cargo.lock content.
+fn parse_risc0_version(lock_content: &str) -> Option<String> {
+    let mut in_risc0_zkvm = false;
+    for line in lock_content.lines() {
+        let line = line.trim();
+        if line == r#"name = "risc0-zkvm""# {
+            in_risc0_zkvm = true;
+            continue;
+        }
+        if in_risc0_zkvm {
+            if let Some(version) = line
+                .strip_prefix("version = \"")
+                .and_then(|s| s.strip_suffix('"'))
+            {
+                return Some(version.to_string());
+            }
+            if line.starts_with("name =") {
+                break;
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -1029,7 +1107,15 @@ mod tests {
             .unwrap();
         assert!(git_init.success(), "git init failed");
         // Local identity so `git commit` doesn't require system-level config.
-        for (k, v) in [("user.email", "t@example.com"), ("user.name", "test")] {
+        // Disable GPG signing locally so an environment with `commit.gpgsign
+        // = true` + an unavailable signing key (sandboxed CI containers,
+        // etc.) doesn't block the commit and mask this regression test.
+        for (k, v) in [
+            ("user.email", "t@example.com"),
+            ("user.name", "test"),
+            ("commit.gpgsign", "false"),
+            ("tag.gpgsign", "false"),
+        ] {
             Command::new("git")
                 .args(["config", k, v])
                 .current_dir(&lez)
