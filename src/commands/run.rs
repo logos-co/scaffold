@@ -10,7 +10,7 @@ use crate::commands::build::cmd_build_shortcut;
 use crate::commands::deploy::{
     cmd_deploy, discover_deployable_programs, discover_program_binaries, extract_program_id,
 };
-use crate::commands::idl::build_idl_for_current_project;
+use crate::commands::idl::{build_idl_for_current_project, IDL_STATE_REL};
 use crate::commands::localnet::{
     build_localnet_status_for_project, cmd_localnet, cmd_localnet_reset, LocalnetAction,
 };
@@ -108,6 +108,22 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
         eprintln!(
             "warning: scaffold.toml requested reset = true; step 3 will wipe sequencer state + wallet. Pass --no-reset to override."
         );
+    }
+
+    // A reset means "start fresh": clear the IDL cache *before* the IDL
+    // step (step 2) so it re-runs this invocation. The deploy cache is
+    // cleared later in step 3, after the on-chain wipe. Tolerate a missing
+    // file (no prior run).
+    if effective_reset {
+        let idl_state = project.root.join(IDL_STATE_REL);
+        match std::fs::remove_file(&idl_state) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("clear stale IDL cache at {}", idl_state.display()));
+            }
+        }
     }
 
     // Step 1: Build (chains setup internally)
