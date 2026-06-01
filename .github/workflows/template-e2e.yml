@@ -1,0 +1,113 @@
+name: Template E2E
+
+# End-to-end guard for the scaffolded project templates (#93). The unit tests
+# only exercise the render *mechanics* (placeholder substitution, manifest
+# overlay). This job actually renders a project with `new`, builds the real,
+# network-fetched lez/spel at the configured pins via `setup`, and asserts
+# `doctor` reports zero FAIL — so a `DEFAULT_LEZ` / `DEFAULT_SPEL` bump (or a
+# template change) that produces an unbuildable user project breaks CI.
+#
+# Heavy (full LEZ build + circuits download + risc0 guest build), so it is
+# path-gated to the inputs that can actually break the rendered output, plus
+# manual `workflow_dispatch`.
+
+on:
+  pull_request:
+    paths:
+      - "src/constants.rs"
+      - "templates/**"
+      - "src/template/**"
+  # Manual trigger for testing the job itself / re-validating a pin on demand.
+  # Intentionally not path-triggered by edits to this workflow file: a
+  # CI-config-only change shouldn't kick off the full (~tens-of-minutes) LEZ
+  # build of itself.
+  workflow_dispatch:
+
+# A newer push to the same PR supersedes an in-flight (expensive) run.
+concurrency:
+  group: template-e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  render-and-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        template: [default, lez-framework]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # The bespoke bootstrap cache holds the cloned lez/spel repos and their
+      # target/ dirs keyed by pin, plus the circuits release. Keying on
+      # constants.rs means a pin bump invalidates it (so the new pin is built
+      # from scratch) while same-pin re-runs stay warm.
+      - name: Cache scaffold bootstrap (repos + circuits)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/logos-scaffold
+          key: scaffold-bootstrap-${{ runner.os }}-${{ hashFiles('src/constants.rs') }}
+
+      - name: Build scaffold CLI
+        run: cargo build --release --bin logos-scaffold
+
+      # The LEZ standalone build chain (logos-blockchain-{pol,poc,poq,zksign})
+      # reads circuit keys at compile time. setup's preflight requires the
+      # release on disk, so fetch the version pinned in constants.rs and export
+      # LOGOS_BLOCKCHAIN_CIRCUITS for every subsequent step.
+      - name: Fetch logos-blockchain-circuits release
+        run: |
+          set -euo pipefail
+          ver="$(sed -n 's/.*DEFAULT_CIRCUITS_VERSION: &str = "\([^"]*\)".*/\1/p' src/constants.rs)"
+          if [ -z "$ver" ]; then echo "could not parse DEFAULT_CIRCUITS_VERSION"; exit 1; fi
+          dest="$HOME/.logos-blockchain-circuits"
+          if [ -f "$dest/pol/verification_key.json" ]; then
+            echo "circuits already cached at $dest"
+          else
+            url="https://github.com/logos-blockchain/logos-blockchain-circuits/releases/download/v${ver}/logos-blockchain-circuits-v${ver}-linux-x86_64.tar.gz"
+            echo "downloading $url"
+            mkdir -p "$dest"
+            curl -fL --retry 3 -o /tmp/circuits.tar.gz "$url"
+            tar -xzf /tmp/circuits.tar.gz -C "$dest" --strip-components=1
+          fi
+          echo "LOGOS_BLOCKCHAIN_CIRCUITS=$dest" >> "$GITHUB_ENV"
+
+      - name: Render project from template
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          "$GITHUB_WORKSPACE/target/release/logos-scaffold" new e2e-app --template "${{ matrix.template }}"
+
+      - name: Setup (clone + build lez/spel at configured pins)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/e2e-app"
+          "$GITHUB_WORKSPACE/target/release/logos-scaffold" setup
+
+      - name: doctor --json asserts zero FAIL
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/e2e-app"
+          # doctor exits non-zero when FAIL > 0; capture for an explicit assert
+          # and a readable failure summary regardless.
+          "$GITHUB_WORKSPACE/target/release/logos-scaffold" doctor --json > doctor.json || true
+          fail="$(jq '.summary.fail' doctor.json)"
+          echo "doctor summary: $(jq -c '.summary' doctor.json)"
+          if [ "$fail" != "0" ]; then
+            echo "::error::doctor reported $fail FAIL check(s) for the '${{ matrix.template }}' template"
+            jq -r '.checks[] | select(.status == "fail") | "FAIL: \(.name) — \(.detail)"' doctor.json
+            exit 1
+          fi
+
+      - name: Build rendered project workspace
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/e2e-app"
+          "$GITHUB_WORKSPACE/target/release/logos-scaffold" build
