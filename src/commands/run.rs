@@ -383,6 +383,17 @@ fn collect_deployed_programs(project: &Project, skipped: bool) -> DynResult<Depl
         .context("failed to resolve spel repo path for run post-deploy env")?;
     let spel_bin = spel_repo.join(SPEL_BIN_REL_PATH);
 
+    // Warn early when the vendored spel binary has not been built yet.
+    // extract_program_id() spawns spel_bin and returns None on any failure,
+    // so a missing binary silently leaves SCAFFOLD_PROGRAM_ID unset — which
+    // causes post-deploy hooks to fail in confusing ways (issue #160).
+    if !spel_bin.is_file() {
+        eprintln!(
+            "warning: vendored spel binary not found at {}.              SCAFFOLD_PROGRAM_ID will be unset for all programs.              Run `lgs setup` to build spel.",
+            spel_bin.display()
+        );
+    }
+
     let mut out = Vec::new();
     for stem in programs {
         let Some(bin_path) = binaries.get(&stem).cloned() else {
