@@ -17,6 +17,24 @@ use super::wallet_support::{
     write_default_wallet_address,
 };
 
+/// Cargo args for the standalone sequencer build. `--features standalone`
+/// is load-bearing (#101): it swaps `SequencerCore`'s real
+/// `IndexerClient` / `BlockSettlementClient` for the no-op mocks. Without it,
+/// `sequencer_core::start_from_config` does `IndexerClient::new(ws://…8779)`
+/// and `BlockSettlementClient::new(http://…8080)` and `.expect()`s on the
+/// connection — so `localnet start` aborts with "Failed to create Indexer
+/// Client" on any host that isn't already running a Bedrock + Indexer stack
+/// (i.e. every standalone dev box). Pinned as a const so the unit test below
+/// fails loudly if the feature is ever dropped from the build invocation.
+const SEQUENCER_BUILD_ARGS: &[&str] = &[
+    "build",
+    "--release",
+    "--features",
+    "standalone",
+    "-p",
+    "sequencer_service",
+];
+
 pub(crate) fn cmd_setup() -> DynResult<()> {
     // Load project first so an outdated scaffold.toml gets the canonical
     // "run `lgs init`" hint before we surface unrelated environment
@@ -38,17 +56,9 @@ pub(crate) fn cmd_setup() -> DynResult<()> {
     sync_pinned_repo(&project.config.lez, &lez, "lez")?;
     ensure_dir_exists(&lez, "lez")?;
 
-    run_checked(
-        Command::new("cargo")
-            .current_dir(&lez)
-            .arg("build")
-            .arg("--release")
-            .arg("--features")
-            .arg("standalone")
-            .arg("-p")
-            .arg("sequencer_service"),
-        "build sequencer_service (standalone)",
-    )?;
+    let mut sequencer_cmd = Command::new("cargo");
+    sequencer_cmd.current_dir(&lez).args(SEQUENCER_BUILD_ARGS);
+    run_checked(&mut sequencer_cmd, "build sequencer_service (standalone)")?;
 
     run_checked(
         Command::new("cargo")
@@ -169,6 +179,29 @@ mod tests {
 
     const PUBLIC_ACCOUNT_ID: &str = "6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV";
     const PRIVATE_ACCOUNT_ID: &str = "2ECgkFTaXzwjJBXR7ZKmXYQtpHbvTTHK9Auma4NL9AUo";
+
+    /// Regression guard for #101: `setup` must build `sequencer_service` with
+    /// `--features standalone`. Dropping it rewires the sequencer to the real
+    /// Indexer/Bedrock clients, which `.expect()` on a connection at startup —
+    /// so `localnet start` aborts ("Failed to create Indexer Client") on any
+    /// host without a running Bedrock+Indexer stack. Verified end-to-end: with
+    /// the flag, the standalone sequencer boots with nothing on :8779/:8080.
+    #[test]
+    fn sequencer_build_uses_standalone_feature() {
+        let args = super::SEQUENCER_BUILD_ARGS;
+        // `--features standalone` must appear as adjacent args.
+        let has_standalone = args.windows(2).any(|w| w == ["--features", "standalone"]);
+        assert!(
+            has_standalone,
+            "sequencer build must pass `--features standalone` (#101); got {args:?}"
+        );
+        assert!(args.contains(&"-p"), "must target a specific package");
+        assert!(
+            args.contains(&"sequencer_service"),
+            "must build the sequencer_service package"
+        );
+        assert!(args.contains(&"--release"), "must be a release build");
+    }
 
     #[test]
     fn ensure_default_wallet_seeded_writes_first_public_account() {
