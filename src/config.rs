@@ -378,7 +378,60 @@ fn parse_basecamp_runtime(doc: &DocumentMut) -> DynResult<Option<BasecampConfig>
             })?;
         any_field = true;
     }
+
+    // [basecamp.env] — plain string map.
+    if let Some(env_table) = table.get("env").and_then(Item::as_table) {
+        cfg.env = parse_string_map(env_table, "basecamp.env")?;
+        any_field = any_field || !cfg.env.is_empty();
+    }
+    // [basecamp.env_append] — map of string -> array<string>.
+    if let Some(append_table) = table.get("env_append").and_then(Item::as_table) {
+        for (key, item) in append_table.iter() {
+            let arr = item.as_array().ok_or_else(|| {
+                anyhow!("invalid scaffold.toml: [basecamp.env_append].{key} must be an array of strings")
+            })?;
+            let mut list = Vec::with_capacity(arr.len());
+            for v in arr.iter() {
+                let s = v.as_str().ok_or_else(|| {
+                    anyhow!("invalid scaffold.toml: [basecamp.env_append].{key} entries must be strings")
+                })?;
+                list.push(s.to_string());
+            }
+            cfg.env_append.insert(key.to_string(), list);
+        }
+        any_field = any_field || !cfg.env_append.is_empty();
+    }
+    // [basecamp.profiles.<name>.env] — per-profile plain string maps.
+    if let Some(profiles) = table.get("profiles").and_then(Item::as_table) {
+        for (name, item) in profiles.iter() {
+            let ptable = item.as_table().ok_or_else(|| {
+                anyhow!("invalid scaffold.toml: [basecamp.profiles.{name}] is not a table")
+            })?;
+            if let Some(env_table) = ptable.get("env").and_then(Item::as_table) {
+                let env = parse_string_map(env_table, &format!("basecamp.profiles.{name}.env"))?;
+                if !env.is_empty() {
+                    cfg.profile_env.insert(name.to_string(), env);
+                }
+            }
+        }
+        any_field = any_field || !cfg.profile_env.is_empty();
+    }
+
     Ok(if any_field { Some(cfg) } else { None })
+}
+
+fn parse_string_map(
+    table: &Table,
+    key: &str,
+) -> DynResult<std::collections::BTreeMap<String, String>> {
+    let mut out = std::collections::BTreeMap::new();
+    for (k, item) in table.iter() {
+        let v = item
+            .as_str()
+            .ok_or_else(|| anyhow!("invalid scaffold.toml: [{key}].{k} must be a string"))?;
+        out.insert(k.to_string(), v.to_string());
+    }
+    Ok(out)
 }
 
 fn parse_framework(doc: &DocumentMut) -> FrameworkConfig {
@@ -513,6 +566,51 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
         let basecamp_table = basecamp.as_table_mut().expect("basecamp table");
         basecamp_table["port_base"] = value(i64::from(bc.port_base));
         basecamp_table["port_stride"] = value(i64::from(bc.port_stride));
+        // [basecamp.env]
+        if !bc.env.is_empty() {
+            for (k, v) in &bc.env {
+                check_toml_value(&format!("basecamp.env.{k}"), v)?;
+            }
+            let env_table = ensure_subtable(&mut doc, "basecamp", "env");
+            for (k, v) in &bc.env {
+                env_table[k] = value(v);
+            }
+        }
+        // [basecamp.env_append]
+        if !bc.env_append.is_empty() {
+            for (k, list) in &bc.env_append {
+                for p in list {
+                    check_toml_value(&format!("basecamp.env_append.{k}"), p)?;
+                }
+            }
+            let append_table = ensure_subtable(&mut doc, "basecamp", "env_append");
+            for (k, list) in &bc.env_append {
+                append_table[k] = string_array(list);
+            }
+        }
+        // [basecamp.profiles.<name>.env]
+        if !bc.profile_env.is_empty() {
+            for (profile, env) in &bc.profile_env {
+                for (k, v) in env {
+                    check_toml_value(&format!("basecamp.profiles.{profile}.env.{k}"), v)?;
+                }
+                let profiles = ensure_subtable(&mut doc, "basecamp", "profiles");
+                profiles.set_implicit(true);
+                let profile_table = profiles
+                    .entry(profile)
+                    .or_insert(Item::Table(Table::new()))
+                    .as_table_mut()
+                    .expect("basecamp profile table");
+                let env_table = profile_table
+                    .entry("env")
+                    .or_insert(Item::Table(Table::new()))
+                    .as_table_mut()
+                    .expect("basecamp profile env table");
+                for (k, v) in env {
+                    env_table[k] = value(v);
+                }
+            }
+        }
     }
 
     // [run] — only emit when non-default to keep fresh scaffold.toml minimal.
@@ -569,6 +667,14 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
         }
     }
     Ok(())
+}
+
+fn string_array(items: &[String]) -> Item {
+    let mut arr = toml_edit::Array::new();
+    for it in items {
+        arr.push(it.as_str());
+    }
+    value(arr)
 }
 
 fn post_deploy_value(hooks: &[String]) -> Item {
@@ -781,6 +887,88 @@ attr = "cli"
         let lgpm = cfg.lgpm_repo.expect("lgpm present");
         assert_eq!(lgpm.build, RepoBuild::NixFlake);
         assert_eq!(lgpm.attr, "cli");
+    }
+
+    #[test]
+    fn parses_basecamp_launch_env_sections() {
+        let toml = minimal_v0_2_0()
+            + r#"
+[basecamp.env]
+QT_DEBUG_PLUGINS = "1"
+
+[basecamp.env_append]
+QT_PLUGIN_PATH = ["/nix/store/a/plugins"]
+LD_LIBRARY_PATH = ["/nix/store/a/lib", "/nix/store/b/lib"]
+
+[basecamp.profiles.alice.env]
+LOGOS_STORAGE_API_PORT = "8081"
+
+[basecamp.profiles.bob.env]
+LOGOS_STORAGE_API_PORT = "8082"
+"#;
+        let cfg = parse_config(&toml).expect("parse");
+        let bc = cfg.basecamp.expect("basecamp config present");
+        assert_eq!(
+            bc.env.get("QT_DEBUG_PLUGINS").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            bc.env_append.get("LD_LIBRARY_PATH").map(Vec::as_slice),
+            Some(
+                &[
+                    "/nix/store/a/lib".to_string(),
+                    "/nix/store/b/lib".to_string()
+                ][..]
+            )
+        );
+        assert_eq!(
+            bc.profile_env
+                .get("alice")
+                .and_then(|e| e.get("LOGOS_STORAGE_API_PORT"))
+                .map(String::as_str),
+            Some("8081")
+        );
+        assert_eq!(
+            bc.profile_env
+                .get("bob")
+                .and_then(|e| e.get("LOGOS_STORAGE_API_PORT"))
+                .map(String::as_str),
+            Some("8082")
+        );
+    }
+
+    #[test]
+    fn basecamp_launch_env_round_trips_through_serialize() {
+        let toml = minimal_v0_2_0()
+            + r#"
+[basecamp.env]
+QT_DEBUG_PLUGINS = "1"
+
+[basecamp.env_append]
+QT_PLUGIN_PATH = ["/nix/store/a/plugins"]
+
+[basecamp.profiles.alice.env]
+LOGOS_STORAGE_API_PORT = "8081"
+"#;
+        let cfg1 = parse_config(&toml).expect("parse");
+        let serialized = serialize_config(&cfg1).expect("serialize");
+        let cfg2 = parse_config(&serialized).expect("re-parse");
+        let bc = cfg2.basecamp.expect("basecamp present after round-trip");
+        assert_eq!(
+            bc.env.get("QT_DEBUG_PLUGINS").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            bc.env_append.get("QT_PLUGIN_PATH").map(Vec::as_slice),
+            Some(&["/nix/store/a/plugins".to_string()][..])
+        );
+        assert_eq!(
+            bc.profile_env
+                .get("alice")
+                .and_then(|e| e.get("LOGOS_STORAGE_API_PORT"))
+                .map(String::as_str),
+            Some("8081")
+        );
     }
 
     #[test]
