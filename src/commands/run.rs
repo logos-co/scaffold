@@ -540,9 +540,13 @@ fn print_deploy_summary(project: &Project) -> DynResult<()> {
         }
     }
 
-    let port = project.config.localnet.port;
+    // Use the same URL construction as build_hook_command and wallet_support
+    // so the summary always reflects the address the wallet actually targets,
+    // rather than the raw localnet.port value which may differ when
+    // wallet_config.json overrides sequencer_addr (issue #161).
+    let sequencer_url = crate::commands::wallet_support::default_sequencer_http_url_for_project(project);
     println!();
-    println!("Sequencer: http://127.0.0.1:{port}");
+    println!("Sequencer: {sequencer_url}");
 
     Ok(())
 }
@@ -552,8 +556,7 @@ fn build_hook_command(
     hook_command: &str,
     deployed: &DeployedPrograms,
 ) -> Command {
-    let port = project.config.localnet.port;
-    let sequencer_url = format!("http://127.0.0.1:{port}");
+    let sequencer_url = crate::commands::wallet_support::default_sequencer_http_url_for_project(project);
     let wallet_home = project
         .root
         .join(&project.config.wallet_home_dir)
