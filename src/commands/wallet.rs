@@ -1,8 +1,9 @@
 use std::process::Command;
 
 use anyhow::{bail, Context};
+use serde_json::json;
 
-use crate::process::{render_command, run_forwarded, run_with_stdin};
+use crate::process::{render_command, run_forwarded, run_with_stdin, EchoGuard};
 use crate::project::load_project;
 use crate::DynResult;
 
@@ -28,6 +29,7 @@ pub(crate) enum TopupOutcome {
 pub(crate) enum WalletAction {
     List {
         long: bool,
+        json: bool,
     },
     Proxy {
         args: Vec<String>,
@@ -35,6 +37,7 @@ pub(crate) enum WalletAction {
     Topup {
         address: Option<String>,
         dry_run: bool,
+        json: bool,
     },
     DefaultSet {
         address: String,
@@ -45,14 +48,18 @@ pub(crate) fn cmd_wallet(action: WalletAction) -> DynResult<()> {
     let project = load_project()?;
 
     match action {
-        WalletAction::List { long } => cmd_wallet_list(&project, long),
+        WalletAction::List { long, json } => cmd_wallet_list(&project, long, json),
         WalletAction::Proxy { args } => cmd_wallet_proxy(&project, &args),
-        WalletAction::Topup { address, dry_run } => cmd_wallet_topup(&project, address, dry_run),
+        WalletAction::Topup {
+            address,
+            dry_run,
+            json,
+        } => cmd_wallet_topup(&project, address, dry_run, json),
         WalletAction::DefaultSet { address } => cmd_wallet_default_set(&project, &address),
     }
 }
 
-fn cmd_wallet_list(project: &crate::model::Project, long: bool) -> DynResult<()> {
+fn cmd_wallet_list(project: &crate::model::Project, long: bool, json: bool) -> DynResult<()> {
     let wallet = load_wallet_runtime(project)?;
 
     let mut command = Command::new(&wallet.wallet_binary);
@@ -66,6 +73,35 @@ fn cmd_wallet_list(project: &crate::model::Project, long: bool) -> DynResult<()>
 
     if long {
         command.arg("--long");
+    }
+
+    if json {
+        // Capture the inner wallet output and re-emit a structured envelope so
+        // consumers can read `exit_code` instead of guessing success from text.
+        // `accounts` is the best-effort line split; `stdout`/`stderr` keep the
+        // raw output for callers that need the wallet's own formatting.
+        let output = command
+            .output()
+            .context("failed to execute wallet list command")?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let accounts: Vec<&str> = stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        let report = json!({
+            "command": "account list",
+            "exit_code": output.status.code(),
+            "accounts": accounts,
+            "stdout": stdout,
+            "stderr": stderr,
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        if !output.status.success() {
+            bail!("wallet account list failed");
+        }
+        return Ok(());
     }
 
     run_forwarded(&mut command, "wallet account list")
@@ -100,10 +136,21 @@ fn cmd_wallet_topup(
     project: &crate::model::Project,
     address: Option<String>,
     dry_run: bool,
+    json: bool,
 ) -> DynResult<()> {
-    match cmd_wallet_topup_inner(project, address, dry_run)? {
+    match cmd_wallet_topup_inner(project, address, dry_run, json)? {
         TopupOutcome::Success => Ok(()),
         TopupOutcome::ConfirmationTimeout { message } => bail!("{message}"),
+    }
+}
+
+/// Print `{ "status": "error", "reason": …, "message": … }` to stdout. Used in
+/// `--json` mode right before a `bail!` so machine consumers get a categorized
+/// reason instead of substring-matching the wallet's stderr.
+fn emit_topup_error_json(reason: &str, message: &str) {
+    let report = json!({ "status": "error", "reason": reason, "message": message });
+    if let Ok(text) = serde_json::to_string_pretty(&report) {
+        println!("{text}");
     }
 }
 
@@ -111,7 +158,11 @@ pub(crate) fn cmd_wallet_topup_inner(
     project: &crate::model::Project,
     address: Option<String>,
     dry_run: bool,
+    json: bool,
 ) -> DynResult<TopupOutcome> {
+    // In JSON mode, keep stdout clean: suppress the `$ <cmd>` echoes so the
+    // only thing on stdout is the structured object we emit at the end.
+    let _echo_guard = json.then(EchoGuard::suppress);
     let wallet = load_wallet_runtime(project)?;
     let default_address = read_default_wallet_address(&project.root)?;
     let resolved_to = resolve_wallet_address(address.as_deref(), default_address.as_deref())?;
@@ -147,6 +198,17 @@ pub(crate) fn cmd_wallet_topup_inner(
         .arg(&resolved_to);
 
     if dry_run {
+        if json {
+            let report = json!({
+                "status": "dry_run",
+                "address": resolved_to,
+                "method": "pinata faucet claim",
+                "network": sequencer_addr,
+                "wallet_home": wallet_home,
+            });
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(TopupOutcome::Success);
+        }
         println!("dry-run: wallet topup command will not be executed");
         println!("NSSA_WALLET_HOME_DIR={wallet_home}");
         println!("$ {}", render_command(&preflight_command));
@@ -168,12 +230,24 @@ pub(crate) fn cmd_wallet_topup_inner(
         let summary = summarize_command_failure(&preflight_output.stdout, &preflight_output.stderr);
         let combined = format!("{}\n{}", preflight_output.stdout, preflight_output.stderr);
         if is_connectivity_failure(&combined) {
+            if json {
+                emit_topup_error_json(
+                    "connectivity",
+                    &format!("wallet topup failed during account preflight: {summary}"),
+                );
+            }
             bail!(
                 "wallet topup failed during account preflight: {summary}\n{}",
                 sequencer_unreachable_hint(&sequencer_addr)
             );
         }
 
+        if json {
+            emit_topup_error_json(
+                "preflight",
+                &format!("wallet topup failed while checking account initialization: {summary}"),
+            );
+        }
         bail!(
             "wallet topup failed while checking account initialization: {summary}\nHint: verify the destination with `logos-scaffold wallet -- account get --account-id {resolved_to}`."
         );
@@ -181,9 +255,11 @@ pub(crate) fn cmd_wallet_topup_inner(
 
     let preflight_combined = format!("{}\n{}", preflight_output.stdout, preflight_output.stderr);
     if is_uninitialized_account_output(&preflight_combined) {
-        println!(
-            "wallet topup preflight: destination is uninitialized; running auth-transfer init"
-        );
+        if !json {
+            println!(
+                "wallet topup preflight: destination is uninitialized; running auth-transfer init"
+            );
+        }
         let init_output = run_with_stdin(init_command, password_input.clone())
             .context("failed to execute wallet topup init command")?;
 
@@ -191,14 +267,30 @@ pub(crate) fn cmd_wallet_topup_inner(
             let summary = summarize_command_failure(&init_output.stdout, &init_output.stderr);
             let combined = format!("{}\n{}", init_output.stdout, init_output.stderr);
             if is_connectivity_failure(&combined) {
+                if json {
+                    emit_topup_error_json(
+                        "connectivity",
+                        &format!("wallet topup failed during account initialization: {summary}"),
+                    );
+                }
                 bail!(
                     "wallet topup failed during account initialization: {summary}\n{}",
                     sequencer_unreachable_hint(&sequencer_addr)
                 );
             }
             if is_already_initialized_failure(&combined) {
-                println!("wallet topup preflight: destination already initialized; continuing");
+                if !json {
+                    println!("wallet topup preflight: destination already initialized; continuing");
+                }
             } else {
+                if json {
+                    emit_topup_error_json(
+                        "init",
+                        &format!(
+                            "wallet topup failed while initializing destination wallet: {summary}"
+                        ),
+                    );
+                }
                 bail!("wallet topup failed while initializing destination wallet: {summary}");
             }
         }
@@ -211,6 +303,9 @@ pub(crate) fn cmd_wallet_topup_inner(
         let summary = summarize_command_failure(&output.stdout, &output.stderr);
         let combined = format!("{}\n{}", output.stdout, output.stderr);
         if is_connectivity_failure(&combined) {
+            if json {
+                emit_topup_error_json("connectivity", &format!("wallet topup failed: {summary}"));
+            }
             bail!(
                 "wallet topup failed: {summary}\n{}",
                 sequencer_unreachable_hint(&sequencer_addr)
@@ -223,18 +318,45 @@ pub(crate) fn cmd_wallet_topup_inner(
                 &output.stdout,
                 &output.stderr,
             );
+            if json {
+                let report = json!({
+                    "status": "pending",
+                    "address": resolved_to,
+                    "method": "pinata faucet claim",
+                    "network": sequencer_addr,
+                    "tx": extract_tx_identifier(&output.stdout, &output.stderr),
+                    "message": message,
+                });
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            }
             return Ok(TopupOutcome::ConfirmationTimeout { message });
+        }
+        if json {
+            emit_topup_error_json("failed", &format!("wallet topup failed: {summary}"));
         }
         bail!(
             "wallet topup failed: {summary}\nHint: run `logos-scaffold wallet list` to inspect addresses, then retry with `--address` or set a default wallet."
         );
     }
 
+    let tx = extract_tx_identifier(&output.stdout, &output.stderr);
+    if json {
+        let report = json!({
+            "status": "success",
+            "address": resolved_to,
+            "method": "pinata faucet claim",
+            "network": sequencer_addr,
+            "tx": tx,
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(TopupOutcome::Success);
+    }
+
     println!("wallet topup complete");
     println!("  Address: {resolved_to}");
     println!("  Method: pinata faucet claim");
     println!("  Network: local sequencer ({sequencer_addr})");
-    if let Some(tx) = extract_tx_identifier(&output.stdout, &output.stderr) {
+    if let Some(tx) = tx {
         println!("  Tx: {tx}");
     }
 
