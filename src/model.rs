@@ -284,6 +284,27 @@ pub(crate) struct RunConfig {
     pub(crate) inline: RunProfile,
     /// Named profiles parsed from `[run.profiles.<name>]` sub-sections.
     pub(crate) profiles: std::collections::BTreeMap<String, RunProfile>,
+    /// `[run.watch]` — filters and debounce for `lgs run --watch`.
+    pub(crate) watch: WatchConfig,
+}
+
+/// `[run.watch]` — controls which filesystem changes trigger a `--watch`
+/// re-run, and how long to coalesce a burst of saves.
+///
+/// Resolution for a changed path: it triggers a re-run iff it matches at
+/// least one `include` glob (or `include` is empty, meaning "any path") AND
+/// matches zero `exclude` globs. `exclude` always wins. Globs are
+/// project-relative, gitignore-style (`**` spans path segments, `*`/`?`
+/// match within a segment; a slash-less pattern matches at any depth).
+/// Built-in ignores (`.scaffold`, `target`, `.git`, the IDL output dir)
+/// always apply regardless of these filters.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WatchConfig {
+    pub(crate) include: Vec<String>,
+    pub(crate) exclude: Vec<String>,
+    /// Debounce window in milliseconds. `None` → built-in default (500ms).
+    /// Overridden per-invocation by `--watch-debounce-ms`.
+    pub(crate) debounce_ms: Option<u64>,
 }
 
 impl RunConfig {
