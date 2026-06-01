@@ -106,7 +106,23 @@ fn cmd_basecamp_docs() -> DynResult<()> {
     Ok(())
 }
 
+/// Bail before any nix invocation if `nix` isn't on PATH. Without this,
+/// `run_logged` surfaces `os error 2` from the spawn failure with no
+/// signal that the missing executable is `nix` — a documented UX
+/// regression in DOGFOODING.md B1.
+fn ensure_nix_present() -> DynResult<()> {
+    if crate::process::which("nix").is_none() {
+        bail!(
+            "this command requires Nix (with flakes enabled) on PATH. \
+             Install Nix from https://nixos.org/download.html, then re-run."
+        );
+    }
+    Ok(())
+}
+
 fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
+    ensure_nix_present()?;
+
     // Pull or default-fill [repos.basecamp]. If the project has never been
     // through `lgs new` post-0.2.0 and lacks the section, fill it with the
     // canonical default and persist back.
@@ -229,7 +245,7 @@ fn resolve_basecamp_binary(app_link: &Path) -> DynResult<PathBuf> {
     }
     let platform_hint = if cfg!(target_os = "macos") {
         "\nNote: on macOS, `nix build .#app` produces an app bundle under Applications/. \
-         v0.1.x does not yet expose a CLI-invocable binary on macOS; track basecamp-profiles spec §6."
+         v0.1.x does not yet expose a CLI-invocable binary on macOS."
     } else {
         ""
     };
@@ -239,8 +255,8 @@ fn resolve_basecamp_binary(app_link: &Path) -> DynResult<PathBuf> {
     )
 }
 
-// Concurrent `launch <same-profile>` is undefined per spec §2.3: no lock; two
-// racing invocations leave partial state.
+// Concurrent `launch <same-profile>` is undefined: no lock; two racing
+// invocations leave partial state.
 fn cmd_basecamp_launch(project: Project, profile: String) -> DynResult<()> {
     let state_path = project.root.join(".scaffold/state/basecamp.state");
     let state = match read_basecamp_state(&state_path).ok() {
@@ -340,10 +356,10 @@ fn cmd_basecamp_launch(project: Project, profile: String) -> DynResult<()> {
     for (k, v) in &env {
         cmd.env(k, v);
     }
-    // Per-module port-override env vars (spec §3.4) are owned by each module and
-    // flow in via a registry — empty in v1 since no modules have published names.
+    // Per-module port-override env vars are owned by each module and flow in
+    // via a registry — empty in v1 since no modules have published names.
     // Concurrent alice/bob on the same host may collide on module-level ports
-    // until upstreams adopt overrides; see basecamp-profiles §3.4.
+    // until upstreams adopt overrides.
     write_launch_pid(&launch_state_path, std::process::id())?;
     let err = cmd.exec();
     // exec() only returns on failure. On Linux/Unix exec preserves the PID, so
@@ -354,8 +370,8 @@ fn cmd_basecamp_launch(project: Project, profile: String) -> DynResult<()> {
     bail!("failed to exec basecamp at {}: {err}", state.basecamp_bin);
 }
 
-/// Env map exported to the basecamp child on launch. Scaffold-owned names only
-/// (spec §3.4); module port-override vars are not yet registered.
+/// Env map exported to the basecamp child on launch. Scaffold-owned names only;
+/// module port-override vars are not yet registered.
 fn launch_env(profile_dir: &Path, profile_name: &str) -> BTreeMap<String, OsString> {
     let mut env = BTreeMap::new();
     env.insert(
@@ -644,6 +660,11 @@ fn cmd_basecamp_build_portable(project: Project) -> DynResult<()> {
              operates on captured project sources only — it never discovers."
         );
     }
+
+    // Nix preflight comes after the modules-empty guard so a user without
+    // nix who has nothing captured still gets the more specific
+    // "run basecamp modules" hint first.
+    ensure_nix_present()?;
 
     // Order project modules so each appears AFTER its own project-internal
     // deps (leaves first). Basecamp loads `.lgx` artefacts in the order the
@@ -980,6 +1001,11 @@ fn cmd_basecamp_modules(
     if show {
         print_modules_table("captured modules", &existing_modules);
         return Ok(());
+    }
+    // Production probes shell out to nix, so keep the missing-nix UX local to
+    // the modules implementation. Unit-test probes opt out below.
+    if probe.requires_nix() {
+        ensure_nix_present()?;
     }
 
     let explicit = !paths.is_empty() || !flakes.is_empty();
@@ -1377,6 +1403,11 @@ fn cmd_basecamp_install(project: Project, probe: &dyn LgxFlakeProbe) -> DynResul
     if !Path::new(&state.basecamp_bin).exists() || !Path::new(&state.lgpm_bin).exists() {
         bail!("basecamp not set up yet; run: logos-scaffold basecamp setup");
     }
+
+    // Nix preflight comes after the setup-state guard so a user without
+    // nix who hasn't run `basecamp setup` still gets the more specific
+    // "run basecamp setup" hint first.
+    ensure_nix_present()?;
 
     // If scaffold.toml has no captured modules, run `modules` in
     // auto-discover mode transparently, then reload the project config.
@@ -2069,11 +2100,13 @@ fn cmd_basecamp_doctor(project: Project, as_json: bool) -> DynResult<()> {
     let mut rows = Vec::new();
     push_basecamp_doctor_rows(&project, &mut rows);
 
-    // If there are no rows at all, state is absent or empty — emit a single
-    // Pass row so the output is never confusingly blank.
+    // If there are no rows at all, state is absent or empty. Emit a Warn
+    // row — `print_rows` only surfaces remediation lines for Warn/Fail,
+    // so a Pass row would suppress the "run basecamp setup" hint and
+    // leave the user with a contradictory PASS-with-remediation line.
     if rows.is_empty() {
         rows.push(crate::model::CheckRow {
-            status: CheckStatus::Pass,
+            status: CheckStatus::Warn,
             name: "basecamp state".to_string(),
             detail: "not set up yet (no basecamp.state)".to_string(),
             remediation: Some("run `logos-scaffold basecamp setup`".to_string()),
@@ -2324,6 +2357,10 @@ fn collect_api_headers(alice_modules: &Path, module_name: &str) -> Vec<PathBuf> 
 /// resolves under `/nix/store/` rather than the real project tree. Mirrors the
 /// sibling-override plumbing already applied at build time.
 trait LgxFlakeProbe {
+    fn requires_nix(&self) -> bool {
+        true
+    }
+
     fn package_names(
         &self,
         flake_ref: &str,
@@ -2333,7 +2370,7 @@ trait LgxFlakeProbe {
 
 /// Resolves the set of `.lgx` sources to install from explicit args and project auto-discovery.
 ///
-/// Precedence (matches §2.2 of the basecamp-profiles spec):
+/// Precedence:
 /// 1. Explicit `--path` / `--flake` — wins if supplied.
 /// 2. Project root `flake.nix` exposing `packages.<system>.<attr>` — build that attribute.
 /// 3. Sub-directories with a `flake.nix` exposing the same.
@@ -2671,6 +2708,10 @@ mod tests {
     }
 
     impl LgxFlakeProbe for FakeProbe {
+        fn requires_nix(&self) -> bool {
+            false
+        }
+
         fn package_names(
             &self,
             flake_ref: &str,

@@ -21,16 +21,13 @@ use sha2::{Digest, Sha256};
 
 use crate::commands::deploy::{discover_deployable_programs, discover_program_binaries};
 use crate::commands::idl::sanitize_file_stem;
-use crate::commands::wallet_support::load_wallet_runtime;
+use crate::commands::wallet_support::{
+    default_sequencer_http_url_for_project, load_wallet_runtime,
+};
 use crate::constants::FRAMEWORK_KIND_LEZ_FRAMEWORK;
 use crate::model::Project;
 use crate::state::read_localnet_state;
 use crate::DynResult;
-
-/// Fallback sequencer address when the wallet config doesn't pin one and
-/// the wallet runtime isn't loadable yet. Mirrors `cmd_deploy`'s default
-/// so the cache key matches the address `cmd_deploy` would actually use.
-const DEFAULT_SEQUENCER_ADDR: &str = "http://127.0.0.1:3040";
 
 const RUN_DEPLOY_STATE_REL: &str = ".scaffold/state/run_deploy.json";
 const LOCALNET_STATE_REL: &str = ".scaffold/state/localnet.state";
@@ -149,15 +146,17 @@ fn config_digest(project: &Project) -> String {
 }
 
 /// Resolve the sequencer address `cmd_deploy` would use for this project.
-/// Falls back to `DEFAULT_SEQUENCER_ADDR` when the wallet runtime isn't
-/// loadable (e.g. on a fresh project before `lgs setup` ran). The
-/// fallback matches `cmd_deploy`'s own default, so cache and deploy stay
-/// in lockstep.
+/// Falls back to the project's localnet sequencer URL (derived from
+/// `[localnet] port`) when the wallet runtime isn't loadable (e.g. on a
+/// fresh project before `lgs setup` ran). The fallback calls the same
+/// `default_sequencer_http_url_for_project` that `cmd_deploy` uses, so a
+/// custom `localnet.port` keeps the cache key and the address `cmd_deploy`
+/// actually targets in lockstep.
 fn resolved_sequencer_addr(project: &Project) -> String {
     load_wallet_runtime(project)
         .ok()
         .and_then(|w| w.sequencer_addr)
-        .unwrap_or_else(|| DEFAULT_SEQUENCER_ADDR.to_string())
+        .unwrap_or_else(|| default_sequencer_http_url_for_project(project))
 }
 
 pub(crate) fn load_state(project: &Project) -> RunDeployState {
