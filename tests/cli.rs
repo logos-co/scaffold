@@ -2377,6 +2377,37 @@ fn basecamp_launch_without_profile_errors() {
         .failure();
 }
 
+#[test]
+fn basecamp_develop_help_lists_module_and_dev_shell() {
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .args(["basecamp", "develop", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MODULE").and(predicate::str::contains("--dev-shell")));
+}
+
+#[test]
+fn basecamp_develop_unknown_module_errors_with_known_list() {
+    // Module lookup runs before the `nix` presence check, so this is
+    // deterministic in CI (no Nix needed): an unknown module name fails fast
+    // and lists the captured modules.
+    let temp = tempdir().expect("tempdir");
+    let toml = format!(
+        "{MINIMAL_SCAFFOLD_TOML}\n[modules.swap_module]\nflake = \"github:logos-co/swap-module#lgx\"\nrole = \"project\"\n"
+    );
+    fs::write(temp.path().join("scaffold.toml"), toml).expect("write scaffold.toml");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["basecamp", "develop", "nonexistent"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("no module `nonexistent`")
+                .and(predicate::str::contains("swap_module")),
+        );
+}
+
 #[cfg(unix)]
 #[test]
 fn self_test_run_logged_success_shape() {
