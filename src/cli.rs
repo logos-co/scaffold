@@ -351,6 +351,9 @@ struct LocalnetStatusArgs {
 struct LocalnetLogsArgs {
     #[arg(long, default_value_t = 200)]
     tail: usize,
+    /// Emit the tailed log lines as a JSON object instead of plain text.
+    #[arg(long)]
+    json: bool,
 }
 
 /// Reset localnet to a clean state: stop the sequencer, delete the sequencer
@@ -600,7 +603,10 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 },
                 LocalnetSubcommand::Stop => LocalnetAction::Stop,
                 LocalnetSubcommand::Status(args) => LocalnetAction::Status { json: args.json },
-                LocalnetSubcommand::Logs(args) => LocalnetAction::Logs { tail: args.tail },
+                LocalnetSubcommand::Logs(args) => LocalnetAction::Logs {
+                    tail: args.tail,
+                    json: args.json,
+                },
                 LocalnetSubcommand::Reset(args) => LocalnetAction::Reset {
                     dry_run: args.dry_run,
                     yes: args.yes,

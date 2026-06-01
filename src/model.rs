@@ -191,6 +191,18 @@ pub(crate) struct LocalnetStatusReport {
     pub(crate) remediation: Vec<String>,
 }
 
+/// Machine-readable shape for `localnet logs --json`. Mirrors the human
+/// output: `lines` holds the last `tail` lines of the sequencer log (empty
+/// when the log is missing or empty), and `exists` lets consumers tell an
+/// absent log file apart from an empty one without parsing prose.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct LocalnetLogsReport {
+    pub(crate) log_path: String,
+    pub(crate) exists: bool,
+    pub(crate) tail: usize,
+    pub(crate) lines: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct DoctorSummary {
     pub(crate) pass: usize,

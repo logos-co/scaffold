@@ -68,7 +68,8 @@ pub(crate) const EXAMPLES_LOCALNET_STATUS: &str = r"Examples:
 
 pub(crate) const EXAMPLES_LOCALNET_LOGS: &str = r"Examples:
   logos-scaffold localnet logs
-  logos-scaffold localnet logs --tail 500";
+  logos-scaffold localnet logs --tail 500
+  logos-scaffold localnet logs --tail 50 --json";
 
 pub(crate) const EXAMPLES_LOCALNET_RESET: &str = r"Examples:
   logos-scaffold localnet reset --dry-run
