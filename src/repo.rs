@@ -44,13 +44,27 @@ pub(crate) fn sync_repo_to_pin_at_path_with_opts(
 ) -> DynResult<()> {
     ensure_repo_present(path, source, label, opts)?;
 
+    // First, attempt a direct fetch of the pinned SHA. GitHub (and most
+    // git servers) support `git fetch origin <sha>` for advertised commits,
+    // which is the only reliable way to retrieve a commit that was
+    // squash-merged and is no longer reachable from any branch or tag ref.
+    let _ = run_checked(
+        Command::new("git")
+            .current_dir(path)
+            .arg("fetch")
+            .arg("origin")
+            .arg(pin),
+        &format!("git fetch pin ({label})"),
+    );
+
+    // Also run the broad fetch so tags and branch heads stay up to date.
     let _ = run_checked(
         Command::new("git")
             .current_dir(path)
             .arg("fetch")
             .arg("--all")
             .arg("--tags"),
-        &format!("git fetch ({label})"),
+        &format!("git fetch all ({label})"),
     );
 
     let resolved_pin = ensure_pin_exists(path, source, pin, label)?;
@@ -474,6 +488,78 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("has local changes"));
         assert!(cache_repo.join("dirty.txt").exists());
+    }
+
+
+
+    /// Regression test for GitHub issue #179.
+    ///
+    /// A commit that was added to the upstream *after* the consumer cloned it,
+    /// and is never attached to any branch or tag ref, cannot be retrieved by
+    /// `git fetch --all --tags`.  The fix issues `git fetch origin <sha>` first.
+    ///
+    /// Setup:
+    ///   1. Create upstream with a single "base" commit; clone it into cache.
+    ///   2. Add a second "orphan" commit to upstream via a hidden ref
+    ///      (`refs/hidden/orphan`) — it exists as an object but no branch/tag
+    ///      points to it, so `fetch --all` is blind to it.
+    ///   3. Call sync with the orphan SHA as the pin — must succeed.
+    #[test]
+    fn pin_unreachable_from_branch_heads_is_fetched_directly() {
+        let temp = tempdir().expect("tempdir");
+        let upstream = temp.path().join("upstream");
+        let cache = temp.path().join("cache");
+
+        // Step 1: upstream with one commit; clone it so cache starts clean.
+        fs::create_dir_all(&upstream).unwrap();
+        run_git(&upstream, &["init"]);
+        run_git(&upstream, &["config", "user.email", "test@example.com"]);
+        run_git(&upstream, &["config", "user.name", "Test"]);
+        run_git(&upstream, &["config", "commit.gpgsign", "false"]);
+        fs::write(upstream.join("base.txt"), "base").unwrap();
+        run_git(&upstream, &["add", "."]);
+        run_git(&upstream, &["commit", "-m", "base"]);
+
+        std::process::Command::new("git")
+            .arg("clone")
+            .arg("--no-hardlinks")
+            .arg(&upstream)
+            .arg(&cache)
+            .status()
+            .expect("consumer clone");
+
+        // Step 2: add an orphan commit to upstream AFTER the clone.
+        // Use a detached HEAD so no branch ref is created.
+        run_git(&upstream, &["checkout", "--detach"]);
+        fs::write(upstream.join("orphan.txt"), "orphan").unwrap();
+        run_git(&upstream, &["add", "."]);
+        run_git(&upstream, &["commit", "-m", "orphan"]);
+        let orphan_sha = git_rev_parse(&upstream, "HEAD");
+        // Restore upstream HEAD to master so the remote is in a clean state.
+        run_git(&upstream, &["checkout", "master"]);
+        // orphan_sha is now a loose object in upstream with no ref pointing to it.
+
+        // Sanity: cache must NOT know the orphan SHA yet.
+        let known = std::process::Command::new("git")
+            .current_dir(&cache)
+            .args(["cat-file", "-e", &orphan_sha])
+            .status()
+            .expect("cat-file -e");
+        assert!(!known.success(), "orphan must be absent from cache before sync");
+
+        // Step 3: sync — must fetch the orphan SHA even though no ref
+        // points to it in the remote.
+        sync_repo_to_pin_at_path_with_opts(
+            &cache,
+            &upstream.display().to_string(),
+            &orphan_sha,
+            "spel",
+            RepoSyncOptions::fail_on_source_mismatch(),
+        )
+        .expect("sync must succeed for an orphan pin via direct SHA fetch");
+
+        let head = git_head_sha(&cache).expect("HEAD");
+        assert_eq!(head, orphan_sha, "HEAD must resolve to the orphan pin");
     }
 
     fn init_repo_with_commit(path: &std::path::Path, file: &str, contents: &str) -> String {
