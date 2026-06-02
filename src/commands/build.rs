@@ -11,9 +11,9 @@ use crate::process::run_checked;
 use crate::project::{load_project, run_in_project_dir};
 use crate::DynResult;
 
-pub(crate) fn cmd_build_shortcut(project_dir: Option<PathBuf>) -> DynResult<()> {
+pub(crate) fn cmd_build_shortcut(project_dir: Option<PathBuf>, prebuilt: bool) -> DynResult<()> {
     run_in_project_dir(project_dir.as_deref(), || {
-        cmd_setup()?;
+        cmd_setup(prebuilt)?;
         let cwd = env::current_dir()?;
 
         let project = load_project()?;
