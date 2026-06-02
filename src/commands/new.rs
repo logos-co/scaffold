@@ -42,7 +42,10 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
             FRAMEWORK_KIND_SPEL.to_string()
         }
         other => {
-            bail!("unsupported template `{other}`. Expected `default` or `spel`.")
+            bail!(
+                "unsupported template `{other}`. \
+                 Expected `default` or `spel` (or the deprecated alias `lez-framework`)."
+            )
         }
     };
 
@@ -105,6 +108,21 @@ fn cmd_new_spel(
          Install it first:\n  \
          cargo install --git https://github.com/logos-co/spel.git --tag v0.5.0 spel",
     )?;
+
+    if cmd.lez_path.is_some() {
+        anyhow::bail!(
+            "`--lez-path` is not supported with `--template spel`.\n\
+             `spel init` fetches LEZ via `--lez-tag`; a local path override is not forwarded.\n\
+             Use `--template default` if you need a local LEZ checkout."
+        );
+    }
+    if cmd.vendor_deps {
+        anyhow::bail!(
+            "`--vendor-deps` is not supported with `--template spel`.\n\
+             Vendoring is managed by `spel init` and `lgs setup`, not by scaffold directly.\n\
+             Use `--template default` if you need vendored deps."
+        );
+    }
 
     println!(
         "Running `spel init {}` (LEZ tag: {})...",
@@ -302,6 +320,14 @@ fn find_spel_on_path() -> anyhow::Result<std::path::PathBuf> {
         let candidate = dir.join("spel");
         if candidate.is_file() {
             return Ok(candidate);
+        }
+        // On Windows executables carry a .exe suffix.
+        #[cfg(target_os = "windows")]
+        {
+            let candidate_exe = dir.join("spel.exe");
+            if candidate_exe.is_file() {
+                return Ok(candidate_exe);
+            }
         }
     }
     anyhow::bail!("spel not found on PATH")
