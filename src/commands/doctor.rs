@@ -303,7 +303,8 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
                         detail: "wallet check-health succeeded".to_string(),
                         remediation: None,
                     });
-                } else if is_localnet_connectivity_failure(&out.stdout, &out.stderr) {
+                } else if is_localnet_connectivity_failure(&out.stdout, &out.stderr, localnet_port)
+                {
                     rows.push(CheckRow {
                         status: CheckStatus::Warn,
                         name: "wallet usability".to_string(),
@@ -474,11 +475,11 @@ fn check_spel_lez_alignment(spel_path: &std::path::Path) -> CheckRow {
 // error contexts (RPC rejection, signature mismatch, malformed payload).
 // We require *both* an explicit transport-error token *and* the address,
 // so an unrelated failure that happens to print the URL is left as Fail.
-fn is_localnet_connectivity_failure(stdout: &str, stderr: &str) -> bool {
+fn is_localnet_connectivity_failure(stdout: &str, stderr: &str, localnet_port: u16) -> bool {
     let text = format!("{stdout}\n{stderr}").to_lowercase();
 
-    let mentions_localnet_address =
-        text.contains("127.0.0.1:3040") || text.contains("localhost:3040");
+    let mentions_localnet_address = text.contains(&format!("127.0.0.1:{localnet_port}"))
+        || text.contains(&format!("localhost:{localnet_port}"));
 
     let has_transport_error_token = text.contains("connection refused")
         || text.contains("econnrefused")
@@ -609,13 +610,13 @@ mod tests {
         let stderr = "Error: reqwest::Error { kind: Request, url: \"http://127.0.0.1:3040/\", \
                       source: hyper::Error(Connect, ConnectError(\"tcp connect error\", \
                       Os { code: 111, kind: ConnectionRefused, message: \"Connection refused\" })) }";
-        assert!(is_localnet_connectivity_failure("", stderr));
+        assert!(is_localnet_connectivity_failure("", stderr, 3040));
     }
 
     #[test]
     fn connectivity_heuristic_triggers_on_localhost_alias_with_econnrefused() {
         let stderr = "wallet: rpc call to http://localhost:3040 failed: ECONNREFUSED";
-        assert!(is_localnet_connectivity_failure("", stderr));
+        assert!(is_localnet_connectivity_failure("", stderr, 3040));
     }
 
     #[test]
@@ -625,7 +626,7 @@ mod tests {
         // context. This must stay Fail, not get downgraded to Warn.
         let stderr = "Error: rpc call to http://127.0.0.1:3040/ failed: \
                       signature mismatch for sender 0xabcd...";
-        assert!(!is_localnet_connectivity_failure("", stderr));
+        assert!(!is_localnet_connectivity_failure("", stderr, 3040));
     }
 
     #[test]
@@ -633,7 +634,7 @@ mod tests {
         // Another genuine failure shape: sequencer rejected a malformed
         // request and the URL appears in the trace. Must stay Fail.
         let stdout = "POST http://localhost:3040/ -> 400 Bad Request: invalid abi-encoded calldata";
-        assert!(!is_localnet_connectivity_failure(stdout, ""));
+        assert!(!is_localnet_connectivity_failure(stdout, "", 3040));
     }
 
     #[test]
@@ -641,7 +642,7 @@ mod tests {
         // Bare address mention with no transport-error token is the exact
         // false-positive shape we are tightening against. Issue #113.
         let stdout = "wallet check-health: target http://127.0.0.1:3040/, sender 0xdead";
-        assert!(!is_localnet_connectivity_failure(stdout, ""));
+        assert!(!is_localnet_connectivity_failure(stdout, "", 3040));
     }
 
     #[test]
@@ -650,13 +651,25 @@ mod tests {
         // not be classified as a localnet-connectivity failure: it could
         // be a different network call entirely (proxy, external RPC).
         let stderr = "io error: connection refused while reaching https://example.com/";
-        assert!(!is_localnet_connectivity_failure("", stderr));
+        assert!(!is_localnet_connectivity_failure("", stderr, 3040));
     }
 
     #[test]
     fn connectivity_heuristic_is_case_insensitive() {
         // Some toolchains emit Title-Case error variants.
         let stderr = "Connection Refused (os error 111) talking to http://127.0.0.1:3040/";
-        assert!(is_localnet_connectivity_failure("", stderr));
+        assert!(is_localnet_connectivity_failure("", stderr, 3040));
+    }
+
+    #[test]
+    fn connectivity_heuristic_honors_configured_port() {
+        // Issue #40: a project on a non-default port must still get the
+        // friendly "start localnet" downgrade. A refused connection to the
+        // configured port (14321) is a connectivity failure...
+        let stderr = "tcp connect error talking to http://127.0.0.1:14321/: Connection refused";
+        assert!(is_localnet_connectivity_failure("", stderr, 14321));
+        // ...but the same error must NOT be mistaken for a localnet failure
+        // when doctor is checking the default port 3040 — different endpoint.
+        assert!(!is_localnet_connectivity_failure("", stderr, 3040));
     }
 }

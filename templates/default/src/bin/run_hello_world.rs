@@ -1,4 +1,4 @@
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use clap::Parser;
 use example_program_deployment_methods::HELLO_WORLD_ELF;
 use nssa::{
@@ -27,10 +27,26 @@ async fn main() -> anyhow::Result<()> {
     let program = load_program(cli.program_path.as_deref(), HELLO_WORLD_ELF, "hello_world")?;
     let account_id = parse_account_id(&cli.account_id)?;
 
+    // The hello_world program claims an uninitialized input account with
+    // `Claim::Authorized`, so the first transaction against a fresh account
+    // must be authorized by that account's key. Submitting it unsigned (empty
+    // witness set / nonces) makes the sequencer reject the claim with
+    // `InvalidProgramBehaviour`. Sign with the account's own signing key and
+    // its current nonce, the same way the authorized example does.
+    let signing_key = wallet_core
+        .storage()
+        .user_data
+        .get_pub_account_signing_key(account_id)
+        .ok_or_else(|| anyhow!("input account must be a self-owned public account"))?;
+
     let greeting: Vec<u8> = vec![72, 111, 108, 97, 32, 109, 117, 110, 100, 111, 33];
-    let message = Message::try_new(program.id(), vec![account_id], vec![], greeting)
+    let nonces = wallet_core
+        .get_accounts_nonces(vec![account_id])
+        .await
+        .context("failed to query account nonce from sequencer")?;
+    let message = Message::try_new(program.id(), vec![account_id], nonces, greeting)
         .context("failed to build hello_world transaction message")?;
-    let witness_set = WitnessSet::for_message(&message, &[]);
+    let witness_set = WitnessSet::for_message(&message, &[signing_key]);
     let tx = PublicTransaction::new(message, witness_set);
 
     let response = wallet_core

@@ -12,9 +12,10 @@ use anyhow::{anyhow, bail, Context};
 use crate::config::{default_basecamp_repo, default_lgpm_repo};
 use crate::constants::{
     BASECAMP_ATTR, BASECAMP_AUTODISCOVER_SKIP_SUBDIRS, BASECAMP_DEPENDENCIES,
-    BASECAMP_PREINSTALLED_MODULES, BASECAMP_PROFILES_REL, BASECAMP_PROFILE_ALICE,
-    BASECAMP_PROFILE_BOB, BASECAMP_SOURCE, BASECAMP_XDG_APP_SUBPATH, DEFAULT_BASECAMP_PIN,
-    DEFAULT_LGPM_PIN, LGPM_ATTR, LGPM_SOURCE,
+    BASECAMP_PORTABLE_ATTRS, BASECAMP_PREINSTALLED_MODULES, BASECAMP_PROFILES_REL,
+    BASECAMP_PROFILE_ALICE, BASECAMP_PROFILE_BOB, BASECAMP_SOURCE, BASECAMP_XDG_APP_SUBPATH_DEV,
+    BASECAMP_XDG_APP_SUBPATH_PORTABLE, DEFAULT_BASECAMP_PIN, DEFAULT_LGPM_PIN, LGPM_ATTR,
+    LGPM_ATTR_PORTABLE, LGPM_SOURCE,
 };
 use crate::model::{
     BasecampSource, BasecampState, ModuleEntry, ModuleRole, Project, RepoBuild, RepoRef,
@@ -164,7 +165,12 @@ fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
         lgpm_repo.pin = DEFAULT_LGPM_PIN.to_string();
     }
     if lgpm_repo.attr.is_empty() {
-        lgpm_repo.attr = LGPM_ATTR.to_string();
+        lgpm_repo.attr = if is_portable_basecamp(Some(&basecamp_repo)) {
+            LGPM_ATTR_PORTABLE
+        } else {
+            LGPM_ATTR
+        }
+        .to_string();
     }
 
     let (cache_root, _) = resolve_cache_root(&project)?;
@@ -183,7 +189,12 @@ fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
     fs::create_dir_all(&pin_artifacts)
         .with_context(|| format!("create {}", pin_artifacts.display()))?;
 
-    let basecamp_bin = build_basecamp_app(&project.root, &basecamp_repo_path, &pin_artifacts)?;
+    let basecamp_bin = build_basecamp_app(
+        &project.root,
+        &basecamp_repo_path,
+        &basecamp_repo.attr,
+        &pin_artifacts,
+    )?;
     // lgpm is built from a flake ref derived from [repos.lgpm].
     let lgpm_flake_ref = format_flake_ref(&lgpm_repo);
     let lgpm_bin = build_lgpm(&project.root, &pin_artifacts, &lgpm_flake_ref)?;
@@ -192,6 +203,7 @@ fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
     let seeded = seed_profiles(
         &profiles_root,
         &[BASECAMP_PROFILE_ALICE, BASECAMP_PROFILE_BOB],
+        Some(&basecamp_repo),
     )?;
     println!("seeded profiles: {}", seeded.join(", "));
 
@@ -223,16 +235,52 @@ fn format_flake_ref(repo: &RepoRef) -> String {
     }
 }
 
-fn build_basecamp_app(project_root: &Path, repo: &Path, out_dir: &Path) -> DynResult<PathBuf> {
+fn is_portable_basecamp(basecamp_repo: Option<&RepoRef>) -> bool {
+    basecamp_repo
+        .map(|r| BASECAMP_PORTABLE_ATTRS.contains(&r.attr.as_str()))
+        .unwrap_or(false)
+}
+
+fn basecamp_xdg_subpath(basecamp_repo: Option<&RepoRef>) -> &'static str {
+    if is_portable_basecamp(basecamp_repo) {
+        BASECAMP_XDG_APP_SUBPATH_PORTABLE
+    } else {
+        BASECAMP_XDG_APP_SUBPATH_DEV
+    }
+}
+
+/// Manifest `main` variant key basecamp resolves against when loading a
+/// plugin on the current host. Returns `None` for unknown nix systems.
+pub(crate) fn platform_variant_key(basecamp_repo: Option<&RepoRef>) -> Option<&'static str> {
+    let portable = is_portable_basecamp(basecamp_repo);
+    match (nix_current_system(), portable) {
+        ("x86_64-linux", false) => Some("linux-amd64-dev"),
+        ("x86_64-linux", true) => Some("linux-amd64"),
+        ("aarch64-linux", false) => Some("linux-arm64-dev"),
+        ("aarch64-linux", true) => Some("linux-arm64"),
+        ("aarch64-darwin", false) => Some("darwin-arm64-dev"),
+        ("aarch64-darwin", true) => Some("darwin-arm64"),
+        ("x86_64-darwin", false) => Some("darwin-amd64-dev"),
+        ("x86_64-darwin", true) => Some("darwin-amd64"),
+        _ => None,
+    }
+}
+
+fn build_basecamp_app(
+    project_root: &Path,
+    repo: &Path,
+    attr: &str,
+    out_dir: &Path,
+) -> DynResult<PathBuf> {
     let link = out_dir.join("app-result");
     let log = derive_log_path(project_root, "setup-basecamp");
     let mut cmd = Command::new("nix");
     cmd.current_dir(repo)
         .arg("build")
-        .arg(".#app")
+        .arg(format!(".#{attr}"))
         .arg("--out-link")
         .arg(&link);
-    run_logged(&mut cmd, "building basecamp", &log)?;
+    run_logged(&mut cmd, &format!("building basecamp (.#{attr})"), &log)?;
     resolve_basecamp_binary(&link)
 }
 
@@ -246,16 +294,24 @@ fn build_lgpm(project_root: &Path, out_dir: &Path, flake_ref: &str) -> DynResult
 }
 
 fn resolve_basecamp_binary(app_link: &Path) -> DynResult<PathBuf> {
-    // v0.1.1 layout: bin/logos-basecamp (Linux); macOS app bundle ships under Applications/.
-    for rel in ["bin/logos-basecamp", "bin/LogosBasecamp", "bin/basecamp"] {
+    // Dev (`#app`) layout: bin/logos-basecamp (Linux).
+    // Portable bundle layouts:
+    //   - bin/LogosBasecamp (Linux portable / AppImage internals, bin-bundle-dir)
+    //   - LogosBasecamp.app/Contents/MacOS/LogosBasecamp (macOS bin-macos-app)
+    for rel in [
+        "bin/logos-basecamp",
+        "bin/LogosBasecamp",
+        "bin/basecamp",
+        "LogosBasecamp.app/Contents/MacOS/LogosBasecamp",
+    ] {
         let candidate = app_link.join(rel);
         if candidate.exists() {
             return Ok(candidate);
         }
     }
     let platform_hint = if cfg!(target_os = "macos") {
-        "\nNote: on macOS, `nix build .#app` produces an app bundle under Applications/. \
-         v0.1.x does not yet expose a CLI-invocable binary on macOS."
+        "\nNote: on macOS the dev `.#app` build does not expose a CLI-invocable binary; \
+         set `[repos.basecamp].attr = \"bin-macos-app\"` to build the portable app bundle."
     } else {
         ""
     };
@@ -321,11 +377,12 @@ fn cmd_basecamp_launch(project: Project, profile: String) -> DynResult<()> {
     // Pre-seed in case a prior crash between scrub and re-seed left the profile
     // without its xdg subdirs; scrub assumes both exist. seed_profiles is
     // idempotent and cheap.
-    seed_profiles(&profiles_root, &[profile.as_str()])?;
+    let basecamp_repo_for_seed = project.config.basecamp_repo.as_ref();
+    seed_profiles(&profiles_root, &[profile.as_str()], basecamp_repo_for_seed)?;
     scrub_profile_data_and_cache(&project.root, &profile_dir)?;
     // Re-seed after scrub: scrub removed xdg-data + xdg-cache; put their
     // module/plugin subtrees back before lgpm writes into them.
-    seed_profiles(&profiles_root, &[profile.as_str()])?;
+    seed_profiles(&profiles_root, &[profile.as_str()], basecamp_repo_for_seed)?;
     let (cache_root, _) = resolve_cache_root(&project)?;
     install_sources_into_profiles(
         &project,
@@ -335,25 +392,25 @@ fn cmd_basecamp_launch(project: Project, profile: String) -> DynResult<()> {
         &[profile.clone()],
     )?;
 
-    // Variant pre-flight: warn if any installed module is missing the current
-    // platform's `<plat>-dev` manifest.json `main` key. Basecamp v0.1.1's
-    // variant resolver silently hangs on first click when loading such a
-    // plugin, so catch it before the user ever clicks. Non-blocking: we
-    // still exec basecamp regardless — the dev may want to click around
-    // anyway.
-    if let Some(expected_dev) = platform_dev_variant_key() {
-        let issues = check_manifest_variants(&profile_dir, &profile, expected_dev);
-        let module_count = count_installed_modules(&profile_dir);
+    // Variant pre-flight: warn if any installed module is missing the
+    // expected `manifest.json` `main` key for the current platform + stack.
+    // Dev basecamp hangs on click; portable basecamp drops the module at
+    // scan time. Either way basecamp can't load the plugin, so catch it
+    // before launch. Non-blocking.
+    let basecamp_repo = project.config.basecamp_repo.as_ref();
+    if let Some(expected) = platform_variant_key(basecamp_repo) {
+        let issues = check_manifest_variants(&profile_dir, &profile, expected, basecamp_repo);
+        let module_count = count_installed_modules(&profile_dir, basecamp_repo);
         if issues.is_empty() {
             println!(
-                "launch: profile {profile} has {module_count} module(s); all {expected_dev} variants present ✓"
+                "launch: profile {profile} has {module_count} module(s); all {expected} variants present ✓"
             );
         } else {
             let names: Vec<String> = issues.iter().map(|i| i.module_name.clone()).collect();
             println!(
                 "launch: profile {profile} has {module_count} module(s); \
-                 {} missing {expected_dev} variant ({}); \
-                 run `logos-scaffold doctor` for details — plugins will hang on click.",
+                 {} missing {expected} variant ({}); \
+                 run `logos-scaffold doctor` for details — basecamp won't load these plugins.",
                 issues.len(),
                 names.join(", ")
             );
@@ -887,6 +944,27 @@ fn swap_flake_attr(flake_ref: &str, expected: &str, replacement: &str) -> String
         Some((_, _)) => flake_ref.to_string(),
         None => flake_ref.to_string(),
     }
+}
+
+/// Attr-swap captured `#lgx` flake refs to `#lgx-portable` when basecamp is
+/// portable, the same way `build-portable` does. Dev basecamp is a no-op.
+/// Path sources and already-pinned non-default attrs pass through.
+fn apply_module_attr_for_stack(
+    sources: Vec<BasecampSource>,
+    basecamp_repo: Option<&RepoRef>,
+) -> Vec<BasecampSource> {
+    if !is_portable_basecamp(basecamp_repo) {
+        return sources;
+    }
+    sources
+        .into_iter()
+        .map(|src| match src {
+            BasecampSource::Flake(r) => {
+                BasecampSource::Flake(swap_flake_attr(&r, "lgx", "lgx-portable"))
+            }
+            other => other,
+        })
+        .collect()
 }
 
 /// Command-line arguments (after `nix`) plus an optional working-directory
@@ -1506,7 +1584,8 @@ fn cmd_basecamp_install(project: Project, probe: &dyn LgxFlakeProbe) -> DynResul
 
     // Deps-first build order. fail-fast: a broken companion pin surfaces
     // before we invest nix build time on the dev's own modules.
-    let ordered = captured_sources_deps_first(&project);
+    let basecamp_repo = project.config.basecamp_repo.as_ref();
+    let ordered = apply_module_attr_for_stack(captured_sources_deps_first(&project), basecamp_repo);
     if ordered.is_empty() {
         bail!(
             "no modules captured after auto-discovery; \
@@ -1529,6 +1608,7 @@ fn cmd_basecamp_install(project: Project, probe: &dyn LgxFlakeProbe) -> DynResul
         &profiles_root,
         &target_profiles,
         &lgx_files,
+        basecamp_repo,
         true,
     )?;
 
@@ -1792,11 +1872,15 @@ fn sibling_overrides_for(target: &BasecampSource, all: &[BasecampSource]) -> Vec
 
 /// `(modules_dir, plugins_dir)` under a profile's `XDG_DATA_HOME`. Pinning this
 /// to one place keeps the layout knowledge from drifting between install/launch.
-fn profile_modules_and_plugins(profiles_root: &Path, name: &str) -> (PathBuf, PathBuf) {
+fn profile_modules_and_plugins(
+    profiles_root: &Path,
+    name: &str,
+    basecamp_repo: Option<&RepoRef>,
+) -> (PathBuf, PathBuf) {
     let xdg_app = profiles_root
         .join(name)
         .join("xdg-data")
-        .join(BASECAMP_XDG_APP_SUBPATH);
+        .join(basecamp_xdg_subpath(basecamp_repo));
     (xdg_app.join("modules"), xdg_app.join("plugins"))
 }
 
@@ -1807,10 +1891,12 @@ fn run_lgpm_install(
     profiles_root: &Path,
     profiles: &[String],
     lgx_files: &[PathBuf],
+    basecamp_repo: Option<&RepoRef>,
     announce: bool,
 ) -> DynResult<()> {
     for name in profiles {
-        let (modules_dir, plugins_dir) = profile_modules_and_plugins(profiles_root, name);
+        let (modules_dir, plugins_dir) =
+            profile_modules_and_plugins(profiles_root, name, basecamp_repo);
         fs::create_dir_all(&modules_dir)
             .with_context(|| format!("create {}", modules_dir.display()))?;
         fs::create_dir_all(&plugins_dir)
@@ -1841,14 +1927,22 @@ fn install_sources_into_profiles(
     profiles_root: &Path,
     profiles: &[String],
 ) -> DynResult<()> {
-    let ordered = captured_sources_deps_first(project);
+    let basecamp_repo = project.config.basecamp_repo.as_ref();
+    let ordered = apply_module_attr_for_stack(captured_sources_deps_first(project), basecamp_repo);
     if ordered.is_empty() {
         return Ok(());
     }
     let lgx_cache = cache_root.join("basecamp/lgx-links");
     fs::create_dir_all(&lgx_cache).with_context(|| format!("create {}", lgx_cache.display()))?;
     let lgx_files = collect_lgx_files(&project.root, &ordered, &lgx_cache)?;
-    run_lgpm_install(&state.lgpm_bin, profiles_root, profiles, &lgx_files, false)
+    run_lgpm_install(
+        &state.lgpm_bin,
+        profiles_root,
+        profiles,
+        &lgx_files,
+        basecamp_repo,
+        false,
+    )
 }
 
 /// Build the argv (after the binary) for `lgpm install --file <lgx>` with the given
@@ -1999,22 +2093,9 @@ fn nix_current_system() -> &'static str {
     }
 }
 
-/// Map the current host's nix system string to the `.lgx` manifest `main`
-/// variant key basecamp resolves against when loading a dev-build plugin.
-/// Returns `None` for platforms we can't map (unknown nix systems).
-pub(crate) fn platform_dev_variant_key() -> Option<&'static str> {
-    match nix_current_system() {
-        "x86_64-linux" => Some("linux-amd64-dev"),
-        "aarch64-linux" => Some("linux-arm64-dev"),
-        "aarch64-darwin" => Some("darwin-arm64-dev"),
-        "x86_64-darwin" => Some("darwin-amd64-dev"),
-        _ => None,
-    }
-}
-
 /// A `modules/<name>/manifest.json` whose `main` object lacks the expected
-/// dev-variant key for the current platform. Basecamp v0.1.1's variant
-/// resolver will silently hang on first click when loading such a plugin.
+/// variant key for the current platform + stack. Basecamp's variant resolver
+/// will silently hang on first click when loading such a plugin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ManifestVariantIssue {
     pub(crate) profile: String,
@@ -2022,12 +2103,16 @@ pub(crate) struct ManifestVariantIssue {
     pub(crate) available_variants: Vec<String>,
 }
 
-/// Count installed modules under `<profile_dir>/xdg-data/<BASECAMP_XDG_APP_SUBPATH>/modules/`.
-/// Returns 0 if the dir doesn't exist yet.
-pub(crate) fn count_installed_modules(profile_dir: &Path) -> usize {
+/// Count installed modules under
+/// `<profile_dir>/xdg-data/<xdg_subpath>/modules/`. Returns 0 if
+/// the dir doesn't exist yet.
+pub(crate) fn count_installed_modules(
+    profile_dir: &Path,
+    basecamp_repo: Option<&RepoRef>,
+) -> usize {
     let modules_root = profile_dir
         .join("xdg-data")
-        .join(BASECAMP_XDG_APP_SUBPATH)
+        .join(basecamp_xdg_subpath(basecamp_repo))
         .join("modules");
     let Ok(entries) = fs::read_dir(&modules_root) else {
         return 0;
@@ -2035,18 +2120,19 @@ pub(crate) fn count_installed_modules(profile_dir: &Path) -> usize {
     entries.flatten().filter(|e| e.path().is_dir()).count()
 }
 
-/// Walk `<profile_dir>/xdg-data/<BASECAMP_XDG_APP_SUBPATH>/modules/*/manifest.json`
-/// and flag modules missing the expected `-dev` variant key. Non-blocking:
-/// callers decide whether to warn or fail based on the returned issues.
-/// Silent on parse errors / missing files (not the check's job to police).
+/// Walk `<profile_dir>/xdg-data/<xdg_subpath>/modules/*/manifest.json` and
+/// flag modules missing the expected variant key for the current platform.
+/// Non-blocking: callers decide whether to warn or fail based on the returned
+/// issues. Silent on parse errors / missing files (not the check's job to police).
 pub(crate) fn check_manifest_variants(
     profile_dir: &Path,
     profile_name: &str,
-    expected_dev_variant: &str,
+    expected_variant: &str,
+    basecamp_repo: Option<&RepoRef>,
 ) -> Vec<ManifestVariantIssue> {
     let modules_root = profile_dir
         .join("xdg-data")
-        .join(BASECAMP_XDG_APP_SUBPATH)
+        .join(basecamp_xdg_subpath(basecamp_repo))
         .join("modules");
     let Ok(entries) = fs::read_dir(&modules_root) else {
         return Vec::new();
@@ -2082,7 +2168,7 @@ pub(crate) fn check_manifest_variants(
             // not variant-keyed, can't reason about -dev presence.
             _ => continue,
         };
-        if !available.is_empty() && !available.iter().any(|k| k.as_str() == expected_dev_variant) {
+        if !available.is_empty() && !available.iter().any(|k| k.as_str() == expected_variant) {
             issues.push(ManifestVariantIssue {
                 profile: profile_name.to_string(),
                 module_name: name,
@@ -2213,10 +2299,11 @@ fn push_basecamp_doctor_rows(project: &Project, rows: &mut Vec<crate::model::Che
     }
 
     let profiles_root = project.root.join(BASECAMP_PROFILES_REL);
+    let basecamp_repo = project.config.basecamp_repo.as_ref();
     let alice_modules = profiles_root
         .join(BASECAMP_PROFILE_ALICE)
         .join("xdg-data")
-        .join(BASECAMP_XDG_APP_SUBPATH)
+        .join(basecamp_xdg_subpath(basecamp_repo))
         .join("modules");
 
     {
@@ -2266,13 +2353,13 @@ fn push_basecamp_doctor_rows(project: &Project, rows: &mut Vec<crate::model::Che
         }
     }
 
-    if let Some(expected_dev) = platform_dev_variant_key() {
+    if let Some(expected) = platform_variant_key(basecamp_repo) {
         for profile in [BASECAMP_PROFILE_ALICE, BASECAMP_PROFILE_BOB] {
             let profile_dir = profiles_root.join(profile);
             if !profile_dir.is_dir() {
                 continue;
             }
-            for issue in check_manifest_variants(&profile_dir, profile, expected_dev) {
+            for issue in check_manifest_variants(&profile_dir, profile, expected, basecamp_repo) {
                 rows.push(CheckRow {
                     status: CheckStatus::Warn,
                     name: format!(
@@ -2280,14 +2367,14 @@ fn push_basecamp_doctor_rows(project: &Project, rows: &mut Vec<crate::model::Che
                         issue.module_name, issue.profile
                     ),
                     detail: format!(
-                        "main=[{}] missing expected `{}`; plugin will hang on click",
+                        "main=[{}] missing expected `{}`; basecamp won't load this plugin",
                         issue.available_variants.join(","),
-                        expected_dev
+                        expected
                     ),
                     remediation: Some(format!(
                         "rebuild `{}` so its manifest.json `main.{}` key is populated \
                          (upstream logos-module-builder issue); then re-run `basecamp install`",
-                        issue.module_name, expected_dev
+                        issue.module_name, expected
                     )),
                 });
             }
@@ -2739,12 +2826,17 @@ fn total_captured_modules(project: &Project) -> usize {
 
 /// Create XDG-rooted profile dirs under `profiles_root` for every named profile.
 /// Returns the list of profile names that now exist (idempotent).
-fn seed_profiles(profiles_root: &Path, names: &[&str]) -> DynResult<Vec<String>> {
+fn seed_profiles(
+    profiles_root: &Path,
+    names: &[&str],
+    basecamp_repo: Option<&RepoRef>,
+) -> DynResult<Vec<String>> {
+    let subpath = basecamp_xdg_subpath(basecamp_repo);
     let mut seeded = Vec::new();
     for name in names {
         let profile_dir = profiles_root.join(name);
         for xdg in ["xdg-config", "xdg-data", "xdg-cache"] {
-            let path = profile_dir.join(xdg).join(BASECAMP_XDG_APP_SUBPATH);
+            let path = profile_dir.join(xdg).join(subpath);
             fs::create_dir_all(&path)
                 .with_context(|| format!("create profile dir {}", path.display()))?;
         }
@@ -3000,6 +3092,106 @@ mod tests {
         );
     }
 
+    fn repo_with_attr(attr: &str) -> RepoRef {
+        RepoRef {
+            source: BASECAMP_SOURCE.to_string(),
+            pin: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
+            build: RepoBuild::NixFlake,
+            attr: attr.to_string(),
+            path: String::new(),
+        }
+    }
+
+    #[test]
+    fn is_portable_basecamp_picks_known_portable_attrs() {
+        assert!(!is_portable_basecamp(None));
+        assert!(!is_portable_basecamp(Some(&repo_with_attr(""))));
+        assert!(!is_portable_basecamp(Some(&repo_with_attr("app"))));
+        assert!(is_portable_basecamp(Some(&repo_with_attr("bin-macos-app"))));
+        assert!(is_portable_basecamp(Some(&repo_with_attr("bin-appimage"))));
+        assert!(is_portable_basecamp(Some(&repo_with_attr(
+            "bin-bundle-dir"
+        ))));
+        assert!(!is_portable_basecamp(Some(&repo_with_attr("future-attr"))));
+    }
+
+    #[test]
+    fn basecamp_xdg_subpath_switches_with_stack() {
+        assert_eq!(basecamp_xdg_subpath(None), BASECAMP_XDG_APP_SUBPATH_DEV);
+        assert_eq!(
+            basecamp_xdg_subpath(Some(&repo_with_attr("app"))),
+            BASECAMP_XDG_APP_SUBPATH_DEV
+        );
+        assert_eq!(
+            basecamp_xdg_subpath(Some(&repo_with_attr("bin-macos-app"))),
+            BASECAMP_XDG_APP_SUBPATH_PORTABLE
+        );
+    }
+
+    #[test]
+    fn platform_variant_key_returns_dev_or_bare_suffix_per_stack() {
+        let dev = platform_variant_key(None).expect("dev variant key for current host");
+        let portable = platform_variant_key(Some(&repo_with_attr("bin-macos-app")))
+            .expect("portable variant key for current host");
+        assert!(dev.ends_with("-dev"), "got: {dev}");
+        assert!(!portable.ends_with("-dev"), "got: {portable}");
+        assert_eq!(portable, dev.trim_end_matches("-dev"));
+    }
+
+    #[test]
+    fn apply_module_attr_for_stack_is_noop_on_dev() {
+        let input = vec![
+            BasecampSource::Flake("path:/a#lgx".to_string()),
+            BasecampSource::Flake("github:foo/bar/abc#lgx".to_string()),
+            BasecampSource::Path("/p/m.lgx".to_string()),
+        ];
+        let got = apply_module_attr_for_stack(input.clone(), None);
+        assert_eq!(got, input);
+    }
+
+    #[test]
+    fn apply_module_attr_for_stack_rewrites_lgx_to_portable_for_portable_basecamp() {
+        let portable = repo_with_attr("bin-macos-app");
+        let input = vec![
+            BasecampSource::Flake("path:/a#lgx".to_string()),
+            BasecampSource::Flake("github:foo/bar/abc#lgx".to_string()),
+            BasecampSource::Flake("path:/c#lgx-portable".to_string()),
+            BasecampSource::Flake("path:/d#custom".to_string()),
+            BasecampSource::Path("/p/m.lgx".to_string()),
+        ];
+        let got = apply_module_attr_for_stack(input, Some(&portable));
+        assert_eq!(
+            got,
+            vec![
+                BasecampSource::Flake("path:/a#lgx-portable".to_string()),
+                BasecampSource::Flake("github:foo/bar/abc#lgx-portable".to_string()),
+                BasecampSource::Flake("path:/c#lgx-portable".to_string()),
+                BasecampSource::Flake("path:/d#custom".to_string()),
+                BasecampSource::Path("/p/m.lgx".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn seed_profiles_uses_portable_subpath_when_basecamp_is_portable() {
+        let tmp = tempdir().expect("tempdir");
+        let root = tmp.path().join("profiles");
+        let portable = repo_with_attr("bin-macos-app");
+        seed_profiles(&root, &["alice"], Some(&portable)).expect("seed");
+        for xdg in ["xdg-config", "xdg-data", "xdg-cache"] {
+            assert!(root
+                .join("alice")
+                .join(xdg)
+                .join(BASECAMP_XDG_APP_SUBPATH_PORTABLE)
+                .is_dir());
+            assert!(!root
+                .join("alice")
+                .join(xdg)
+                .join(BASECAMP_XDG_APP_SUBPATH_DEV)
+                .exists());
+        }
+    }
+
     #[test]
     fn sibling_overrides_pair_path_flakes_under_a_shared_parent() {
         // Set up a repo with three sub-flakes sharing a parent and two
@@ -3119,12 +3311,12 @@ mod tests {
         let root = tmp.path().join("profiles");
 
         let names = ["alice", "bob"];
-        let seeded = seed_profiles(&root, &names).expect("seed");
+        let seeded = seed_profiles(&root, &names, None).expect("seed");
         assert_eq!(seeded, vec!["alice".to_string(), "bob".to_string()]);
 
         for name in names {
             for xdg in ["xdg-config", "xdg-data", "xdg-cache"] {
-                let dir = root.join(name).join(xdg).join(BASECAMP_XDG_APP_SUBPATH);
+                let dir = root.join(name).join(xdg).join(BASECAMP_XDG_APP_SUBPATH_DEV);
                 assert!(dir.is_dir(), "expected XDG subdir at {}", dir.display());
             }
         }
@@ -3261,14 +3453,14 @@ mod tests {
     fn seed_profiles_is_idempotent() {
         let tmp = tempdir().expect("tempdir");
         let root = tmp.path().join("profiles");
-        seed_profiles(&root, &["alice"]).expect("first");
+        seed_profiles(&root, &["alice"], None).expect("first");
         // Drop a sentinel file inside the xdg-data dir; a second seed must not delete it.
         let sentinel = root
             .join("alice/xdg-data")
-            .join(BASECAMP_XDG_APP_SUBPATH)
+            .join(BASECAMP_XDG_APP_SUBPATH_DEV)
             .join("keep-me.txt");
         fs::write(&sentinel, b"hi").expect("write sentinel");
-        seed_profiles(&root, &["alice"]).expect("second");
+        seed_profiles(&root, &["alice"], None).expect("second");
         assert!(
             sentinel.exists(),
             "second seed must not scrub existing contents"
