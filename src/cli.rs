@@ -218,11 +218,20 @@ struct NewArgs {
 
 #[derive(Debug, clap::Args)]
 #[command(after_long_help = EXAMPLES_SETUP)]
-struct SetupArgs {}
+struct SetupArgs {
+    /// Download prebuilt binaries instead of compiling from source.
+    /// Falls back to source build if no prebuilt exists for the pinned commit.
+    #[arg(long, default_value_t = false)]
+    prebuilt: bool,
+}
 
 #[derive(Debug, clap::Args)]
 #[command(after_long_help = EXAMPLES_BUILD)]
 struct BuildArgs {
+    /// Download prebuilt binaries instead of compiling from source.
+    /// Falls back to source build if no prebuilt exists for the pinned commit.
+    #[arg(long, default_value_t = false)]
+    prebuilt: bool,
     #[command(subcommand)]
     subcommand: Option<BuildSubcommand>,
     project_path: Option<PathBuf>,
@@ -581,7 +590,7 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
             template: args.template,
             cache_root: args.cache_root,
         }),
-        Some(Commands::Setup(_)) => cmd_setup(),
+        Some(Commands::Setup(args)) => cmd_setup(args.prebuilt),
         Some(Commands::Build(args)) => match args.subcommand {
             Some(BuildSubcommand::Idl(sub)) => cmd_idl(
                 &sub.project_path
@@ -593,7 +602,7 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                     .map(|p| vec!["build".to_string(), p.to_string_lossy().to_string()])
                     .unwrap_or_else(|| vec!["build".to_string()]),
             ),
-            None => cmd_build_shortcut(args.project_path),
+            None => cmd_build_shortcut(args.project_path, args.prebuilt),
         },
         Some(Commands::Deploy(args)) => cmd_deploy(args.program_name, args.program_path, args.json),
         Some(Commands::Localnet(localnet)) => {
