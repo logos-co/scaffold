@@ -103,11 +103,15 @@ fn cmd_new_spel(
     target: &Path,
     bootstrap_cache: &std::path::Path,
 ) -> DynResult<()> {
-    let spel_bin = find_spel_on_path().context(
-        "spel binary not found on PATH.\n\
-         Install it first:\n  \
-         cargo install --git https://github.com/logos-co/spel.git --tag v0.5.0 spel",
-    )?;
+    let spel_bin = find_spel_on_path().with_context(|| {
+        format!(
+            "spel binary not found on PATH.\n\
+             Install it first:\n  \
+             cargo install --git https://github.com/logos-co/spel.git --tag {} spel",
+            DEFAULT_SPEL.tag
+        )
+    })?;
+    check_spel_version(&spel_bin);
 
     if cmd.lez_path.is_some() {
         anyhow::bail!(
@@ -310,6 +314,31 @@ fn build_scaffold_config(
         modules: std::collections::BTreeMap::new(),
         basecamp: None,
         run: RunConfig::default(),
+    }
+}
+
+/// Warn if the installed `spel` version does not match `DEFAULT_SPEL.tag`.
+/// A mismatch is non-fatal — the user may have a newer version — but silently
+/// using the wrong version produces hard-to-diagnose mismatches at first
+/// `lgs build idl` or `lgs setup`.
+fn check_spel_version(spel_bin: &std::path::Path) {
+    let output = match std::process::Command::new(spel_bin)
+        .arg("--version")
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return,
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.contains(DEFAULT_SPEL.tag) {
+        eprintln!(
+            "warning: installed spel version ({}) does not match the expected {} pinned by scaffold.\n\
+             This may cause unexpected behaviour. Install the pinned version with:\n  \
+             cargo install --git https://github.com/logos-co/spel.git --tag {} spel",
+            stdout.trim(),
+            DEFAULT_SPEL.tag,
+            DEFAULT_SPEL.tag,
+        );
     }
 }
 

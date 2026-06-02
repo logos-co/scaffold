@@ -137,6 +137,11 @@ pub(crate) fn available_templates() -> Vec<String> {
         })
         .filter(|s| !s.is_empty())
         .collect();
+    // `spel` is handled by delegating to `spel init` rather than an embedded
+    // template directory, so it does not appear in TEMPLATES_DIR.
+    if !names.contains(&"spel".to_string()) {
+        names.push("spel".to_string());
+    }
     names.sort();
     names
 }
