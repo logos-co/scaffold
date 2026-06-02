@@ -45,14 +45,18 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      # The bespoke bootstrap cache holds the cloned lez/spel repos and their
-      # target/ dirs keyed by pin, plus the circuits release. Keying on
-      # constants.rs means a pin bump invalidates it (so the new pin is built
-      # from scratch) while same-pin re-runs stay warm.
+      # The bootstrap cache holds the cloned lez/spel repos and their target/
+      # dirs (~/.cache/logos-scaffold) AND the extracted circuits release
+      # (~/.logos-blockchain-circuits, where the fetch step below puts it).
+      # Both must be cached, or the multi-MB circuits tarball re-downloads on
+      # every run. Keying on constants.rs means a pin or circuits-version bump
+      # invalidates it (rebuild from scratch) while same-pin re-runs stay warm.
       - name: Cache scaffold bootstrap (repos + circuits)
         uses: actions/cache@v4
         with:
-          path: ~/.cache/logos-scaffold
+          path: |
+            ~/.cache/logos-scaffold
+            ~/.logos-blockchain-circuits
           key: scaffold-bootstrap-${{ runner.os }}-${{ hashFiles('src/constants.rs') }}
 
       - name: Build scaffold CLI
@@ -93,16 +97,32 @@ jobs:
 
       - name: doctor --json asserts zero FAIL
         run: |
-          set -euo pipefail
+          set -uo pipefail
           cd "$RUNNER_TEMP/e2e-app"
-          # doctor exits non-zero when FAIL > 0; capture for an explicit assert
-          # and a readable failure summary regardless.
-          "$GITHUB_WORKSPACE/target/release/logos-scaffold" doctor --json > doctor.json || true
+          # doctor exits 0 with no FAIL, or non-zero *only* when summary.fail > 0.
+          # Capture the exit code rather than `|| true` so an unexpected error
+          # (crash, no JSON) stays diagnosable instead of degrading into a
+          # generic jq parse failure with the original status lost.
+          set +e
+          "$GITHUB_WORKSPACE/target/release/logos-scaffold" doctor --json > doctor.json
+          rc=$?
+          set -e
+          if ! jq -e . doctor.json >/dev/null 2>&1; then
+            echo "::error::doctor did not emit valid JSON (exit $rc)"
+            cat doctor.json || true
+            exit 1
+          fi
           fail="$(jq '.summary.fail' doctor.json)"
-          echo "doctor summary: $(jq -c '.summary' doctor.json)"
+          echo "doctor summary: $(jq -c '.summary' doctor.json) (exit $rc)"
           if [ "$fail" != "0" ]; then
             echo "::error::doctor reported $fail FAIL check(s) for the '${{ matrix.template }}' template"
             jq -r '.checks[] | select(.status == "fail") | "FAIL: \(.name) — \(.detail)"' doctor.json
+            exit 1
+          fi
+          # Zero FAIL but a non-zero exit means doctor failed for a reason other
+          # than FAIL checks — surface it rather than treating the run as green.
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::doctor exited $rc with zero FAIL — unexpected"
             exit 1
           fi
 
