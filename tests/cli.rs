@@ -1227,6 +1227,8 @@ fn wallet_topup_json_dry_run_is_structured() {
         value.get("method").and_then(|v| v.as_str()),
         Some("pinata faucet claim")
     );
+    // Stable schema: `tx` key is always present (null for a dry run).
+    assert!(value.get("tx").is_some_and(serde_json::Value::is_null));
 }
 
 #[test]
@@ -1305,6 +1307,8 @@ fn wallet_topup_json_connectivity_failure_categorizes_reason() {
         value.get("network").and_then(|v| v.as_str()),
         Some("http://127.0.0.1:3040")
     );
+    // Stable schema: `tx` is always present (null in the error case).
+    assert!(value.get("tx").is_some_and(serde_json::Value::is_null));
 }
 
 #[test]

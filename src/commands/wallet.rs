@@ -88,6 +88,13 @@ fn cmd_wallet_list(project: &crate::model::Project, long: bool, json: bool) -> D
             .context("failed to execute wallet list command")?;
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        // Always emit a number: a wallet killed by a signal has no exit code,
+        // so map that to the shell convention `128 + signal` (else -1) rather
+        // than letting `exit_code` serialize as `null`.
+        let exit_code = output.status.code().unwrap_or_else(|| {
+            use std::os::unix::process::ExitStatusExt;
+            output.status.signal().map(|s| 128 + s).unwrap_or(-1)
+        });
         let accounts: Vec<&str> = stdout
             .lines()
             .map(str::trim)
@@ -95,7 +102,7 @@ fn cmd_wallet_list(project: &crate::model::Project, long: bool, json: bool) -> D
             .collect();
         let report = json!({
             "command": rendered_command,
-            "exit_code": output.status.code(),
+            "exit_code": exit_code,
             "accounts": accounts,
             "stdout": stdout,
             "stderr": stderr,
@@ -159,6 +166,9 @@ fn emit_topup_error_json(reason: &str, message: &str, address: &str, network: &s
         "address": address,
         "method": "pinata faucet claim",
         "network": network,
+        // Always present (null here) so the object shape is stable across
+        // every `status` and consumers don't need per-status conditional keys.
+        "tx": serde_json::Value::Null,
         "message": message,
     });
     if let Ok(text) = serde_json::to_string_pretty(&report) {
@@ -216,6 +226,8 @@ pub(crate) fn cmd_wallet_topup_inner(
                 "address": resolved_to,
                 "method": "pinata faucet claim",
                 "network": sequencer_addr,
+                // Stable shape: no tx exists for a dry run, but keep the key.
+                "tx": serde_json::Value::Null,
                 "wallet_home": wallet_home,
             });
             println!("{}", serde_json::to_string_pretty(&report)?);
