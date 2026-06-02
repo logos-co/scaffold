@@ -445,6 +445,18 @@ fn cmd_localnet_logs(log_path: &Path, tail: usize, json: bool) -> DynResult<()> 
     let content = fs::read_to_string(log_path)
         .with_context(|| format!("failed to read log file {}", log_path.display()))?;
 
+    // Treat a whitespace-only log as empty in BOTH modes. Without this, a log
+    // containing only newlines yields `content.lines() == [""]`, so JSON would
+    // report a non-empty `lines` array — contradicting the LocalnetLogsReport
+    // contract (empty when the log is empty) and the plain-text branch below.
+    if content.trim().is_empty() {
+        if json {
+            return print_logs_json(log_path, true, tail, Vec::new());
+        }
+        println!("log file is empty: {}", log_path.display());
+        return Ok(());
+    }
+
     let all_lines: Vec<&str> = content.lines().collect();
     let start = all_lines.len().saturating_sub(tail);
     let tail_lines = &all_lines[start..];
@@ -452,11 +464,6 @@ fn cmd_localnet_logs(log_path: &Path, tail: usize, json: bool) -> DynResult<()> 
     if json {
         let lines = tail_lines.iter().map(|l| l.to_string()).collect();
         return print_logs_json(log_path, true, tail, lines);
-    }
-
-    if content.trim().is_empty() {
-        println!("log file is empty: {}", log_path.display());
-        return Ok(());
     }
 
     for line in tail_lines {
