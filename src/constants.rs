@@ -98,14 +98,19 @@ pub(crate) const BASECAMP_PROFILES_REL: &str = ".scaffold/basecamp/profiles";
 /// The configured `cache_root` is prepended at call sites — it's dynamic.
 pub(crate) const BASECAMP_AUTODISCOVER_SKIP_SUBDIRS: &[&str] =
     &["target", "node_modules", "result"];
-/// Path under `XDG_DATA_HOME` (and `XDG_CACHE_HOME`) where basecamp reads and
-/// writes its user data — modules, plugins, preinstall seed. Must match the
-/// Qt `QApplication::applicationName()` the pinned basecamp binary is built
-/// with: dev builds use `LogosBasecampDev`; release builds would use
-/// `LogosBasecamp`. The current pin (`DEFAULT_BASECAMP_PIN`) is a dev build,
-/// so lgpm must install under `LogosBasecampDev` for basecamp to discover
-/// the installed modules at launch.
-pub(crate) const BASECAMP_XDG_APP_SUBPATH: &str = "Logos/LogosBasecampDev";
+/// Path under `XDG_CONFIG_HOME` / `XDG_DATA_HOME` / `XDG_CACHE_HOME` where
+/// basecamp reads and writes its user state. Must match the Qt
+/// `QApplication::applicationName()` the pinned basecamp binary is built
+/// with: dev (`#app`) → `LogosBasecampDev`, portable (`#bin-*`) →
+/// `LogosBasecamp`.
+pub(crate) const BASECAMP_XDG_APP_SUBPATH_DEV: &str = "Logos/LogosBasecampDev";
+pub(crate) const BASECAMP_XDG_APP_SUBPATH_PORTABLE: &str = "Logos/LogosBasecamp";
+
+/// `[repos.basecamp].attr` values that select the portable distribution stack.
+/// Anything else (including unrecognised attrs) is treated as dev.
+pub(crate) const BASECAMP_PORTABLE_ATTRS: &[&str] =
+    &["bin-macos-app", "bin-appimage", "bin-bundle-dir"];
+
 /// Default `source` / `pin` / `attr` for `[repos.lgpm]`. The `lgpm` CLI
 /// lives in a separate repo (`logos-package-manager`) from basecamp; pin
 /// alongside basecamp so dogfooding is reproducible. Built via
@@ -119,7 +124,10 @@ pub(crate) const BASECAMP_XDG_APP_SUBPATH: &str = "Logos/LogosBasecampDev";
 /// emitting hashes (or lgpm gains a compatibility mode).
 pub(crate) const LGPM_SOURCE: &str = "github:logos-co/logos-package-manager";
 pub(crate) const DEFAULT_LGPM_PIN: &str = "e5c25989861f4487c3dc8c7b3bc0062bcbc3221f";
+/// Dev stack (accepts `<host>-dev` `.lgx` variants).
 pub(crate) const LGPM_ATTR: &str = "cli";
+/// Portable stack (accepts bare `<host>` `.lgx` variants).
+pub(crate) const LGPM_ATTR_PORTABLE: &str = "cli-portable";
 
 /// Scaffold-level default pins for runtime companion modules that basecamp
 /// v0.1.1 does NOT preinstall (listed in the Package Manager UI catalog but
