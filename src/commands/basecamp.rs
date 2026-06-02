@@ -450,6 +450,18 @@ fn launch_env(profile_dir: &Path, profile_name: &str) -> BTreeMap<String, OsStri
         "XDG_CACHE_HOME".into(),
         profile_dir.join("xdg-cache").into_os_string(),
     );
+    // Per-profile TMPDIR (#89): liblogos_core binds each `logos_host`'s
+    // QLocalServer socket at a hardcoded `logos_token_<module>` name under
+    // `QStandardPaths::TempLocation` (== TMPDIR, else /tmp). Without a
+    // per-profile TMPDIR, concurrent `launch alice` / `launch bob` collide on
+    // `/tmp/logos_token_<module>`; the second bind unlinks the first, and the
+    // first profile's Qt RemoteObjects replica then derefs a dangling
+    // QMetaObject on its next socket read → SIGSEGV. A distinct temp root per
+    // profile removes the race without any upstream change.
+    env.insert(
+        "TMPDIR".into(),
+        profile_dir.join("xdg-tmp").into_os_string(),
+    );
     env.insert("LOGOS_PROFILE".into(), profile_name.into());
     env
 }
@@ -2822,6 +2834,13 @@ fn seed_profiles(
             fs::create_dir_all(&path)
                 .with_context(|| format!("create profile dir {}", path.display()))?;
         }
+        // Per-profile temp root for the launch-time `TMPDIR` export (#89).
+        // Flat — no BASECAMP_XDG_APP_SUBPATH suffix: Qt's
+        // `QLocalServer::listen("logos_token_…")` writes a socket file
+        // directly under the temp root.
+        let tmp_dir = profile_dir.join("xdg-tmp");
+        fs::create_dir_all(&tmp_dir)
+            .with_context(|| format!("create profile dir {}", tmp_dir.display()))?;
         seeded.push(name.to_string());
     }
     Ok(seeded)
@@ -3301,6 +3320,9 @@ mod tests {
                 let dir = root.join(name).join(xdg).join(BASECAMP_XDG_APP_SUBPATH_DEV);
                 assert!(dir.is_dir(), "expected XDG subdir at {}", dir.display());
             }
+            // #89: per-profile temp root, created flat (no app subpath).
+            let tmp = root.join(name).join("xdg-tmp");
+            assert!(tmp.is_dir(), "expected temp dir at {}", tmp.display());
         }
     }
 
@@ -3319,6 +3341,12 @@ mod tests {
         assert_eq!(
             env.get("XDG_CACHE_HOME").unwrap(),
             &OsString::from("/p/alice/xdg-cache")
+        );
+        // #89: per-profile TMPDIR prevents the cross-profile QLocalServer
+        // socket-name collision that SIGSEGVs Qt RemoteObjects.
+        assert_eq!(
+            env.get("TMPDIR").unwrap(),
+            &OsString::from("/p/alice/xdg-tmp")
         );
         assert_eq!(env.get("LOGOS_PROFILE").unwrap(), &OsString::from("alice"));
     }
@@ -3408,6 +3436,15 @@ mod tests {
             bob_env.get("PORT").is_none(),
             "alice's profile env must not leak to bob"
         );
+    }
+
+    #[test]
+    fn launch_env_tmpdir_is_distinct_per_profile() {
+        // The whole point of #89: alice and bob must not share a temp root,
+        // or their `logos_token_<module>` sockets collide.
+        let alice = launch_env(Path::new("/p/alice"), "alice");
+        let bob = launch_env(Path::new("/p/bob"), "bob");
+        assert_ne!(alice.get("TMPDIR"), bob.get("TMPDIR"));
     }
 
     #[test]
