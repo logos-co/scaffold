@@ -1291,6 +1291,20 @@ fn wallet_topup_json_connectivity_failure_categorizes_reason() {
         value.get("reason").and_then(|v| v.as_str()),
         Some("connectivity")
     );
+    // Error objects carry the same attempt context as success/pending, so
+    // consumers don't lose what was attempted on failure.
+    assert!(value
+        .get("address")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s.contains("Public/")));
+    assert_eq!(
+        value.get("method").and_then(|v| v.as_str()),
+        Some("pinata faucet claim")
+    );
+    assert_eq!(
+        value.get("network").and_then(|v| v.as_str()),
+        Some("http://127.0.0.1:3040")
+    );
 }
 
 #[test]
