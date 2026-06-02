@@ -413,7 +413,7 @@ fn cmd_basecamp_launch(project: Project, profile: String) -> DynResult<()> {
     // base (#163): [basecamp.env_append] path joins, then [basecamp.env]
     // globals, then [basecamp.profiles.<profile>.env] (profile wins).
     if let Some(bc) = project.config.basecamp.as_ref() {
-        apply_launch_env_overrides(&mut env, bc, &profile, |k| std::env::var(k).ok());
+        apply_launch_env_overrides(&mut env, bc, &profile, |k| std::env::var_os(k));
     }
     println!("launching basecamp for profile {profile}");
     let mut cmd = Command::new(&state.basecamp_bin);
@@ -460,32 +460,33 @@ fn launch_env(profile_dir: &Path, profile_name: &str) -> BTreeMap<String, OsStri
 ///      inherited (`inherited(key)`), so basecamp's own paths aren't clobbered.
 ///   2. `[basecamp.env]` — global plain replace.
 ///   3. `[basecamp.profiles.<profile>.env]` — per-profile plain replace (wins).
-/// `inherited` is injected (real caller passes `std::env::var`) so the append
-/// semantics are unit-testable without touching the process environment.
+/// `inherited` is injected (real caller passes `std::env::var_os`) so the
+/// append semantics are unit-testable without touching the process environment.
 fn apply_launch_env_overrides(
     env: &mut BTreeMap<String, OsString>,
     cfg: &BasecampConfig,
     profile: &str,
-    inherited: impl Fn(&str) -> Option<String>,
+    inherited: impl Fn(&str) -> Option<OsString>,
 ) {
     for (key, paths) in &cfg.env_append {
         if paths.is_empty() {
             continue;
         }
-        let joined = paths.join(":");
-        // Prefer a value scaffold already put in the env map, else what `lgs`
-        // inherited from its own environment.
-        let base = env
+        // Build the combined value in OsString space so a non-UTF8 base value
+        // (valid on Unix, e.g. a path with odd bytes) isn't corrupted by a
+        // lossy round-trip. Base is the value scaffold already set, else what
+        // `lgs` inherited; only the `:` separator and the (UTF-8) configured
+        // paths are appended.
+        let mut combined = env
             .get(key)
-            .map(|v| v.to_string_lossy().into_owned())
+            .cloned()
             .or_else(|| inherited(key))
             .unwrap_or_default();
-        let combined = if base.is_empty() {
-            joined
-        } else {
-            format!("{base}:{joined}")
-        };
-        env.insert(key.clone(), OsString::from(combined));
+        if !combined.is_empty() {
+            combined.push(":");
+        }
+        combined.push(paths.join(":"));
+        env.insert(key.clone(), combined);
     }
     for (key, val) in &cfg.env {
         env.insert(key.clone(), OsString::from(val));
@@ -3341,7 +3342,7 @@ mod tests {
 
         let mut env = launch_env(Path::new("/p/alice"), "alice");
         apply_launch_env_overrides(&mut env, &cfg, "alice", |k| {
-            (k == "QT_PLUGIN_PATH").then(|| "/usr/lib/qt/plugins".to_string())
+            (k == "QT_PLUGIN_PATH").then(|| OsString::from("/usr/lib/qt/plugins"))
         });
 
         // append: inherited value prepended, configured paths ':'-joined.
@@ -3371,6 +3372,25 @@ mod tests {
             env.get("LD_LIBRARY_PATH").unwrap(),
             &OsString::from("/nix/store/x/lib")
         );
+    }
+
+    #[test]
+    fn launch_env_append_preserves_non_utf8_inherited_value() {
+        // A non-UTF8 inherited value (valid on Unix) must survive the append
+        // intact — building in OsString space, not via to_string_lossy.
+        use std::os::unix::ffi::OsStringExt;
+        let weird = OsString::from_vec(vec![b'/', 0x66, 0xff, b'/', b'l', b'i', b'b']); // "/f\xff/lib"
+        let mut cfg = BasecampConfig::default();
+        cfg.env_append
+            .insert("LD_LIBRARY_PATH".into(), vec!["/nix/store/x/lib".into()]);
+        let mut env = launch_env(Path::new("/p/bob"), "bob");
+        let weird_for_closure = weird.clone();
+        apply_launch_env_overrides(&mut env, &cfg, "bob", move |k| {
+            (k == "LD_LIBRARY_PATH").then(|| weird_for_closure.clone())
+        });
+        let mut expected = weird;
+        expected.push(":/nix/store/x/lib");
+        assert_eq!(env.get("LD_LIBRARY_PATH").unwrap(), &expected);
     }
 
     #[test]

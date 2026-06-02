@@ -568,50 +568,50 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
 
     // [basecamp]
     if let Some(bc) = &cfg.basecamp {
+        // Validate all string values up front, before borrowing `doc` mutably.
+        for (k, v) in &bc.env {
+            check_toml_value(&format!("basecamp.env.{k}"), v)?;
+        }
+        for (k, list) in &bc.env_append {
+            for p in list {
+                check_toml_value(&format!("basecamp.env_append.{k}"), p)?;
+            }
+        }
+        for (profile, env) in &bc.profile_env {
+            for (k, v) in env {
+                check_toml_value(&format!("basecamp.profiles.{profile}.env.{k}"), v)?;
+            }
+        }
+
         let basecamp = doc.entry("basecamp").or_insert(Item::Table(Table::new()));
         let basecamp_table = basecamp.as_table_mut().expect("basecamp table");
         basecamp_table["port_base"] = value(i64::from(bc.port_base));
         basecamp_table["port_stride"] = value(i64::from(bc.port_stride));
-        // [basecamp.env]
+
+        // Build the env subtables off `basecamp_table` directly. Routing
+        // through `doc` via `ensure_subtable` would mark `[basecamp]` implicit
+        // and render its real keys as dotted `basecamp.port_base = …` instead
+        // of an explicit `[basecamp]` table.
         if !bc.env.is_empty() {
-            for (k, v) in &bc.env {
-                check_toml_value(&format!("basecamp.env.{k}"), v)?;
-            }
-            let env_table = ensure_subtable(&mut doc, "basecamp", "env");
+            let env_table = child_table(basecamp_table, "env");
             for (k, v) in &bc.env {
                 env_table[k] = value(v);
             }
         }
-        // [basecamp.env_append]
         if !bc.env_append.is_empty() {
-            for (k, list) in &bc.env_append {
-                for p in list {
-                    check_toml_value(&format!("basecamp.env_append.{k}"), p)?;
-                }
-            }
-            let append_table = ensure_subtable(&mut doc, "basecamp", "env_append");
+            let append_table = child_table(basecamp_table, "env_append");
             for (k, list) in &bc.env_append {
                 append_table[k] = string_array(list);
             }
         }
-        // [basecamp.profiles.<name>.env]
         if !bc.profile_env.is_empty() {
+            let profiles = child_table(basecamp_table, "profiles");
+            // Implicit so `[basecamp.profiles.<name>.env]` renders as the
+            // nested header without an empty `[basecamp.profiles]` line.
+            profiles.set_implicit(true);
             for (profile, env) in &bc.profile_env {
-                for (k, v) in env {
-                    check_toml_value(&format!("basecamp.profiles.{profile}.env.{k}"), v)?;
-                }
-                let profiles = ensure_subtable(&mut doc, "basecamp", "profiles");
-                profiles.set_implicit(true);
-                let profile_table = profiles
-                    .entry(profile)
-                    .or_insert(Item::Table(Table::new()))
-                    .as_table_mut()
-                    .expect("basecamp profile table");
-                let env_table = profile_table
-                    .entry("env")
-                    .or_insert(Item::Table(Table::new()))
-                    .as_table_mut()
-                    .expect("basecamp profile env table");
+                let profile_table = child_table(profiles, profile);
+                let env_table = child_table(profile_table, "env");
                 for (k, v) in env {
                     env_table[k] = value(v);
                 }
@@ -719,6 +719,17 @@ fn write_repo_ref(doc: &mut DocumentMut, name: &str, repo: &RepoRef) -> DynResul
         table.remove("path");
     }
     Ok(())
+}
+
+/// Get or create a child `Table` under an existing `Table` without touching the
+/// parent's implicit flag — unlike `ensure_subtable`, which marks its parent
+/// implicit (wrong when the parent has real keys, e.g. `[basecamp]`).
+fn child_table<'a>(parent: &'a mut Table, name: &str) -> &'a mut Table {
+    parent
+        .entry(name)
+        .or_insert(Item::Table(Table::new()))
+        .as_table_mut()
+        .expect("child is a table")
 }
 
 fn ensure_subtable<'a>(doc: &'a mut DocumentMut, parent: &str, child: &str) -> &'a mut Table {
@@ -988,6 +999,26 @@ LOGOS_STORAGE_API_PORT = "8081"
                 .map(String::as_str),
             Some("8081")
         );
+    }
+
+    #[test]
+    fn basecamp_env_serializes_as_explicit_table_not_dotted() {
+        // Regression: building the env subtables via `ensure_subtable` marked
+        // `[basecamp]` implicit, which renders its real keys as dotted
+        // `basecamp.port_base = …` rather than an explicit `[basecamp]` table.
+        let toml = minimal_v0_2_0() + "[basecamp.env]\nQT_DEBUG_PLUGINS = \"1\"\n";
+        let cfg = parse_config(&toml).expect("parse");
+        let serialized = serialize_config(&cfg).expect("serialize");
+        assert!(
+            serialized.contains("[basecamp]"),
+            "expected an explicit [basecamp] table header, got:\n{serialized}"
+        );
+        assert!(
+            !serialized.contains("basecamp.port_base"),
+            "port_base must not serialize as a dotted key, got:\n{serialized}"
+        );
+        // And it must still round-trip.
+        parse_config(&serialized).expect("re-parse");
     }
 
     #[test]
