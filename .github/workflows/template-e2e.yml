@@ -97,12 +97,15 @@ jobs:
 
       - name: doctor --json asserts zero FAIL
         run: |
-          set -uo pipefail
+          # -e up front so a failing `cd` (or any setup command) aborts the step
+          # instead of silently running doctor from the wrong directory.
+          set -euo pipefail
           cd "$RUNNER_TEMP/e2e-app"
-          # doctor exits 0 with no FAIL, or non-zero *only* when summary.fail > 0.
-          # Capture the exit code rather than `|| true` so an unexpected error
-          # (crash, no JSON) stays diagnosable instead of degrading into a
-          # generic jq parse failure with the original status lost.
+          # doctor exits 0 with no FAIL, and non-zero when summary.fail > 0 — but
+          # it can also exit non-zero *before* emitting JSON (e.g. failing to
+          # load the project). So disable -e only around the call, capture rc,
+          # then validate the JSON rather than `|| true`-ing the whole step
+          # (which would lose the status and degrade into a generic jq error).
           set +e
           "$GITHUB_WORKSPACE/target/release/logos-scaffold" doctor --json > doctor.json
           rc=$?
