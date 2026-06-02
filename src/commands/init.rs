@@ -326,7 +326,7 @@ mod tests {
         for name in [
             "lgs-cli",
             "lez-template",
-            "lez-framework-template",
+            "spel-template",
             "basecamp",
         ] {
             assert!(

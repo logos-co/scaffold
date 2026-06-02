@@ -6,7 +6,9 @@ use std::process::Command;
 use crate::commands::client::generate_clients_from_current_idl;
 use crate::commands::idl::build_idl_for_current_project;
 use crate::commands::setup::cmd_setup;
-use crate::constants::{FRAMEWORK_KIND_DEFAULT, FRAMEWORK_KIND_LEZ_FRAMEWORK, METHODS_DIR};
+use crate::constants::{
+    FRAMEWORK_KIND_DEFAULT, FRAMEWORK_KIND_LEZ_FRAMEWORK, FRAMEWORK_KIND_SPEL, METHODS_DIR,
+};
 use crate::process::run_checked;
 use crate::project::{load_project, run_in_project_dir};
 use crate::DynResult;
@@ -20,9 +22,16 @@ pub(crate) fn cmd_build_shortcut(project_dir: Option<PathBuf>, prebuilt: bool) -
         build_workspace_for_current_project(&cwd)?;
         match project.config.framework.kind.as_str() {
             FRAMEWORK_KIND_DEFAULT => {}
+            // lez-framework uses scaffold's internal IDL/client pipeline.
             FRAMEWORK_KIND_LEZ_FRAMEWORK => {
                 build_idl_for_current_project()?;
                 generate_clients_from_current_idl()?;
+            }
+            // spel delegates IDL generation to the vendored spel CLI.
+            // FFI/client gen is left to the project's own Makefile (`make ffi`)
+            // or `lgs spel -- ffi-gen`, keeping scaffold's role minimal.
+            FRAMEWORK_KIND_SPEL => {
+                build_idl_for_current_project()?;
             }
             other => {
                 println!(

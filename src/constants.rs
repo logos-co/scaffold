@@ -58,7 +58,10 @@ pub(crate) const DEFAULT_HELLO_WORLD_IMAGE_ID_HEX: &str =
 pub(crate) const DEFAULT_WALLET_PASSWORD: &str = "logos-scaffold-v0";
 pub(crate) const WALLET_BIN_REL_PATH: &str = "target/release/wallet";
 pub(crate) const FRAMEWORK_KIND_DEFAULT: &str = "default";
+/// Deprecated alias kept for backward compatibility with existing scaffold.toml files.
+/// New projects use `FRAMEWORK_KIND_SPEL` ("spel").
 pub(crate) const FRAMEWORK_KIND_LEZ_FRAMEWORK: &str = "lez-framework";
+pub(crate) const FRAMEWORK_KIND_SPEL: &str = "spel";
 pub(crate) const DEFAULT_FRAMEWORK_VERSION: &str = "0.1.0";
 pub(crate) const DEFAULT_FRAMEWORK_IDL_SPEC: &str = "lssa-idl/0.1.0";
 pub(crate) const DEFAULT_FRAMEWORK_IDL_PATH: &str = "idl";
