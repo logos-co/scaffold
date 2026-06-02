@@ -492,9 +492,12 @@ fn cmd_basecamp_develop(
     cmd.current_dir(&project.root)
         .arg("develop")
         .arg(&target)
-        // Export scaffold-managed names so in-shell `lgs` calls resolve this
-        // project's state explicitly: SCAFFOLD_PROJECT_ROOT (the project root)
-        // and LOGOS_PROFILE (the module name for this dev session).
+        // The dev shell starts in the project root (current_dir above), so an
+        // in-shell `lgs` already discovers this project via its normal
+        // cwd-upward search. These vars are exported as extra context for
+        // scripts/tooling in the shell — SCAFFOLD_PROJECT_ROOT (the project
+        // root) and LOGOS_PROFILE (the module name for this dev session);
+        // `load_project` itself does not read them.
         .env("SCAFFOLD_PROJECT_ROOT", &project.root)
         .env("LOGOS_PROFILE", &module);
 
