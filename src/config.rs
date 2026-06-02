@@ -148,8 +148,8 @@ fn parse_run_watch(run_table: &Table) -> DynResult<WatchConfig> {
     let Some(watch_table) = run_table.get("watch").and_then(Item::as_table) else {
         return Ok(WatchConfig::default());
     };
-    let include = parse_glob_list(watch_table.get("include"), "run.watch.include")?;
-    let exclude = parse_glob_list(watch_table.get("exclude"), "run.watch.exclude")?;
+    let include = parse_glob_list(watch_table.get("include"), "[run.watch].include")?;
+    let exclude = parse_glob_list(watch_table.get("exclude"), "[run.watch].exclude")?;
     let debounce_ms = match watch_table.get("debounce_ms") {
         None => None,
         Some(item) => {
@@ -169,23 +169,26 @@ fn parse_run_watch(run_table: &Table) -> DynResult<WatchConfig> {
     })
 }
 
+/// `key` is the field label already formatted as `[table].field` (e.g.
+/// `[run.watch].include`), so error messages point at the actual key instead of
+/// a `[run.watch.include]`-looking pseudo-table.
 fn parse_glob_list(item: Option<&Item>, key: &str) -> DynResult<Vec<String>> {
     let Some(item) = item else {
         return Ok(Vec::new());
     };
     let arr = item
         .as_array()
-        .ok_or_else(|| anyhow!("invalid scaffold.toml: [{key}] must be an array of strings"))?;
+        .ok_or_else(|| anyhow!("invalid scaffold.toml: {key} must be an array of strings"))?;
     let mut out = Vec::with_capacity(arr.len());
     for v in arr.iter() {
         let s = v
             .as_str()
-            .ok_or_else(|| anyhow!("invalid scaffold.toml: [{key}] entries must be strings"))?;
+            .ok_or_else(|| anyhow!("invalid scaffold.toml: {key} entries must be strings"))?;
         // Reject empty patterns: an empty glob normalizes to a match-all
         // (`**/`), so an empty `exclude` entry would silently suppress *every*
         // watch trigger. Fail fast with a targeted error instead.
         if s.is_empty() {
-            bail!("invalid scaffold.toml: [{key}] entries must not be empty");
+            bail!("invalid scaffold.toml: {key} entries must not be empty");
         }
         out.push(s.to_string());
     }

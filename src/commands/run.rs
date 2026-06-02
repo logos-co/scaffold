@@ -262,8 +262,12 @@ fn watch_loop(project: &Project, params: &PipelineParams, debounce_ms: u64) -> D
     // iteration. Without ignoring that directory, those writes fire
     // their own notify events → infinite loop. Resolve once before
     // entering the loop. Use the project-relative form so we match
-    // both canonical and non-canonical event paths.
-    let idl_rel = PathBuf::from(&project.config.framework.idl.path);
+    // both canonical and non-canonical event paths — and normalize an
+    // absolute `framework.idl.path` that points inside the project to its
+    // relative form, or the `rel.starts_with(idl_rel)` ignore check (which
+    // compares against the project-relative event path) would never match
+    // and watch mode would loop forever on IDL write-backs.
+    let idl_rel = normalize_idl_rel(&project.config.framework.idl.path, &project.root);
     let watch_ctx = WatchIgnore {
         idl_rel,
         include: project.config.run.watch.include.clone(),
@@ -303,6 +307,19 @@ fn watch_loop(project: &Project, params: &PipelineParams, debounce_ms: u64) -> D
     }
 
     Ok(())
+}
+
+/// Resolve `framework.idl.path` to the project-relative form the watch ignore
+/// check compares against. A relative config value is used as-is; an absolute
+/// value pointing inside the project root is rewritten relative to it (so the
+/// `rel.starts_with(idl_rel)` ignore matches and watch mode doesn't loop on IDL
+/// write-backs). An absolute value outside the project passes through unchanged.
+fn normalize_idl_rel(idl_path: &str, root: &Path) -> PathBuf {
+    let configured = PathBuf::from(idl_path);
+    configured
+        .strip_prefix(root)
+        .map(Path::to_path_buf)
+        .unwrap_or(configured)
 }
 
 struct WatchIgnore {
@@ -855,6 +872,27 @@ mod tests {
         assert!(!is_ignored_path(root, &ctx, &root.join("src/main.rs")));
         // ...while a path outside the include set is ignored.
         assert!(is_ignored_path(root, &ctx, &root.join("docs/readme.md")));
+    }
+
+    #[test]
+    fn normalize_idl_rel_handles_relative_and_absolute_paths() {
+        let root = Path::new("/proj");
+        // Relative config value is used as-is.
+        assert_eq!(normalize_idl_rel("idl", root), PathBuf::from("idl"));
+        // Absolute value inside the project is rewritten relative to root, so
+        // the ignore check matches the project-relative event path.
+        let ctx = WatchIgnore {
+            idl_rel: normalize_idl_rel("/proj/idl", root),
+            include: vec![],
+            exclude: vec![],
+        };
+        assert_eq!(ctx.idl_rel, PathBuf::from("idl"));
+        assert!(is_ignored_path(root, &ctx, &root.join("idl/counter.json")));
+        // Absolute value outside the project passes through unchanged.
+        assert_eq!(
+            normalize_idl_rel("/elsewhere/idl", root),
+            PathBuf::from("/elsewhere/idl")
+        );
     }
 
     fn make_test_project(root: PathBuf) -> Project {
