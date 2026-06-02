@@ -181,6 +181,12 @@ fn parse_glob_list(item: Option<&Item>, key: &str) -> DynResult<Vec<String>> {
         let s = v
             .as_str()
             .ok_or_else(|| anyhow!("invalid scaffold.toml: [{key}] entries must be strings"))?;
+        // Reject empty patterns: an empty glob normalizes to a match-all
+        // (`**/`), so an empty `exclude` entry would silently suppress *every*
+        // watch trigger. Fail fast with a targeted error instead.
+        if s.is_empty() {
+            bail!("invalid scaffold.toml: [{key}] entries must not be empty");
+        }
         out.push(s.to_string());
     }
     Ok(out)
@@ -1098,6 +1104,15 @@ role = "project"
             vec!["**/*.md".to_string(), "Cargo.lock".to_string()]
         );
         assert_eq!(cfg.run.watch.debounce_ms, Some(1500));
+    }
+
+    #[test]
+    fn parse_config_run_watch_rejects_empty_glob() {
+        // An empty pattern normalizes to match-all; an empty `exclude` would
+        // silently suppress every watch trigger, so it's rejected at parse.
+        let toml = minimal_v0_2_0() + "[run.watch]\nexclude = [\"\"]\n";
+        let err = parse_config(&toml).unwrap_err();
+        assert!(err.to_string().contains("must not be empty"), "{err}");
     }
 
     #[test]

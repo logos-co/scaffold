@@ -315,7 +315,8 @@ struct RunArgs {
     watch: bool,
     /// Override the `--watch` debounce window (milliseconds) for this
     /// invocation. Defaults to `[run.watch].debounce_ms`, else 500.
-    #[arg(long, value_name = "MS")]
+    /// Only meaningful with `--watch`, so it requires it.
+    #[arg(long, value_name = "MS", requires = "watch")]
     watch_debounce_ms: Option<u64>,
 }
 

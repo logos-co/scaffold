@@ -385,30 +385,68 @@ fn glob_match(pattern: &str, path: &str) -> bool {
     match_segments(&pat_segs, &path_segs)
 }
 
+/// Iterative two-pointer match of pattern segments against path segments,
+/// where `**` matches zero or more whole segments and any other segment must
+/// match exactly one path segment via `segment_match`. Linear-time
+/// (O(pat·path)) with single-star backtracking — so a pattern carrying several
+/// `**` can't trigger exponential recursive blowup in the watch loop.
 fn match_segments(pat: &[&str], path: &[&str]) -> bool {
-    match pat.split_first() {
-        None => path.is_empty(),
-        Some((&"**", rest)) => {
-            // `**` matches zero or more path segments.
-            (0..=path.len()).any(|i| match_segments(rest, &path[i..]))
-        }
-        Some((seg, rest)) => {
-            !path.is_empty()
-                && segment_match(seg.as_bytes(), path[0].as_bytes())
-                && match_segments(rest, &path[1..])
+    let (mut p, mut s) = (0usize, 0usize);
+    // Position of the most recent `**` and the path index it started at.
+    let mut star: Option<usize> = None;
+    let mut star_s = 0usize;
+    while s < path.len() {
+        if p < pat.len() && pat[p] == "**" {
+            star = Some(p);
+            star_s = s;
+            p += 1;
+        } else if p < pat.len() && segment_match(pat[p].as_bytes(), path[s].as_bytes()) {
+            p += 1;
+            s += 1;
+        } else if let Some(sp) = star {
+            // Backtrack: let the last `**` swallow one more path segment.
+            p = sp + 1;
+            star_s += 1;
+            s = star_s;
+        } else {
+            return false;
         }
     }
+    // Trailing `**`s match the empty remainder.
+    while p < pat.len() && pat[p] == "**" {
+        p += 1;
+    }
+    p == pat.len()
 }
 
-/// `*` (any run within a segment) / `?` (single char) matcher. Never crosses a
-/// `/` because it only ever sees one already-split path segment.
+/// Iterative `*` (any run within a segment) / `?` (single char) matcher. Never
+/// crosses a `/` (it only ever sees one already-split path segment). Uses the
+/// same single-star-backtrack scheme so a segment with many `*`s can't trigger
+/// exponential backtracking.
 fn segment_match(pat: &[u8], seg: &[u8]) -> bool {
-    match pat.split_first() {
-        None => seg.is_empty(),
-        Some((&b'*', rest)) => (0..=seg.len()).any(|i| segment_match(rest, &seg[i..])),
-        Some((&b'?', rest)) => !seg.is_empty() && segment_match(rest, &seg[1..]),
-        Some((c, rest)) => seg.first() == Some(c) && segment_match(rest, &seg[1..]),
+    let (mut p, mut s) = (0usize, 0usize);
+    let mut star: Option<usize> = None;
+    let mut star_s = 0usize;
+    while s < seg.len() {
+        if p < pat.len() && (pat[p] == b'?' || pat[p] == seg[s]) {
+            p += 1;
+            s += 1;
+        } else if p < pat.len() && pat[p] == b'*' {
+            star = Some(p);
+            star_s = s;
+            p += 1;
+        } else if let Some(sp) = star {
+            p = sp + 1;
+            star_s += 1;
+            s = star_s;
+        } else {
+            return false;
+        }
     }
+    while p < pat.len() && pat[p] == b'*' {
+        p += 1;
+    }
+    p == pat.len()
 }
 
 fn reseed_after_wipe(project: &Project) -> DynResult<()> {
@@ -727,6 +765,22 @@ mod tests {
         // `**` also matches zero segments between fixed parts.
         assert!(glob_match("programs/**/guest/**", "programs/guest/x.rs"));
         assert!(!glob_match("programs/**/guest/**", "src/main.rs"));
+    }
+
+    #[test]
+    fn glob_handles_multiple_stars_without_blowup() {
+        // Multiple `**` across segments and multiple `*` within a segment must
+        // resolve correctly under the iterative matcher (and not hang).
+        assert!(glob_match("**/a/**/b/**", "x/a/y/z/b/c/d"));
+        assert!(!glob_match("**/a/**/b/**", "x/a/y/z/c"));
+        assert!(glob_match("src/*a*b*.rs", "src/xxaxxbxx.rs"));
+        assert!(!glob_match("src/*a*b*.rs", "src/xxbxxaxx.rs"));
+        // A long segment against many `*` should be fast (linear), not
+        // exponential — exercised here purely for correctness.
+        assert!(glob_match(
+            "**/*x*x*x*x*x*",
+            "deep/path/xxxxxxxxxxxxxxxxxxxx"
+        ));
     }
 
     #[test]
