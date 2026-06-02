@@ -402,9 +402,9 @@ fn launch_env(profile_dir: &Path, profile_name: &str) -> BTreeMap<String, OsStri
 
 /// `lgs basecamp develop <module>` — enter a module's Nix dev shell.
 ///
-/// Resolves the module's flake from `[modules.<module>]`, strips its `#lgx`
-/// output fragment, and execs `nix develop <flake>[#<dev_shell>]` from the
-/// project root so any in-shell `lgs` invocation resolves to this project.
+/// Resolves the module's flake from `[modules.<module>]`, strips its output
+/// fragment (e.g. `#lgx`), and execs `nix develop <flake>[#<dev_shell>]` from
+/// the project root so any in-shell `lgs` invocation resolves to this project.
 /// The module lookup runs before the `nix` presence check, so an unknown
 /// module name fails fast with the known-module list even on a host without
 /// Nix.
@@ -435,8 +435,9 @@ fn cmd_basecamp_develop(
     cmd.current_dir(&project.root)
         .arg("develop")
         .arg(&target)
-        // Mirror `launch`: export scaffold-managed names so in-shell `lgs`
-        // calls resolve this project's state explicitly.
+        // Export scaffold-managed names so in-shell `lgs` calls resolve this
+        // project's state explicitly: SCAFFOLD_PROJECT_ROOT (the project root)
+        // and LOGOS_PROFILE (the module name for this dev session).
         .env("SCAFFOLD_PROJECT_ROOT", &project.root)
         .env("LOGOS_PROFILE", &module);
 
@@ -445,10 +446,10 @@ fn cmd_basecamp_develop(
     bail!("failed to exec `nix develop {target}`: {err}");
 }
 
-/// Build the `nix develop` target from a module's stored flake ref. Strips the
-/// module's output fragment (`#lgx`), absolutizes path-style refs the same way
-/// `launch`/`install` do, then re-attaches the requested dev-shell attr (if
-/// any). `None` selects the flake's default dev shell.
+/// Build the `nix develop` target from a module's stored flake ref. Strips any
+/// output fragment after `#` (e.g. `#lgx`), absolutizes path-style refs the
+/// same way `launch`/`install` do, then re-attaches the requested dev-shell
+/// attr (if any). `None` selects the flake's default dev shell.
 fn nix_develop_target(project_root: &Path, flake: &str, dev_shell: Option<&str>) -> String {
     let bare = flake.split_once('#').map_or(flake, |(b, _)| b);
     let normalized = normalize_flake_ref(project_root, bare);
