@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::path::Path;
 use std::process::Command;
 
@@ -343,26 +344,11 @@ fn try_download_prebuilt(lez: &Path, pin: &str) -> crate::DynResult<bool> {
 }
 
 fn sha256_hex(data: &[u8]) -> String {
-    // Simple SHA256 using the sha2 crate via workspace dependency
-    // Falls back gracefully if not available
-    #[cfg(feature = "sha2")]
-    {
-        use sha2::{Digest, Sha256};
-        let hash = Sha256::digest(data);
-        let mut s = String::new();
-        for byte in hash {
-            write!(s, "{byte:02x}").unwrap();
-        }
-        s
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(data);
+    let mut s = String::new();
+    for byte in hash {
+        write!(s, "{byte:02x}").unwrap();
     }
-    #[cfg(not(feature = "sha2"))]
-    {
-        // Without sha2, compute a simple checksum for basic integrity
-        let mut h: u64 = 0xcbf29ce484222325;
-        for &b in data {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x100000001b3);
-        }
-        format!("{h:016x}")
-    }
+    s
 }
