@@ -397,14 +397,15 @@ fn cmd_localnet_status(
         println!("tracked sequencer: not tracked");
     }
 
+    let sequencer_url = format!("http://{localnet_addr}");
     if report.listener_present {
         let pid_text = report
             .listener_pid
             .map(|pid| pid.to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        println!("listener {localnet_addr}: reachable (pid={pid_text})");
+        println!("listener {sequencer_url}: reachable (pid={pid_text})");
     } else {
-        println!("listener {localnet_addr}: not reachable");
+        println!("listener {sequencer_url}: not reachable");
     }
 
     println!("ownership: {}", ownership_label(report.ownership));
