@@ -307,7 +307,6 @@ fn find_spel_on_path() -> anyhow::Result<std::path::PathBuf> {
     anyhow::bail!("spel not found on PATH")
 }
 
-
 pub(crate) fn to_cargo_crate_name(input: &str) -> String {
     let mut out = String::new();
     let mut prev_dash = false;

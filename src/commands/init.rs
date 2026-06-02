@@ -323,12 +323,7 @@ mod tests {
         let target = temp.path();
         cmd_init_at(target, "lgs", false, false).expect("init");
 
-        for name in [
-            "lgs-cli",
-            "lez-template",
-            "spel-template",
-            "basecamp",
-        ] {
+        for name in ["lgs-cli", "lez-template", "spel-template", "basecamp"] {
             assert!(
                 target
                     .join(format!(".claude/skills/{name}/SKILL.md"))
