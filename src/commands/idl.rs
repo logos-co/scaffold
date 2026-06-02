@@ -25,9 +25,10 @@ const IDL_MARKER_SUFFIX: &str = " ---";
 pub(crate) const IDL_STATE_REL: &str = ".scaffold/state/idl_build.json";
 
 /// Persisted IDL-build fingerprint. `input_hash` covers every project `.rs`
-/// source, `Cargo.lock` (which pins the IDL-emitting proc-macro), and the
-/// `[framework.idl]` config; `outputs` are the file names written so a cache
-/// hit can verify they still exist before skipping the rebuild.
+/// source and `Cargo.toml` manifest, `Cargo.lock` (which pins the IDL-emitting
+/// proc-macro), and the `[framework.idl]` config; `outputs` are the file names
+/// written so a cache hit can verify they still exist before skipping the
+/// rebuild.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct IdlBuildState {
     input_hash: String,
@@ -143,12 +144,19 @@ fn build_idl_inner(force: bool) -> DynResult<()> {
 }
 
 /// SHA-256 over the inputs that determine the IDL output: every `.rs` source
-/// in the project (target / hidden / vendor dirs excluded), `Cargo.lock` (so a
-/// `cargo update` that bumps the IDL-emitting proc-macro busts the cache even
-/// when guest sources are byte-identical), and the `[framework.idl]` config.
+/// and every `Cargo.toml` manifest in the project (target / hidden / vendor
+/// dirs excluded), `Cargo.lock` (so a `cargo update` that bumps the
+/// IDL-emitting proc-macro busts the cache even when guest sources are
+/// byte-identical), and the `[framework.idl]` config. Manifests are included
+/// because a `Cargo.toml` feature-flag / dependency / proc-macro change can
+/// alter what `cargo test __lssa_idl_print` emits without touching any `.rs`
+/// file or `Cargo.lock`.
 fn compute_idl_input_hash(project: &Project) -> DynResult<String> {
     let root = &project.root;
-    let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+    // Collect just the input paths (no file bytes), sort for a stable digest,
+    // then stream each file into the hasher one at a time — peak memory is a
+    // single file rather than the whole source tree.
+    let mut files: Vec<(String, std::path::PathBuf)> = Vec::new();
     for entry in WalkDir::new(root)
         .into_iter()
         .filter_entry(|e| keep_for_idl_hash(e, root))
@@ -158,24 +166,26 @@ fn compute_idl_input_hash(project: &Project) -> DynResult<String> {
             continue;
         }
         let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "rs") {
+        let is_rs = path.extension().is_some_and(|ext| ext == "rs");
+        let is_manifest = path.file_name().is_some_and(|n| n == "Cargo.toml");
+        if is_rs || is_manifest {
             let rel = path
                 .strip_prefix(root)
                 .unwrap_or(path)
                 .to_string_lossy()
                 .replace('\\', "/");
-            let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
-            entries.push((rel, bytes));
+            files.push((rel, path.to_path_buf()));
         }
     }
     // Deterministic order so the digest is stable regardless of FS traversal.
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    files.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut hasher = Sha256::new();
-    for (rel, bytes) in &entries {
+    for (rel, abs) in &files {
         hasher.update(rel.as_bytes());
         hasher.update(b"\x00");
-        hasher.update(bytes);
+        let bytes = fs::read(abs).with_context(|| format!("read {}", abs.display()))?;
+        hasher.update(&bytes);
         hasher.update(b"\x00");
     }
     // Cargo.lock is part of the cache key. A missing lock is fine (absent), but
@@ -211,7 +221,12 @@ fn keep_for_idl_hash(entry: &walkdir::DirEntry, root: &Path) -> bool {
     }
     if entry.file_type().is_dir() {
         let name = entry.file_name().to_string_lossy();
-        if name.starts_with('.') || matches!(name.as_ref(), "target" | "node_modules" | "result") {
+        if name.starts_with('.')
+            || matches!(
+                name.as_ref(),
+                "target" | "node_modules" | "result" | "vendor"
+            )
+        {
             return false;
         }
     }
@@ -480,7 +495,29 @@ ignored
     }
 
     #[test]
-    fn idl_hash_ignores_target_and_hidden_dirs() {
+    fn idl_hash_changes_when_cargo_toml_changes() {
+        // A Cargo.toml feature/dep/proc-macro change can alter the emitted IDL
+        // without touching any .rs file or Cargo.lock — it must bust the cache.
+        let temp = tempfile::tempdir().expect("tempdir");
+        write(
+            temp.path(),
+            "methods/guest/src/bin/counter.rs",
+            b"fn main() {}\n",
+        );
+        write(temp.path(), "Cargo.toml", b"[package]\nname='x'\n");
+        let project = make_test_project(temp.path().to_path_buf());
+        let before = compute_idl_input_hash(&project).expect("before");
+        write(
+            temp.path(),
+            "Cargo.toml",
+            b"[package]\nname='x'\n\n[features]\nidl-extra=[]\n",
+        );
+        let after = compute_idl_input_hash(&project).expect("after");
+        assert_ne!(before, after, "Cargo.toml change must bust the cache");
+    }
+
+    #[test]
+    fn idl_hash_ignores_target_hidden_and_vendor_dirs() {
         let temp = tempfile::tempdir().expect("tempdir");
         write(
             temp.path(),
@@ -489,12 +526,18 @@ ignored
         );
         let project = make_test_project(temp.path().to_path_buf());
         let before = compute_idl_input_hash(&project).expect("before");
-        // Build artifacts and scaffold state must not affect the fingerprint.
+        // Build artifacts, scaffold state, and vendored sources must not affect
+        // the fingerprint (vendor/ can be large + is not project source).
         write(temp.path(), "target/debug/build/gen.rs", b"// generated\n");
         write(temp.path(), "methods/target/x/riscv.rs", b"// generated\n");
         write(temp.path(), ".scaffold/state/note.rs", b"// state\n");
+        write(temp.path(), "vendor/somecrate/src/lib.rs", b"// vendored\n");
+        write(temp.path(), "vendor/somecrate/Cargo.toml", b"[package]\n");
         let after = compute_idl_input_hash(&project).expect("after");
-        assert_eq!(before, after, "target/.scaffold .rs must be excluded");
+        assert_eq!(
+            before, after,
+            "target/.scaffold/vendor must be excluded from the fingerprint"
+        );
     }
 
     #[test]
