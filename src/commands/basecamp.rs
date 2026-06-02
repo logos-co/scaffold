@@ -3131,7 +3131,7 @@ mod tests {
     }
 
     #[test]
-    fn launch_env_overrides_apply_global_then_profile_then_append() {
+    fn launch_env_overrides_apply_append_then_global_then_profile() {
         let mut cfg = BasecampConfig::default();
         cfg.env.insert("QT_DEBUG_PLUGINS".into(), "1".into());
         cfg.env

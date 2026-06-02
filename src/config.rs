@@ -397,7 +397,13 @@ fn parse_basecamp_runtime(doc: &DocumentMut) -> DynResult<Option<BasecampConfig>
                 })?;
                 list.push(s.to_string());
             }
-            cfg.env_append.insert(key.to_string(), list);
+            // Skip empty lists: they're a no-op at launch (apply_launch_env_
+            // overrides skips them) and would otherwise make `[basecamp]`
+            // non-empty and round-trip back into scaffold.toml — inconsistent
+            // with how empty per-profile env maps are dropped below.
+            if !list.is_empty() {
+                cfg.env_append.insert(key.to_string(), list);
+            }
         }
         any_field = any_field || !cfg.env_append.is_empty();
     }
@@ -934,6 +940,19 @@ LOGOS_STORAGE_API_PORT = "8082"
                 .and_then(|e| e.get("LOGOS_STORAGE_API_PORT"))
                 .map(String::as_str),
             Some("8082")
+        );
+    }
+
+    #[test]
+    fn basecamp_env_append_drops_empty_lists() {
+        // An empty list is a launch-time no-op; it must not be captured (so
+        // `[basecamp]` stays empty here and nothing round-trips back).
+        let toml = minimal_v0_2_0() + "[basecamp.env_append]\nQT_PLUGIN_PATH = []\n";
+        let cfg = parse_config(&toml).expect("parse");
+        assert!(
+            cfg.basecamp.is_none(),
+            "an empty env_append entry must not make [basecamp] non-empty: {:?}",
+            cfg.basecamp
         );
     }
 
