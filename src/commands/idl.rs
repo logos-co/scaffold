@@ -178,9 +178,20 @@ fn compute_idl_input_hash(project: &Project) -> DynResult<String> {
         hasher.update(bytes);
         hasher.update(b"\x00");
     }
-    if let Ok(lock) = fs::read(root.join("Cargo.lock")) {
-        hasher.update(b"cargo.lock\x00");
-        hasher.update(&lock);
+    // Cargo.lock is part of the cache key. A missing lock is fine (absent), but
+    // any other read error (permissions, I/O) must surface — silently ignoring
+    // it would fold an empty value into the digest and risk a false cache hit
+    // that skips a needed rebuild.
+    let lock_path = root.join("Cargo.lock");
+    match fs::read(&lock_path) {
+        Ok(lock) => {
+            hasher.update(b"cargo.lock\x00");
+            hasher.update(&lock);
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(e).with_context(|| format!("read {}", lock_path.display()));
+        }
     }
     hasher.update(b"idlcfg\x00");
     hasher.update(project.config.framework.idl.spec.as_bytes());
@@ -208,7 +219,9 @@ fn keep_for_idl_hash(entry: &walkdir::DirEntry, root: &Path) -> bool {
 }
 
 fn outputs_present(idl_dir: &Path, outputs: &[String]) -> bool {
-    !outputs.is_empty() && outputs.iter().all(|name| idl_dir.join(name).exists())
+    // `is_file()` (not `exists()`): a directory named `<stem>.json` must not
+    // count as a valid cached output and short-circuit the rebuild.
+    !outputs.is_empty() && outputs.iter().all(|name| idl_dir.join(name).is_file())
 }
 
 fn load_idl_state(project: &Project) -> Option<IdlBuildState> {
@@ -516,6 +529,9 @@ ignored
         assert!(!outputs_present(&idl_dir, &two));
         // Empty outputs never count as a fresh cache.
         assert!(!outputs_present(&idl_dir, &[]));
+        // A *directory* named like an output must not count as present.
+        fs::create_dir_all(idl_dir.join("dir.json")).unwrap();
+        assert!(!outputs_present(&idl_dir, &["dir.json".to_string()]));
     }
 
     #[test]
