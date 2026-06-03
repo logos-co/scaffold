@@ -24,18 +24,13 @@ pub(crate) struct GitRef {
 // scaffold's own wallet/sequencer build. `check_spel_lez_alignment` in
 // `commands/doctor.rs` enforces this at runtime — re-run `doctor` after
 // bumping either pin.
-//
-// Special note on DEFAULT_SPEL: this is the public commit that the
-// `v0.2.0-rc.5` tag peels to on `logos-co/spel`. We deliberately use the
-// commit so the default cannot drift if the upstream
-// tag is ever moved or replaced.
 pub(crate) const DEFAULT_LEZ: GitRef = GitRef {
-    sha: "35d8df0d031315219f94d1546ceb862b0e5b208f",
-    tag: "v0.2.0-rc1",
+    sha: "cf3639d8252040d13b3d4e933feb19b42c76e14a",
+    tag: "v0.1.2",
 };
 pub(crate) const DEFAULT_SPEL: GitRef = GitRef {
-    sha: "1db7c5f8af3165318f9046c13ab185e24773fd59",
-    tag: "v0.2.0-rc.5",
+    sha: "73fc462eb8f0a4d00f1a846437c627ec2e523f83",
+    tag: "v0.5.0",
 };
 
 /// `logos-blockchain-circuits` GitHub release version that contains the
@@ -43,8 +38,8 @@ pub(crate) const DEFAULT_SPEL: GitRef = GitRef {
 /// `logos-blockchain-{pol,poc,poq,zksign}` build script reads at compile time
 /// via `logos-blockchain-circuits-utils::circuits_dir()`.
 ///
-/// Pinned to the version LEZ rc1's `flake.lock` resolves to (its
-/// `logos-blockchain-circuits` input is `ec7d298…`, whose `flake.nix` declares
+/// Pinned to the version LEZ v0.1.2's `flake.lock` resolves to (its
+/// `logos-blockchain-circuits` input is `d6cf41f…`, whose `flake.nix` declares
 /// `circuitsVersion = "0.4.1"`). A mismatched circuits release silently
 /// produces incompatible verifier keys, so bump this in lock-step with
 /// `DEFAULT_LB_PIN` / `DEFAULT_LEZ`.
@@ -63,7 +58,10 @@ pub(crate) const DEFAULT_HELLO_WORLD_IMAGE_ID_HEX: &str =
 pub(crate) const DEFAULT_WALLET_PASSWORD: &str = "logos-scaffold-v0";
 pub(crate) const WALLET_BIN_REL_PATH: &str = "target/release/wallet";
 pub(crate) const FRAMEWORK_KIND_DEFAULT: &str = "default";
+/// Deprecated alias kept for backward compatibility with existing scaffold.toml files.
+/// New projects use `FRAMEWORK_KIND_SPEL` ("spel").
 pub(crate) const FRAMEWORK_KIND_LEZ_FRAMEWORK: &str = "lez-framework";
+pub(crate) const FRAMEWORK_KIND_SPEL: &str = "spel";
 pub(crate) const DEFAULT_FRAMEWORK_VERSION: &str = "0.1.0";
 pub(crate) const DEFAULT_FRAMEWORK_IDL_SPEC: &str = "lssa-idl/0.1.0";
 pub(crate) const DEFAULT_FRAMEWORK_IDL_PATH: &str = "idl";

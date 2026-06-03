@@ -137,6 +137,11 @@ pub(crate) fn available_templates() -> Vec<String> {
         })
         .filter(|s| !s.is_empty())
         .collect();
+    // `spel` is handled by delegating to `spel init` rather than an embedded
+    // template directory, so it does not appear in TEMPLATES_DIR.
+    if !names.contains(&"spel".to_string()) {
+        names.push("spel".to_string());
+    }
     names.sort();
     names
 }
@@ -201,41 +206,6 @@ mod tests {
     }
 
     #[test]
-    fn lez_framework_overlay_converts_template_manifests_to_cargo_toml() {
-        let target = mk_temp_dir("lez-manifests");
-        let ctx = OverlayRenderContext {
-            crate_name: "my-app",
-            lez_pin: "abc123",
-        };
-
-        apply_overlay(&target, "lez-framework", &ctx).expect("failed to apply lez-framework");
-
-        for path in [
-            "Cargo.toml",
-            "crates/lez-client-gen/Cargo.toml",
-            "methods/guest/Cargo.toml",
-        ] {
-            assert!(
-                target.join(path).exists(),
-                "missing expected manifest in generated project: {path}"
-            );
-        }
-
-        for path in [
-            "Cargo.toml.template",
-            "crates/lez-client-gen/Cargo.toml.template",
-            "methods/guest/Cargo.toml.template",
-        ] {
-            assert!(
-                !target.join(path).exists(),
-                "template manifest should not leak into output: {path}"
-            );
-        }
-
-        fs::remove_dir_all(&target).expect("failed to cleanup temporary test directory");
-    }
-
-    #[test]
     fn overlay_renders_tokens_and_leaves_no_unresolved_placeholders() {
         let target = mk_temp_dir("tokens");
         let ctx = OverlayRenderContext {
@@ -265,7 +235,7 @@ mod tests {
         // `circuits::ensure_circuits_for_subprocess` (which exports
         // `LOGOS_BLOCKCHAIN_CIRCUITS` and bypasses the version check inside
         // every `logos-blockchain` rev's circuits-utils crate).
-        for variant in ["default", "lez-framework"] {
+        for variant in ["default"] {
             let target = mk_temp_dir(&format!("no-self-patch-{variant}"));
             let ctx = OverlayRenderContext {
                 crate_name: "my-app",

@@ -3529,12 +3529,7 @@ fn init_refreshes_skills_when_already_at_v0_2_0_scaffold_toml() {
         "init must not overwrite an already-migrated scaffold.toml"
     );
 
-    for skill in [
-        "lgs-cli",
-        "lez-template",
-        "lez-framework-template",
-        "basecamp",
-    ] {
+    for skill in ["lgs-cli", "lez-template", "spel-template", "basecamp"] {
         assert!(
             temp.path()
                 .join(format!(".claude/skills/{skill}/SKILL.md"))
@@ -3938,8 +3933,10 @@ fn build_idl_fails_loudly_on_default_framework() {
         .assert()
         .failure()
         .stderr(
-            predicate::str::contains("`build idl` is only supported for `lez-framework`")
-                .and(predicate::str::contains("framework.kind = `default`")),
+            predicate::str::contains(
+                "`build idl` is only supported for `spel` and `lez-framework`",
+            )
+            .and(predicate::str::contains("framework.kind = `default`")),
         );
 }
 
@@ -3957,8 +3954,10 @@ fn build_client_fails_loudly_on_default_framework() {
         .assert()
         .failure()
         .stderr(
-            predicate::str::contains("`build client` is only supported for `lez-framework`")
-                .and(predicate::str::contains("framework.kind = `default`")),
+            predicate::str::contains(
+                "`build client` is only supported for `spel` and `lez-framework`",
+            )
+            .and(predicate::str::contains("framework.kind = `default`")),
         );
 }
 

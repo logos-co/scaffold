@@ -11,14 +11,14 @@ use crate::config::{
 use crate::constants::{
     DEFAULT_BASECAMP_PIN, DEFAULT_FRAMEWORK_IDL_PATH, DEFAULT_FRAMEWORK_IDL_SPEC,
     DEFAULT_FRAMEWORK_VERSION, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL, FRAMEWORK_KIND_DEFAULT,
-    FRAMEWORK_KIND_LEZ_FRAMEWORK, LEZ_SOURCE, SCAFFOLD_TOML_SCHEMA_VERSION,
+    FRAMEWORK_KIND_LEZ_FRAMEWORK, FRAMEWORK_KIND_SPEL, LEZ_SOURCE, SCAFFOLD_TOML_SCHEMA_VERSION,
 };
 use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RunConfig};
 use crate::project::default_cache_root;
 use crate::repo::{sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
 use crate::state::write_text;
 use crate::template::copy::{copy_dir_contents, patch_simple_tail_call_program_id};
-use crate::template::project::{apply_overlay, OverlayRenderContext};
+use crate::template::project::{apply_overlay, ensure_scaffold_in_gitignore, OverlayRenderContext};
 use crate::template::skills::apply_skills;
 use crate::DynResult;
 
@@ -33,9 +33,19 @@ pub(crate) struct NewCommand {
 
 pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
     let template_variant = match cmd.template.as_str() {
-        FRAMEWORK_KIND_DEFAULT | FRAMEWORK_KIND_LEZ_FRAMEWORK => cmd.template.clone(),
+        FRAMEWORK_KIND_DEFAULT => cmd.template.clone(),
+        FRAMEWORK_KIND_SPEL => cmd.template.clone(),
+        FRAMEWORK_KIND_LEZ_FRAMEWORK => {
+            eprintln!(
+                "warning: template `lez-framework` is deprecated; use `--template spel` instead."
+            );
+            FRAMEWORK_KIND_SPEL.to_string()
+        }
         other => {
-            bail!("unsupported template `{other}`. Expected `default` or `lez-framework`.")
+            bail!(
+                "unsupported template `{other}`. \
+                 Expected `default` or `spel` (or the deprecated alias `lez-framework`)."
+            )
         }
     };
 
@@ -67,18 +77,6 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
 }
 
 fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> DynResult<()> {
-    let crate_name = {
-        let fallback = "app";
-        let file_name = target
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(fallback);
-        to_cargo_crate_name(file_name)
-    };
-
-    fs::create_dir_all(target.join(".scaffold/state"))?;
-    fs::create_dir_all(target.join(".scaffold/logs"))?;
-
     let (bootstrap_cache, _) = match &cmd.cache_root {
         Some(p) => (p.clone(), ()),
         None => {
@@ -91,6 +89,104 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
     fs::create_dir_all(bootstrap_cache.join("logs"))?;
     fs::create_dir_all(bootstrap_cache.join("builds"))?;
 
+    if template_variant == FRAMEWORK_KIND_SPEL {
+        cmd_new_spel(cmd, target, &bootstrap_cache)
+    } else {
+        cmd_new_default(cmd, target, template_variant, &bootstrap_cache)
+    }
+}
+
+/// Scaffold a `spel` project by delegating to the `spel init` CLI, then
+/// layering scaffold.toml and AI skills on top.
+fn cmd_new_spel(
+    cmd: &NewCommand,
+    target: &Path,
+    bootstrap_cache: &std::path::Path,
+) -> DynResult<()> {
+    let spel_bin = find_spel_on_path().with_context(|| {
+        format!(
+            "spel binary not found on PATH.\n\
+             Install it first:\n  \
+             cargo install --git https://github.com/logos-co/spel.git --tag {} spel",
+            DEFAULT_SPEL.tag
+        )
+    })?;
+    check_spel_version(&spel_bin);
+
+    if cmd.lez_path.is_some() {
+        anyhow::bail!(
+            "`--lez-path` is not supported with `--template spel`.\n\
+             `spel init` fetches LEZ via `--lez-tag`; a local path override is not forwarded.\n\
+             Use `--template default` if you need a local LEZ checkout."
+        );
+    }
+    if cmd.vendor_deps {
+        anyhow::bail!(
+            "`--vendor-deps` is not supported with `--template spel`.\n\
+             Vendoring is managed by `spel init` and `lgs setup`, not by scaffold directly.\n\
+             Use `--template default` if you need vendored deps."
+        );
+    }
+
+    println!(
+        "Running `spel init {}` (LEZ tag: {})...",
+        cmd.name, DEFAULT_LEZ.tag
+    );
+    let cwd = env::current_dir()?;
+    let status = std::process::Command::new(&spel_bin)
+        .arg("init")
+        .arg(&cmd.name)
+        .arg("--lez-tag")
+        .arg(DEFAULT_LEZ.tag)
+        .current_dir(&cwd)
+        .status()
+        .context("failed to launch spel init")?;
+    if !status.success() {
+        anyhow::bail!("spel init failed");
+    }
+
+    // spel init created `target/`; layer scaffold state on top.
+    fs::create_dir_all(target.join(".scaffold/state"))?;
+    fs::create_dir_all(target.join(".scaffold/logs"))?;
+
+    let cfg = build_scaffold_config(cmd, FRAMEWORK_KIND_SPEL, bootstrap_cache);
+    write_text(&target.join("scaffold.toml"), &serialize_config(&cfg)?)?;
+    ensure_scaffold_in_gitignore(target)?;
+    apply_skills(target)?;
+
+    println!("Created spel project at {}", target.display());
+    println!("Pinned LEZ: {}  ({})", DEFAULT_LEZ.tag, DEFAULT_LEZ.sha);
+    println!("Pinned spel: {}  ({})", DEFAULT_SPEL.tag, DEFAULT_SPEL.sha);
+    println!("AI skills installed under .claude/skills/, .cursor/rules/, and AGENTS.md.");
+    println!();
+    println!("Next steps:");
+    println!("  cd {}", cmd.name);
+    println!("  lgs setup       # clone LEZ, build sequencer + wallet + spel CLI");
+    println!("  lgs run         # start localnet, deploy, open REPL");
+
+    Ok(())
+}
+
+/// Scaffold a `default` (bare LEZ) project by copying the LEZ example template
+/// and applying scaffold's overlay files.
+fn cmd_new_default(
+    cmd: &NewCommand,
+    target: &Path,
+    template_variant: &str,
+    bootstrap_cache: &std::path::Path,
+) -> DynResult<()> {
+    let crate_name = {
+        let fallback = "app";
+        let file_name = target
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(fallback);
+        to_cargo_crate_name(file_name)
+    };
+
+    fs::create_dir_all(target.join(".scaffold/state"))?;
+    fs::create_dir_all(target.join(".scaffold/logs"))?;
+
     let lez_source = cmd
         .lez_path
         .as_ref()
@@ -98,13 +194,7 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
         .unwrap_or_else(|| LEZ_SOURCE.to_string());
 
     // First-run noise reduction: scaffold normally echoes every git
-    // subprocess (`$ git clone ...`, `$ git fetch --all --tags`,
-    // `$ git checkout <pin>`). For a fresh `lgs new` that's three
-    // shell-prefixed lines before any human-friendly status. Suppress
-    // the echo for the LEZ sync only — `setup`, `localnet`, etc. keep
-    // their existing echo behavior. `git clone --no-hardlinks` still
-    // prints its own progress to stderr, which is reassuring during a
-    // slow first clone.
+    // subprocess. Suppress the echo for the LEZ sync only.
     println!(
         "Cloning lez at pin {} from {} (this may take a minute the first time)...",
         DEFAULT_LEZ.sha, lez_source
@@ -136,56 +226,7 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
         }
     };
 
-    // spel is recorded in scaffold.toml here but actually cloned + built by
-    // `setup`. Persist `path` only for vendored projects (relative,
-    // project-local). Cache-managed projects leave it empty so scaffold.toml
-    // stays portable; `resolve_repo_path` derives the on-disk location from
-    // cache_root + pin at runtime.
-    let (lez_persisted_path, spel_persisted_path) = if cmd.vendor_deps {
-        (
-            ".scaffold/repos/lez".to_string(),
-            ".scaffold/repos/spel".to_string(),
-        )
-    } else {
-        (String::new(), String::new())
-    };
-
-    let mut lez = default_lez_repo(DEFAULT_LEZ.sha);
-    lez.source = lez_source;
-    lez.path = lez_persisted_path;
-    let mut spel = default_spel_repo(DEFAULT_SPEL.sha);
-    spel.path = spel_persisted_path;
-
-    let persisted_cache_root = match &cmd.cache_root {
-        Some(p) => p.display().to_string(),
-        None => String::new(),
-    };
-
-    let cfg = Config {
-        version: SCAFFOLD_TOML_SCHEMA_VERSION.to_string(),
-        cache_root: persisted_cache_root,
-        lez,
-        spel,
-        // Default scaffolded projects don't pin basecamp/lgpm — only
-        // projects building Logos modules need them. `lgs basecamp setup`
-        // is the entry point that backfills those sections, mirroring how
-        // `lgs init` backfills `[repos.spel]` for pre-spel projects.
-        basecamp_repo: Some(default_basecamp_repo(DEFAULT_BASECAMP_PIN)),
-        lgpm_repo: Some(default_lgpm_repo(DEFAULT_LGPM_PIN)),
-        wallet_home_dir: ".scaffold/wallet".to_string(),
-        framework: FrameworkConfig {
-            kind: template_variant.to_string(),
-            version: DEFAULT_FRAMEWORK_VERSION.to_string(),
-            idl: FrameworkIdlConfig {
-                spec: DEFAULT_FRAMEWORK_IDL_SPEC.to_string(),
-                path: DEFAULT_FRAMEWORK_IDL_PATH.to_string(),
-            },
-        },
-        localnet: LocalnetConfig::default(),
-        modules: std::collections::BTreeMap::new(),
-        basecamp: None,
-        run: RunConfig::default(),
-    };
+    let cfg = build_scaffold_config(cmd, template_variant, bootstrap_cache);
 
     let template_root = lez_repo_path.join("examples/program_deployment");
     if !template_root.exists() {
@@ -201,11 +242,9 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
         lez_pin: &cfg.lez.pin,
     };
     apply_overlay(target, template_variant, &overlay_ctx)?;
-    if template_variant == FRAMEWORK_KIND_LEZ_FRAMEWORK {
-        cleanup_lez_hello_artifacts(target)?;
-    }
+
     write_text(&target.join("scaffold.toml"), &serialize_config(&cfg)?)?;
-    apply_skills(&target)?;
+    apply_skills(target)?;
 
     let old_getting_started = target.join("GETTING_STARTED.md");
     if old_getting_started.exists() {
@@ -224,32 +263,103 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
     Ok(())
 }
 
-fn cleanup_lez_hello_artifacts(project_root: &Path) -> DynResult<()> {
-    const RUNNER_FILES: &[&str] = &[
-        "src/bin/run_hello_world.rs",
-        "src/bin/run_hello_world_private.rs",
-        "src/bin/run_hello_world_with_authorization.rs",
-        "src/bin/run_hello_world_with_move_function.rs",
-        "src/bin/run_hello_world_through_tail_call.rs",
-        "src/bin/run_hello_world_through_tail_call_private.rs",
-        "src/bin/run_hello_world_with_authorization_through_tail_call_with_pda.rs",
-    ];
-    const GUEST_METHOD_FILES: &[&str] = &[
-        "methods/guest/src/bin/hello_world.rs",
-        "methods/guest/src/bin/hello_world_with_authorization.rs",
-        "methods/guest/src/bin/hello_world_with_move_function.rs",
-        "methods/guest/src/bin/simple_tail_call.rs",
-        "methods/guest/src/bin/tail_call_with_pda.rs",
-    ];
+fn build_scaffold_config(
+    cmd: &NewCommand,
+    framework_kind: &str,
+    bootstrap_cache: &std::path::Path,
+) -> Config {
+    let (lez_persisted_path, spel_persisted_path) = if cmd.vendor_deps {
+        (
+            ".scaffold/repos/lez".to_string(),
+            ".scaffold/repos/spel".to_string(),
+        )
+    } else {
+        (String::new(), String::new())
+    };
 
-    for rel_path in RUNNER_FILES.iter().chain(GUEST_METHOD_FILES) {
-        let path = project_root.join(rel_path);
-        if path.exists() {
-            fs::remove_file(path)?;
+    let lez_source = cmd
+        .lez_path
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| LEZ_SOURCE.to_string());
+
+    let mut lez = default_lez_repo(DEFAULT_LEZ.sha);
+    lez.source = lez_source;
+    lez.path = lez_persisted_path;
+    let mut spel = default_spel_repo(DEFAULT_SPEL.sha);
+    spel.path = spel_persisted_path;
+
+    let persisted_cache_root = match &cmd.cache_root {
+        Some(p) => p.display().to_string(),
+        None => bootstrap_cache.display().to_string(),
+    };
+
+    Config {
+        version: SCAFFOLD_TOML_SCHEMA_VERSION.to_string(),
+        cache_root: persisted_cache_root,
+        lez,
+        spel,
+        basecamp_repo: Some(default_basecamp_repo(DEFAULT_BASECAMP_PIN)),
+        lgpm_repo: Some(default_lgpm_repo(DEFAULT_LGPM_PIN)),
+        wallet_home_dir: ".scaffold/wallet".to_string(),
+        framework: FrameworkConfig {
+            kind: framework_kind.to_string(),
+            version: DEFAULT_FRAMEWORK_VERSION.to_string(),
+            idl: FrameworkIdlConfig {
+                spec: DEFAULT_FRAMEWORK_IDL_SPEC.to_string(),
+                path: DEFAULT_FRAMEWORK_IDL_PATH.to_string(),
+            },
+        },
+        localnet: LocalnetConfig::default(),
+        modules: std::collections::BTreeMap::new(),
+        basecamp: None,
+        run: RunConfig::default(),
+    }
+}
+
+/// Warn if the installed `spel` version does not match `DEFAULT_SPEL.tag`.
+/// A mismatch is non-fatal — the user may have a newer version — but silently
+/// using the wrong version produces hard-to-diagnose mismatches at first
+/// `lgs build idl` or `lgs setup`.
+fn check_spel_version(spel_bin: &std::path::Path) {
+    let output = match std::process::Command::new(spel_bin)
+        .arg("--version")
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return,
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.contains(DEFAULT_SPEL.tag) {
+        eprintln!(
+            "warning: installed spel version ({}) does not match the expected {} pinned by scaffold.\n\
+             This may cause unexpected behaviour. Install the pinned version with:\n  \
+             cargo install --git https://github.com/logos-co/spel.git --tag {} spel",
+            stdout.trim(),
+            DEFAULT_SPEL.tag,
+            DEFAULT_SPEL.tag,
+        );
+    }
+}
+
+/// Locate the `spel` binary by walking PATH entries.
+fn find_spel_on_path() -> anyhow::Result<std::path::PathBuf> {
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join("spel");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+        // On Windows executables carry a .exe suffix.
+        #[cfg(target_os = "windows")]
+        {
+            let candidate_exe = dir.join("spel.exe");
+            if candidate_exe.is_file() {
+                return Ok(candidate_exe);
+            }
         }
     }
-
-    Ok(())
+    anyhow::bail!("spel not found on PATH")
 }
 
 pub(crate) fn to_cargo_crate_name(input: &str) -> String {

@@ -24,7 +24,7 @@ use crate::commands::idl::sanitize_file_stem;
 use crate::commands::wallet_support::{
     default_sequencer_http_url_for_project, load_wallet_runtime,
 };
-use crate::constants::FRAMEWORK_KIND_LEZ_FRAMEWORK;
+use crate::constants::{FRAMEWORK_KIND_LEZ_FRAMEWORK, FRAMEWORK_KIND_SPEL};
 use crate::model::Project;
 use crate::state::read_localnet_state;
 use crate::DynResult;
@@ -85,7 +85,11 @@ pub(crate) fn compute_program_hashes(project: &Project) -> DynResult<BTreeMap<St
     }
     let idl_dir = project.root.join(&project.config.framework.idl.path);
     let cfg_digest = config_digest(project);
-    let is_lez_framework = project.config.framework.kind == FRAMEWORK_KIND_LEZ_FRAMEWORK;
+    // Both lez-framework and spel projects require an IDL file at deploy time.
+    let requires_idl = matches!(
+        project.config.framework.kind.as_str(),
+        FRAMEWORK_KIND_LEZ_FRAMEWORK | FRAMEWORK_KIND_SPEL
+    );
 
     for (stem, bin_path) in binaries {
         let mut hasher = Sha256::new();
@@ -112,8 +116,8 @@ pub(crate) fn compute_program_hashes(project: &Project) -> DynResult<BTreeMap<St
                 .with_context(|| format!("read {} for hashing", idl_path.display()))?;
             hasher.update(b"\x00idl\x00");
             hasher.update(&idl_bytes);
-        } else if is_lez_framework {
-            // For lez-framework projects, the IDL file is a documented
+        } else if requires_idl {
+            // For spel and lez-framework projects, the IDL file is a documented
             // build artifact (`<stem>.json` produced by `build idl`).
             // Missing it would mean we cache a partial digest and silently
             // skip deploys after later ABI-only edits. Bail loudly.
