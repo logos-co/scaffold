@@ -112,6 +112,17 @@ pub(crate) struct ModuleEntry {
 pub(crate) struct BasecampConfig {
     pub(crate) port_base: u16,
     pub(crate) port_stride: u16,
+    /// `[basecamp.env]` — plain env vars injected into every profile's launch
+    /// (replace semantics).
+    pub(crate) env: std::collections::BTreeMap<String, String>,
+    /// `[basecamp.env_append]` — path-style env. Each list is `:`-joined and
+    /// appended onto the value `lgs` inherited at launch time (so basecamp's
+    /// own paths aren't clobbered). Applied before `env`.
+    pub(crate) env_append: std::collections::BTreeMap<String, Vec<String>>,
+    /// `[basecamp.profiles.<name>.env]` — per-profile plain env. Wins over the
+    /// global `[basecamp.env]` for the launched profile.
+    pub(crate) profile_env:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
 }
 
 impl Default for BasecampConfig {
@@ -119,6 +130,9 @@ impl Default for BasecampConfig {
         Self {
             port_base: 60000,
             port_stride: 10,
+            env: std::collections::BTreeMap::new(),
+            env_append: std::collections::BTreeMap::new(),
+            profile_env: std::collections::BTreeMap::new(),
         }
     }
 }
