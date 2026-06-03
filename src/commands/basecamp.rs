@@ -7,7 +7,7 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context};
+use anyhow::{anyhow, bail, Context};
 
 use crate::config::{default_basecamp_repo, default_lgpm_repo};
 use crate::constants::{
@@ -45,6 +45,13 @@ pub(crate) enum BasecampAction {
     },
     Launch {
         profile: String,
+    },
+    /// Enter a module's Nix dev shell. Resolves the module's flake from
+    /// `[modules.<name>]`, strips its output fragment, and execs
+    /// `nix develop <flake>[#<dev_shell>]` from the project root.
+    Develop {
+        module: String,
+        dev_shell: Option<String>,
     },
     /// Attr-swap replay on `state.project_sources` only (`#lgx` →
     /// `#lgx-portable`). `state.dependencies` is ignored — the target AppImage
@@ -85,6 +92,9 @@ pub(crate) fn cmd_basecamp(action: BasecampAction) -> DynResult<()> {
             cmd_basecamp_install(project, &NixLgxProbe)
         }
         BasecampAction::Launch { profile } => cmd_basecamp_launch(project, profile),
+        BasecampAction::Develop { module, dev_shell } => {
+            cmd_basecamp_develop(project, module, dev_shell)
+        }
         BasecampAction::BuildPortable => cmd_basecamp_build_portable(project),
         BasecampAction::Doctor { json } => cmd_basecamp_doctor(project, json),
         // Handled above via early return (project-context-free).
@@ -464,6 +474,68 @@ fn launch_env(profile_dir: &Path, profile_name: &str) -> BTreeMap<String, OsStri
     );
     env.insert("LOGOS_PROFILE".into(), profile_name.into());
     env
+}
+
+/// `lgs basecamp develop <module>` — enter a module's Nix dev shell.
+///
+/// Resolves the module's flake from `[modules.<module>]`, strips its output
+/// fragment (e.g. `#lgx`), and execs `nix develop <flake>[#<dev_shell>]` from
+/// the project root so any in-shell `lgs` invocation resolves to this project.
+/// The module lookup runs before the `nix` presence check, so an unknown
+/// module name fails fast with the known-module list even on a host without
+/// Nix.
+fn cmd_basecamp_develop(
+    project: Project,
+    module: String,
+    dev_shell: Option<String>,
+) -> DynResult<()> {
+    let entry = project.config.modules.get(&module).ok_or_else(|| {
+        let known: Vec<&str> = project.config.modules.keys().map(String::as_str).collect();
+        let known = if known.is_empty() {
+            "none captured yet".to_string()
+        } else {
+            known.join(", ")
+        };
+        anyhow!(
+            "no module `{module}` in scaffold.toml [modules] (known: {known}). \
+             Capture project sources with `logos-scaffold basecamp modules`."
+        )
+    })?;
+
+    ensure_nix_present()?;
+
+    let target = nix_develop_target(&project.root, &entry.flake, dev_shell.as_deref());
+    println!("entering dev shell for module `{module}` ({target})");
+
+    let mut cmd = Command::new("nix");
+    cmd.current_dir(&project.root)
+        .arg("develop")
+        .arg(&target)
+        // The dev shell starts in the project root (current_dir above), so an
+        // in-shell `lgs` already discovers this project via its normal
+        // cwd-upward search. These vars are exported as extra context for
+        // scripts/tooling in the shell — SCAFFOLD_PROJECT_ROOT (the project
+        // root) and LOGOS_PROFILE (the module name for this dev session);
+        // `load_project` itself does not read them.
+        .env("SCAFFOLD_PROJECT_ROOT", &project.root)
+        .env("LOGOS_PROFILE", &module);
+
+    let err = cmd.exec();
+    // exec() only returns on failure.
+    bail!("failed to exec `nix develop {target}`: {err}");
+}
+
+/// Build the `nix develop` target from a module's stored flake ref. Strips any
+/// output fragment after `#` (e.g. `#lgx`), absolutizes path-style refs the
+/// same way `launch`/`install` do, then re-attaches the requested dev-shell
+/// attr (if any). `None` selects the flake's default dev shell.
+fn nix_develop_target(project_root: &Path, flake: &str, dev_shell: Option<&str>) -> String {
+    let bare = flake.split_once('#').map_or(flake, |(b, _)| b);
+    let normalized = normalize_flake_ref(project_root, bare);
+    match dev_shell {
+        Some(attr) => format!("{normalized}#{attr}"),
+        None => normalized,
+    }
 }
 
 /// Layer scaffold.toml-declared launch env (#163) onto the scaffold-owned
@@ -4759,6 +4831,44 @@ role = "dependency"
             swap_flake_attr("path:/abs", "lgx", "lgx-portable"),
             "path:/abs"
         );
+    }
+
+    // ---- basecamp develop (nix_develop_target) ----
+
+    #[test]
+    fn nix_develop_target_strips_output_fragment_for_github_default_shell() {
+        // The module's stored flake addresses its `#lgx` *output*; `nix
+        // develop` wants the bare flake (default dev shell).
+        let root = Path::new("/proj");
+        assert_eq!(
+            nix_develop_target(root, "github:logos-co/swap-module/1.0.0#lgx", None),
+            "github:logos-co/swap-module/1.0.0"
+        );
+    }
+
+    #[test]
+    fn nix_develop_target_appends_requested_dev_shell_attr() {
+        let root = Path::new("/proj");
+        assert_eq!(
+            nix_develop_target(root, "github:logos-co/swap-module#lgx", Some("dev")),
+            "github:logos-co/swap-module#dev"
+        );
+    }
+
+    #[test]
+    fn nix_develop_target_absolutizes_relative_path_flakes() {
+        // A relative `path:` module ref must be absolutized (same as the
+        // launch/install paths) so `nix develop` resolves it regardless of
+        // the invocation cwd. Use the project root as a real dir.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sub = tmp.path().join("swap-module");
+        std::fs::create_dir_all(&sub).unwrap();
+        let target = nix_develop_target(tmp.path(), "path:./swap-module#lgx", None);
+        let expected = format!("path:{}", sub.canonicalize().unwrap().display());
+        assert_eq!(target, expected);
+        // Dev-shell attr is re-attached after absolutization.
+        let with_attr = nix_develop_target(tmp.path(), "path:./swap-module#lgx", Some("dev"));
+        assert_eq!(with_attr, format!("{expected}#dev"));
     }
 
     // ---- doctor helpers (github_ref_part_label, infer_module_name_from_flake_ref) ----

@@ -490,6 +490,10 @@ enum BasecampSubcommand {
     )]
     Launch(BasecampLaunchArgs),
     #[command(
+        about = "Enter a module's Nix dev shell (`nix develop`) resolved from [modules.<name>]. Verb-set symmetry so contributors stop reaching for raw `nix`."
+    )]
+    Develop(BasecampDevelopArgs),
+    #[command(
         name = "build-portable",
         about = "Build the project's .#lgx-portable artefacts for hand-loading into a basecamp AppImage. See `basecamp docs` for project requirements."
     )]
@@ -546,6 +550,17 @@ struct BasecampInstallArgs {
 struct BasecampLaunchArgs {
     #[arg(value_name = "PROFILE")]
     profile: String,
+}
+
+#[derive(Debug, clap::Args)]
+struct BasecampDevelopArgs {
+    /// Name of the module to enter, keyed in `[modules.<name>]`.
+    #[arg(value_name = "MODULE")]
+    module: String,
+    /// Dev-shell attribute to select (`nix develop <flake>#<attr>`). Defaults
+    /// to the flake's default dev shell.
+    #[arg(long, value_name = "ATTR")]
+    dev_shell: Option<String>,
 }
 
 pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
@@ -687,6 +702,10 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 },
                 BasecampSubcommand::Launch(args) => BasecampAction::Launch {
                     profile: args.profile,
+                },
+                BasecampSubcommand::Develop(args) => BasecampAction::Develop {
+                    module: args.module,
+                    dev_shell: args.dev_shell,
                 },
                 BasecampSubcommand::BuildPortable(_) => BasecampAction::BuildPortable,
                 BasecampSubcommand::Doctor(args) => BasecampAction::Doctor { json: args.json },
