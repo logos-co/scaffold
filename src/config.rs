@@ -387,6 +387,7 @@ fn parse_basecamp_runtime(doc: &DocumentMut) -> DynResult<Option<BasecampConfig>
     // [basecamp.env_append] — map of string -> array<string>.
     if let Some(append_table) = table.get("env_append").and_then(Item::as_table) {
         for (key, item) in append_table.iter() {
+            validate_env_var_name(key, "basecamp.env_append")?;
             let arr = item.as_array().ok_or_else(|| {
                 anyhow!("invalid scaffold.toml: [basecamp.env_append].{key} must be an array of strings")
             })?;
@@ -395,6 +396,12 @@ fn parse_basecamp_runtime(doc: &DocumentMut) -> DynResult<Option<BasecampConfig>
                 let s = v.as_str().ok_or_else(|| {
                     anyhow!("invalid scaffold.toml: [basecamp.env_append].{key} entries must be strings")
                 })?;
+                // Reject empty entries: `:`-joining them yields an empty path
+                // segment (e.g. `LD_LIBRARY_PATH=:`), which silently injects the
+                // current directory into search paths — surprising and unsafe.
+                if s.is_empty() {
+                    bail!("invalid scaffold.toml: [basecamp.env_append].{key} entries must not be empty");
+                }
                 list.push(s.to_string());
             }
             // Skip empty lists: they're a no-op at launch (apply_launch_env_
@@ -432,12 +439,31 @@ fn parse_string_map(
 ) -> DynResult<std::collections::BTreeMap<String, String>> {
     let mut out = std::collections::BTreeMap::new();
     for (k, item) in table.iter() {
+        validate_env_var_name(k, key)?;
         let v = item
             .as_str()
             .ok_or_else(|| anyhow!("invalid scaffold.toml: [{key}].{k} must be a string"))?;
         out.insert(k.to_string(), v.to_string());
     }
     Ok(out)
+}
+
+/// Reject env var names that would only surface as an opaque `exec` /
+/// `Command::env` failure at launch: TOML quoted keys can be empty or contain
+/// `=` or control characters. Fail fast at parse with an actionable message.
+fn validate_env_var_name(name: &str, context: &str) -> DynResult<()> {
+    if name.is_empty() {
+        bail!("invalid scaffold.toml: [{context}] env var name must not be empty");
+    }
+    if name.contains('=') {
+        bail!("invalid scaffold.toml: [{context}] env var name {name:?} must not contain `=`");
+    }
+    if name.chars().any(char::is_control) {
+        bail!(
+            "invalid scaffold.toml: [{context}] env var name {name:?} must not contain control characters"
+        );
+    }
+    Ok(())
 }
 
 fn parse_framework(doc: &DocumentMut) -> FrameworkConfig {
@@ -585,8 +611,26 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
 
         let basecamp = doc.entry("basecamp").or_insert(Item::Table(Table::new()));
         let basecamp_table = basecamp.as_table_mut().expect("basecamp table");
-        basecamp_table["port_base"] = value(i64::from(bc.port_base));
-        basecamp_table["port_stride"] = value(i64::from(bc.port_stride));
+        // Only emit port keys when they differ from the defaults, so setting
+        // just `[basecamp.env]` doesn't churn a user's scaffold.toml with
+        // default `port_base`/`port_stride` on the next `save_project_config`.
+        let default_bc = BasecampConfig::default();
+        let mut wrote_direct_key = false;
+        if bc.port_base != default_bc.port_base {
+            basecamp_table["port_base"] = value(i64::from(bc.port_base));
+            wrote_direct_key = true;
+        }
+        if bc.port_stride != default_bc.port_stride {
+            basecamp_table["port_stride"] = value(i64::from(bc.port_stride));
+            wrote_direct_key = true;
+        }
+        // With no direct keys, an explicit `[basecamp]` header would render
+        // empty — mark it implicit so only the child `[basecamp.env]` / etc.
+        // tables appear. (Safe here precisely because there are no keys to get
+        // dotted, which is the hazard the env subtables avoid via child_table.)
+        if !wrote_direct_key {
+            basecamp_table.set_implicit(true);
+        }
 
         // Build the env subtables off `basecamp_table` directly. Routing
         // through `doc` via `ensure_subtable` would mark `[basecamp]` implicit
@@ -1002,23 +1046,76 @@ LOGOS_STORAGE_API_PORT = "8081"
     }
 
     #[test]
-    fn basecamp_env_serializes_as_explicit_table_not_dotted() {
-        // Regression: building the env subtables via `ensure_subtable` marked
-        // `[basecamp]` implicit, which renders its real keys as dotted
-        // `basecamp.port_base = …` rather than an explicit `[basecamp]` table.
+    fn basecamp_env_only_omits_default_port_keys_and_avoids_dotting() {
+        // Setting just [basecamp.env] (default ports) must NOT churn in
+        // default port_base/port_stride, and must never serialize them as
+        // dotted `basecamp.port_base = …` keys. Only [basecamp.env] renders.
         let toml = minimal_v0_2_0() + "[basecamp.env]\nQT_DEBUG_PLUGINS = \"1\"\n";
         let cfg = parse_config(&toml).expect("parse");
         let serialized = serialize_config(&cfg).expect("serialize");
         assert!(
-            serialized.contains("[basecamp]"),
-            "expected an explicit [basecamp] table header, got:\n{serialized}"
+            !serialized.contains("port_base"),
+            "default port_base must be omitted (no churn), got:\n{serialized}"
+        );
+        assert!(
+            serialized.contains("[basecamp.env]"),
+            "expected [basecamp.env], got:\n{serialized}"
+        );
+        // Round-trips with env intact.
+        let cfg2 = parse_config(&serialized).expect("re-parse");
+        assert_eq!(
+            cfg2.basecamp
+                .and_then(|b| b.env.get("QT_DEBUG_PLUGINS").cloned())
+                .as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn basecamp_non_default_ports_serialize_as_explicit_table() {
+        // When a port differs from the default it is written under an explicit
+        // [basecamp] header (not dotted), even alongside [basecamp.env].
+        let toml = minimal_v0_2_0()
+            + "[basecamp]\nport_base = 50000\n\n[basecamp.env]\nQT_DEBUG_PLUGINS = \"1\"\n";
+        let cfg = parse_config(&toml).expect("parse");
+        let serialized = serialize_config(&cfg).expect("serialize");
+        assert!(
+            serialized.contains("[basecamp]") && serialized.contains("port_base = 50000"),
+            "expected explicit [basecamp] with port_base, got:\n{serialized}"
         );
         assert!(
             !serialized.contains("basecamp.port_base"),
-            "port_base must not serialize as a dotted key, got:\n{serialized}"
+            "port_base must not be a dotted key, got:\n{serialized}"
         );
-        // And it must still round-trip.
-        parse_config(&serialized).expect("re-parse");
+        assert_eq!(
+            parse_config(&serialized)
+                .expect("re-parse")
+                .basecamp
+                .map(|b| b.port_base),
+            Some(50000)
+        );
+    }
+
+    #[test]
+    fn basecamp_env_append_rejects_empty_string_entry() {
+        // An empty path segment (`LD_LIBRARY_PATH=:`) silently injects CWD into
+        // search paths — reject it at parse.
+        let toml = minimal_v0_2_0() + "[basecamp.env_append]\nLD_LIBRARY_PATH = [\"\"]\n";
+        let err = parse_config(&toml).unwrap_err();
+        assert!(err.to_string().contains("must not be empty"), "{err}");
+    }
+
+    #[test]
+    fn basecamp_env_rejects_invalid_var_name() {
+        // `=` in an env var name would only surface as an opaque exec failure.
+        let toml = minimal_v0_2_0() + "[basecamp.env]\n\"FOO=BAR\" = \"1\"\n";
+        let err = parse_config(&toml).unwrap_err();
+        assert!(err.to_string().contains("must not contain `=`"), "{err}");
+
+        // Empty env var name is rejected too.
+        let toml2 = minimal_v0_2_0() + "[basecamp.profiles.alice.env]\n\"\" = \"1\"\n";
+        let err2 = parse_config(&toml2).unwrap_err();
+        assert!(err2.to_string().contains("must not be empty"), "{err2}");
     }
 
     #[test]
