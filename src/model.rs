@@ -112,6 +112,17 @@ pub(crate) struct ModuleEntry {
 pub(crate) struct BasecampConfig {
     pub(crate) port_base: u16,
     pub(crate) port_stride: u16,
+    /// `[basecamp.env]` — plain env vars injected into every profile's launch
+    /// (replace semantics).
+    pub(crate) env: std::collections::BTreeMap<String, String>,
+    /// `[basecamp.env_append]` — path-style env. Each list is `:`-joined and
+    /// appended onto the value `lgs` inherited at launch time (so basecamp's
+    /// own paths aren't clobbered). Applied before `env`.
+    pub(crate) env_append: std::collections::BTreeMap<String, Vec<String>>,
+    /// `[basecamp.profiles.<name>.env]` — per-profile plain env. Wins over the
+    /// global `[basecamp.env]` for the launched profile.
+    pub(crate) profile_env:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
 }
 
 impl Default for BasecampConfig {
@@ -119,6 +130,9 @@ impl Default for BasecampConfig {
         Self {
             port_base: 60000,
             port_stride: 10,
+            env: std::collections::BTreeMap::new(),
+            env_append: std::collections::BTreeMap::new(),
+            profile_env: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -189,6 +203,18 @@ pub(crate) struct LocalnetStatusReport {
     pub(crate) ready: bool,
     pub(crate) log_path: String,
     pub(crate) remediation: Vec<String>,
+}
+
+/// Machine-readable shape for `localnet logs --json`. Mirrors the human
+/// output: `lines` holds the last `tail` lines of the sequencer log (empty
+/// when the log is missing or empty), and `exists` lets consumers tell an
+/// absent log file apart from an empty one without parsing prose.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct LocalnetLogsReport {
+    pub(crate) log_path: String,
+    pub(crate) exists: bool,
+    pub(crate) tail: usize,
+    pub(crate) lines: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -284,6 +310,27 @@ pub(crate) struct RunConfig {
     pub(crate) inline: RunProfile,
     /// Named profiles parsed from `[run.profiles.<name>]` sub-sections.
     pub(crate) profiles: std::collections::BTreeMap<String, RunProfile>,
+    /// `[run.watch]` — filters and debounce for `lgs run --watch`.
+    pub(crate) watch: WatchConfig,
+}
+
+/// `[run.watch]` — controls which filesystem changes trigger a `--watch`
+/// re-run, and how long to coalesce a burst of saves.
+///
+/// Resolution for a changed path: it triggers a re-run iff it matches at
+/// least one `include` glob (or `include` is empty, meaning "any path") AND
+/// matches zero `exclude` globs. `exclude` always wins. Globs are
+/// project-relative, gitignore-style (`**` spans path segments, `*`/`?`
+/// match within a segment; a slash-less pattern matches at any depth).
+/// Built-in ignores (`.scaffold`, `target`, `.git`, the IDL output dir)
+/// always apply regardless of these filters.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WatchConfig {
+    pub(crate) include: Vec<String>,
+    pub(crate) exclude: Vec<String>,
+    /// Debounce window in milliseconds. `None` → built-in default (500ms).
+    /// Overridden per-invocation by `--watch-debounce-ms`.
+    pub(crate) debounce_ms: Option<u64>,
 }
 
 impl RunConfig {

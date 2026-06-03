@@ -18,7 +18,8 @@ use crate::constants::{
     LGPM_ATTR_PORTABLE, LGPM_SOURCE,
 };
 use crate::model::{
-    BasecampSource, BasecampState, ModuleEntry, ModuleRole, Project, RepoBuild, RepoRef,
+    BasecampConfig, BasecampSource, BasecampState, ModuleEntry, ModuleRole, Project, RepoBuild,
+    RepoRef,
 };
 use crate::process::{derive_log_path, run_checked, run_logged, set_print_output};
 use crate::project::{load_project, resolve_cache_root, save_project_config};
@@ -417,7 +418,13 @@ fn cmd_basecamp_launch(project: Project, profile: String) -> DynResult<()> {
         }
     }
 
-    let env = launch_env(&profile_dir, &profile);
+    let mut env = launch_env(&profile_dir, &profile);
+    // Layer scaffold.toml-declared launch env on top of the scaffold-owned
+    // base (#163): [basecamp.env_append] path joins, then [basecamp.env]
+    // globals, then [basecamp.profiles.<profile>.env] (profile wins).
+    if let Some(bc) = project.config.basecamp.as_ref() {
+        apply_launch_env_overrides(&mut env, bc, &profile, |k| std::env::var_os(k));
+    }
     println!("launching basecamp for profile {profile}");
     let mut cmd = Command::new(&state.basecamp_bin);
     for (k, v) in &env {
@@ -452,6 +459,18 @@ fn launch_env(profile_dir: &Path, profile_name: &str) -> BTreeMap<String, OsStri
     env.insert(
         "XDG_CACHE_HOME".into(),
         profile_dir.join("xdg-cache").into_os_string(),
+    );
+    // Per-profile TMPDIR (#89): liblogos_core binds each `logos_host`'s
+    // QLocalServer socket at a hardcoded `logos_token_<module>` name under
+    // `QStandardPaths::TempLocation` (== TMPDIR, else /tmp). Without a
+    // per-profile TMPDIR, concurrent `launch alice` / `launch bob` collide on
+    // `/tmp/logos_token_<module>`; the second bind unlinks the first, and the
+    // first profile's Qt RemoteObjects replica then derefs a dangling
+    // QMetaObject on its next socket read → SIGSEGV. A distinct temp root per
+    // profile removes the race without any upstream change.
+    env.insert(
+        "TMPDIR".into(),
+        profile_dir.join("xdg-tmp").into_os_string(),
     );
     env.insert("LOGOS_PROFILE".into(), profile_name.into());
     env
@@ -516,6 +535,50 @@ fn nix_develop_target(project_root: &Path, flake: &str, dev_shell: Option<&str>)
     match dev_shell {
         Some(attr) => format!("{normalized}#{attr}"),
         None => normalized,
+    }
+}
+
+/// Layer scaffold.toml-declared launch env (#163) onto the scaffold-owned
+/// `launch_env` base. Resolution order, last-writer-wins per key:
+///   1. `[basecamp.env_append]` — `:`-join each list onto the value `lgs`
+///      inherited (`inherited(key)`), so basecamp's own paths aren't clobbered.
+///   2. `[basecamp.env]` — global plain replace.
+///   3. `[basecamp.profiles.<profile>.env]` — per-profile plain replace (wins).
+/// `inherited` is injected (real caller passes `std::env::var_os`) so the
+/// append semantics are unit-testable without touching the process environment.
+fn apply_launch_env_overrides(
+    env: &mut BTreeMap<String, OsString>,
+    cfg: &BasecampConfig,
+    profile: &str,
+    inherited: impl Fn(&str) -> Option<OsString>,
+) {
+    for (key, paths) in &cfg.env_append {
+        if paths.is_empty() {
+            continue;
+        }
+        // Build the combined value in OsString space so a non-UTF8 base value
+        // (valid on Unix, e.g. a path with odd bytes) isn't corrupted by a
+        // lossy round-trip. Base is the value scaffold already set, else what
+        // `lgs` inherited; only the `:` separator and the (UTF-8) configured
+        // paths are appended.
+        let mut combined = env
+            .get(key)
+            .cloned()
+            .or_else(|| inherited(key))
+            .unwrap_or_default();
+        if !combined.is_empty() {
+            combined.push(":");
+        }
+        combined.push(paths.join(":"));
+        env.insert(key.clone(), combined);
+    }
+    for (key, val) in &cfg.env {
+        env.insert(key.clone(), OsString::from(val));
+    }
+    if let Some(profile_env) = cfg.profile_env.get(profile) {
+        for (key, val) in profile_env {
+            env.insert(key.clone(), OsString::from(val));
+        }
     }
 }
 
@@ -2843,6 +2906,13 @@ fn seed_profiles(
             fs::create_dir_all(&path)
                 .with_context(|| format!("create profile dir {}", path.display()))?;
         }
+        // Per-profile temp root for the launch-time `TMPDIR` export (#89).
+        // Flat — no BASECAMP_XDG_APP_SUBPATH suffix: Qt's
+        // `QLocalServer::listen("logos_token_…")` writes a socket file
+        // directly under the temp root.
+        let tmp_dir = profile_dir.join("xdg-tmp");
+        fs::create_dir_all(&tmp_dir)
+            .with_context(|| format!("create profile dir {}", tmp_dir.display()))?;
         seeded.push(name.to_string());
     }
     Ok(seeded)
@@ -3322,6 +3392,9 @@ mod tests {
                 let dir = root.join(name).join(xdg).join(BASECAMP_XDG_APP_SUBPATH_DEV);
                 assert!(dir.is_dir(), "expected XDG subdir at {}", dir.display());
             }
+            // #89: per-profile temp root, created flat (no app subpath).
+            let tmp = root.join(name).join("xdg-tmp");
+            assert!(tmp.is_dir(), "expected temp dir at {}", tmp.display());
         }
     }
 
@@ -3341,7 +3414,109 @@ mod tests {
             env.get("XDG_CACHE_HOME").unwrap(),
             &OsString::from("/p/alice/xdg-cache")
         );
+        // #89: per-profile TMPDIR prevents the cross-profile QLocalServer
+        // socket-name collision that SIGSEGVs Qt RemoteObjects.
+        assert_eq!(
+            env.get("TMPDIR").unwrap(),
+            &OsString::from("/p/alice/xdg-tmp")
+        );
         assert_eq!(env.get("LOGOS_PROFILE").unwrap(), &OsString::from("alice"));
+    }
+
+    #[test]
+    fn launch_env_overrides_apply_append_then_global_then_profile() {
+        let mut cfg = BasecampConfig::default();
+        cfg.env.insert("QT_DEBUG_PLUGINS".into(), "1".into());
+        cfg.env
+            .insert("LOGOS_STORAGE_API_PORT".into(), "8080".into());
+        cfg.env_append.insert(
+            "QT_PLUGIN_PATH".into(),
+            vec!["/nix/store/a/plugins".into(), "/nix/store/b/plugins".into()],
+        );
+        cfg.profile_env.insert(
+            "alice".into(),
+            [("LOGOS_STORAGE_API_PORT".to_string(), "8081".to_string())]
+                .into_iter()
+                .collect(),
+        );
+
+        let mut env = launch_env(Path::new("/p/alice"), "alice");
+        apply_launch_env_overrides(&mut env, &cfg, "alice", |k| {
+            (k == "QT_PLUGIN_PATH").then(|| OsString::from("/usr/lib/qt/plugins"))
+        });
+
+        // append: inherited value prepended, configured paths ':'-joined.
+        assert_eq!(
+            env.get("QT_PLUGIN_PATH").unwrap(),
+            &OsString::from("/usr/lib/qt/plugins:/nix/store/a/plugins:/nix/store/b/plugins")
+        );
+        // global plain env.
+        assert_eq!(env.get("QT_DEBUG_PLUGINS").unwrap(), &OsString::from("1"));
+        // profile env wins over the global value for the same key.
+        assert_eq!(
+            env.get("LOGOS_STORAGE_API_PORT").unwrap(),
+            &OsString::from("8081")
+        );
+        // scaffold-owned base is preserved.
+        assert_eq!(env.get("LOGOS_PROFILE").unwrap(), &OsString::from("alice"));
+    }
+
+    #[test]
+    fn launch_env_append_uses_only_configured_when_no_inherited_value() {
+        let mut cfg = BasecampConfig::default();
+        cfg.env_append
+            .insert("LD_LIBRARY_PATH".into(), vec!["/nix/store/x/lib".into()]);
+        let mut env = launch_env(Path::new("/p/bob"), "bob");
+        apply_launch_env_overrides(&mut env, &cfg, "bob", |_| None);
+        assert_eq!(
+            env.get("LD_LIBRARY_PATH").unwrap(),
+            &OsString::from("/nix/store/x/lib")
+        );
+    }
+
+    #[test]
+    fn launch_env_append_preserves_non_utf8_inherited_value() {
+        // A non-UTF8 inherited value (valid on Unix) must survive the append
+        // intact — building in OsString space, not via to_string_lossy.
+        use std::os::unix::ffi::OsStringExt;
+        let weird = OsString::from_vec(vec![b'/', 0x66, 0xff, b'/', b'l', b'i', b'b']); // "/f\xff/lib"
+        let mut cfg = BasecampConfig::default();
+        cfg.env_append
+            .insert("LD_LIBRARY_PATH".into(), vec!["/nix/store/x/lib".into()]);
+        let mut env = launch_env(Path::new("/p/bob"), "bob");
+        let weird_for_closure = weird.clone();
+        apply_launch_env_overrides(&mut env, &cfg, "bob", move |k| {
+            (k == "LD_LIBRARY_PATH").then(|| weird_for_closure.clone())
+        });
+        let mut expected = weird;
+        expected.push(":/nix/store/x/lib");
+        assert_eq!(env.get("LD_LIBRARY_PATH").unwrap(), &expected);
+    }
+
+    #[test]
+    fn launch_env_profile_env_does_not_leak_across_profiles() {
+        let mut cfg = BasecampConfig::default();
+        cfg.profile_env.insert(
+            "alice".into(),
+            [("PORT".to_string(), "1".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        let mut bob_env = launch_env(Path::new("/p/bob"), "bob");
+        apply_launch_env_overrides(&mut bob_env, &cfg, "bob", |_| None);
+        assert!(
+            bob_env.get("PORT").is_none(),
+            "alice's profile env must not leak to bob"
+        );
+    }
+
+    #[test]
+    fn launch_env_tmpdir_is_distinct_per_profile() {
+        // The whole point of #89: alice and bob must not share a temp root,
+        // or their `logos_token_<module>` sockets collide.
+        let alice = launch_env(Path::new("/p/alice"), "alice");
+        let bob = launch_env(Path::new("/p/bob"), "bob");
+        assert_ne!(alice.get("TMPDIR"), bob.get("TMPDIR"));
     }
 
     #[test]

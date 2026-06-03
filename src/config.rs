@@ -29,7 +29,7 @@ use crate::constants::{
 };
 use crate::model::{
     BasecampConfig, Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, ModuleEntry,
-    ModuleRole, RepoBuild, RepoRef, RunConfig, RunProfile,
+    ModuleRole, RepoBuild, RepoRef, RunConfig, RunProfile, WatchConfig,
 };
 use crate::DynResult;
 
@@ -131,6 +131,8 @@ fn parse_run(doc: &DocumentMut) -> DynResult<RunConfig> {
         }
     }
 
+    let watch = parse_run_watch(run_table)?;
+
     Ok(RunConfig {
         default_profile,
         inline: RunProfile {
@@ -138,7 +140,59 @@ fn parse_run(doc: &DocumentMut) -> DynResult<RunConfig> {
             post_deploy: inline_post_deploy,
         },
         profiles,
+        watch,
     })
+}
+
+fn parse_run_watch(run_table: &Table) -> DynResult<WatchConfig> {
+    let Some(watch_table) = run_table.get("watch").and_then(Item::as_table) else {
+        return Ok(WatchConfig::default());
+    };
+    let include = parse_glob_list(watch_table.get("include"), "[run.watch].include")?;
+    let exclude = parse_glob_list(watch_table.get("exclude"), "[run.watch].exclude")?;
+    let debounce_ms = match watch_table.get("debounce_ms") {
+        None => None,
+        Some(item) => {
+            let n = item.as_integer().ok_or_else(|| {
+                anyhow!("invalid scaffold.toml: [run.watch].debounce_ms must be an integer")
+            })?;
+            if n < 0 {
+                bail!("invalid scaffold.toml: [run.watch].debounce_ms must be non-negative");
+            }
+            Some(n as u64)
+        }
+    };
+    Ok(WatchConfig {
+        include,
+        exclude,
+        debounce_ms,
+    })
+}
+
+/// `key` is the field label already formatted as `[table].field` (e.g.
+/// `[run.watch].include`), so error messages point at the actual key instead of
+/// a `[run.watch.include]`-looking pseudo-table.
+fn parse_glob_list(item: Option<&Item>, key: &str) -> DynResult<Vec<String>> {
+    let Some(item) = item else {
+        return Ok(Vec::new());
+    };
+    let arr = item
+        .as_array()
+        .ok_or_else(|| anyhow!("invalid scaffold.toml: {key} must be an array of strings"))?;
+    let mut out = Vec::with_capacity(arr.len());
+    for v in arr.iter() {
+        let s = v
+            .as_str()
+            .ok_or_else(|| anyhow!("invalid scaffold.toml: {key} entries must be strings"))?;
+        // Reject empty patterns: an empty glob normalizes to a match-all
+        // (`**/`), so an empty `exclude` entry would silently suppress *every*
+        // watch trigger. Fail fast with a targeted error instead.
+        if s.is_empty() {
+            bail!("invalid scaffold.toml: {key} entries must not be empty");
+        }
+        out.push(s.to_string());
+    }
+    Ok(out)
 }
 
 fn parse_post_deploy(item: Option<&Item>) -> DynResult<Vec<String>> {
@@ -378,7 +432,92 @@ fn parse_basecamp_runtime(doc: &DocumentMut) -> DynResult<Option<BasecampConfig>
             })?;
         any_field = true;
     }
+
+    // [basecamp.env] — plain string map.
+    if let Some(env_table) = table.get("env").and_then(Item::as_table) {
+        cfg.env = parse_string_map(env_table, "basecamp.env")?;
+        any_field = any_field || !cfg.env.is_empty();
+    }
+    // [basecamp.env_append] — map of string -> array<string>.
+    if let Some(append_table) = table.get("env_append").and_then(Item::as_table) {
+        for (key, item) in append_table.iter() {
+            validate_env_var_name(key, "basecamp.env_append")?;
+            let arr = item.as_array().ok_or_else(|| {
+                anyhow!("invalid scaffold.toml: [basecamp.env_append].{key} must be an array of strings")
+            })?;
+            let mut list = Vec::with_capacity(arr.len());
+            for v in arr.iter() {
+                let s = v.as_str().ok_or_else(|| {
+                    anyhow!("invalid scaffold.toml: [basecamp.env_append].{key} entries must be strings")
+                })?;
+                // Reject empty entries: `:`-joining them yields an empty path
+                // segment (e.g. `LD_LIBRARY_PATH=:`), which silently injects the
+                // current directory into search paths — surprising and unsafe.
+                if s.is_empty() {
+                    bail!("invalid scaffold.toml: [basecamp.env_append].{key} entries must not be empty");
+                }
+                list.push(s.to_string());
+            }
+            // Skip empty lists: they're a no-op at launch (apply_launch_env_
+            // overrides skips them) and would otherwise make `[basecamp]`
+            // non-empty and round-trip back into scaffold.toml — inconsistent
+            // with how empty per-profile env maps are dropped below.
+            if !list.is_empty() {
+                cfg.env_append.insert(key.to_string(), list);
+            }
+        }
+        any_field = any_field || !cfg.env_append.is_empty();
+    }
+    // [basecamp.profiles.<name>.env] — per-profile plain string maps.
+    if let Some(profiles) = table.get("profiles").and_then(Item::as_table) {
+        for (name, item) in profiles.iter() {
+            let ptable = item.as_table().ok_or_else(|| {
+                anyhow!("invalid scaffold.toml: [basecamp.profiles.{name}] is not a table")
+            })?;
+            if let Some(env_table) = ptable.get("env").and_then(Item::as_table) {
+                let env = parse_string_map(env_table, &format!("basecamp.profiles.{name}.env"))?;
+                if !env.is_empty() {
+                    cfg.profile_env.insert(name.to_string(), env);
+                }
+            }
+        }
+        any_field = any_field || !cfg.profile_env.is_empty();
+    }
+
     Ok(if any_field { Some(cfg) } else { None })
+}
+
+fn parse_string_map(
+    table: &Table,
+    key: &str,
+) -> DynResult<std::collections::BTreeMap<String, String>> {
+    let mut out = std::collections::BTreeMap::new();
+    for (k, item) in table.iter() {
+        validate_env_var_name(k, key)?;
+        let v = item
+            .as_str()
+            .ok_or_else(|| anyhow!("invalid scaffold.toml: [{key}].{k} must be a string"))?;
+        out.insert(k.to_string(), v.to_string());
+    }
+    Ok(out)
+}
+
+/// Reject env var names that would only surface as an opaque `exec` /
+/// `Command::env` failure at launch: TOML quoted keys can be empty or contain
+/// `=` or control characters. Fail fast at parse with an actionable message.
+fn validate_env_var_name(name: &str, context: &str) -> DynResult<()> {
+    if name.is_empty() {
+        bail!("invalid scaffold.toml: [{context}] env var name must not be empty");
+    }
+    if name.contains('=') {
+        bail!("invalid scaffold.toml: [{context}] env var name {name:?} must not contain `=`");
+    }
+    if name.chars().any(char::is_control) {
+        bail!(
+            "invalid scaffold.toml: [{context}] env var name {name:?} must not contain control characters"
+        );
+    }
+    Ok(())
 }
 
 fn parse_framework(doc: &DocumentMut) -> FrameworkConfig {
@@ -509,10 +648,73 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
 
     // [basecamp]
     if let Some(bc) = &cfg.basecamp {
+        // Validate all string values up front, before borrowing `doc` mutably.
+        for (k, v) in &bc.env {
+            check_toml_value(&format!("basecamp.env.{k}"), v)?;
+        }
+        for (k, list) in &bc.env_append {
+            for p in list {
+                check_toml_value(&format!("basecamp.env_append.{k}"), p)?;
+            }
+        }
+        for (profile, env) in &bc.profile_env {
+            for (k, v) in env {
+                check_toml_value(&format!("basecamp.profiles.{profile}.env.{k}"), v)?;
+            }
+        }
+
         let basecamp = doc.entry("basecamp").or_insert(Item::Table(Table::new()));
         let basecamp_table = basecamp.as_table_mut().expect("basecamp table");
-        basecamp_table["port_base"] = value(i64::from(bc.port_base));
-        basecamp_table["port_stride"] = value(i64::from(bc.port_stride));
+        // Only emit port keys when they differ from the defaults, so setting
+        // just `[basecamp.env]` doesn't churn a user's scaffold.toml with
+        // default `port_base`/`port_stride` on the next `save_project_config`.
+        let default_bc = BasecampConfig::default();
+        let mut wrote_direct_key = false;
+        if bc.port_base != default_bc.port_base {
+            basecamp_table["port_base"] = value(i64::from(bc.port_base));
+            wrote_direct_key = true;
+        }
+        if bc.port_stride != default_bc.port_stride {
+            basecamp_table["port_stride"] = value(i64::from(bc.port_stride));
+            wrote_direct_key = true;
+        }
+        // With no direct keys, an explicit `[basecamp]` header would render
+        // empty — mark it implicit so only the child `[basecamp.env]` / etc.
+        // tables appear. (Safe here precisely because there are no keys to get
+        // dotted, which is the hazard the env subtables avoid via child_table.)
+        if !wrote_direct_key {
+            basecamp_table.set_implicit(true);
+        }
+
+        // Build the env subtables off `basecamp_table` directly. Routing
+        // through `doc` via `ensure_subtable` would mark `[basecamp]` implicit
+        // and render its real keys as dotted `basecamp.port_base = …` instead
+        // of an explicit `[basecamp]` table.
+        if !bc.env.is_empty() {
+            let env_table = child_table(basecamp_table, "env");
+            for (k, v) in &bc.env {
+                env_table[k] = value(v);
+            }
+        }
+        if !bc.env_append.is_empty() {
+            let append_table = child_table(basecamp_table, "env_append");
+            for (k, list) in &bc.env_append {
+                append_table[k] = string_array(list);
+            }
+        }
+        if !bc.profile_env.is_empty() {
+            let profiles = child_table(basecamp_table, "profiles");
+            // Implicit so `[basecamp.profiles.<name>.env]` renders as the
+            // nested header without an empty `[basecamp.profiles]` line.
+            profiles.set_implicit(true);
+            for (profile, env) in &bc.profile_env {
+                let profile_table = child_table(profiles, profile);
+                let env_table = child_table(profile_table, "env");
+                for (k, v) in env {
+                    env_table[k] = value(v);
+                }
+            }
+        }
     }
 
     // [run] — only emit when non-default to keep fresh scaffold.toml minimal.
@@ -525,7 +727,8 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
     let has_inline = run.inline.reset || !run.inline.post_deploy.is_empty();
     let has_default_profile = run.default_profile.is_some();
     let has_profiles = !run.profiles.is_empty();
-    if !has_inline && !has_default_profile && !has_profiles {
+    let has_watch = run.watch != WatchConfig::default();
+    if !has_inline && !has_default_profile && !has_profiles && !has_watch {
         return Ok(());
     }
 
@@ -568,7 +771,31 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
             }
         }
     }
+
+    if has_watch {
+        for g in run.watch.include.iter().chain(run.watch.exclude.iter()) {
+            check_toml_value("run.watch", g)?;
+        }
+        let watch_table = ensure_subtable(doc, "run", "watch");
+        if !run.watch.include.is_empty() {
+            watch_table["include"] = string_array(&run.watch.include);
+        }
+        if !run.watch.exclude.is_empty() {
+            watch_table["exclude"] = string_array(&run.watch.exclude);
+        }
+        if let Some(ms) = run.watch.debounce_ms {
+            watch_table["debounce_ms"] = value(ms as i64);
+        }
+    }
     Ok(())
+}
+
+fn string_array(items: &[String]) -> Item {
+    let mut arr = toml_edit::Array::new();
+    for it in items {
+        arr.push(it.as_str());
+    }
+    value(arr)
 }
 
 fn post_deploy_value(hooks: &[String]) -> Item {
@@ -607,6 +834,17 @@ fn write_repo_ref(doc: &mut DocumentMut, name: &str, repo: &RepoRef) -> DynResul
         table.remove("path");
     }
     Ok(())
+}
+
+/// Get or create a child `Table` under an existing `Table` without touching the
+/// parent's implicit flag — unlike `ensure_subtable`, which marks its parent
+/// implicit (wrong when the parent has real keys, e.g. `[basecamp]`).
+fn child_table<'a>(parent: &'a mut Table, name: &str) -> &'a mut Table {
+    parent
+        .entry(name)
+        .or_insert(Item::Table(Table::new()))
+        .as_table_mut()
+        .expect("child is a table")
 }
 
 fn ensure_subtable<'a>(doc: &'a mut DocumentMut, parent: &str, child: &str) -> &'a mut Table {
@@ -781,6 +1019,174 @@ attr = "cli"
         let lgpm = cfg.lgpm_repo.expect("lgpm present");
         assert_eq!(lgpm.build, RepoBuild::NixFlake);
         assert_eq!(lgpm.attr, "cli");
+    }
+
+    #[test]
+    fn parses_basecamp_launch_env_sections() {
+        let toml = minimal_v0_2_0()
+            + r#"
+[basecamp.env]
+QT_DEBUG_PLUGINS = "1"
+
+[basecamp.env_append]
+QT_PLUGIN_PATH = ["/nix/store/a/plugins"]
+LD_LIBRARY_PATH = ["/nix/store/a/lib", "/nix/store/b/lib"]
+
+[basecamp.profiles.alice.env]
+LOGOS_STORAGE_API_PORT = "8081"
+
+[basecamp.profiles.bob.env]
+LOGOS_STORAGE_API_PORT = "8082"
+"#;
+        let cfg = parse_config(&toml).expect("parse");
+        let bc = cfg.basecamp.expect("basecamp config present");
+        assert_eq!(
+            bc.env.get("QT_DEBUG_PLUGINS").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            bc.env_append.get("LD_LIBRARY_PATH").map(Vec::as_slice),
+            Some(
+                &[
+                    "/nix/store/a/lib".to_string(),
+                    "/nix/store/b/lib".to_string()
+                ][..]
+            )
+        );
+        assert_eq!(
+            bc.profile_env
+                .get("alice")
+                .and_then(|e| e.get("LOGOS_STORAGE_API_PORT"))
+                .map(String::as_str),
+            Some("8081")
+        );
+        assert_eq!(
+            bc.profile_env
+                .get("bob")
+                .and_then(|e| e.get("LOGOS_STORAGE_API_PORT"))
+                .map(String::as_str),
+            Some("8082")
+        );
+    }
+
+    #[test]
+    fn basecamp_env_append_drops_empty_lists() {
+        // An empty list is a launch-time no-op; it must not be captured (so
+        // `[basecamp]` stays empty here and nothing round-trips back).
+        let toml = minimal_v0_2_0() + "[basecamp.env_append]\nQT_PLUGIN_PATH = []\n";
+        let cfg = parse_config(&toml).expect("parse");
+        assert!(
+            cfg.basecamp.is_none(),
+            "an empty env_append entry must not make [basecamp] non-empty: {:?}",
+            cfg.basecamp
+        );
+    }
+
+    #[test]
+    fn basecamp_launch_env_round_trips_through_serialize() {
+        let toml = minimal_v0_2_0()
+            + r#"
+[basecamp.env]
+QT_DEBUG_PLUGINS = "1"
+
+[basecamp.env_append]
+QT_PLUGIN_PATH = ["/nix/store/a/plugins"]
+
+[basecamp.profiles.alice.env]
+LOGOS_STORAGE_API_PORT = "8081"
+"#;
+        let cfg1 = parse_config(&toml).expect("parse");
+        let serialized = serialize_config(&cfg1).expect("serialize");
+        let cfg2 = parse_config(&serialized).expect("re-parse");
+        let bc = cfg2.basecamp.expect("basecamp present after round-trip");
+        assert_eq!(
+            bc.env.get("QT_DEBUG_PLUGINS").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            bc.env_append.get("QT_PLUGIN_PATH").map(Vec::as_slice),
+            Some(&["/nix/store/a/plugins".to_string()][..])
+        );
+        assert_eq!(
+            bc.profile_env
+                .get("alice")
+                .and_then(|e| e.get("LOGOS_STORAGE_API_PORT"))
+                .map(String::as_str),
+            Some("8081")
+        );
+    }
+
+    #[test]
+    fn basecamp_env_only_omits_default_port_keys_and_avoids_dotting() {
+        // Setting just [basecamp.env] (default ports) must NOT churn in
+        // default port_base/port_stride, and must never serialize them as
+        // dotted `basecamp.port_base = …` keys. Only [basecamp.env] renders.
+        let toml = minimal_v0_2_0() + "[basecamp.env]\nQT_DEBUG_PLUGINS = \"1\"\n";
+        let cfg = parse_config(&toml).expect("parse");
+        let serialized = serialize_config(&cfg).expect("serialize");
+        assert!(
+            !serialized.contains("port_base"),
+            "default port_base must be omitted (no churn), got:\n{serialized}"
+        );
+        assert!(
+            serialized.contains("[basecamp.env]"),
+            "expected [basecamp.env], got:\n{serialized}"
+        );
+        // Round-trips with env intact.
+        let cfg2 = parse_config(&serialized).expect("re-parse");
+        assert_eq!(
+            cfg2.basecamp
+                .and_then(|b| b.env.get("QT_DEBUG_PLUGINS").cloned())
+                .as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn basecamp_non_default_ports_serialize_as_explicit_table() {
+        // When a port differs from the default it is written under an explicit
+        // [basecamp] header (not dotted), even alongside [basecamp.env].
+        let toml = minimal_v0_2_0()
+            + "[basecamp]\nport_base = 50000\n\n[basecamp.env]\nQT_DEBUG_PLUGINS = \"1\"\n";
+        let cfg = parse_config(&toml).expect("parse");
+        let serialized = serialize_config(&cfg).expect("serialize");
+        assert!(
+            serialized.contains("[basecamp]") && serialized.contains("port_base = 50000"),
+            "expected explicit [basecamp] with port_base, got:\n{serialized}"
+        );
+        assert!(
+            !serialized.contains("basecamp.port_base"),
+            "port_base must not be a dotted key, got:\n{serialized}"
+        );
+        assert_eq!(
+            parse_config(&serialized)
+                .expect("re-parse")
+                .basecamp
+                .map(|b| b.port_base),
+            Some(50000)
+        );
+    }
+
+    #[test]
+    fn basecamp_env_append_rejects_empty_string_entry() {
+        // An empty path segment (`LD_LIBRARY_PATH=:`) silently injects CWD into
+        // search paths — reject it at parse.
+        let toml = minimal_v0_2_0() + "[basecamp.env_append]\nLD_LIBRARY_PATH = [\"\"]\n";
+        let err = parse_config(&toml).unwrap_err();
+        assert!(err.to_string().contains("must not be empty"), "{err}");
+    }
+
+    #[test]
+    fn basecamp_env_rejects_invalid_var_name() {
+        // `=` in an env var name would only surface as an opaque exec failure.
+        let toml = minimal_v0_2_0() + "[basecamp.env]\n\"FOO=BAR\" = \"1\"\n";
+        let err = parse_config(&toml).unwrap_err();
+        assert!(err.to_string().contains("must not contain `=`"), "{err}");
+
+        // Empty env var name is rejected too.
+        let toml2 = minimal_v0_2_0() + "[basecamp.profiles.alice.env]\n\"\" = \"1\"\n";
+        let err2 = parse_config(&toml2).unwrap_err();
+        assert!(err2.to_string().contains("must not be empty"), "{err2}");
     }
 
     #[test]
@@ -1012,6 +1418,50 @@ role = "project"
         let prof = cfg.run.profiles.get("e2e").expect("e2e present");
         assert!(prof.reset);
         assert_eq!(prof.post_deploy, vec!["scripts/e2e.sh".to_string()]);
+    }
+
+    #[test]
+    fn parse_config_with_run_watch_section() {
+        let toml = minimal_v0_2_0()
+            + "[run.watch]\ninclude = [\"programs/**/guest/**\"]\nexclude = [\"**/*.md\", \"Cargo.lock\"]\ndebounce_ms = 1500\n";
+        let cfg = parse_config(&toml).expect("parse");
+        assert_eq!(
+            cfg.run.watch.include,
+            vec!["programs/**/guest/**".to_string()]
+        );
+        assert_eq!(
+            cfg.run.watch.exclude,
+            vec!["**/*.md".to_string(), "Cargo.lock".to_string()]
+        );
+        assert_eq!(cfg.run.watch.debounce_ms, Some(1500));
+    }
+
+    #[test]
+    fn parse_config_run_watch_rejects_empty_glob() {
+        // An empty pattern normalizes to match-all; an empty `exclude` would
+        // silently suppress every watch trigger, so it's rejected at parse.
+        let toml = minimal_v0_2_0() + "[run.watch]\nexclude = [\"\"]\n";
+        let err = parse_config(&toml).unwrap_err();
+        assert!(err.to_string().contains("must not be empty"), "{err}");
+    }
+
+    #[test]
+    fn parse_config_run_watch_rejects_negative_debounce() {
+        let toml = minimal_v0_2_0() + "[run.watch]\ndebounce_ms = -5\n";
+        let err = parse_config(&toml).unwrap_err();
+        assert!(err.to_string().contains("debounce_ms"), "{err}");
+    }
+
+    #[test]
+    fn run_watch_round_trips_through_parse_serialize() {
+        let toml = minimal_v0_2_0()
+            + "[run.watch]\ninclude = [\"src/**\"]\nexclude = [\"**/target/**\"]\ndebounce_ms = 750\n";
+        let cfg1 = parse_config(&toml).expect("parse");
+        let serialized = serialize_config(&cfg1).expect("serialize");
+        let cfg2 = parse_config(&serialized).expect("re-parse");
+        assert_eq!(cfg2.run.watch.include, vec!["src/**".to_string()]);
+        assert_eq!(cfg2.run.watch.exclude, vec!["**/target/**".to_string()]);
+        assert_eq!(cfg2.run.watch.debounce_ms, Some(750));
     }
 
     #[test]

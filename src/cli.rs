@@ -322,6 +322,11 @@ struct RunArgs {
     /// Localnet is reused; reset is skipped on re-runs.
     #[arg(long)]
     watch: bool,
+    /// Override the `--watch` debounce window (milliseconds) for this
+    /// invocation. Defaults to `[run.watch].debounce_ms`, else 500.
+    /// Only meaningful with `--watch`, so it requires it.
+    #[arg(long, value_name = "MS", requires = "watch")]
+    watch_debounce_ms: Option<u64>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -360,6 +365,9 @@ struct LocalnetStatusArgs {
 struct LocalnetLogsArgs {
     #[arg(long, default_value_t = 200)]
     tail: usize,
+    /// Emit the tailed log lines as a JSON object instead of plain text.
+    #[arg(long)]
+    json: bool,
 }
 
 /// Reset localnet to a clean state: stop the sequencer, delete the sequencer
@@ -419,6 +427,9 @@ enum WalletSubcommand {
 struct WalletListArgs {
     #[arg(long)]
     long: bool,
+    /// Emit accounts as a JSON object instead of forwarding the wallet's text.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -429,6 +440,9 @@ struct WalletTopupArgs {
     address_flag: Option<String>,
     #[arg(long)]
     dry_run: bool,
+    /// Emit the topup outcome as a JSON object instead of human-readable text.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -624,7 +638,10 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 },
                 LocalnetSubcommand::Stop => LocalnetAction::Stop,
                 LocalnetSubcommand::Status(args) => LocalnetAction::Status { json: args.json },
-                LocalnetSubcommand::Logs(args) => LocalnetAction::Logs { tail: args.tail },
+                LocalnetSubcommand::Logs(args) => LocalnetAction::Logs {
+                    tail: args.tail,
+                    json: args.json,
+                },
                 LocalnetSubcommand::Reset(args) => LocalnetAction::Reset {
                     dry_run: args.dry_run,
                     yes: args.yes,
@@ -647,7 +664,10 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
         }
         Some(Commands::Wallet(args)) => {
             let action = match args.command {
-                WalletSubcommand::List(args) => WalletAction::List { long: args.long },
+                WalletSubcommand::List(args) => WalletAction::List {
+                    long: args.long,
+                    json: args.json,
+                },
                 WalletSubcommand::Topup(args) => WalletAction::Topup {
                     address: merge_optional_address(
                         args.address,
@@ -655,6 +675,7 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                         "wallet topup",
                     )?,
                     dry_run: args.dry_run,
+                    json: args.json,
                 },
                 WalletSubcommand::Default(args) => match args.command {
                     WalletDefaultSubcommand::Set(set) => WalletAction::DefaultSet {
@@ -714,6 +735,7 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 post_deploy_override: post_deploy,
                 localnet_timeout_sec: args.localnet_timeout,
                 watch: args.watch,
+                watch_debounce_ms: args.watch_debounce_ms,
             })
         }
         Some(Commands::Report(args)) => cmd_report(args.out, args.tail),

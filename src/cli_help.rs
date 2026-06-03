@@ -68,7 +68,8 @@ pub(crate) const EXAMPLES_LOCALNET_STATUS: &str = r"Examples:
 
 pub(crate) const EXAMPLES_LOCALNET_LOGS: &str = r"Examples:
   logos-scaffold localnet logs
-  logos-scaffold localnet logs --tail 500";
+  logos-scaffold localnet logs --tail 500
+  logos-scaffold localnet logs --tail 50 --json";
 
 pub(crate) const EXAMPLES_LOCALNET_RESET: &str = r"Examples:
   logos-scaffold localnet reset --dry-run
@@ -92,6 +93,7 @@ Environment:
 pub(crate) const EXAMPLES_WALLET_LIST: &str = r"Examples:
   logos-scaffold wallet list
   logos-scaffold wallet list --long
+  logos-scaffold wallet list --json
 
 Passthrough (inner wallet CLI):
   logos-scaffold wallet -- --help
@@ -105,6 +107,7 @@ pub(crate) const EXAMPLES_WALLET_TOPUP: &str = r"Examples:
   logos-scaffold wallet topup Public/6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV
   logos-scaffold wallet topup --address Public/6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV
   logos-scaffold wallet topup --dry-run
+  logos-scaffold wallet topup --json
 
 Exit codes:
   0  topup confirmed.
