@@ -1170,6 +1170,148 @@ fn wallet_list_proxies_account_list() {
 }
 
 #[test]
+fn wallet_list_json_emits_structured_envelope() {
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["wallet", "list", "--json"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    assert_eq!(value.get("exit_code").and_then(|v| v.as_i64()), Some(0));
+    let accounts = value
+        .get("accounts")
+        .and_then(|v| v.as_array())
+        .expect("accounts array");
+    assert_eq!(accounts.len(), 2, "stub lists two accounts: {stdout}");
+    assert!(accounts.iter().any(|a| a
+        .as_str()
+        .is_some_and(|s| s.contains("Preconfigured Public/"))));
+}
+
+#[test]
+fn wallet_topup_json_dry_run_is_structured() {
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args([
+            "wallet",
+            "topup",
+            "--address",
+            VALID_PUBLIC_ADDRESS,
+            "--dry-run",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    assert_eq!(
+        value.get("status").and_then(|v| v.as_str()),
+        Some("dry_run")
+    );
+    assert!(value
+        .get("address")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s.contains("Public/")));
+    assert_eq!(
+        value.get("method").and_then(|v| v.as_str()),
+        Some("pinata faucet claim")
+    );
+    // Stable schema: `tx` key is always present (null for a dry run).
+    assert!(value.get("tx").is_some_and(serde_json::Value::is_null));
+}
+
+#[test]
+fn wallet_topup_json_success_reports_tx() {
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args([
+            "wallet",
+            "topup",
+            "--address",
+            VALID_PUBLIC_ADDRESS,
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    assert_eq!(
+        value.get("status").and_then(|v| v.as_str()),
+        Some("success")
+    );
+    assert_eq!(
+        value.get("tx").and_then(|v| v.as_str()),
+        Some("pinata-topup-hash"),
+        "stub emits tx_hash=pinata-topup-hash"
+    );
+    // stdout must be a single clean JSON object — no `$ <cmd>` echo lines.
+    assert!(
+        stdout.trim_start().starts_with('{'),
+        "json mode must not echo commands before the object: {stdout}"
+    );
+}
+
+#[test]
+fn wallet_topup_json_connectivity_failure_categorizes_reason() {
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .env("TOPUP_FAIL_CONNECT", "1")
+        .args([
+            "wallet",
+            "topup",
+            "--address",
+            VALID_PUBLIC_ADDRESS,
+            "--json",
+        ])
+        .assert()
+        .failure();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    assert_eq!(value.get("status").and_then(|v| v.as_str()), Some("error"));
+    assert_eq!(
+        value.get("reason").and_then(|v| v.as_str()),
+        Some("connectivity")
+    );
+    // Error objects carry the same attempt context as success/pending, so
+    // consumers don't lose what was attempted on failure.
+    assert!(value
+        .get("address")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s.contains("Public/")));
+    assert_eq!(
+        value.get("method").and_then(|v| v.as_str()),
+        Some("pinata faucet claim")
+    );
+    assert_eq!(
+        value.get("network").and_then(|v| v.as_str()),
+        Some("http://127.0.0.1:3040")
+    );
+    // Stable schema: `tx` is always present (null in the error case).
+    assert!(value.get("tx").is_some_and(serde_json::Value::is_null));
+}
+
+#[test]
 fn wallet_passthrough_account_list_works() {
     let temp = tempdir().expect("tempdir");
     setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));

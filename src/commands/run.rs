@@ -166,7 +166,7 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
 
     // Step 4: Wallet topup
     println!("[4/{total_steps}] Topping up wallet...");
-    let outcome = cmd_wallet_topup_inner(project, None, false)?;
+    let outcome = cmd_wallet_topup_inner(project, None, false, false)?;
     if let TopupOutcome::ConfirmationTimeout { message } = outcome {
         bail!(
             "{message}\n\
