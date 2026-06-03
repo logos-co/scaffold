@@ -180,7 +180,7 @@ Existing fields are preserved verbatim.
 
 ### Configuring `lgs run`
 
-`lgs run` works with no configuration (build → IDL → localnet → topup → deploy).
+`lgs run` works with no configuration (setup, via build, → IDL → localnet → topup → deploy).
 To run one or more post-deploy hooks automatically (e.g. submit a transaction
 with [spel](https://github.com/logos-co/spel)), add a `[run]` section to
 `scaffold.toml`. `post_deploy` is a list of shell commands executed in order;

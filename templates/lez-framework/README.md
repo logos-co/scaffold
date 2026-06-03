@@ -27,9 +27,15 @@ pipeline.
 
 ### First run step-by-step (optional)
 
+Run each phase `run` performs yourself when debugging a single step:
+
 ```bash
 logos-scaffold setup
 logos-scaffold localnet start
+logos-scaffold build
+logos-scaffold build idl
+logos-scaffold deploy
+logos-scaffold wallet topup
 logos-scaffold doctor
 ```
 

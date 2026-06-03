@@ -116,7 +116,7 @@ cargo run --bin run_hello_world_through_tail_call_private -- --simple-tail-call-
 ## Main Scaffold Commands
 
 ```bash
-logos-scaffold run [--post-deploy <cmd>...] [--no-post-deploy] [--watch]
+logos-scaffold run [--profile NAME] [--reset | --no-reset] [--post-deploy <cmd>...] [--no-post-deploy] [--watch] [--localnet-timeout N]
 logos-scaffold setup
 logos-scaffold build [project-path]
 logos-scaffold deploy [program-name]
