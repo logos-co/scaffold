@@ -1,0 +1,136 @@
+name: Template E2E
+
+# End-to-end guard for the scaffolded project templates (#93). The unit tests
+# only exercise the render *mechanics* (placeholder substitution, manifest
+# overlay). This job actually renders a project with `new`, builds the real,
+# network-fetched lez/spel at the configured pins via `setup`, and asserts
+# `doctor` reports zero FAIL — so a `DEFAULT_LEZ` / `DEFAULT_SPEL` bump (or a
+# template change) that produces an unbuildable user project breaks CI.
+#
+# Heavy (full LEZ build + circuits download + risc0 guest build), so it is
+# path-gated to the inputs that can actually break the rendered output, plus
+# manual `workflow_dispatch`.
+
+on:
+  pull_request:
+    paths:
+      - "src/constants.rs"
+      - "templates/**"
+      - "src/template/**"
+  # Manual trigger for testing the job itself / re-validating a pin on demand.
+  # Intentionally not path-triggered by edits to this workflow file: a
+  # CI-config-only change shouldn't kick off the full (~tens-of-minutes) LEZ
+  # build of itself.
+  workflow_dispatch:
+
+# A newer push to the same PR supersedes an in-flight (expensive) run.
+concurrency:
+  group: template-e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  render-and-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        template: [default, lez-framework]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # The bootstrap cache holds the cloned lez/spel repos and their target/
+      # dirs (~/.cache/logos-scaffold) AND the extracted circuits release
+      # (~/.logos-blockchain-circuits, where the fetch step below puts it).
+      # Both must be cached, or the multi-MB circuits tarball re-downloads on
+      # every run. Keying on constants.rs means a pin or circuits-version bump
+      # invalidates it (rebuild from scratch) while same-pin re-runs stay warm.
+      - name: Cache scaffold bootstrap (repos + circuits)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/logos-scaffold
+            ~/.logos-blockchain-circuits
+          key: scaffold-bootstrap-${{ runner.os }}-${{ hashFiles('src/constants.rs') }}
+
+      - name: Build scaffold CLI
+        run: cargo build --release --bin logos-scaffold
+
+      # The LEZ standalone build chain (logos-blockchain-{pol,poc,poq,zksign})
+      # reads circuit keys at compile time. setup's preflight requires the
+      # release on disk, so fetch the version pinned in constants.rs and export
+      # LOGOS_BLOCKCHAIN_CIRCUITS for every subsequent step.
+      - name: Fetch logos-blockchain-circuits release
+        run: |
+          set -euo pipefail
+          ver="$(sed -n 's/.*DEFAULT_CIRCUITS_VERSION: &str = "\([^"]*\)".*/\1/p' src/constants.rs)"
+          if [ -z "$ver" ]; then echo "could not parse DEFAULT_CIRCUITS_VERSION"; exit 1; fi
+          dest="$HOME/.logos-blockchain-circuits"
+          if [ -f "$dest/pol/verification_key.json" ]; then
+            echo "circuits already cached at $dest"
+          else
+            url="https://github.com/logos-blockchain/logos-blockchain-circuits/releases/download/v${ver}/logos-blockchain-circuits-v${ver}-linux-x86_64.tar.gz"
+            echo "downloading $url"
+            mkdir -p "$dest"
+            curl -fL --retry 3 -o /tmp/circuits.tar.gz "$url"
+            tar -xzf /tmp/circuits.tar.gz -C "$dest" --strip-components=1
+          fi
+          echo "LOGOS_BLOCKCHAIN_CIRCUITS=$dest" >> "$GITHUB_ENV"
+
+      - name: Render project from template
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          "$GITHUB_WORKSPACE/target/release/logos-scaffold" new e2e-app --template "${{ matrix.template }}"
+
+      - name: Setup (clone + build lez/spel at configured pins)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/e2e-app"
+          "$GITHUB_WORKSPACE/target/release/logos-scaffold" setup
+
+      - name: doctor --json asserts zero FAIL
+        run: |
+          # -e up front so a failing `cd` (or any setup command) aborts the step
+          # instead of silently running doctor from the wrong directory.
+          set -euo pipefail
+          cd "$RUNNER_TEMP/e2e-app"
+          # doctor exits 0 with no FAIL, and non-zero when summary.fail > 0 — but
+          # it can also exit non-zero *before* emitting JSON (e.g. failing to
+          # load the project). So disable -e only around the call, capture rc,
+          # then validate the JSON rather than `|| true`-ing the whole step
+          # (which would lose the status and degrade into a generic jq error).
+          set +e
+          "$GITHUB_WORKSPACE/target/release/logos-scaffold" doctor --json > doctor.json
+          rc=$?
+          set -e
+          if ! jq -e . doctor.json >/dev/null 2>&1; then
+            echo "::error::doctor did not emit valid JSON (exit $rc)"
+            cat doctor.json || true
+            exit 1
+          fi
+          fail="$(jq '.summary.fail' doctor.json)"
+          echo "doctor summary: $(jq -c '.summary' doctor.json) (exit $rc)"
+          if [ "$fail" != "0" ]; then
+            echo "::error::doctor reported $fail FAIL check(s) for the '${{ matrix.template }}' template"
+            jq -r '.checks[] | select(.status == "fail") | "FAIL: \(.name) — \(.detail)"' doctor.json
+            exit 1
+          fi
+          # Zero FAIL but a non-zero exit means doctor failed for a reason other
+          # than FAIL checks — surface it rather than treating the run as green.
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::doctor exited $rc with zero FAIL — unexpected"
+            exit 1
+          fi
+
+      - name: Build rendered project workspace
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/e2e-app"
+          "$GITHUB_WORKSPACE/target/release/logos-scaffold" build
