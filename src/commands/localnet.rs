@@ -11,7 +11,9 @@ use serde_json::Value;
 use crate::circuits::ensure_circuits_for_subprocess;
 use crate::constants::{SEQUENCER_BIN_REL_PATH, SEQUENCER_CONFIG_REL_PATH};
 use crate::error::{LocalnetError, ResetError};
-use crate::model::{LocalnetOwnership, LocalnetState, LocalnetStatusReport, Project};
+use crate::model::{
+    LocalnetLogsReport, LocalnetOwnership, LocalnetState, LocalnetStatusReport, Project,
+};
 use crate::process::{listener_pid, pid_alive, pid_command, pid_running, port_open, spawn_to_log};
 use crate::project::{
     ensure_dir_exists, find_project_root, load_project, resolve_cache_root, resolve_repo_path,
@@ -34,6 +36,7 @@ pub(crate) enum LocalnetAction {
     },
     Logs {
         tail: usize,
+        json: bool,
     },
     Reset {
         dry_run: bool,
@@ -109,7 +112,7 @@ fn cmd_localnet_in_project(project: &Project, action: LocalnetAction) -> DynResu
         LocalnetAction::Status { json } => {
             cmd_localnet_status(&state_path, &log_path, json, &localnet_addr, localnet_port)
         }
-        LocalnetAction::Logs { tail } => cmd_localnet_logs(&log_path, tail),
+        LocalnetAction::Logs { tail, json } => cmd_localnet_logs(&log_path, tail, json),
         LocalnetAction::Reset {
             dry_run,
             yes,
@@ -430,26 +433,60 @@ fn ownership_label(ownership: LocalnetOwnership) -> &'static str {
     }
 }
 
-fn cmd_localnet_logs(log_path: &Path, tail: usize) -> DynResult<()> {
+fn cmd_localnet_logs(log_path: &Path, tail: usize, json: bool) -> DynResult<()> {
     if !log_path.exists() {
-        println!("log file does not exist yet: {}", log_path.display());
+        if json {
+            print_logs_json(log_path, false, tail, Vec::new())?;
+        } else {
+            println!("log file does not exist yet: {}", log_path.display());
+        }
         return Ok(());
     }
 
     let content = fs::read_to_string(log_path)
         .with_context(|| format!("failed to read log file {}", log_path.display()))?;
 
+    // Treat a whitespace-only log as empty in BOTH modes. Without this, a log
+    // containing only newlines yields `content.lines() == [""]`, so JSON would
+    // report a non-empty `lines` array — contradicting the LocalnetLogsReport
+    // contract (empty when the log is empty) and the plain-text branch below.
     if content.trim().is_empty() {
+        if json {
+            return print_logs_json(log_path, true, tail, Vec::new());
+        }
         println!("log file is empty: {}", log_path.display());
         return Ok(());
     }
 
-    let lines: Vec<&str> = content.lines().collect();
-    let start = lines.len().saturating_sub(tail);
-    for line in &lines[start..] {
+    let all_lines: Vec<&str> = content.lines().collect();
+    let start = all_lines.len().saturating_sub(tail);
+    let tail_lines = &all_lines[start..];
+
+    if json {
+        let lines = tail_lines.iter().map(|l| l.to_string()).collect();
+        return print_logs_json(log_path, true, tail, lines);
+    }
+
+    for line in tail_lines {
         println!("{line}");
     }
 
+    Ok(())
+}
+
+fn print_logs_json(
+    log_path: &Path,
+    exists: bool,
+    tail: usize,
+    lines: Vec<String>,
+) -> DynResult<()> {
+    let report = LocalnetLogsReport {
+        log_path: log_path.display().to_string(),
+        exists,
+        tail,
+        lines,
+    };
+    println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 

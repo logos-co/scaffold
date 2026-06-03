@@ -830,6 +830,95 @@ fn localnet_status_json_is_parseable() {
 }
 
 #[test]
+fn localnet_logs_json_tails_and_is_parseable() {
+    let temp = tempdir().expect("tempdir");
+    let lez_path = temp.path().join("lez");
+    fs::create_dir_all(&lez_path).expect("create lez path");
+    write_scaffold_toml(temp.path(), &lez_path);
+    fs::create_dir_all(temp.path().join(".scaffold/logs")).expect("create logs dir");
+    fs::write(
+        temp.path().join(".scaffold/logs/sequencer.log"),
+        "line one\nline two\nline three\n",
+    )
+    .expect("write sequencer log");
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["localnet", "logs", "--tail", "2", "--json"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    assert_eq!(value.get("exists").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(value.get("tail").and_then(|v| v.as_u64()), Some(2));
+    let lines = value
+        .get("lines")
+        .and_then(|v| v.as_array())
+        .expect("lines array");
+    assert_eq!(
+        lines.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>(),
+        vec!["line two", "line three"],
+        "should return the last two lines"
+    );
+}
+
+#[test]
+fn localnet_logs_json_reports_missing_log_without_failing() {
+    let temp = tempdir().expect("tempdir");
+    let lez_path = temp.path().join("lez");
+    fs::create_dir_all(&lez_path).expect("create lez path");
+    write_scaffold_toml(temp.path(), &lez_path);
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["localnet", "logs", "--json"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    assert_eq!(value.get("exists").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(
+        value.get("lines").and_then(|v| v.as_array()).map(Vec::len),
+        Some(0),
+        "missing log should yield an empty lines array"
+    );
+}
+
+#[test]
+fn localnet_logs_json_treats_whitespace_only_log_as_empty() {
+    // A log file that exists but holds only newlines/whitespace must report
+    // exists=true with an empty `lines` array — `content.lines()` on "\n\n"
+    // would otherwise yield ["", ""]. Mirrors the plain-text "empty" branch.
+    let temp = tempdir().expect("tempdir");
+    let lez_path = temp.path().join("lez");
+    fs::create_dir_all(&lez_path).expect("create lez path");
+    write_scaffold_toml(temp.path(), &lez_path);
+    fs::create_dir_all(temp.path().join(".scaffold/logs")).expect("create logs dir");
+    fs::write(temp.path().join(".scaffold/logs/sequencer.log"), "\n\n  \n")
+        .expect("write whitespace-only log");
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["localnet", "logs", "--json"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    assert_eq!(value.get("exists").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        value.get("lines").and_then(|v| v.as_array()).map(Vec::len),
+        Some(0),
+        "whitespace-only log must yield an empty lines array, not [\"\"]"
+    );
+}
+
+#[test]
 fn doctor_json_outputs_machine_readable_report() {
     let temp = tempdir().expect("tempdir");
     let lez_path = temp.path().join("lez");
