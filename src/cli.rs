@@ -322,6 +322,11 @@ struct RunArgs {
     /// Localnet is reused; reset is skipped on re-runs.
     #[arg(long)]
     watch: bool,
+    /// Override the `--watch` debounce window (milliseconds) for this
+    /// invocation. Defaults to `[run.watch].debounce_ms`, else 500.
+    /// Only meaningful with `--watch`, so it requires it.
+    #[arg(long, value_name = "MS", requires = "watch")]
+    watch_debounce_ms: Option<u64>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -695,6 +700,7 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 post_deploy_override: post_deploy,
                 localnet_timeout_sec: args.localnet_timeout,
                 watch: args.watch,
+                watch_debounce_ms: args.watch_debounce_ms,
             })
         }
         Some(Commands::Report(args)) => cmd_report(args.out, args.tail),

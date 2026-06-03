@@ -222,6 +222,29 @@ lgs run --no-post-deploy                                 # skip all hooks
 `--post-deploy` and `--no-post-deploy` conflict with each other and
 both override whatever `[run].post_deploy` defines.
 
+#### Watch mode
+
+`lgs run --watch` re-runs the pipeline on each filesystem change (localnet
+is reused; reset is skipped on re-runs). Scope what counts as a change with
+`[run.watch]` and tune the coalescing window:
+
+```toml
+[run.watch]
+include = ["programs/**/guest/**", "contracts/**/*.sol"]
+exclude = ["**/*.md", "Cargo.lock"]
+debounce_ms = 1500
+```
+
+A changed path triggers a re-run **iff** it matches at least one `include`
+glob (or `include` is unset, meaning "any path") **and** matches zero
+`exclude` globs — `exclude` always wins. Globs are project-relative,
+gitignore-style: `**` spans path segments, `*`/`?` match within a segment,
+and a slash-less pattern (`Cargo.lock`) matches at any depth. `.scaffold`,
+`target`, `.git`, and the IDL output dir are always ignored regardless of
+these filters. Override the debounce per invocation with
+`lgs run --watch --watch-debounce-ms 1500` (CLI wins over
+`[run.watch].debounce_ms`, which wins over the 500ms default).
+
 Checkpoint commands:
 
 ```bash

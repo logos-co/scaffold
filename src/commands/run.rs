@@ -42,6 +42,8 @@ pub(crate) struct RunInvocation {
     pub(crate) post_deploy_override: Option<Vec<String>>,
     pub(crate) localnet_timeout_sec: Option<u64>,
     pub(crate) watch: bool,
+    /// Per-invocation override of the `--watch` debounce window (ms).
+    pub(crate) watch_debounce_ms: Option<u64>,
 }
 
 pub(crate) fn cmd_run(inv: RunInvocation) -> DynResult<()> {
@@ -78,7 +80,13 @@ pub(crate) fn cmd_run(inv: RunInvocation) -> DynResult<()> {
             // never reset the localnet again — that would clobber the state
             // hook code is verifying.
             params.reset_override = Some(false);
-            watch_loop(&project, &params)?;
+            // CLI flag wins over `[run.watch].debounce_ms`, which wins over
+            // the built-in default.
+            let debounce_ms = inv
+                .watch_debounce_ms
+                .or(project.config.run.watch.debounce_ms)
+                .unwrap_or(WATCH_DEBOUNCE_MS);
+            watch_loop(&project, &params, debounce_ms)?;
         }
 
         Ok(())
@@ -240,7 +248,7 @@ fn reset_for_run(project: &Project, verify_timeout_sec: u64) -> DynResult<()> {
 /// `wallet.state` is byte-equivalent to a fresh `lgs setup`. Extracted as
 /// its own helper so the byte-equivalence test can drive it directly
 /// without booting a real sequencer.
-fn watch_loop(project: &Project, params: &PipelineParams) -> DynResult<()> {
+fn watch_loop(project: &Project, params: &PipelineParams, debounce_ms: u64) -> DynResult<()> {
     let (tx, rx) = mpsc::channel();
     let mut watcher = notify::recommended_watcher(move |res| {
         let _ = tx.send(res);
@@ -254,13 +262,21 @@ fn watch_loop(project: &Project, params: &PipelineParams) -> DynResult<()> {
     // iteration. Without ignoring that directory, those writes fire
     // their own notify events → infinite loop. Resolve once before
     // entering the loop. Use the project-relative form so we match
-    // both canonical and non-canonical event paths.
-    let idl_rel = PathBuf::from(&project.config.framework.idl.path);
-    let watch_ctx = WatchIgnore { idl_rel };
+    // both canonical and non-canonical event paths — and normalize an
+    // absolute `framework.idl.path` that points inside the project to its
+    // relative form, or the `rel.starts_with(idl_rel)` ignore check (which
+    // compares against the project-relative event path) would never match
+    // and watch mode would loop forever on IDL write-backs.
+    let idl_rel = normalize_idl_rel(&project.config.framework.idl.path, &project.root);
+    let watch_ctx = WatchIgnore {
+        idl_rel,
+        include: project.config.run.watch.include.clone(),
+        exclude: project.config.run.watch.exclude.clone(),
+    };
 
     println!();
     println!(
-        "===> watching {} for changes (Ctrl-C to exit)",
+        "===> watching {} for changes (debounce {debounce_ms}ms, Ctrl-C to exit)",
         project.root.display()
     );
 
@@ -280,7 +296,7 @@ fn watch_loop(project: &Project, params: &PipelineParams) -> DynResult<()> {
             continue;
         }
         // Debounce: sleep then drain the rest of the burst.
-        std::thread::sleep(Duration::from_millis(WATCH_DEBOUNCE_MS));
+        std::thread::sleep(Duration::from_millis(debounce_ms));
         while rx.try_recv().is_ok() {}
         println!();
         println!("===> change detected, re-running pipeline");
@@ -293,8 +309,25 @@ fn watch_loop(project: &Project, params: &PipelineParams) -> DynResult<()> {
     Ok(())
 }
 
+/// Resolve `framework.idl.path` to the project-relative form the watch ignore
+/// check compares against. A relative config value is used as-is; an absolute
+/// value pointing inside the project root is rewritten relative to it (so the
+/// `rel.starts_with(idl_rel)` ignore matches and watch mode doesn't loop on IDL
+/// write-backs). An absolute value outside the project passes through unchanged.
+fn normalize_idl_rel(idl_path: &str, root: &Path) -> PathBuf {
+    let configured = PathBuf::from(idl_path);
+    configured
+        .strip_prefix(root)
+        .map(Path::to_path_buf)
+        .unwrap_or(configured)
+}
+
 struct WatchIgnore {
     idl_rel: PathBuf,
+    /// `[run.watch].include` globs. Empty → match any path.
+    include: Vec<String>,
+    /// `[run.watch].exclude` globs. Always win over `include`.
+    exclude: Vec<String>,
 }
 
 fn is_watched_event(project: &Project, ctx: &WatchIgnore, event: &notify::Event) -> bool {
@@ -324,6 +357,8 @@ fn is_ignored_path(project_root: &Path, ctx: &WatchIgnore, path: &Path) -> bool 
         // — this is a notify event from outside the watched directory.
         return true;
     };
+    // Built-in ignores always win: these guard against the IDL/deploy
+    // write-back loop and obvious noise, and are not user-overridable.
     for component in rel.components() {
         let s = component.as_os_str().to_string_lossy();
         if matches!(s.as_ref(), ".scaffold" | "target" | ".git") {
@@ -333,7 +368,102 @@ fn is_ignored_path(project_root: &Path, ctx: &WatchIgnore, path: &Path) -> bool 
     if rel.starts_with(&ctx.idl_rel) {
         return true;
     }
-    false
+
+    // User `[run.watch]` filters. A path is *ignored* when it doesn't
+    // trigger a re-run under the include/exclude resolution rules.
+    let rel_str = rel.to_string_lossy().replace('\\', "/");
+    !watch_path_triggers(&rel_str, &ctx.include, &ctx.exclude)
+}
+
+/// Apply the `[run.watch]` resolution rules to a project-relative path:
+/// triggers a re-run iff it matches at least one `include` glob (or
+/// `include` is empty) AND matches zero `exclude` globs. `exclude` wins.
+fn watch_path_triggers(rel: &str, include: &[String], exclude: &[String]) -> bool {
+    if exclude.iter().any(|g| glob_match(g, rel)) {
+        return false;
+    }
+    include.is_empty() || include.iter().any(|g| glob_match(g, rel))
+}
+
+/// Minimal gitignore-style glob match against a `/`-separated, project-relative
+/// path. `**` spans zero or more path segments; `*` and `?` match within a
+/// single segment. A pattern containing no `/` matches at any depth (so
+/// `Cargo.lock` ≡ `**/Cargo.lock`).
+fn glob_match(pattern: &str, path: &str) -> bool {
+    let anchored;
+    let pattern = if pattern.contains('/') {
+        pattern
+    } else {
+        anchored = format!("**/{pattern}");
+        &anchored
+    };
+    let pat_segs: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
+    let path_segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    match_segments(&pat_segs, &path_segs)
+}
+
+/// Iterative two-pointer match of pattern segments against path segments,
+/// where `**` matches zero or more whole segments and any other segment must
+/// match exactly one path segment via `segment_match`. Linear-time
+/// (O(pat·path)) with single-star backtracking — so a pattern carrying several
+/// `**` can't trigger exponential recursive blowup in the watch loop.
+fn match_segments(pat: &[&str], path: &[&str]) -> bool {
+    let (mut p, mut s) = (0usize, 0usize);
+    // Position of the most recent `**` and the path index it started at.
+    let mut star: Option<usize> = None;
+    let mut star_s = 0usize;
+    while s < path.len() {
+        if p < pat.len() && pat[p] == "**" {
+            star = Some(p);
+            star_s = s;
+            p += 1;
+        } else if p < pat.len() && segment_match(pat[p].as_bytes(), path[s].as_bytes()) {
+            p += 1;
+            s += 1;
+        } else if let Some(sp) = star {
+            // Backtrack: let the last `**` swallow one more path segment.
+            p = sp + 1;
+            star_s += 1;
+            s = star_s;
+        } else {
+            return false;
+        }
+    }
+    // Trailing `**`s match the empty remainder.
+    while p < pat.len() && pat[p] == "**" {
+        p += 1;
+    }
+    p == pat.len()
+}
+
+/// Iterative `*` (any run within a segment) / `?` (single char) matcher. Never
+/// crosses a `/` (it only ever sees one already-split path segment). Uses the
+/// same single-star-backtrack scheme so a segment with many `*`s can't trigger
+/// exponential backtracking.
+fn segment_match(pat: &[u8], seg: &[u8]) -> bool {
+    let (mut p, mut s) = (0usize, 0usize);
+    let mut star: Option<usize> = None;
+    let mut star_s = 0usize;
+    while s < seg.len() {
+        if p < pat.len() && (pat[p] == b'?' || pat[p] == seg[s]) {
+            p += 1;
+            s += 1;
+        } else if p < pat.len() && pat[p] == b'*' {
+            star = Some(p);
+            star_s = s;
+            p += 1;
+        } else if let Some(sp) = star {
+            p = sp + 1;
+            star_s += 1;
+            s = star_s;
+        } else {
+            return false;
+        }
+    }
+    while p < pat.len() && pat[p] == b'*' {
+        p += 1;
+    }
+    p == pat.len()
 }
 
 fn reseed_after_wipe(project: &Project) -> DynResult<()> {
@@ -647,6 +777,123 @@ mod tests {
         Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, Project, RepoRef, RunConfig,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn glob_double_star_spans_segments() {
+        assert!(glob_match(
+            "programs/**/guest/**",
+            "programs/lez-htlc/methods/guest/src/lib.rs"
+        ));
+        // `**` also matches zero segments between fixed parts.
+        assert!(glob_match("programs/**/guest/**", "programs/guest/x.rs"));
+        assert!(!glob_match("programs/**/guest/**", "src/main.rs"));
+    }
+
+    #[test]
+    fn glob_handles_multiple_stars_without_blowup() {
+        // Multiple `**` across segments and multiple `*` within a segment must
+        // resolve correctly under the iterative matcher (and not hang).
+        assert!(glob_match("**/a/**/b/**", "x/a/y/z/b/c/d"));
+        assert!(!glob_match("**/a/**/b/**", "x/a/y/z/c"));
+        assert!(glob_match("src/*a*b*.rs", "src/xxaxxbxx.rs"));
+        assert!(!glob_match("src/*a*b*.rs", "src/xxbxxaxx.rs"));
+        // A long segment against many `*` should be fast (linear), not
+        // exponential — exercised here purely for correctness.
+        assert!(glob_match(
+            "**/*x*x*x*x*x*",
+            "deep/path/xxxxxxxxxxxxxxxxxxxx"
+        ));
+    }
+
+    #[test]
+    fn glob_single_star_stays_within_a_segment() {
+        assert!(glob_match("**/*.md", "docs/readme.md"));
+        assert!(glob_match("**/*.md", "readme.md"));
+        // `*` must not cross a `/`: `*.sol` can't match a nested path here.
+        assert!(!glob_match("contracts/*.sol", "contracts/sub/a.sol"));
+        assert!(glob_match("contracts/*.sol", "contracts/a.sol"));
+    }
+
+    #[test]
+    fn glob_slashless_pattern_matches_at_any_depth() {
+        assert!(glob_match("Cargo.lock", "Cargo.lock"));
+        assert!(glob_match("Cargo.lock", "crates/foo/Cargo.lock"));
+        assert!(!glob_match("Cargo.lock", "Cargo.toml"));
+    }
+
+    #[test]
+    fn glob_question_mark_matches_one_char() {
+        assert!(glob_match("src/a?.rs", "src/ab.rs"));
+        assert!(!glob_match("src/a?.rs", "src/abc.rs"));
+    }
+
+    #[test]
+    fn watch_resolution_exclude_wins_over_include() {
+        let include = vec!["programs/**".to_string()];
+        let exclude = vec!["**/*.md".to_string()];
+        // matches include, not excluded → triggers
+        assert!(watch_path_triggers(
+            "programs/htlc/guest/lib.rs",
+            &include,
+            &exclude
+        ));
+        // matches include AND exclude → excluded wins, no trigger
+        assert!(!watch_path_triggers(
+            "programs/htlc/README.md",
+            &include,
+            &exclude
+        ));
+        // outside include set → no trigger
+        assert!(!watch_path_triggers("src/main.rs", &include, &exclude));
+    }
+
+    #[test]
+    fn watch_resolution_empty_include_means_any_path() {
+        let exclude = vec!["**/target/**".to_string()];
+        assert!(watch_path_triggers("src/main.rs", &[], &exclude));
+        assert!(!watch_path_triggers("a/target/debug/x", &[], &exclude));
+        // No filters at all → everything triggers (default behaviour).
+        assert!(watch_path_triggers("anything/at/all.rs", &[], &[]));
+    }
+
+    #[test]
+    fn is_ignored_path_keeps_builtin_ignores_with_filters() {
+        let ctx = WatchIgnore {
+            idl_rel: PathBuf::from("idl"),
+            include: vec!["src/**".to_string()],
+            exclude: vec![],
+        };
+        let root = Path::new("/proj");
+        // Built-in ignores apply even though they'd match neither filter.
+        assert!(is_ignored_path(root, &ctx, &root.join("target/debug/x")));
+        assert!(is_ignored_path(root, &ctx, &root.join(".scaffold/state/x")));
+        assert!(is_ignored_path(root, &ctx, &root.join("idl/counter.json")));
+        // An included source path is watched (not ignored)...
+        assert!(!is_ignored_path(root, &ctx, &root.join("src/main.rs")));
+        // ...while a path outside the include set is ignored.
+        assert!(is_ignored_path(root, &ctx, &root.join("docs/readme.md")));
+    }
+
+    #[test]
+    fn normalize_idl_rel_handles_relative_and_absolute_paths() {
+        let root = Path::new("/proj");
+        // Relative config value is used as-is.
+        assert_eq!(normalize_idl_rel("idl", root), PathBuf::from("idl"));
+        // Absolute value inside the project is rewritten relative to root, so
+        // the ignore check matches the project-relative event path.
+        let ctx = WatchIgnore {
+            idl_rel: normalize_idl_rel("/proj/idl", root),
+            include: vec![],
+            exclude: vec![],
+        };
+        assert_eq!(ctx.idl_rel, PathBuf::from("idl"));
+        assert!(is_ignored_path(root, &ctx, &root.join("idl/counter.json")));
+        // Absolute value outside the project passes through unchanged.
+        assert_eq!(
+            normalize_idl_rel("/elsewhere/idl", root),
+            PathBuf::from("/elsewhere/idl")
+        );
+    }
 
     fn make_test_project(root: PathBuf) -> Project {
         Project {

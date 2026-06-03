@@ -29,7 +29,7 @@ use crate::constants::{
 };
 use crate::model::{
     BasecampConfig, Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, ModuleEntry,
-    ModuleRole, RepoBuild, RepoRef, RunConfig, RunProfile,
+    ModuleRole, RepoBuild, RepoRef, RunConfig, RunProfile, WatchConfig,
 };
 use crate::DynResult;
 
@@ -131,6 +131,8 @@ fn parse_run(doc: &DocumentMut) -> DynResult<RunConfig> {
         }
     }
 
+    let watch = parse_run_watch(run_table)?;
+
     Ok(RunConfig {
         default_profile,
         inline: RunProfile {
@@ -138,7 +140,59 @@ fn parse_run(doc: &DocumentMut) -> DynResult<RunConfig> {
             post_deploy: inline_post_deploy,
         },
         profiles,
+        watch,
     })
+}
+
+fn parse_run_watch(run_table: &Table) -> DynResult<WatchConfig> {
+    let Some(watch_table) = run_table.get("watch").and_then(Item::as_table) else {
+        return Ok(WatchConfig::default());
+    };
+    let include = parse_glob_list(watch_table.get("include"), "[run.watch].include")?;
+    let exclude = parse_glob_list(watch_table.get("exclude"), "[run.watch].exclude")?;
+    let debounce_ms = match watch_table.get("debounce_ms") {
+        None => None,
+        Some(item) => {
+            let n = item.as_integer().ok_or_else(|| {
+                anyhow!("invalid scaffold.toml: [run.watch].debounce_ms must be an integer")
+            })?;
+            if n < 0 {
+                bail!("invalid scaffold.toml: [run.watch].debounce_ms must be non-negative");
+            }
+            Some(n as u64)
+        }
+    };
+    Ok(WatchConfig {
+        include,
+        exclude,
+        debounce_ms,
+    })
+}
+
+/// `key` is the field label already formatted as `[table].field` (e.g.
+/// `[run.watch].include`), so error messages point at the actual key instead of
+/// a `[run.watch.include]`-looking pseudo-table.
+fn parse_glob_list(item: Option<&Item>, key: &str) -> DynResult<Vec<String>> {
+    let Some(item) = item else {
+        return Ok(Vec::new());
+    };
+    let arr = item
+        .as_array()
+        .ok_or_else(|| anyhow!("invalid scaffold.toml: {key} must be an array of strings"))?;
+    let mut out = Vec::with_capacity(arr.len());
+    for v in arr.iter() {
+        let s = v
+            .as_str()
+            .ok_or_else(|| anyhow!("invalid scaffold.toml: {key} entries must be strings"))?;
+        // Reject empty patterns: an empty glob normalizes to a match-all
+        // (`**/`), so an empty `exclude` entry would silently suppress *every*
+        // watch trigger. Fail fast with a targeted error instead.
+        if s.is_empty() {
+            bail!("invalid scaffold.toml: {key} entries must not be empty");
+        }
+        out.push(s.to_string());
+    }
+    Ok(out)
 }
 
 fn parse_post_deploy(item: Option<&Item>) -> DynResult<Vec<String>> {
@@ -673,7 +727,8 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
     let has_inline = run.inline.reset || !run.inline.post_deploy.is_empty();
     let has_default_profile = run.default_profile.is_some();
     let has_profiles = !run.profiles.is_empty();
-    if !has_inline && !has_default_profile && !has_profiles {
+    let has_watch = run.watch != WatchConfig::default();
+    if !has_inline && !has_default_profile && !has_profiles && !has_watch {
         return Ok(());
     }
 
@@ -714,6 +769,22 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
             if !profile.post_deploy.is_empty() {
                 profile_table["post_deploy"] = post_deploy_value(&profile.post_deploy);
             }
+        }
+    }
+
+    if has_watch {
+        for g in run.watch.include.iter().chain(run.watch.exclude.iter()) {
+            check_toml_value("run.watch", g)?;
+        }
+        let watch_table = ensure_subtable(doc, "run", "watch");
+        if !run.watch.include.is_empty() {
+            watch_table["include"] = string_array(&run.watch.include);
+        }
+        if !run.watch.exclude.is_empty() {
+            watch_table["exclude"] = string_array(&run.watch.exclude);
+        }
+        if let Some(ms) = run.watch.debounce_ms {
+            watch_table["debounce_ms"] = value(ms as i64);
         }
     }
     Ok(())
@@ -1347,6 +1418,50 @@ role = "project"
         let prof = cfg.run.profiles.get("e2e").expect("e2e present");
         assert!(prof.reset);
         assert_eq!(prof.post_deploy, vec!["scripts/e2e.sh".to_string()]);
+    }
+
+    #[test]
+    fn parse_config_with_run_watch_section() {
+        let toml = minimal_v0_2_0()
+            + "[run.watch]\ninclude = [\"programs/**/guest/**\"]\nexclude = [\"**/*.md\", \"Cargo.lock\"]\ndebounce_ms = 1500\n";
+        let cfg = parse_config(&toml).expect("parse");
+        assert_eq!(
+            cfg.run.watch.include,
+            vec!["programs/**/guest/**".to_string()]
+        );
+        assert_eq!(
+            cfg.run.watch.exclude,
+            vec!["**/*.md".to_string(), "Cargo.lock".to_string()]
+        );
+        assert_eq!(cfg.run.watch.debounce_ms, Some(1500));
+    }
+
+    #[test]
+    fn parse_config_run_watch_rejects_empty_glob() {
+        // An empty pattern normalizes to match-all; an empty `exclude` would
+        // silently suppress every watch trigger, so it's rejected at parse.
+        let toml = minimal_v0_2_0() + "[run.watch]\nexclude = [\"\"]\n";
+        let err = parse_config(&toml).unwrap_err();
+        assert!(err.to_string().contains("must not be empty"), "{err}");
+    }
+
+    #[test]
+    fn parse_config_run_watch_rejects_negative_debounce() {
+        let toml = minimal_v0_2_0() + "[run.watch]\ndebounce_ms = -5\n";
+        let err = parse_config(&toml).unwrap_err();
+        assert!(err.to_string().contains("debounce_ms"), "{err}");
+    }
+
+    #[test]
+    fn run_watch_round_trips_through_parse_serialize() {
+        let toml = minimal_v0_2_0()
+            + "[run.watch]\ninclude = [\"src/**\"]\nexclude = [\"**/target/**\"]\ndebounce_ms = 750\n";
+        let cfg1 = parse_config(&toml).expect("parse");
+        let serialized = serialize_config(&cfg1).expect("serialize");
+        let cfg2 = parse_config(&serialized).expect("re-parse");
+        assert_eq!(cfg2.run.watch.include, vec!["src/**".to_string()]);
+        assert_eq!(cfg2.run.watch.exclude, vec!["**/target/**".to_string()]);
+        assert_eq!(cfg2.run.watch.debounce_ms, Some(750));
     }
 
     #[test]
