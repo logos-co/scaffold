@@ -28,7 +28,6 @@ use crate::state::{read_basecamp_state, write_basecamp_state};
 use crate::DynResult;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields wired up in later phases
 pub(crate) enum BasecampAction {
     Setup,
     Modules {
@@ -1084,14 +1083,7 @@ fn run_build_portable_nix(
 ) -> DynResult<Vec<PathBuf>> {
     println!("building {flake_ref}");
     let mut cmd = Command::new("nix");
-    match &inv.cwd_override {
-        Some(cwd) => {
-            cmd.current_dir(cwd);
-        }
-        None => {
-            cmd.current_dir(project_root);
-        }
-    }
+    cmd.current_dir(inv.cwd_override.as_deref().unwrap_or(project_root));
     for a in &inv.args {
         cmd.arg(a);
     }
