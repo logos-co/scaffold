@@ -611,12 +611,9 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
             ModuleRole::Project => "project",
             ModuleRole::Dependency => "dependency",
         };
-        let path = format!("modules.{name}");
         let table = ensure_subtable(&mut doc, "modules", name);
         table["flake"] = value(&entry.flake);
         table["role"] = value(role_str);
-        // Defensive: the function's check above already covered both fields.
-        let _ = path;
     }
 
     // [wallet]

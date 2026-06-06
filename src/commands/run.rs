@@ -134,15 +134,15 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
         }
     }
 
-    // Step 1: Build (chains setup internally)
+    // Build (chains setup internally)
     println!("[1/{total_steps}] Building...");
     cmd_build_shortcut(None, false)?;
 
-    // Step 2: Build IDL (no-op for non-lez-framework projects)
+    // Build IDL (no-op for non-lez-framework projects)
     println!("[2/{total_steps}] Building IDL...");
     build_idl_for_current_project()?;
 
-    // Step 3: Reset OR ensure localnet.
+    // Reset OR ensure localnet.
     if effective_reset {
         println!("[3/{total_steps}] Resetting localnet (wipes sequencer + wallet)...");
         reset_for_run(project, params.localnet_timeout_sec)?;
@@ -164,7 +164,7 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
         ensure_localnet(project, params.localnet_timeout_sec)?;
     }
 
-    // Step 4: Wallet topup
+    // Wallet topup
     println!("[4/{total_steps}] Topping up wallet...");
     let outcome = cmd_wallet_topup_inner(project, None, false, false)?;
     if let TopupOutcome::ConfirmationTimeout { message } = outcome {
@@ -175,7 +175,7 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
         );
     }
 
-    // Step 5: Deploy (idempotent: skip when guest .bin + IDL + deploy
+    // Deploy (idempotent: skip when guest .bin + IDL + deploy
     // config hashes match the prior deploy AND the sequencer is the same
     // instance that received it. A `lgs localnet stop && start` cycle
     // changes the sequencer PID and wipes on-chain state, so PID equality
@@ -211,7 +211,7 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
     // here so the per-hook loop doesn't multiply latency by hook count.
     let deployed = collect_deployed_programs(project, deploy_skipped)?;
 
-    // Step 6: Post-deploy hooks (or summary)
+    // Post-deploy hooks (or summary)
     if has_hooks {
         let n = params.hooks.len();
         println!("[6/{total_steps}] Running {n} post-deploy hook(s)...");

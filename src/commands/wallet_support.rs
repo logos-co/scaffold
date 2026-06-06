@@ -68,7 +68,7 @@ fn read_wallet_config(wallet_home: &Path) -> DynResult<(PathBuf, Value)> {
         // Legacy: older `setup` runs wrote "config.json" instead of
         // "wallet_config.json". Re-run `logos-scaffold setup` to migrate.
         eprintln!(
-            "warning: found legacy wallet config '{}';              re-run `logos-scaffold setup` to migrate to '{}'.",
+            "warning: found legacy wallet config '{}'; re-run `logos-scaffold setup` to migrate to '{}'.",
             WALLET_CONFIG_FALLBACK,
             WALLET_CONFIG_PRIMARY,
         );
