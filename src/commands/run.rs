@@ -259,11 +259,6 @@ fn reset_for_run(project: &Project, verify_timeout_sec: u64) -> DynResult<()> {
     Ok(())
 }
 
-/// Re-seed the project's default wallet after `cmd_localnet_reset` wiped
-/// it. Reuses the same primitives `cmd_setup` calls so the resulting
-/// `wallet.state` is byte-equivalent to a fresh `lgs setup`. Extracted as
-/// its own helper so the byte-equivalence test can drive it directly
-/// without booting a real sequencer.
 fn watch_loop(project: &Project, params: &PipelineParams, debounce_ms: u64) -> DynResult<()> {
     let (tx, rx) = mpsc::channel();
     let mut watcher = notify::recommended_watcher(move |res| {
@@ -482,6 +477,11 @@ fn segment_match(pat: &[u8], seg: &[u8]) -> bool {
     p == pat.len()
 }
 
+/// Re-seed the project's default wallet after `cmd_localnet_reset` wiped
+/// it. Reuses the same primitives `cmd_setup` calls so the resulting
+/// `wallet.state` is byte-equivalent to a fresh `lgs setup`. Extracted as
+/// its own helper so the byte-equivalence test can drive it directly
+/// without booting a real sequencer.
 fn reseed_after_wipe(project: &Project) -> DynResult<()> {
     let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
     let wallet_home = project.root.join(&project.config.wallet_home_dir);
