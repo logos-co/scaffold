@@ -247,37 +247,35 @@ impl OldSchemaMarkers {
 /// every variant we detect here, so the user-facing error in
 /// `detect_old_schema` does not enumerate them.
 pub(crate) fn detect_old_schema_markers(doc: &DocumentMut, version: &str) -> OldSchemaMarkers {
-    let mut m = OldSchemaMarkers::default();
-
-    // Old version stamp. Other version mismatches (prerelease tags, hand-edits)
-    // are caught downstream in `parse_config` with a more specific "this build
-    // expects X" message; `init`'s migrator bumps the version regardless of
-    // origin.
-    m.version_stale = version != SCAFFOLD_TOML_SCHEMA_VERSION
-        && (version.starts_with("0.1.") || version == "0.1" || version == "0.0");
-
     let repos_table = doc.get("repos").and_then(Item::as_table);
-    // [repos.lssa] — pre-spel-era alias for [repos.lez].
-    m.has_lssa = repos_table.is_some_and(|t| t.get("lssa").is_some());
-    // [repos.{lez,spel}].url — dropped in 0.2.0; source is the single field.
-    m.has_repo_url = ["lez", "spel"].iter().any(|name| {
-        repos_table
-            .and_then(|t| t.get(name).and_then(Item::as_table))
-            .is_some_and(|tbl| tbl.get("url").is_some())
-    });
     let basecamp_table = doc.get("basecamp").and_then(Item::as_table);
-    // Old [basecamp] shape: pin / source / lgpm_flake at the root.
-    m.has_old_basecamp_keys = basecamp_table.is_some_and(|t| {
-        ["pin", "source", "lgpm_flake"]
-            .iter()
-            .any(|k| t.get(k).is_some())
-    });
-    // [basecamp.modules.*] — moved to [modules.*].
-    m.has_old_basecamp_modules = basecamp_table
-        .and_then(|t| t.get("modules").and_then(Item::as_table))
-        .is_some_and(|m| m.iter().next().is_some());
 
-    m
+    OldSchemaMarkers {
+        // Old version stamp. Other version mismatches (prerelease tags,
+        // hand-edits) are caught downstream in `parse_config` with a more
+        // specific "this build expects X" message; `init`'s migrator bumps the
+        // version regardless of origin.
+        version_stale: version != SCAFFOLD_TOML_SCHEMA_VERSION
+            && (version.starts_with("0.1.") || version == "0.1" || version == "0.0"),
+        // [repos.lssa] — pre-spel-era alias for [repos.lez].
+        has_lssa: repos_table.is_some_and(|t| t.get("lssa").is_some()),
+        // [repos.{lez,spel}].url — dropped in 0.2.0; source is the single field.
+        has_repo_url: ["lez", "spel"].iter().any(|name| {
+            repos_table
+                .and_then(|t| t.get(name).and_then(Item::as_table))
+                .is_some_and(|tbl| tbl.get("url").is_some())
+        }),
+        // Old [basecamp] shape: pin / source / lgpm_flake at the root.
+        has_old_basecamp_keys: basecamp_table.is_some_and(|t| {
+            ["pin", "source", "lgpm_flake"]
+                .iter()
+                .any(|k| t.get(k).is_some())
+        }),
+        // [basecamp.modules.*] — moved to [modules.*].
+        has_old_basecamp_modules: basecamp_table
+            .and_then(|t| t.get("modules").and_then(Item::as_table))
+            .is_some_and(|m| m.iter().next().is_some()),
+    }
 }
 
 /// Reject pre-0.2.0 schemas with a one-line, action-only error pointing at

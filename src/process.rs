@@ -369,124 +369,6 @@ fn unix_to_ymdhms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
     (y, m, d, h, mi, se)
 }
 
-#[cfg(test)]
-mod logged_tests {
-    use super::*;
-
-    #[test]
-    fn fmt_duration_short_secs() {
-        assert_eq!(fmt_duration(std::time::Duration::from_millis(500)), "0.5s");
-        assert_eq!(fmt_duration(std::time::Duration::from_secs(37)), "37.0s");
-    }
-
-    #[test]
-    fn fmt_duration_rounds_instead_of_truncating() {
-        // R-S2: previously we floored via `subsec_millis() / 100`, so 499ms
-        // rendered as "0.4s" (floor of 4.99 → 4). Round to nearest decisecond.
-        assert_eq!(fmt_duration(std::time::Duration::from_millis(499)), "0.5s");
-        assert_eq!(fmt_duration(std::time::Duration::from_millis(949)), "0.9s");
-        assert_eq!(fmt_duration(std::time::Duration::from_millis(950)), "1.0s");
-    }
-
-    #[test]
-    fn fmt_duration_minutes() {
-        assert_eq!(fmt_duration(std::time::Duration::from_secs(65)), "1m05s");
-        assert_eq!(fmt_duration(std::time::Duration::from_secs(3601)), "60m01s");
-    }
-
-    #[test]
-    fn is_truthy_env_value_accepts_only_one_and_true() {
-        use std::ffi::OsStr;
-        // R-S1: previously "any non-empty, non-zero value" was truthy, so
-        // `LOGOS_SCAFFOLD_PRINT_OUTPUT=false` surprisingly enabled streaming.
-        assert!(is_truthy_env_value(OsStr::new("1")));
-        assert!(is_truthy_env_value(OsStr::new("true")));
-        assert!(is_truthy_env_value(OsStr::new("TRUE")));
-        assert!(is_truthy_env_value(OsStr::new("True")));
-        assert!(!is_truthy_env_value(OsStr::new("0")));
-        assert!(!is_truthy_env_value(OsStr::new("")));
-        assert!(!is_truthy_env_value(OsStr::new("false")));
-        assert!(!is_truthy_env_value(OsStr::new("no")));
-        assert!(!is_truthy_env_value(OsStr::new("yes")));
-        assert!(!is_truthy_env_value(OsStr::new("on")));
-    }
-
-    #[test]
-    fn echo_guard_restores_previous_state_on_drop() {
-        // Verify the RAII guard's contract: capture-then-restore, so a `?`
-        // propagation inside a `--json` block never leaves echo permanently
-        // suppressed for subsequent commands. The guard captures the *current*
-        // state at construction (not a hardcoded `true`), so nesting works.
-        // NOTE: `ECHO_COMMANDS` is a process-global; this test cannot be run
-        // concurrently with other tests that toggle it. The default is `true`.
-        let initial = ECHO_COMMANDS.load(Ordering::Relaxed);
-        // Force a known starting state.
-        ECHO_COMMANDS.store(true, Ordering::Relaxed);
-        {
-            let _g = EchoGuard::suppress();
-            assert!(!ECHO_COMMANDS.load(Ordering::Relaxed));
-        }
-        assert!(ECHO_COMMANDS.load(Ordering::Relaxed));
-        // Outer-suppressed → guard suppresses → drop restores to suppressed.
-        ECHO_COMMANDS.store(false, Ordering::Relaxed);
-        {
-            let _g = EchoGuard::suppress();
-            assert!(!ECHO_COMMANDS.load(Ordering::Relaxed));
-        }
-        assert!(!ECHO_COMMANDS.load(Ordering::Relaxed));
-        // Restore for any tests that follow.
-        ECHO_COMMANDS.store(initial, Ordering::Relaxed);
-    }
-
-    #[test]
-    fn unix_to_ymdhms_spot_checks() {
-        // 2020-01-01 00:00:00 UTC
-        assert_eq!(unix_to_ymdhms(1577836800), (2020, 1, 1, 0, 0, 0));
-        // 2024-06-15 12:34:56 UTC
-        assert_eq!(unix_to_ymdhms(1718454896), (2024, 6, 15, 12, 34, 56));
-    }
-
-    #[test]
-    fn derive_log_path_uses_scaffold_logs_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = derive_log_path(tmp.path(), "setup");
-        assert!(p.starts_with(tmp.path().join(".scaffold/logs")));
-        assert!(p.to_string_lossy().ends_with("-setup.log"));
-    }
-
-    #[test]
-    fn derive_log_path_includes_millisecond_suffix_in_stamp() {
-        // R-C1: two calls within the same second must produce different
-        // filenames. Millis granularity gives us 1000x the headroom before
-        // two truly-simultaneous calls collide on File::create truncation.
-        let tmp = tempfile::tempdir().unwrap();
-        let p = derive_log_path(tmp.path(), "install");
-        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap();
-        // Expected shape: YYYYMMDD-HHMMSS-mmm-<command>
-        //   parts[0] = YYYYMMDD, parts[1] = HHMMSS,
-        //   parts[2] = mmm,      parts[3] = command
-        let parts: Vec<&str> = stem.split('-').collect();
-        assert!(
-            parts.len() >= 4,
-            "expected 4 dash-separated segments, got: {stem}"
-        );
-        assert_eq!(
-            parts[1].len(),
-            6,
-            "HHMMSS should be 6 chars, got {:?} in {stem}",
-            parts[1]
-        );
-        assert_eq!(
-            parts[2].len(),
-            3,
-            "millis should be 3 digits, got {:?} in {stem}",
-            parts[2]
-        );
-        assert!(parts[2].chars().all(|c| c.is_ascii_digit()));
-        assert_eq!(parts[3], "install");
-    }
-}
-
 pub(crate) fn run_capture(cmd: &mut Command, label: &str) -> DynResult<Captured> {
     if should_echo() {
         println!("$ {}", render_command(cmd));
@@ -676,4 +558,122 @@ pub(crate) fn which(binary: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod logged_tests {
+    use super::*;
+
+    #[test]
+    fn fmt_duration_short_secs() {
+        assert_eq!(fmt_duration(std::time::Duration::from_millis(500)), "0.5s");
+        assert_eq!(fmt_duration(std::time::Duration::from_secs(37)), "37.0s");
+    }
+
+    #[test]
+    fn fmt_duration_rounds_instead_of_truncating() {
+        // R-S2: previously we floored via `subsec_millis() / 100`, so 499ms
+        // rendered as "0.4s" (floor of 4.99 → 4). Round to nearest decisecond.
+        assert_eq!(fmt_duration(std::time::Duration::from_millis(499)), "0.5s");
+        assert_eq!(fmt_duration(std::time::Duration::from_millis(949)), "0.9s");
+        assert_eq!(fmt_duration(std::time::Duration::from_millis(950)), "1.0s");
+    }
+
+    #[test]
+    fn fmt_duration_minutes() {
+        assert_eq!(fmt_duration(std::time::Duration::from_secs(65)), "1m05s");
+        assert_eq!(fmt_duration(std::time::Duration::from_secs(3601)), "60m01s");
+    }
+
+    #[test]
+    fn is_truthy_env_value_accepts_only_one_and_true() {
+        use std::ffi::OsStr;
+        // R-S1: previously "any non-empty, non-zero value" was truthy, so
+        // `LOGOS_SCAFFOLD_PRINT_OUTPUT=false` surprisingly enabled streaming.
+        assert!(is_truthy_env_value(OsStr::new("1")));
+        assert!(is_truthy_env_value(OsStr::new("true")));
+        assert!(is_truthy_env_value(OsStr::new("TRUE")));
+        assert!(is_truthy_env_value(OsStr::new("True")));
+        assert!(!is_truthy_env_value(OsStr::new("0")));
+        assert!(!is_truthy_env_value(OsStr::new("")));
+        assert!(!is_truthy_env_value(OsStr::new("false")));
+        assert!(!is_truthy_env_value(OsStr::new("no")));
+        assert!(!is_truthy_env_value(OsStr::new("yes")));
+        assert!(!is_truthy_env_value(OsStr::new("on")));
+    }
+
+    #[test]
+    fn echo_guard_restores_previous_state_on_drop() {
+        // Verify the RAII guard's contract: capture-then-restore, so a `?`
+        // propagation inside a `--json` block never leaves echo permanently
+        // suppressed for subsequent commands. The guard captures the *current*
+        // state at construction (not a hardcoded `true`), so nesting works.
+        // NOTE: `ECHO_COMMANDS` is a process-global; this test cannot be run
+        // concurrently with other tests that toggle it. The default is `true`.
+        let initial = ECHO_COMMANDS.load(Ordering::Relaxed);
+        // Force a known starting state.
+        ECHO_COMMANDS.store(true, Ordering::Relaxed);
+        {
+            let _g = EchoGuard::suppress();
+            assert!(!ECHO_COMMANDS.load(Ordering::Relaxed));
+        }
+        assert!(ECHO_COMMANDS.load(Ordering::Relaxed));
+        // Outer-suppressed → guard suppresses → drop restores to suppressed.
+        ECHO_COMMANDS.store(false, Ordering::Relaxed);
+        {
+            let _g = EchoGuard::suppress();
+            assert!(!ECHO_COMMANDS.load(Ordering::Relaxed));
+        }
+        assert!(!ECHO_COMMANDS.load(Ordering::Relaxed));
+        // Restore for any tests that follow.
+        ECHO_COMMANDS.store(initial, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn unix_to_ymdhms_spot_checks() {
+        // 2020-01-01 00:00:00 UTC
+        assert_eq!(unix_to_ymdhms(1577836800), (2020, 1, 1, 0, 0, 0));
+        // 2024-06-15 12:34:56 UTC
+        assert_eq!(unix_to_ymdhms(1718454896), (2024, 6, 15, 12, 34, 56));
+    }
+
+    #[test]
+    fn derive_log_path_uses_scaffold_logs_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = derive_log_path(tmp.path(), "setup");
+        assert!(p.starts_with(tmp.path().join(".scaffold/logs")));
+        assert!(p.to_string_lossy().ends_with("-setup.log"));
+    }
+
+    #[test]
+    fn derive_log_path_includes_millisecond_suffix_in_stamp() {
+        // R-C1: two calls within the same second must produce different
+        // filenames. Millis granularity gives us 1000x the headroom before
+        // two truly-simultaneous calls collide on File::create truncation.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = derive_log_path(tmp.path(), "install");
+        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap();
+        // Expected shape: YYYYMMDD-HHMMSS-mmm-<command>
+        //   parts[0] = YYYYMMDD, parts[1] = HHMMSS,
+        //   parts[2] = mmm,      parts[3] = command
+        let parts: Vec<&str> = stem.split('-').collect();
+        assert!(
+            parts.len() >= 4,
+            "expected 4 dash-separated segments, got: {stem}"
+        );
+        assert_eq!(
+            parts[1].len(),
+            6,
+            "HHMMSS should be 6 chars, got {:?} in {stem}",
+            parts[1]
+        );
+        assert_eq!(
+            parts[2].len(),
+            3,
+            "millis should be 3 digits, got {:?} in {stem}",
+            parts[2]
+        );
+        assert!(parts[2].chars().all(|c| c.is_ascii_digit()));
+        assert_eq!(parts[3], "install");
+    }
 }

@@ -543,6 +543,7 @@ fn nix_develop_target(project_root: &Path, flake: &str, dev_shell: Option<&str>)
 ///      inherited (`inherited(key)`), so basecamp's own paths aren't clobbered.
 ///   2. `[basecamp.env]` — global plain replace.
 ///   3. `[basecamp.profiles.<profile>.env]` — per-profile plain replace (wins).
+///
 /// `inherited` is injected (real caller passes `std::env::var_os`) so the
 /// append semantics are unit-testable without touching the process environment.
 fn apply_launch_env_overrides(
@@ -3081,7 +3082,7 @@ mod tests {
         let real = root.join("real-mod");
         fs::create_dir_all(&real).unwrap();
         fs::write(real.join("flake.nix"), b"{}").unwrap();
-        let answers_owned = vec![
+        let answers_owned = [
             (
                 format!("path:{}", root.join("target").display()),
                 vec!["lgx"],
