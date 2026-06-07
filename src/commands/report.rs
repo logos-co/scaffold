@@ -1208,9 +1208,7 @@ fn redact_url_credentials(line: &str) -> (String, usize) {
             .unwrap_or(after_scheme.len());
 
         let url_slice = &after_scheme[..end];
-        let authority_end = url_slice
-            .find(|c: char| matches!(c, '/' | '?' | '#'))
-            .unwrap_or(url_slice.len());
+        let authority_end = url_slice.find(['/', '?', '#']).unwrap_or(url_slice.len());
         let authority = &url_slice[..authority_end];
         let path_and_query = &url_slice[authority_end..];
 

@@ -389,7 +389,7 @@ fn cmd_basecamp_launch(project: Project, profile: String) -> DynResult<()> {
         &state,
         &cache_root,
         &profiles_root,
-        &[profile.clone()],
+        std::slice::from_ref(&profile),
     )?;
 
     // Variant pre-flight: warn if any installed module is missing the
@@ -1230,8 +1230,7 @@ fn cmd_basecamp_modules(
         out
     } else {
         let cache_root_first = first_path_component(&project.config.cache_root);
-        let mut skip_subdirs: Vec<&str> =
-            BASECAMP_AUTODISCOVER_SKIP_SUBDIRS.iter().copied().collect();
+        let mut skip_subdirs: Vec<&str> = BASECAMP_AUTODISCOVER_SKIP_SUBDIRS.to_vec();
         if let Some(c) = cache_root_first.as_deref() {
             if !skip_subdirs.contains(&c) {
                 skip_subdirs.push(c);
@@ -2256,7 +2255,7 @@ pub(crate) struct ModuleDriftReport {
 /// rather than via this doctor row.
 pub(crate) fn compute_module_drift(project: &Project) -> DynResult<ModuleDriftReport> {
     let cache_root_first = first_path_component(&project.config.cache_root);
-    let mut skip_subdirs: Vec<&str> = BASECAMP_AUTODISCOVER_SKIP_SUBDIRS.iter().copied().collect();
+    let mut skip_subdirs: Vec<&str> = BASECAMP_AUTODISCOVER_SKIP_SUBDIRS.to_vec();
     if let Some(c) = cache_root_first.as_deref() {
         if !skip_subdirs.contains(&c) {
             skip_subdirs.push(c);
@@ -3497,7 +3496,7 @@ mod tests {
         let mut bob_env = launch_env(Path::new("/p/bob"), "bob");
         apply_launch_env_overrides(&mut bob_env, &cfg, "bob", |_| None);
         assert!(
-            bob_env.get("PORT").is_none(),
+            !bob_env.contains_key("PORT"),
             "alice's profile env must not leak to bob"
         );
     }

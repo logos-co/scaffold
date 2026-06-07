@@ -278,7 +278,7 @@ pub(crate) fn print_rows(rows: &[CheckRow]) {
 }
 
 pub(crate) fn one_line(text: &str) -> String {
-    text.replace('\n', " ").replace('\r', " ")
+    text.replace(['\n', '\r'], " ")
 }
 
 #[cfg(test)]

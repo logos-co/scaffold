@@ -412,9 +412,7 @@ mod tests {
         if bin {
             // discover_program_binaries requires a `riscv32im*` segment
             // and prefers paths containing `release`.
-            let bin_dir = root.join(format!(
-                "target/riscv-guest/riscv32im-risc0-zkvm-elf/release"
-            ));
+            let bin_dir = root.join("target/riscv-guest/riscv32im-risc0-zkvm-elf/release");
             std::fs::create_dir_all(&bin_dir).unwrap();
             std::fs::write(bin_dir.join(format!("{stem}.bin")), b"\x7fELF...").unwrap();
         }

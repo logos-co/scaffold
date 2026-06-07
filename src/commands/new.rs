@@ -205,7 +205,7 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
         cleanup_lez_hello_artifacts(target)?;
     }
     write_text(&target.join("scaffold.toml"), &serialize_config(&cfg)?)?;
-    apply_skills(&target)?;
+    apply_skills(target)?;
 
     let old_getting_started = target.join("GETTING_STARTED.md");
     if old_getting_started.exists() {

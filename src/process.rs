@@ -301,7 +301,7 @@ pub(crate) fn rotate_logs(project_root: &Path, command: &str, keep: usize) {
                 .map(|t| (t, e.path()))
         })
         .collect();
-    matching.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+    matching.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     for (_, path) in matching.into_iter().skip(keep) {
         let _ = fs::remove_file(path);
     }
