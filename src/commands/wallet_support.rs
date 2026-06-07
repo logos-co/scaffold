@@ -75,7 +75,7 @@ fn read_wallet_config(wallet_home: &Path) -> DynResult<(PathBuf, Value)> {
         fallback
     } else {
         return Err(anyhow::anyhow!(
-            "missing wallet config at \'{}\'. Run `logos-scaffold setup`.",
+            "missing wallet config at '{}'. Run `logos-scaffold setup`.",
             wallet_home.join(WALLET_CONFIG_PRIMARY).display()
         ));
     };
