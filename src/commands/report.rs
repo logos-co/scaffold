@@ -604,8 +604,7 @@ fn collect_log_files(
                     .to_string(),
             });
             warnings.push(format!(
-                "skipped {} because high-risk markers remained after sanitization",
-                rel
+                "skipped {rel} because high-risk markers remained after sanitization"
             ));
             continue;
         }

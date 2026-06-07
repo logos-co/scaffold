@@ -599,7 +599,7 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 // "error: error: ..." when entry_main adds its own prefix.
                 let msg = err.to_string();
                 let msg = msg.strip_prefix("error: ").unwrap_or(&msg);
-                return Err(anyhow!("{}", msg));
+                return Err(anyhow!("{msg}"));
             }
         },
     };

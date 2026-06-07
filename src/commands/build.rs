@@ -25,10 +25,7 @@ pub(crate) fn cmd_build_shortcut(project_dir: Option<PathBuf>, prebuilt: bool) -
                 generate_clients_from_current_idl()?;
             }
             other => {
-                println!(
-                    "Skipping IDL/client generation for framework kind `{}`",
-                    other
-                );
+                println!("Skipping IDL/client generation for framework kind `{other}`");
             }
         }
         // Guest building is intentionally framework-agnostic: any project with
