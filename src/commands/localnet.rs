@@ -623,6 +623,7 @@ fn read_log_tail(log_path: &Path, tail: usize) -> String {
 
 // ─── reset ───────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_localnet_reset_dry_run(
     project: &Project,
     lez: &Path,
@@ -725,6 +726,7 @@ fn cmd_localnet_reset_dry_run(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_localnet_reset(
     project: &Project,
     lez: &Path,
