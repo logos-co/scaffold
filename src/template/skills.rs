@@ -128,11 +128,9 @@ fn parse_skill_frontmatter(raw: &str) -> DynResult<ParsedSkill> {
                 buf.push(' ');
             }
             buf.push_str(line.trim());
-        } else {
-            if in_description {
-                description = Some(std::mem::take(&mut buf));
-                in_description = false;
-            }
+        } else if in_description {
+            description = Some(std::mem::take(&mut buf));
+            in_description = false;
         }
     }
     if in_description {
