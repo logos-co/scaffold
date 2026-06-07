@@ -248,7 +248,10 @@ fn cmd_localnet_start(
             sequencer_cmd.env("RISC0_SERVER_PATH", &r0vm_path);
         } else {
             eprintln!(
-                "warning: RISC0_SERVER_PATH is not set and r0vm was not found in the                  rzup extensions directory for the LEZ-pinned risc0 version.                  If transaction execution fails, set RISC0_SERVER_PATH to the r0vm                  binary installed by rzup."
+                "warning: RISC0_SERVER_PATH is not set and r0vm was not found in the \
+                 rzup extensions directory for the LEZ-pinned risc0 version. \
+                 If transaction execution fails, set RISC0_SERVER_PATH to the r0vm \
+                 binary installed by rzup."
             );
         }
     }

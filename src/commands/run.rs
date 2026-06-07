@@ -535,7 +535,9 @@ fn collect_deployed_programs(project: &Project, skipped: bool) -> DynResult<Depl
     // causes post-deploy hooks to fail in confusing ways (issue #160).
     if !spel_bin.is_file() {
         eprintln!(
-            "warning: vendored spel binary not found at {}.              SCAFFOLD_PROGRAM_ID will be unset for all programs.              Run `lgs setup` to build spel.",
+            "warning: vendored spel binary not found at {}. \
+             SCAFFOLD_PROGRAM_ID will be unset for all programs. \
+             Run `lgs setup` to build spel.",
             spel_bin.display()
         );
     }
