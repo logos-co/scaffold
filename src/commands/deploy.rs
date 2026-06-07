@@ -308,20 +308,16 @@ fn resolve_selected_programs(
     requested_program: Option<String>,
     available_programs: &[String],
 ) -> DynResult<Vec<String>> {
-    if requested_program.is_none() {
+    let Some(raw) = requested_program else {
         return Ok(available_programs.to_vec());
-    }
+    };
 
-    let raw = requested_program.unwrap_or_default();
     let candidate = raw.trim().trim_end_matches(".bin").to_string();
     if candidate.is_empty() {
         bail!("program name cannot be empty");
     }
 
-    if available_programs
-        .iter()
-        .any(|program| program == &candidate)
-    {
+    if available_programs.contains(&candidate) {
         return Ok(vec![candidate]);
     }
 
