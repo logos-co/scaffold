@@ -278,7 +278,10 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
-fn parse_optional_project_path(args: &[String], usage_label: &str) -> DynResult<Option<PathBuf>> {
+pub(crate) fn parse_optional_project_path(
+    args: &[String],
+    usage_label: &str,
+) -> DynResult<Option<PathBuf>> {
     let mut project_dir: Option<PathBuf> = None;
 
     for arg in args {

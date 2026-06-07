@@ -1,10 +1,9 @@
 use std::fs;
-use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{anyhow, bail};
 
-use crate::commands::idl::build_idl_for_current_project;
+use crate::commands::idl::{build_idl_for_current_project, parse_optional_project_path};
 use crate::constants::FRAMEWORK_KIND_LEZ_FRAMEWORK;
 use crate::model::Project;
 use crate::process::run_checked;
@@ -88,21 +87,4 @@ fn generate_clients_from_project_idl(project: &Project) -> DynResult<()> {
     )?;
 
     Ok(())
-}
-
-fn parse_optional_project_path(args: &[String], usage_label: &str) -> DynResult<Option<PathBuf>> {
-    let mut project_dir: Option<PathBuf> = None;
-
-    for arg in args {
-        if arg.starts_with("--") {
-            bail!("unknown flag for `{usage_label}`: {arg}");
-        }
-        if project_dir.is_none() {
-            project_dir = Some(PathBuf::from(arg));
-        } else {
-            bail!("unexpected argument `{arg}` for `{usage_label}`");
-        }
-    }
-
-    Ok(project_dir)
 }
