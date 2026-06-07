@@ -222,14 +222,13 @@ fn extract_tarball(bytes: &[u8], dest: &Path) -> DynResult<()> {
         // original layout — `unpack` will fall back to using `path`.
         components.next();
         let stripped: PathBuf = components.as_path().to_path_buf();
-        let target = if stripped.as_os_str().is_empty() {
+        if stripped.as_os_str().is_empty() {
             // Top-level directory entry itself; the strip leaves nothing to
             // create, and `entry.unpack` would otherwise try to write to
             // `dest` directly.
             continue;
-        } else {
-            dest.join(&stripped)
-        };
+        }
+        let target = dest.join(&stripped);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
