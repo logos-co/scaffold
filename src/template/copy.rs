@@ -15,9 +15,8 @@ pub(crate) fn patch_simple_tail_call_program_id(project_root: &Path) -> DynResul
 
     let content = fs::read_to_string(&path)?;
     let marker = "const HELLO_WORLD_PROGRAM_ID_HEX: &str =";
-    let marker_pos = match content.find(marker) {
-        Some(pos) => pos,
-        None => return Ok(()),
+    let Some(marker_pos) = content.find(marker) else {
+        return Ok(());
     };
 
     let from_marker = &content[marker_pos..];

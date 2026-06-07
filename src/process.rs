@@ -515,9 +515,8 @@ pub(crate) fn pid_command(_pid: u32) -> Option<String> {
 }
 
 pub(crate) fn port_open(addr: &str) -> bool {
-    let parsed: SocketAddr = match addr.parse() {
-        Ok(v) => v,
-        Err(_) => return false,
+    let Ok(parsed) = addr.parse::<SocketAddr>() else {
+        return false;
     };
     TcpStream::connect_timeout(&parsed, Duration::from_millis(500)).is_ok()
 }

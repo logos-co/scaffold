@@ -190,11 +190,10 @@ pub(crate) fn save_state(project: &Project, state: &RunDeployState) -> DynResult
     // between write and rename leaves the prior cache intact rather than
     // truncating it. Same parent dir so rename(2) stays atomic across the
     // same filesystem.
-    let tmp_name = match path.file_name().and_then(|n| n.to_str()) {
-        Some(n) => format!("{n}.tmp"),
-        None => return Err(anyhow::anyhow!("invalid state path: {}", path.display())),
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return Err(anyhow::anyhow!("invalid state path: {}", path.display()));
     };
-    let tmp = path.with_file_name(tmp_name);
+    let tmp = path.with_file_name(format!("{name}.tmp"));
     std::fs::write(&tmp, &bytes).with_context(|| format!("write {}", tmp.display()))?;
     std::fs::rename(&tmp, &path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
