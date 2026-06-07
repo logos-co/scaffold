@@ -1463,7 +1463,7 @@ fn pack_staging_dir(staging_dir: &Path, output_path: &Path) -> DynResult<()> {
     }
 
     let encoder = archive.into_inner()?;
-    let _ = encoder.finish()?;
+    encoder.finish()?;
     Ok(())
 }
 
