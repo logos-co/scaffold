@@ -2543,16 +2543,20 @@ fn collect_api_headers(alice_modules: &Path, module_name: &str) -> Vec<PathBuf> 
         module_dir.join("interfaces"),
     ];
     for dir in candidates {
-        if let Ok(entries) = fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                        if ext.eq_ignore_ascii_case("h") || ext.eq_ignore_ascii_case("hpp") {
-                            out.push(path);
-                        }
-                    }
-                }
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let is_header = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("h") || ext.eq_ignore_ascii_case("hpp"));
+            if is_header {
+                out.push(path);
             }
         }
     }
