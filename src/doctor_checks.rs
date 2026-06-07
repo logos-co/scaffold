@@ -81,13 +81,11 @@ pub(crate) fn check_repo(name: &str, path: &Path, pin: &str) -> CheckRow {
             };
 
             let mut detail = format!("pin={pin}, head={head}");
-            if let Ok(clean) = git_clean(path) {
-                if !clean {
-                    if status == CheckStatus::Pass {
-                        status = CheckStatus::Warn;
-                    }
-                    detail.push_str("; working tree dirty");
+            if let Ok(false) = git_clean(path) {
+                if status == CheckStatus::Pass {
+                    status = CheckStatus::Warn;
                 }
+                detail.push_str("; working tree dirty");
             }
 
             CheckRow {
