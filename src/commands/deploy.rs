@@ -507,8 +507,8 @@ pub(crate) enum DeployStatus {
 impl DeployStatus {
     pub(crate) fn label(&self) -> &'static str {
         match self {
-            DeployStatus::Submitted => "submitted",
-            DeployStatus::Failed => "failed",
+            Self::Submitted => "submitted",
+            Self::Failed => "failed",
         }
     }
 }

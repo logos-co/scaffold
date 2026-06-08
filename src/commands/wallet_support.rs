@@ -388,8 +388,8 @@ pub(crate) enum RpcReachabilityError {
 impl std::fmt::Display for RpcReachabilityError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RpcReachabilityError::Connectivity(msg) => write!(f, "{msg}"),
-            RpcReachabilityError::Other(msg) => write!(f, "{msg}"),
+            Self::Connectivity(msg) => write!(f, "{msg}"),
+            Self::Other(msg) => write!(f, "{msg}"),
         }
     }
 }
