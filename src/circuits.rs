@@ -220,7 +220,7 @@ fn extract_tarball(bytes: &[u8], dest: &Path) -> DynResult<()> {
         // ships without one (e.g. plain files at the root), preserve the
         // original layout — `unpack` will fall back to using `path`.
         components.next();
-        let stripped: PathBuf = components.as_path().to_path_buf();
+        let stripped = components.as_path().to_path_buf();
         if stripped.as_os_str().is_empty() {
             // Top-level directory entry itself; the strip leaves nothing to
             // create, and `entry.unpack` would otherwise try to write to
