@@ -270,25 +270,13 @@ pub(crate) fn is_confirmation_timeout_failure(text: &str) -> bool {
 }
 
 pub(crate) fn summarize_command_failure(stdout: &str, stderr: &str) -> String {
-    let stderr_line = stderr
+    stderr
         .lines()
+        .chain(stdout.lines())
         .map(str::trim)
         .find(|line| !line.is_empty())
-        .map(|line| line.to_string());
-    if let Some(line) = stderr_line {
-        return line;
-    }
-
-    let stdout_line = stdout
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(|line| line.to_string());
-    if let Some(line) = stdout_line {
-        return line;
-    }
-
-    "command failed without stderr output".to_string()
+        .map(str::to_string)
+        .unwrap_or_else(|| "command failed without stderr output".to_string())
 }
 
 pub(crate) fn extract_tx_identifier(stdout: &str, stderr: &str) -> Option<String> {

@@ -32,8 +32,8 @@ pub(crate) struct NewCommand {
 }
 
 pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
-    let template_variant = match cmd.template.as_str() {
-        FRAMEWORK_KIND_DEFAULT | FRAMEWORK_KIND_LEZ_FRAMEWORK => cmd.template.clone(),
+    let template_variant: &str = match cmd.template.as_str() {
+        FRAMEWORK_KIND_DEFAULT | FRAMEWORK_KIND_LEZ_FRAMEWORK => &cmd.template,
         other => {
             bail!("unsupported template `{other}`. Expected `default` or `lez-framework`.")
         }
@@ -51,7 +51,7 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
     // `--lez-path`) leaves a half-built project directory behind. The
     // `target.exists()` guard above guarantees we only delete a directory
     // we created ourselves in this run.
-    let result = cmd_new_inner(&cmd, &target, &template_variant);
+    let result = cmd_new_inner(&cmd, &target, template_variant);
     if result.is_err() {
         match fs::remove_dir_all(&target) {
             Ok(()) => {}
