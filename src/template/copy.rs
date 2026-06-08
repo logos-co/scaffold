@@ -44,21 +44,6 @@ pub(crate) fn patch_simple_tail_call_program_id(project_root: &Path) -> DynResul
     Ok(())
 }
 
-pub(crate) fn copy_dir_contents(src: &Path, dst: &Path) -> DynResult<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if from.is_dir() {
-            copy_dir_recursive(&from, &to)?;
-        } else {
-            fs::copy(&from, &to)?;
-        }
-    }
-    Ok(())
-}
-
 pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> DynResult<()> {
     if !src.exists() {
         bail!("copy source does not exist: {}", src.display());

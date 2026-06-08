@@ -17,7 +17,7 @@ use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, 
 use crate::project::default_cache_root;
 use crate::repo::{sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
 use crate::state::write_text;
-use crate::template::copy::{copy_dir_contents, patch_simple_tail_call_program_id};
+use crate::template::copy::{copy_dir_recursive, patch_simple_tail_call_program_id};
 use crate::template::project::{apply_overlay, OverlayRenderContext};
 use crate::template::skills::apply_skills;
 use crate::DynResult;
@@ -189,7 +189,7 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
         bail!("template not found at {}", template_root.display());
     }
 
-    copy_dir_contents(&template_root, target).context("failed to copy scaffold template")?;
+    copy_dir_recursive(&template_root, target).context("failed to copy scaffold template")?;
     if template_variant == FRAMEWORK_KIND_DEFAULT {
         patch_simple_tail_call_program_id(target)?;
     }
