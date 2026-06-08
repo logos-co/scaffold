@@ -563,6 +563,14 @@ struct BasecampDevelopArgs {
     dev_shell: Option<String>,
 }
 
+/// Passthrough args for `build idl` / `build client`: the `build` verb
+/// followed by an optional project path.
+fn build_args(project_path: Option<PathBuf>) -> Vec<String> {
+    let mut args = vec!["build".to_string()];
+    args.extend(project_path.map(|p| p.to_string_lossy().to_string()));
+    args
+}
+
 pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
     apply_quiet_from_env();
     let passthrough_start = leading_global_flags_end(&args);
@@ -618,16 +626,8 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
         }),
         Some(Commands::Setup(args)) => cmd_setup(args.prebuilt),
         Some(Commands::Build(args)) => match args.subcommand {
-            Some(BuildSubcommand::Idl(sub)) => cmd_idl(
-                &sub.project_path
-                    .map(|p| vec!["build".to_string(), p.to_string_lossy().to_string()])
-                    .unwrap_or_else(|| vec!["build".to_string()]),
-            ),
-            Some(BuildSubcommand::Client(sub)) => cmd_client(
-                &sub.project_path
-                    .map(|p| vec!["build".to_string(), p.to_string_lossy().to_string()])
-                    .unwrap_or_else(|| vec!["build".to_string()]),
-            ),
+            Some(BuildSubcommand::Idl(sub)) => cmd_idl(&build_args(sub.project_path)),
+            Some(BuildSubcommand::Client(sub)) => cmd_client(&build_args(sub.project_path)),
             None => cmd_build_shortcut(args.project_path, args.prebuilt),
         },
         Some(Commands::Deploy(args)) => cmd_deploy(args.program_name, args.program_path, args.json),
