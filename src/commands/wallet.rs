@@ -190,14 +190,13 @@ pub(crate) fn cmd_wallet_topup_inner(
     let resolved_to = resolve_wallet_address(address.as_deref(), default_address.as_deref())?;
     let sequencer_addr = wallet
         .sequencer_addr
-        .clone()
         .unwrap_or_else(|| default_sequencer_http_url_for_project(project));
     let wallet_home = wallet.wallet_home.as_os_str().to_string_lossy().to_string();
     let password_input = format!("{}\n", wallet_password());
 
     let mut preflight_command = Command::new(&wallet.wallet_binary);
     preflight_command
-        .env("NSSA_WALLET_HOME_DIR", wallet_home.clone())
+        .env("NSSA_WALLET_HOME_DIR", &wallet_home)
         .arg("account")
         .arg("get")
         .arg("--account-id")
@@ -205,7 +204,7 @@ pub(crate) fn cmd_wallet_topup_inner(
 
     let mut init_command = Command::new(&wallet.wallet_binary);
     init_command
-        .env("NSSA_WALLET_HOME_DIR", wallet_home.clone())
+        .env("NSSA_WALLET_HOME_DIR", &wallet_home)
         .arg("auth-transfer")
         .arg("init")
         .arg("--account-id")
@@ -213,7 +212,7 @@ pub(crate) fn cmd_wallet_topup_inner(
 
     let mut pinata_command = Command::new(&wallet.wallet_binary);
     pinata_command
-        .env("NSSA_WALLET_HOME_DIR", wallet_home.clone())
+        .env("NSSA_WALLET_HOME_DIR", &wallet_home)
         .arg("pinata")
         .arg("claim")
         .arg("--to")
