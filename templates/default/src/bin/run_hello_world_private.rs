@@ -23,7 +23,7 @@ async fn main() -> anyhow::Result<()> {
     let program = load_program(cli.program_path.as_deref(), HELLO_WORLD_ELF, "hello_world")?;
     let account_id = parse_account_id(&cli.account_id)?;
 
-    let greeting: Vec<u8> = vec![72, 111, 108, 97, 32, 109, 117, 110, 100, 111, 33];
+    let greeting = b"Hola mundo!".to_vec();
     let accounts = vec![PrivacyPreservingAccount::PrivateOwned(account_id)];
 
     let (response, _) = wallet_core
