@@ -1593,12 +1593,9 @@ fn resolve_manifest_dependencies(
 /// installs either (KISS); install overwrites both profiles in one pass.
 fn cmd_basecamp_install(project: Project, probe: &dyn LgxFlakeProbe) -> DynResult<()> {
     let state_path = project.root.join(".scaffold/state/basecamp.state");
-    let state = read_basecamp_state(&state_path)
-        .ok()
-        .filter(|s| !s.basecamp_bin.is_empty() && !s.lgpm_bin.is_empty())
-        .ok_or_else(|| {
-            anyhow::anyhow!("basecamp not set up yet; run: logos-scaffold basecamp setup")
-        })?;
+    let state = read_basecamp_state(&state_path).ok().ok_or_else(|| {
+        anyhow::anyhow!("basecamp not set up yet; run: logos-scaffold basecamp setup")
+    })?;
 
     if !Path::new(&state.basecamp_bin).exists() || !Path::new(&state.lgpm_bin).exists() {
         bail!("basecamp not set up yet; run: logos-scaffold basecamp setup");
