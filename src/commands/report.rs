@@ -880,7 +880,6 @@ fn tail_file_lines_lossy(path: &Path, tail: usize) -> DynResult<String> {
     let mut lines: VecDeque<Vec<u8>> = VecDeque::new();
 
     loop {
-        buf.clear();
         let read = reader
             .read_until(b'\n', &mut buf)
             .with_context(|| format!("failed to read bytes from {}", path.display()))?;
@@ -891,7 +890,7 @@ fn tail_file_lines_lossy(path: &Path, tail: usize) -> DynResult<String> {
         if lines.len() == tail {
             lines.pop_front();
         }
-        lines.push_back(buf.clone());
+        lines.push_back(std::mem::take(&mut buf));
     }
 
     let mut out = Vec::new();
