@@ -14,7 +14,9 @@ use crate::error::{LocalnetError, ResetError};
 use crate::model::{
     LocalnetLogsReport, LocalnetOwnership, LocalnetState, LocalnetStatusReport, Project,
 };
-use crate::process::{listener_pid, pid_alive, pid_command, pid_running, port_open, spawn_to_log};
+use crate::process::{
+    listener_pid, pid_alive, pid_command, pid_running, pid_text, port_open, spawn_to_log,
+};
 use crate::project::{
     ensure_dir_exists, find_project_root, load_project, resolve_cache_root, resolve_repo_path,
 };
@@ -141,9 +143,7 @@ fn cmd_localnet_stop_outside_project() -> DynResult<()> {
     }
 
     let listener_pid = listener_pid(default_port);
-    let pid_text = listener_pid
-        .map(|pid| pid.to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    let pid_text = pid_text(listener_pid);
 
     println!("listener detected on {default_addr} (pid={pid_text})");
     println!(
@@ -199,9 +199,7 @@ fn cmd_localnet_start(
 
     let existing_listener_pid = listener_pid(localnet_port);
     if port_open(localnet_addr) {
-        let pid_text = existing_listener_pid
-            .map(|pid| pid.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+        let pid_text = pid_text(existing_listener_pid);
         let mut message = format!(
             "cannot start localnet: port {localnet_port} is already in use (pid={pid_text})"
         );
@@ -364,10 +362,7 @@ fn cmd_localnet_stop(state_path: &Path, localnet_port: u16) -> DynResult<()> {
     }
 
     if report.listener_present {
-        let pid_text = report
-            .listener_pid
-            .map(|pid| pid.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+        let pid_text = pid_text(report.listener_pid);
         println!(
             "foreign listener detected on {localnet_addr} (pid={pid_text}); not stopping unmanaged process"
         );
@@ -403,10 +398,7 @@ fn cmd_localnet_status(
 
     let sequencer_url = format!("http://{localnet_addr}");
     if report.listener_present {
-        let pid_text = report
-            .listener_pid
-            .map(|pid| pid.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+        let pid_text = pid_text(report.listener_pid);
         println!("listener {sequencer_url}: reachable (pid={pid_text})");
     } else {
         println!("listener {sequencer_url}: not reachable");

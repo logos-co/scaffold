@@ -22,6 +22,7 @@ use crate::commands::setup::ensure_default_wallet_seeded;
 use crate::commands::wallet::{cmd_wallet_topup_inner, TopupOutcome};
 use crate::constants::{DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, SPEL_BIN_REL_PATH};
 use crate::model::{LocalnetOwnership, Project, RunProfile};
+use crate::process::pid_text;
 use crate::project::{load_project, resolve_repo_path, run_in_project_dir};
 use crate::state::prepare_wallet_home;
 use crate::DynResult;
@@ -638,18 +639,12 @@ fn ensure_localnet(project: &Project, timeout_sec: u64) -> DynResult<()> {
     let status = build_localnet_status_for_project(project);
     match status.ownership {
         LocalnetOwnership::Managed if status.ready => {
-            let pid_display = status
-                .tracked_pid
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| "unknown".to_string());
+            let pid_display = pid_text(status.tracked_pid);
             println!("      localnet already running (sequencer pid={pid_display})");
             Ok(())
         }
         LocalnetOwnership::Foreign => {
-            let pid_display = status
-                .listener_pid
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| "unknown".to_string());
+            let pid_display = pid_text(status.listener_pid);
             bail!(
                 "localnet port is in use by another process (pid={pid_display}).\n\
                  This may be a sequencer from another project.\n\

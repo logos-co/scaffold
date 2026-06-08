@@ -534,6 +534,12 @@ pub(crate) fn listener_pid(_port: u16) -> Option<u32> {
     None
 }
 
+/// Render an optional pid for user-facing messages, falling back to `unknown`
+/// when the pid couldn't be determined.
+pub(crate) fn pid_text(pid: Option<u32>) -> String {
+    pid.map_or_else(|| "unknown".to_string(), |pid| pid.to_string())
+}
+
 pub(crate) fn which(binary: &str) -> Option<PathBuf> {
     let paths = env::var_os("PATH")?;
     for p in env::split_paths(&paths) {
