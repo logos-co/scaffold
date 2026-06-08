@@ -584,7 +584,7 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
         return cmd_wallet(action);
     }
     if let Some(spel_args) = spel_passthrough_args(&args, passthrough_start)? {
-        return cmd_spel(spel_args);
+        return cmd_spel(&spel_args);
     }
 
     let cli = match Cli::try_parse_from(&args) {
