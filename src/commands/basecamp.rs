@@ -1381,16 +1381,16 @@ pub(crate) fn derive_module_name(
         }
         BasecampSource::Path(p) => {
             let pb = PathBuf::from(p);
-            let sibling_metadata = pb.parent().map(|d| d.join("metadata.json"));
-            if let Some(metadata_path) = &sibling_metadata {
-                if let Ok(text) = fs::read_to_string(metadata_path) {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                        if let Some(raw) = json.get("name").and_then(|v| v.as_str()) {
-                            let name =
-                                normalize_and_validate_module_name(raw, &metadata_path.display())?;
-                            return Ok((name, None));
-                        }
-                    }
+            if let Some(metadata_path) = pb.parent().map(|d| d.join("metadata.json")) {
+                let name = fs::read_to_string(&metadata_path)
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                    .and_then(|json| {
+                        json.get("name").and_then(|v| v.as_str()).map(str::to_owned)
+                    });
+                if let Some(raw) = name {
+                    let name = normalize_and_validate_module_name(&raw, &metadata_path.display())?;
+                    return Ok((name, None));
                 }
             }
             let raw = pb.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
