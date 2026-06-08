@@ -2893,7 +2893,7 @@ fn seed_profiles(
 ) -> DynResult<Vec<String>> {
     let subpath = basecamp_xdg_subpath(basecamp_repo);
     let mut seeded = Vec::new();
-    for name in names {
+    for &name in names {
         let profile_dir = profiles_root.join(name);
         for xdg in ["xdg-config", "xdg-data", "xdg-cache"] {
             let path = profile_dir.join(xdg).join(subpath);
