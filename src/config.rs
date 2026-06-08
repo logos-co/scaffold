@@ -868,9 +868,8 @@ pub(crate) fn check_toml_value(key: &str, value: &str) -> DynResult<()> {
         .find(|c| *c == '\n' || *c == '\r' || *c == '\t' || (*c as u32) < 0x20)
     {
         bail!(
-            "scaffold.toml `{key}` contains control character {:?} which would \
-             corrupt the line-oriented serializer: {value:?}",
-            bad
+            "scaffold.toml `{key}` contains control character {bad:?} which would \
+             corrupt the line-oriented serializer: {value:?}"
         );
     }
     Ok(())

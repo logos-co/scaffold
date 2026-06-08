@@ -69,10 +69,7 @@ pub(crate) fn sync_repo_to_pin_at_path_with_opts(
         // otherwise tag/branch pins (e.g. `pin = "v0.2.0"`) always trip this
         // assertion even though the checkout succeeded.
         bail!(
-            "{label} pin mismatch after checkout (expected {} resolved from {}, got {})",
-            resolved_pin,
-            pin,
-            head
+            "{label} pin mismatch after checkout (expected {resolved_pin} resolved from {pin}, got {head})"
         );
     }
 
