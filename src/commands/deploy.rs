@@ -171,7 +171,7 @@ pub(crate) fn cmd_deploy(
             if let Some(tx) = &tx {
                 println!("  tx: {tx}");
             }
-            print_program_id_line(&program_id);
+            print_program_id_line(program_id.as_deref());
         }
         results.push(DeployResult {
             program,
@@ -405,7 +405,7 @@ fn deploy_single_program(
         if let Some(tx) = &tx {
             println!("  tx: {tx}");
         }
-        print_program_id_line(&program_id);
+        print_program_id_line(program_id.as_deref());
         println!(
             "  Note: Program ID is computed locally; on-chain inclusion is not yet verifiable."
         );
@@ -477,7 +477,7 @@ pub(crate) fn extract_program_id(spel_bin: &Path, binary_path: &Path) -> Option<
     }
 }
 
-fn print_program_id_line(program_id: &Option<String>) {
+fn print_program_id_line(program_id: Option<&str>) {
     // Lowercase, snake_case key with 2-space indent so the same awk/grep
     // pattern matches in single-program and multi-program plain output and
     // mirrors the JSON key. Single canonical line per deployed program.
