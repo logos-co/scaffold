@@ -183,7 +183,7 @@ fn collect_report_artifacts(
                 &mut skipped,
                 &mut warnings,
                 &mut redaction,
-            )?;
+            );
         }
         Err(err) => {
             warnings.push(format!("doctor diagnostics unavailable: {err}"));
@@ -205,7 +205,7 @@ fn collect_report_artifacts(
         &mut skipped,
         &mut warnings,
         &mut redaction,
-    )?;
+    );
 
     let scaffold_path = project.root.join("scaffold.toml");
     match fs::read_to_string(&scaffold_path) {
@@ -368,7 +368,7 @@ fn collect_sanitized_json_artifact<T: Serialize>(
     skipped: &mut Vec<SkippedItem>,
     warnings: &mut Vec<String>,
     redaction: &mut RedactionSummary,
-) -> DynResult<()> {
+) {
     let sanitized = match render_sanitized_json_artifact(value, sanitize_ctx) {
         Ok(sanitized) => sanitized,
         Err(err) => {
@@ -379,7 +379,7 @@ fn collect_sanitized_json_artifact<T: Serialize>(
             warnings.push(format!(
                 "could not sanitize optional artifact {rel_path}: {err}"
             ));
-            return Ok(());
+            return;
         }
     };
 
@@ -393,7 +393,7 @@ fn collect_sanitized_json_artifact<T: Serialize>(
         warnings.push(format!(
             "skipped {rel_path} because high-risk markers remained after sanitization"
         ));
-        return Ok(());
+        return;
     }
 
     if let Err(err) = write_text(&staging_dir.join(rel_path), &sanitized.text) {
@@ -404,7 +404,7 @@ fn collect_sanitized_json_artifact<T: Serialize>(
         warnings.push(format!(
             "could not write optional sanitized artifact {rel_path}: {err}"
         ));
-        return Ok(());
+        return;
     }
 
     collected.push(CollectedItem {
@@ -412,7 +412,6 @@ fn collect_sanitized_json_artifact<T: Serialize>(
         source: source.to_string(),
         notes: None,
     });
-    Ok(())
 }
 
 fn render_sanitized_json_artifact<T: Serialize>(
