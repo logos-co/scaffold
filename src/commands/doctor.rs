@@ -93,8 +93,9 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
     // Drift check vs. the scaffold-shipped default — distinct from
     // `check_repo("lez", …)` above, which only validates the on-disk clone
     // is at the *configured* pin (whatever the user wrote in scaffold.toml).
+    let lez_pin_matches = project.config.lez.pin == DEFAULT_LEZ.sha;
     rows.push(CheckRow {
-        status: if project.config.lez.pin == DEFAULT_LEZ.sha {
+        status: if lez_pin_matches {
             CheckStatus::Pass
         } else {
             CheckStatus::Warn
@@ -104,7 +105,7 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
             "configured pin={} expected={}",
             project.config.lez.pin, DEFAULT_LEZ.sha
         ),
-        remediation: if project.config.lez.pin == DEFAULT_LEZ.sha {
+        remediation: if lez_pin_matches {
             None
         } else {
             Some(format!(
@@ -118,8 +119,9 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
 
     rows.push(check_repo("spel", &spel, &project.config.spel.pin));
 
+    let spel_pin_matches = project.config.spel.pin == DEFAULT_SPEL.sha;
     rows.push(CheckRow {
-        status: if project.config.spel.pin == DEFAULT_SPEL.sha {
+        status: if spel_pin_matches {
             CheckStatus::Pass
         } else {
             CheckStatus::Warn
@@ -129,7 +131,7 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
             "configured pin={} expected={} ({})",
             project.config.spel.pin, DEFAULT_SPEL.sha, DEFAULT_SPEL.tag
         ),
-        remediation: if project.config.spel.pin == DEFAULT_SPEL.sha {
+        remediation: if spel_pin_matches {
             None
         } else {
             Some(format!(
