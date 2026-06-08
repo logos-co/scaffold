@@ -73,9 +73,7 @@ pub(crate) fn write_basecamp_state(path: &Path, state: &BasecampState) -> DynRes
     check_state_value("lgpm_bin", &state.lgpm_bin)?;
 
     // Source lines are no longer part of the state file — the captured module
-    // set lives in `[basecamp.modules.*]` in scaffold.toml (v0.4). Any
-    // residual `project_sources` / `dependencies` values on the struct are
-    // intentionally ignored here; the fields are removed in Phase 3.
+    // set lives in `[basecamp.modules.*]` in scaffold.toml.
     let mut content = String::new();
     if !state.pin.is_empty() {
         content.push_str(&format!("pin={}\n", state.pin));
