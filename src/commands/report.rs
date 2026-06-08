@@ -1050,10 +1050,7 @@ fn sanitize_text(raw: &str, sanitize_ctx: &SanitizeContext) -> SanitizedText {
 }
 
 fn redacted_line_marker(line: &str) -> String {
-    let indentation: String = line
-        .chars()
-        .take_while(|ch| ch.is_ascii_whitespace())
-        .collect();
+    let indentation: String = line.chars().take_while(char::is_ascii_whitespace).collect();
     format!("{indentation}[REDACTED SENSITIVE LINE]")
 }
 
@@ -1179,7 +1176,7 @@ const SENSITIVE_KEYWORDS: &[&str] = &[
 fn normalize_for_keyword_match(lowered: &str) -> String {
     lowered
         .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
+        .filter(char::is_ascii_alphanumeric)
         .collect()
 }
 
@@ -1359,7 +1356,7 @@ fn should_redact_high_entropy(span: &str) -> bool {
     // Pattern 1: 0x followed by 40+ hex chars.
     if bytes.len() >= 42 && (bytes[0] == b'0') && (bytes[1] == b'x' || bytes[1] == b'X') {
         let tail = &bytes[2..];
-        if tail.len() >= 40 && tail.iter().all(|b| b.is_ascii_hexdigit()) {
+        if tail.len() >= 40 && tail.iter().all(u8::is_ascii_hexdigit) {
             return true;
         }
     }

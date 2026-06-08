@@ -571,7 +571,7 @@ fn read_string(table: &Table, key: &str) -> Option<String> {
     table
         .get(key)
         .and_then(Item::as_str)
-        .map(|s| s.to_string())
+        .map(str::to_string)
         .filter(|s| !s.is_empty())
 }
 

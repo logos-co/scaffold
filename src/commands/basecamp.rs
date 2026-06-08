@@ -1115,7 +1115,7 @@ fn run_build_portable_nix(
     let stdout = String::from_utf8_lossy(&output.stdout);
     let store_paths: Vec<PathBuf> = stdout
         .lines()
-        .map(|s| s.trim())
+        .map(str::trim)
         .filter(|s| s.starts_with('/'))
         .map(PathBuf::from)
         .collect();
@@ -1482,7 +1482,7 @@ fn read_source_metadata_dependencies(src: &BasecampSource) -> Vec<String> {
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .filter_map(|v| v.as_str().map(str::to_string))
                 .collect()
         })
         .unwrap_or_default()
@@ -1871,7 +1871,7 @@ fn flake_path_prefix(flake_ref: &str) -> Option<&str> {
 /// `"cache/basecamp"`. Returns `None` if the path is empty or absolute.
 fn first_path_component(rel: &str) -> Option<String> {
     Path::new(rel).components().find_map(|c| match c {
-        Component::Normal(s) => s.to_str().map(|s| s.to_string()),
+        Component::Normal(s) => s.to_str().map(str::to_string),
         _ => None,
     })
 }
