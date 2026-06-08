@@ -3717,7 +3717,7 @@ mod tests {
         );
     }
 
-    // ---- normalize_flake_ref (I2 fix) ----
+    // ---- normalize_flake_ref ----
 
     #[test]
     fn normalize_flake_ref_rewrites_relative_path_to_path_scheme() {
@@ -3867,8 +3867,7 @@ mod tests {
         }
     }
 
-    // ---- resolve_sibling_overrides (I1 fix) — exercised via the command paths;
-    //      a focused test pins the helper's Path-source short-circuit ----
+    // ---- resolve_sibling_overrides ----
 
     #[test]
     fn resolve_sibling_overrides_returns_empty_for_isolated_flake() {
