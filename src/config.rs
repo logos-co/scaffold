@@ -20,7 +20,7 @@
 //! corresponding rewrite lives in `crate::migrate`.
 
 use anyhow::{anyhow, bail, Context};
-use toml_edit::{value, DocumentMut, Item, Table};
+use toml_edit::{value, DocumentMut, Item, Table, Value};
 
 use crate::constants::{
     BASECAMP_ATTR, BASECAMP_SOURCE, DEFAULT_FRAMEWORK_IDL_PATH, DEFAULT_FRAMEWORK_IDL_SPEC,
@@ -102,7 +102,7 @@ fn parse_run(doc: &DocumentMut) -> DynResult<RunConfig> {
     let inline_reset = run_table
         .get("reset")
         .and_then(Item::as_value)
-        .and_then(|v| v.as_bool())
+        .and_then(Value::as_bool)
         .unwrap_or(false);
     let inline_post_deploy = parse_post_deploy(run_table.get("post_deploy"))?;
 
@@ -116,7 +116,7 @@ fn parse_run(doc: &DocumentMut) -> DynResult<RunConfig> {
             let reset = table
                 .get("reset")
                 .and_then(Item::as_value)
-                .and_then(|v| v.as_bool())
+                .and_then(Value::as_bool)
                 .unwrap_or(false);
             let post_deploy = parse_post_deploy(table.get("post_deploy"))?;
             profiles.insert(name.to_string(), RunProfile { reset, post_deploy });
