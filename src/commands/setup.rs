@@ -177,7 +177,7 @@ pub(crate) fn ensure_default_wallet_seeded(
     Ok(())
 }
 
-fn try_download_prebuilt(lez: &Path, pin: &str) -> crate::DynResult<bool> {
+fn try_download_prebuilt(lez: &Path, pin: &str) -> DynResult<bool> {
     let arch = if cfg!(target_arch = "x86_64") {
         "x86_64"
     } else if cfg!(target_arch = "aarch64") {
