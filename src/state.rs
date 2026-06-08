@@ -67,6 +67,7 @@ pub(crate) fn read_localnet_state(path: &Path) -> DynResult<LocalnetState> {
 }
 
 pub(crate) fn write_basecamp_state(path: &Path, state: &BasecampState) -> DynResult<()> {
+    use std::fmt::Write;
     // The state file is a line-oriented key=value format. A newline or CR embedded
     // in a value would split the record and silently corrupt state on the next read.
     check_state_value("pin", &state.pin)?;
@@ -75,7 +76,6 @@ pub(crate) fn write_basecamp_state(path: &Path, state: &BasecampState) -> DynRes
 
     // Source lines are no longer part of the state file — the captured module
     // set lives in `[basecamp.modules.*]` in scaffold.toml.
-    use std::fmt::Write;
     let mut content = String::new();
     if !state.pin.is_empty() {
         let _ = writeln!(content, "pin={}", state.pin);
