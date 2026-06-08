@@ -158,11 +158,9 @@ pub(crate) fn migrate_to_v0_2_0(doc: &mut DocumentMut) -> DynResult<MigrationRep
     let need_basecamp_repo = basecamp_pin.is_some() || basecamp_source.is_some();
     if need_basecamp_repo {
         let pin = basecamp_pin
-            .clone()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| DEFAULT_BASECAMP_PIN.to_string());
         let source = basecamp_source
-            .clone()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| BASECAMP_SOURCE.to_string());
         let mut repo = crate::config::default_basecamp_repo(&pin);

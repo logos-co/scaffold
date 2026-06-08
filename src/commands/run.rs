@@ -62,7 +62,7 @@ pub(crate) fn cmd_run(inv: RunInvocation) -> DynResult<()> {
         .unwrap_or(DEFAULT_RUN_LOCALNET_TIMEOUT_SEC);
 
     let mut params = PipelineParams {
-        resolved: resolved.clone(),
+        resolved,
         hooks,
         reset_override: inv.reset,
         localnet_timeout_sec,

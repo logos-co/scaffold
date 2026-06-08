@@ -2465,8 +2465,7 @@ fn captured_source_row(
     alice_modules: &Path,
 ) -> crate::model::CheckRow {
     use crate::model::{CheckRow, CheckStatus};
-    let ref_text = flake_ref(src);
-    let mut detail = ref_text.clone();
+    let mut detail = flake_ref(src);
 
     if let BasecampSource::Flake(flake_ref) = src {
         if let Some(label) = github_ref_part_label(flake_ref) {
