@@ -923,11 +923,6 @@ pub(crate) fn default_lgpm_repo(pin: &str) -> RepoRef {
     }
 }
 
-// The old `parse_inline_string_array`, `unquote`, and `escape_toml_string`
-// helpers are no longer needed — toml_edit handles array parsing, quote
-// unwrapping, and string escaping for `value(..)` calls. The hand-rolled
-// preserving emitter is gone along with them.
-
 #[cfg(test)]
 mod tests {
     use super::*;
