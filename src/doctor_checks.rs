@@ -219,10 +219,7 @@ fn check_logos_blockchain_circuits_with(
 }
 
 fn is_broken_symlink(path: &Path) -> bool {
-    !path.exists()
-        && fs::symlink_metadata(path)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
+    !path.exists() && fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
 }
 
 pub(crate) fn check_standalone_support(lez_path: &Path) -> CheckRow {

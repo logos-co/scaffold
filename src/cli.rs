@@ -793,15 +793,12 @@ fn is_help_token(token: &str) -> bool {
 }
 
 fn apply_quiet_from_env() {
-    if std::env::var("LOGOS_SCAFFOLD_QUIET")
-        .map(|v| {
-            v == "1"
-                || v.eq_ignore_ascii_case("true")
-                || v.eq_ignore_ascii_case("yes")
-                || v.eq_ignore_ascii_case("on")
-        })
-        .unwrap_or(false)
-    {
+    if std::env::var("LOGOS_SCAFFOLD_QUIET").is_ok_and(|v| {
+        v == "1"
+            || v.eq_ignore_ascii_case("true")
+            || v.eq_ignore_ascii_case("yes")
+            || v.eq_ignore_ascii_case("on")
+    }) {
         set_command_echo(false);
     }
 }

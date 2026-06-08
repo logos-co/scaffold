@@ -236,9 +236,7 @@ fn format_flake_ref(repo: &RepoRef) -> String {
 }
 
 fn is_portable_basecamp(basecamp_repo: Option<&RepoRef>) -> bool {
-    basecamp_repo
-        .map(|r| BASECAMP_PORTABLE_ATTRS.contains(&r.attr.as_str()))
-        .unwrap_or(false)
+    basecamp_repo.is_some_and(|r| BASECAMP_PORTABLE_ATTRS.contains(&r.attr.as_str()))
 }
 
 fn basecamp_xdg_subpath(basecamp_repo: Option<&RepoRef>) -> &'static str {
@@ -1385,9 +1383,7 @@ pub(crate) fn derive_module_name(
                 let name = fs::read_to_string(&metadata_path)
                     .ok()
                     .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-                    .and_then(|json| {
-                        json.get("name").and_then(|v| v.as_str()).map(str::to_owned)
-                    });
+                    .and_then(|json| json.get("name").and_then(|v| v.as_str()).map(str::to_owned));
                 if let Some(raw) = name {
                     let name = normalize_and_validate_module_name(&raw, &metadata_path.display())?;
                     return Ok((name, None));
@@ -2552,7 +2548,9 @@ fn collect_api_headers(alice_modules: &Path, module_name: &str) -> Vec<PathBuf> 
             let is_header = path
                 .extension()
                 .and_then(|s| s.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("h") || ext.eq_ignore_ascii_case("hpp"));
+                .is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("h") || ext.eq_ignore_ascii_case("hpp")
+                });
             if is_header {
                 out.push(path);
             }

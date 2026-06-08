@@ -501,7 +501,7 @@ fn build_status_report(
 ) -> LocalnetStatusReport {
     let state = read_localnet_state(state_path).unwrap_or_default();
     let tracked_pid = state.sequencer_pid;
-    let tracked_running = tracked_pid.map(pid_running).unwrap_or(false);
+    let tracked_running = tracked_pid.is_some_and(pid_running);
     let listener_present = port_open(localnet_addr);
     let listener_pid = if listener_present {
         listener_pid(localnet_port)

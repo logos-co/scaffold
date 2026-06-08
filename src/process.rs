@@ -83,8 +83,7 @@ pub(crate) fn print_output_enabled() -> bool {
     PRINT_OUTPUT.load(Ordering::Relaxed)
         || std::env::var_os("LOGOS_SCAFFOLD_PRINT_OUTPUT")
             .as_deref()
-            .map(is_truthy_env_value)
-            .unwrap_or(false)
+            .is_some_and(is_truthy_env_value)
 }
 
 /// Accept only `1` or `true` (case-insensitive). Rejects `0`, empty,
@@ -245,9 +244,7 @@ fn finish_spinner_err(bar: Option<indicatif::ProgressBar>, step: &str, duration:
 /// limit (~25). Not present for builder-stage failures, so this check gates
 /// the `--show-trace` hint to cases where it actually helps.
 fn log_indicates_truncated_trace(path: &Path) -> bool {
-    std::fs::read_to_string(path)
-        .map(|s| s.contains("stack trace truncated"))
-        .unwrap_or(false)
+    std::fs::read_to_string(path).is_ok_and(|s| s.contains("stack trace truncated"))
 }
 
 /// Given a log path of the shape
@@ -288,12 +285,7 @@ pub(crate) fn rotate_logs(project_root: &Path, command: &str, keep: usize) {
     let suffix = format!("-{command}.log");
     let mut matching: Vec<(std::time::SystemTime, PathBuf)> = entries
         .flatten()
-        .filter(|e| {
-            e.file_name()
-                .to_str()
-                .map(|n| n.ends_with(&suffix))
-                .unwrap_or(false)
-        })
+        .filter(|e| e.file_name().to_str().is_some_and(|n| n.ends_with(&suffix)))
         .filter_map(|e| {
             e.metadata()
                 .ok()
@@ -435,8 +427,7 @@ pub(crate) fn pid_alive(pid: u32) -> bool {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 #[cfg(not(unix))]
@@ -466,8 +457,7 @@ fn pid_is_zombie(pid: u32) -> bool {
     stat.lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
-        .map(|line| line.starts_with('Z'))
-        .unwrap_or(false)
+        .is_some_and(|line| line.starts_with('Z'))
 }
 
 #[cfg(not(unix))]
