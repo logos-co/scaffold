@@ -5,6 +5,7 @@ use anyhow::bail;
 
 use crate::circuits::ensure_circuits_for_subprocess;
 use crate::doctor_checks::check_logos_blockchain_circuits;
+use crate::hash::sha256_hex;
 use crate::model::{CheckStatus, RepoRef};
 use crate::process::run_checked;
 use crate::project::{ensure_dir_exists, load_project, resolve_cache_root, resolve_repo_path};
@@ -250,17 +251,6 @@ fn try_download_prebuilt(lez: &Path, pin: &str) -> crate::DynResult<bool> {
             Ok(false)
         }
     }
-}
-
-fn sha256_hex(data: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    use std::fmt::Write;
-    let hash = Sha256::digest(data);
-    let mut s = String::with_capacity(hash.len() * 2);
-    for byte in hash {
-        let _ = write!(s, "{byte:02x}");
-    }
-    s
 }
 
 #[cfg(test)]

@@ -9,6 +9,7 @@ use walkdir::WalkDir;
 
 use crate::circuits::ensure_circuits_for_subprocess;
 use crate::constants::FRAMEWORK_KIND_LEZ_FRAMEWORK;
+use crate::hash::hex_encode;
 use crate::model::Project;
 use crate::process::run_capture;
 use crate::project::{load_project, resolve_cache_root, run_in_project_dir};
@@ -267,15 +268,6 @@ fn save_idl_state(project: &Project, state: &IdlBuildState) -> DynResult<()> {
     fs::write(&tmp, &text).with_context(|| format!("write {}", tmp.display()))?;
     fs::rename(&tmp, &path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
 }
 
 pub(crate) fn parse_optional_project_path(

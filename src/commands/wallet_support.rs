@@ -7,6 +7,7 @@ use anyhow::{bail, Context};
 use serde_json::Value;
 
 use crate::constants::{DEFAULT_WALLET_PASSWORD, WALLET_BIN_REL_PATH};
+use crate::hash::hex_encode;
 use crate::model::Project;
 use crate::project::resolve_repo_path;
 use crate::state::write_text;
@@ -368,12 +369,7 @@ fn extract_tx_hash_from_hash_type_bytes(text: &str) -> Option<String> {
             continue;
         }
 
-        let mut hex_hash = String::from("0x");
-        for byte in bytes {
-            use std::fmt::Write as _;
-            let _ = write!(&mut hex_hash, "{byte:02x}");
-        }
-        return Some(hex_hash);
+        return Some(format!("0x{}", hex_encode(&bytes)));
     }
 
     None
