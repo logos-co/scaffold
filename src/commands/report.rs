@@ -1444,9 +1444,8 @@ fn pack_staging_dir(staging_dir: &Path, output_path: &Path) -> DynResult<()> {
         if file_type.is_symlink() {
             continue;
         }
-        let rel = match path.strip_prefix(staging_dir) {
-            Ok(rel) => rel,
-            Err(_) => continue,
+        let Ok(rel) = path.strip_prefix(staging_dir) else {
+            continue;
         };
         let archive_path = Path::new("report").join(rel);
         if file_type.is_dir() {
