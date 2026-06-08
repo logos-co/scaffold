@@ -76,17 +76,17 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
     let wallet_home = project.root.join(&project.config.wallet_home_dir);
     let localnet_state_path = project.root.join(".scaffold/state/localnet.state");
 
-    let mut rows = Vec::new();
-
-    rows.push(check_binary("git", true));
-    rows.push(check_binary("rustc", true));
-    rows.push(check_binary("cargo", true));
-    rows.push(check_binary("lsof", true));
-    rows.push(check_binary("ps", true));
-    rows.push(check_binary("kill", true));
-    rows.push(check_container_runtime());
-    rows.push(check_binary("nix", false));
-    rows.push(check_logos_blockchain_circuits());
+    let mut rows = vec![
+        check_binary("git", true),
+        check_binary("rustc", true),
+        check_binary("cargo", true),
+        check_binary("lsof", true),
+        check_binary("ps", true),
+        check_binary("kill", true),
+        check_container_runtime(),
+        check_binary("nix", false),
+        check_logos_blockchain_circuits(),
+    ];
 
     rows.push(check_repo("lez", &lez, &project.config.lez.pin));
 
