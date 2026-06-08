@@ -12,10 +12,10 @@ use crate::DynResult;
 pub(crate) fn load_project() -> DynResult<Project> {
     let cwd = env::current_dir()?;
     let root = find_project_root(cwd.clone()).ok_or_else(|| {
-        let bin = std::env::args()
+        let bin = env::args()
             .next()
             .and_then(|p| {
-                std::path::Path::new(&p)
+                Path::new(&p)
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
             })
