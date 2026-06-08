@@ -6,7 +6,7 @@ use anyhow::{anyhow, bail};
 use crate::commands::idl::{build_idl_for_current_project, parse_optional_project_path};
 use crate::constants::FRAMEWORK_KIND_LEZ_FRAMEWORK;
 use crate::model::Project;
-use crate::process::run_checked;
+use crate::process::run_forwarded;
 use crate::project::{load_project, run_in_project_dir};
 use crate::DynResult;
 
@@ -72,7 +72,7 @@ fn generate_clients_from_project_idl(project: &Project) -> DynResult<()> {
         );
     }
 
-    run_checked(
+    run_forwarded(
         Command::new("cargo")
             .current_dir(&project.root)
             .arg("run")

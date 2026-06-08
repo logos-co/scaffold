@@ -7,7 +7,7 @@ use crate::circuits::ensure_circuits_for_subprocess;
 use crate::doctor_checks::check_logos_blockchain_circuits;
 use crate::hash::sha256_hex;
 use crate::model::{CheckStatus, RepoRef};
-use crate::process::run_checked;
+use crate::process::run_forwarded;
 use crate::project::{ensure_dir_exists, load_project, resolve_cache_root, resolve_repo_path};
 use crate::repo::{sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
 use crate::state::prepare_wallet_home;
@@ -66,11 +66,11 @@ pub(crate) fn cmd_setup(prebuilt: bool) -> DynResult<()> {
     if !built_from_prebuilt {
         let mut sequencer_cmd = Command::new("cargo");
         sequencer_cmd.current_dir(&lez).args(SEQUENCER_BUILD_ARGS);
-        run_checked(&mut sequencer_cmd, "build sequencer_service (standalone)")?;
+        run_forwarded(&mut sequencer_cmd, "build sequencer_service (standalone)")?;
     }
 
     // wallet is always built from source — prebuilt download only covers sequencer_service
-    run_checked(
+    run_forwarded(
         Command::new("cargo")
             .current_dir(&lez)
             .arg("build")
@@ -82,7 +82,7 @@ pub(crate) fn cmd_setup(prebuilt: bool) -> DynResult<()> {
 
     sync_pinned_repo(&project.config.spel, &spel, "spel")?;
     ensure_dir_exists(&spel, "spel")?;
-    run_checked(
+    run_forwarded(
         Command::new("cargo")
             .current_dir(&spel)
             .arg("build")

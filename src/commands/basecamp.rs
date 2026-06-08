@@ -21,7 +21,7 @@ use crate::model::{
     BasecampConfig, BasecampSource, BasecampState, ModuleEntry, ModuleRole, Project, RepoBuild,
     RepoRef,
 };
-use crate::process::{derive_log_path, run_checked, run_logged, set_print_output};
+use crate::process::{derive_log_path, run_forwarded, run_logged, set_print_output};
 use crate::project::{load_project, resolve_cache_root, save_project_config};
 use crate::repo::{sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
 use crate::state::{read_basecamp_state, write_basecamp_state};
@@ -1956,7 +1956,7 @@ fn run_lgpm_install(
                 println!("installing {} into {}", lgx.display(), name);
             }
             let args = lgpm_install_args(&modules_dir, &plugins_dir, lgx);
-            run_checked(
+            run_forwarded(
                 Command::new(lgpm_bin).args(&args),
                 &format!("lgpm install {} into {}", lgx.display(), name),
             )?;

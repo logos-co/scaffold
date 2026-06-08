@@ -6,7 +6,7 @@ use std::process::Command;
 
 use anyhow::bail;
 
-use crate::process::{run_capture, run_checked};
+use crate::process::{run_capture, run_forwarded};
 use crate::DynResult;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -44,7 +44,7 @@ pub(crate) fn sync_repo_to_pin_at_path_with_opts(
 ) -> DynResult<()> {
     ensure_repo_present(path, source, label, opts)?;
 
-    let _ = run_checked(
+    let _ = run_forwarded(
         Command::new("git")
             .current_dir(path)
             .arg("fetch")
@@ -55,7 +55,7 @@ pub(crate) fn sync_repo_to_pin_at_path_with_opts(
 
     let resolved_pin = ensure_pin_exists(path, source, pin, label)?;
 
-    run_checked(
+    run_forwarded(
         Command::new("git")
             .current_dir(path)
             .arg("checkout")
@@ -121,7 +121,7 @@ pub(crate) fn ensure_repo_present(
         fs::create_dir_all(parent)?;
     }
 
-    run_checked(
+    run_forwarded(
         Command::new("git")
             .arg("clone")
             .arg("--no-hardlinks")
@@ -172,7 +172,7 @@ fn reconcile_repo_source(
             }
 
             fs::remove_dir_all(path)?;
-            run_checked(
+            run_forwarded(
                 Command::new("git")
                     .arg("clone")
                     .arg("--no-hardlinks")

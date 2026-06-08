@@ -54,10 +54,6 @@ pub(crate) fn render_command(cmd: &Command) -> String {
     out
 }
 
-pub(crate) fn run_checked(cmd: &mut Command, label: &str) -> DynResult<()> {
-    run_forwarded(cmd, label)
-}
-
 pub(crate) fn run_forwarded(cmd: &mut Command, label: &str) -> DynResult<()> {
     if should_echo() {
         println!("$ {}", render_command(cmd));
