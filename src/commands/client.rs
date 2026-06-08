@@ -29,7 +29,7 @@ pub(crate) fn build_clients_for_current_project() -> DynResult<()> {
     let project = load_lez_framework_project_for_client_build()?;
 
     // Always regenerate IDL in direct `build client` flows to prevent stale IDL drift.
-    println!("[client] Regenerating IDL to ensure it is fresh...");
+    println!("Regenerating IDL...");
     build_idl_for_current_project()?;
 
     generate_clients_from_project_idl(&project)
