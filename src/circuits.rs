@@ -163,10 +163,9 @@ fn release_triple() -> DynResult<&'static str> {
 fn download_to_tempfile(url: &str) -> DynResult<tempfile::NamedTempFile> {
     if which("curl").is_none() {
         bail!(
-            "`curl` is required to fetch the {} release tarball but is not on PATH. \
+            "`curl` is required to fetch the logos-blockchain-circuits release tarball but is not on PATH. \
              Install curl, or set {LOGOS_BLOCKCHAIN_CIRCUITS_ENV} to a pre-extracted \
-             circuits directory to bypass the download.",
-            "logos-blockchain-circuits",
+             circuits directory to bypass the download."
         );
     }
 
