@@ -736,7 +736,7 @@ fn collect_tool_versions(
     ] {
         let (result, replacements) = collect_tool_command(name, program, &args, cwd, sanitize_ctx);
         redaction_replacements += replacements;
-        if result.error.is_some() || result.status.unwrap_or(1) != 0 {
+        if !result.succeeded() {
             warnings.push(format!("tool probe `{name}` did not succeed"));
         }
         results.push(result);
@@ -759,7 +759,7 @@ fn collect_tool_versions(
         sanitize_ctx,
     );
     redaction_replacements += wallet_replacements;
-    if wallet_result.error.is_some() || wallet_result.status.unwrap_or(1) != 0 {
+    if !wallet_result.succeeded() {
         warnings.push("tool probe `wallet` did not succeed".to_string());
     }
     results.push(wallet_result);
@@ -768,7 +768,7 @@ fn collect_tool_versions(
         let (docker_result, replacements) =
             collect_tool_command("docker", "docker", &["--version"], None, sanitize_ctx);
         redaction_replacements += replacements;
-        if docker_result.error.is_some() || docker_result.status.unwrap_or(1) != 0 {
+        if !docker_result.succeeded() {
             warnings.push("tool probe `docker` did not succeed".to_string());
         }
         results.push(docker_result);
@@ -778,7 +778,7 @@ fn collect_tool_versions(
         let (podman_result, replacements) =
             collect_tool_command("podman", "podman", &["--version"], None, sanitize_ctx);
         redaction_replacements += replacements;
-        if podman_result.error.is_some() || podman_result.status.unwrap_or(1) != 0 {
+        if !podman_result.succeeded() {
             warnings.push("tool probe `podman` did not succeed".to_string());
         }
         results.push(podman_result);

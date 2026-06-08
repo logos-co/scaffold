@@ -209,12 +209,10 @@ pub(crate) fn migrate_to_v0_2_0(doc: &mut DocumentMut) -> DynResult<MigrationRep
     // [basecamp.modules.*] -> [modules.*]
     let mut moved_modules = Vec::new();
     if let Some(bc) = doc.get_mut("basecamp").and_then(Item::as_table_mut) {
-        if let Some(modules_item) = bc.get("modules") {
-            if let Some(modules_table) = modules_item.as_table() {
-                for (name, item) in modules_table.iter() {
-                    if let Some(t) = item.as_table() {
-                        moved_modules.push((name.to_string(), t.clone()));
-                    }
+        if let Some(modules_table) = bc.get("modules").and_then(Item::as_table) {
+            for (name, item) in modules_table.iter() {
+                if let Some(t) = item.as_table() {
+                    moved_modules.push((name.to_string(), t.clone()));
                 }
             }
         }

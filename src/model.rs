@@ -261,6 +261,12 @@ pub(crate) struct ToolCommandResult {
     pub(crate) error: Option<String>,
 }
 
+impl ToolCommandResult {
+    pub(crate) fn succeeded(&self) -> bool {
+        self.error.is_none() && self.status == Some(0)
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct ReportManifest {
     pub(crate) generated_at_unix: u64,
