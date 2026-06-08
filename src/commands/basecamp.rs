@@ -1007,8 +1007,7 @@ fn topo_order_project_modules(
 fn swap_flake_attr(flake_ref: &str, expected: &str, replacement: &str) -> String {
     match flake_ref.rsplit_once('#') {
         Some((base, attr)) if attr == expected => format!("{base}#{replacement}"),
-        Some((_, _)) => flake_ref.to_string(),
-        None => flake_ref.to_string(),
+        _ => flake_ref.to_string(),
     }
 }
 
