@@ -101,6 +101,16 @@ struct PipelineParams {
     localnet_timeout_sec: u64,
 }
 
+/// Delete a stale cache/state file, tolerating its absence (no prior run) but
+/// surfacing any other I/O error with context.
+fn clear_stale(path: &Path, what: &str) -> DynResult<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("{what} at {}", path.display())),
+    }
+}
+
 fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()> {
     let has_hooks = !params.hooks.is_empty();
     // Steps: build, build idl, localnet, topup, deploy, [+1 if hooks]
@@ -124,14 +134,7 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
     // file (no prior run).
     if effective_reset {
         let idl_state = project.root.join(IDL_STATE_REL);
-        match std::fs::remove_file(&idl_state) {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(e)
-                    .with_context(|| format!("clear stale IDL cache at {}", idl_state.display()));
-            }
-        }
+        clear_stale(&idl_state, "clear stale IDL cache")?;
     }
 
     // Build (chains setup internally)
@@ -150,15 +153,7 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
         // the next deploy must run regardless of hash equality. Tolerate
         // NotFound (no prior run); surface anything else.
         let state_file = project.root.join(".scaffold/state/run_deploy.json");
-        match std::fs::remove_file(&state_file) {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(e).with_context(|| {
-                    format!("clear stale deploy state at {}", state_file.display())
-                });
-            }
-        }
+        clear_stale(&state_file, "clear stale deploy state")?;
     } else {
         println!("[3/{total_steps}] Ensuring localnet...");
         ensure_localnet(project, params.localnet_timeout_sec)?;
