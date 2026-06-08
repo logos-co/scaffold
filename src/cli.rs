@@ -567,7 +567,7 @@ struct BasecampDevelopArgs {
 /// followed by an optional project path.
 fn build_args(project_path: Option<PathBuf>) -> Vec<String> {
     let mut args = vec!["build".to_string()];
-    args.extend(project_path.map(|p| p.to_string_lossy().to_string()));
+    args.extend(project_path.map(|p| p.to_string_lossy().into_owned()));
     args
 }
 
