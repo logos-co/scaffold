@@ -2249,7 +2249,7 @@ pub(crate) struct ModuleDriftReport {
 /// source is captured, `basecamp modules` resolves its deps deterministically
 /// at capture time, so any dep drift surfaces via the modules command itself
 /// rather than via this doctor row.
-pub(crate) fn compute_module_drift(project: &Project) -> DynResult<ModuleDriftReport> {
+pub(crate) fn compute_module_drift(project: &Project) -> ModuleDriftReport {
     let cache_root_first = first_path_component(&project.config.cache_root);
     let mut skip_subdirs: Vec<&str> = BASECAMP_AUTODISCOVER_SKIP_SUBDIRS.to_vec();
     if let Some(c) = cache_root_first.as_deref() {
@@ -2284,9 +2284,9 @@ pub(crate) fn compute_module_drift(project: &Project) -> DynResult<ModuleDriftRe
         .collect();
     discovered_not_captured.sort_by_key(flake_ref);
 
-    Ok(ModuleDriftReport {
+    ModuleDriftReport {
         discovered_not_captured,
-    })
+    }
 }
 
 /// `basecamp doctor` entry point. Builds a scaffold `DoctorReport` containing
@@ -2434,20 +2434,19 @@ fn push_basecamp_doctor_rows(project: &Project, rows: &mut Vec<crate::model::Che
         }
     }
 
-    if let Ok(drift) = compute_module_drift(project) {
-        for src in &drift.discovered_not_captured {
-            rows.push(CheckRow {
-                status: CheckStatus::Warn,
-                name: "basecamp drift: uncaptured".to_string(),
-                detail: format!(
-                    "discovered `{}` but not captured in basecamp.state",
-                    flake_ref(src)
-                ),
-                remediation: Some(
-                    "run `logos-scaffold basecamp modules` to refresh capture".to_string(),
-                ),
-            });
-        }
+    let drift = compute_module_drift(project);
+    for src in &drift.discovered_not_captured {
+        rows.push(CheckRow {
+            status: CheckStatus::Warn,
+            name: "basecamp drift: uncaptured".to_string(),
+            detail: format!(
+                "discovered `{}` but not captured in basecamp.state",
+                flake_ref(src)
+            ),
+            remediation: Some(
+                "run `logos-scaffold basecamp modules` to refresh capture".to_string(),
+            ),
+        });
     }
 }
 
