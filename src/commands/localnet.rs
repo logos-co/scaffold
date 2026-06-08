@@ -456,7 +456,7 @@ fn cmd_localnet_logs(log_path: &Path, tail: usize, json: bool) -> DynResult<()> 
     let tail_lines = &all_lines[start..];
 
     if json {
-        let lines = tail_lines.iter().map(|l| l.to_string()).collect();
+        let lines = tail_lines.iter().map(ToString::to_string).collect();
         return print_logs_json(log_path, true, tail, lines);
     }
 

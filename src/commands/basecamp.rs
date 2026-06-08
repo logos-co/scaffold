@@ -2921,7 +2921,7 @@ mod tests {
         fn new(answers: &[(&str, &[&str])]) -> Self {
             let mut map = HashMap::new();
             for (k, v) in answers {
-                map.insert(k.to_string(), v.iter().map(|s| s.to_string()).collect());
+                map.insert(k.to_string(), v.iter().map(ToString::to_string).collect());
             }
             Self {
                 answers: RefCell::new(map),
