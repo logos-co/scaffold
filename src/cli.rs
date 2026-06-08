@@ -609,7 +609,7 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
     }
 
     match cli.command {
-        Some(Commands::Create(args)) | Some(Commands::New(args)) => cmd_new(NewCommand {
+        Some(Commands::Create(args) | Commands::New(args)) => cmd_new(NewCommand {
             name: args.name,
             vendor_deps: args.vendor_deps,
             lez_path: args.lez_path,
