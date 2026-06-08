@@ -38,9 +38,10 @@ pub(crate) fn write_text_atomic(path: &Path, text: &str) -> DynResult<()> {
 }
 
 pub(crate) fn write_localnet_state(path: &Path, state: &LocalnetState) -> DynResult<()> {
+    use std::fmt::Write;
     let mut content = String::new();
     if let Some(pid) = state.sequencer_pid {
-        content.push_str(&format!("sequencer_pid={pid}\n"));
+        let _ = writeln!(content, "sequencer_pid={pid}");
     }
     write_text(path, &content)
 }
@@ -74,15 +75,16 @@ pub(crate) fn write_basecamp_state(path: &Path, state: &BasecampState) -> DynRes
 
     // Source lines are no longer part of the state file — the captured module
     // set lives in `[basecamp.modules.*]` in scaffold.toml.
+    use std::fmt::Write;
     let mut content = String::new();
     if !state.pin.is_empty() {
-        content.push_str(&format!("pin={}\n", state.pin));
+        let _ = writeln!(content, "pin={}", state.pin);
     }
     if !state.basecamp_bin.is_empty() {
-        content.push_str(&format!("basecamp_bin={}\n", state.basecamp_bin));
+        let _ = writeln!(content, "basecamp_bin={}", state.basecamp_bin);
     }
     if !state.lgpm_bin.is_empty() {
-        content.push_str(&format!("lgpm_bin={}\n", state.lgpm_bin));
+        let _ = writeln!(content, "lgpm_bin={}", state.lgpm_bin);
     }
     write_text(path, &content)
 }
