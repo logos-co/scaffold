@@ -202,8 +202,9 @@ fn cmd_localnet_start(
         let pid_text = existing_listener_pid
             .map(|pid| pid.to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        let mut message =
-            format!("cannot start localnet: port {localnet_port} is already in use (pid={pid_text})");
+        let mut message = format!(
+            "cannot start localnet: port {localnet_port} is already in use (pid={pid_text})"
+        );
         message.push_str(
             "\nThis may be a sequencer started from another project and may not work with the current project.",
         );
