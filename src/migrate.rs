@@ -142,15 +142,12 @@ pub(crate) fn migrate_to_v0_2_0(doc: &mut DocumentMut) -> DynResult<MigrationRep
     let mut basecamp_source = None;
     let mut lgpm_flake = None;
     if let Some(bc) = doc.get_mut("basecamp").and_then(Item::as_table_mut) {
-        if let Some(s) = bc.get("pin").and_then(Item::as_str) {
-            basecamp_pin = Some(s.to_string());
-        }
-        if let Some(s) = bc.get("source").and_then(Item::as_str) {
-            basecamp_source = Some(s.to_string());
-        }
-        if let Some(s) = bc.get("lgpm_flake").and_then(Item::as_str) {
-            lgpm_flake = Some(s.to_string());
-        }
+        basecamp_pin = bc.get("pin").and_then(Item::as_str).map(str::to_string);
+        basecamp_source = bc.get("source").and_then(Item::as_str).map(str::to_string);
+        lgpm_flake = bc
+            .get("lgpm_flake")
+            .and_then(Item::as_str)
+            .map(str::to_string);
     }
 
     let need_basecamp_repo = basecamp_pin.is_some() || basecamp_source.is_some();
