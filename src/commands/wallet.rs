@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use anyhow::{bail, Context};
+use anyhow::{anyhow, bail, Context};
 use serde_json::json;
 
 use crate::process::{render_command, run_forwarded, run_with_stdin, EchoGuard};
@@ -176,6 +176,23 @@ fn emit_topup_error_json(reason: &str, message: &str, address: &str, network: &s
     }
 }
 
+/// Build the error for a topup step that failed because the sequencer was
+/// unreachable. In JSON mode it first emits the structured `connectivity`
+/// error; either way the returned error carries `message` plus the
+/// sequencer-unreachable hint. Used by all three topup steps (preflight, init,
+/// pinata claim), which differ only in `message`.
+fn connectivity_error(
+    json: bool,
+    message: String,
+    address: &str,
+    sequencer_addr: &str,
+) -> anyhow::Error {
+    if json {
+        emit_topup_error_json("connectivity", &message, address, sequencer_addr);
+    }
+    anyhow!("{message}\n{}", sequencer_unreachable_hint(sequencer_addr))
+}
+
 pub(crate) fn cmd_wallet_topup_inner(
     project: &crate::model::Project,
     address: Option<String>,
@@ -253,18 +270,12 @@ pub(crate) fn cmd_wallet_topup_inner(
         let summary = summarize_command_failure(&preflight_output.stdout, &preflight_output.stderr);
         let combined = format!("{}\n{}", preflight_output.stdout, preflight_output.stderr);
         if is_connectivity_failure(&combined) {
-            if json {
-                emit_topup_error_json(
-                    "connectivity",
-                    &format!("wallet topup failed during account preflight: {summary}"),
-                    &resolved_to,
-                    &sequencer_addr,
-                );
-            }
-            bail!(
-                "wallet topup failed during account preflight: {summary}\n{}",
-                sequencer_unreachable_hint(&sequencer_addr)
-            );
+            return Err(connectivity_error(
+                json,
+                format!("wallet topup failed during account preflight: {summary}"),
+                &resolved_to,
+                &sequencer_addr,
+            ));
         }
 
         if json {
@@ -294,18 +305,12 @@ pub(crate) fn cmd_wallet_topup_inner(
             let summary = summarize_command_failure(&init_output.stdout, &init_output.stderr);
             let combined = format!("{}\n{}", init_output.stdout, init_output.stderr);
             if is_connectivity_failure(&combined) {
-                if json {
-                    emit_topup_error_json(
-                        "connectivity",
-                        &format!("wallet topup failed during account initialization: {summary}"),
-                        &resolved_to,
-                        &sequencer_addr,
-                    );
-                }
-                bail!(
-                    "wallet topup failed during account initialization: {summary}\n{}",
-                    sequencer_unreachable_hint(&sequencer_addr)
-                );
+                return Err(connectivity_error(
+                    json,
+                    format!("wallet topup failed during account initialization: {summary}"),
+                    &resolved_to,
+                    &sequencer_addr,
+                ));
             }
             if is_already_initialized_failure(&combined) {
                 if !json {
@@ -334,18 +339,12 @@ pub(crate) fn cmd_wallet_topup_inner(
         let summary = summarize_command_failure(&output.stdout, &output.stderr);
         let combined = format!("{}\n{}", output.stdout, output.stderr);
         if is_connectivity_failure(&combined) {
-            if json {
-                emit_topup_error_json(
-                    "connectivity",
-                    &format!("wallet topup failed: {summary}"),
-                    &resolved_to,
-                    &sequencer_addr,
-                );
-            }
-            bail!(
-                "wallet topup failed: {summary}\n{}",
-                sequencer_unreachable_hint(&sequencer_addr)
-            );
+            return Err(connectivity_error(
+                json,
+                format!("wallet topup failed: {summary}"),
+                &resolved_to,
+                &sequencer_addr,
+            ));
         }
         if is_confirmation_timeout_failure(&combined) {
             let message = confirmation_timeout_message(
