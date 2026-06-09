@@ -313,33 +313,7 @@ fn canonical_json(text: &str) -> DynResult<String> {
 }
 
 pub(crate) fn sanitize_file_stem(name: &str) -> String {
-    let mut out = String::new();
-    let mut prev_sep = false;
-
-    for ch in name.chars() {
-        let mapped = if ch.is_ascii_alphanumeric() {
-            ch.to_ascii_lowercase()
-        } else {
-            '_'
-        };
-
-        if mapped == '_' {
-            if !prev_sep {
-                out.push('_');
-                prev_sep = true;
-            }
-        } else {
-            out.push(mapped);
-            prev_sep = false;
-        }
-    }
-
-    let out = out.trim_matches('_').to_string();
-    if out.is_empty() {
-        "program".to_string()
-    } else {
-        out
-    }
+    crate::commands::sanitize_separated(name, '_', "program")
 }
 
 fn parse_idl_blocks(output: &str) -> DynResult<Vec<(String, String)>> {

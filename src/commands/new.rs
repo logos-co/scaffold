@@ -245,32 +245,7 @@ fn cleanup_lez_hello_artifacts(project_root: &Path) -> DynResult<()> {
 }
 
 pub(crate) fn to_cargo_crate_name(input: &str) -> String {
-    let mut out = String::new();
-    let mut prev_dash = false;
-    for ch in input.chars() {
-        let mapped = if ch.is_ascii_alphanumeric() {
-            ch.to_ascii_lowercase()
-        } else {
-            '-'
-        };
-
-        if mapped == '-' {
-            if !prev_dash {
-                out.push('-');
-                prev_dash = true;
-            }
-        } else {
-            out.push(mapped);
-            prev_dash = false;
-        }
-    }
-
-    let out = out.trim_matches('-').to_string();
-    if out.is_empty() {
-        "program_deployment".to_string()
-    } else {
-        out
-    }
+    crate::commands::sanitize_separated(input, '-', "program_deployment")
 }
 
 #[cfg(test)]
