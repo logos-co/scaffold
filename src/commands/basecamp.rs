@@ -322,17 +322,20 @@ fn resolve_basecamp_binary(app_link: &Path) -> DynResult<PathBuf> {
     )
 }
 
+/// Loads basecamp state and verifies both binaries are present on disk,
+/// bailing with the setup hint otherwise. Shared by `launch` and `install`.
+fn load_ready_basecamp_state(state_path: &Path) -> DynResult<BasecampState> {
+    read_basecamp_state(state_path)
+        .ok()
+        .filter(|s| Path::new(&s.basecamp_bin).exists() && Path::new(&s.lgpm_bin).exists())
+        .ok_or_else(|| anyhow!("basecamp not set up yet; run: logos-scaffold basecamp setup"))
+}
+
 // Concurrent `launch <same-profile>` is undefined: no lock; two racing
 // invocations leave partial state.
 fn cmd_basecamp_launch(project: Project, profile: String) -> DynResult<()> {
     let state_path = project.root.join(".scaffold/state/basecamp.state");
-    let state = match read_basecamp_state(&state_path).ok() {
-        Some(s) if !s.basecamp_bin.is_empty() && !s.lgpm_bin.is_empty() => s,
-        _ => bail!("basecamp not set up yet; run: logos-scaffold basecamp setup"),
-    };
-    if !Path::new(&state.basecamp_bin).exists() || !Path::new(&state.lgpm_bin).exists() {
-        bail!("basecamp not set up yet; run: logos-scaffold basecamp setup");
-    }
+    let state = load_ready_basecamp_state(&state_path)?;
 
     if profile != BASECAMP_PROFILE_ALICE && profile != BASECAMP_PROFILE_BOB {
         bail!(
@@ -1594,13 +1597,7 @@ fn resolve_manifest_dependencies(
 /// installs either (KISS); install overwrites both profiles in one pass.
 fn cmd_basecamp_install(project: Project, probe: &dyn LgxFlakeProbe) -> DynResult<()> {
     let state_path = project.root.join(".scaffold/state/basecamp.state");
-    let state = read_basecamp_state(&state_path).ok().ok_or_else(|| {
-        anyhow::anyhow!("basecamp not set up yet; run: logos-scaffold basecamp setup")
-    })?;
-
-    if !Path::new(&state.basecamp_bin).exists() || !Path::new(&state.lgpm_bin).exists() {
-        bail!("basecamp not set up yet; run: logos-scaffold basecamp setup");
-    }
+    let state = load_ready_basecamp_state(&state_path)?;
 
     // Nix preflight comes after the setup-state guard so a user without
     // nix who hasn't run `basecamp setup` still gets the more specific
