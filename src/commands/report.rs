@@ -764,24 +764,17 @@ fn collect_tool_versions(
     }
     results.push(wallet_result);
 
-    if which("docker").is_some() {
-        let (docker_result, replacements) =
-            collect_tool_command("docker", "docker", &["--version"], None, sanitize_ctx);
-        redaction_replacements += replacements;
-        if !docker_result.succeeded() {
-            warnings.push("tool probe `docker` did not succeed".to_string());
+    for tool in ["docker", "podman"] {
+        if which(tool).is_none() {
+            continue;
         }
-        results.push(docker_result);
-    }
-
-    if which("podman").is_some() {
-        let (podman_result, replacements) =
-            collect_tool_command("podman", "podman", &["--version"], None, sanitize_ctx);
+        let (result, replacements) =
+            collect_tool_command(tool, tool, &["--version"], None, sanitize_ctx);
         redaction_replacements += replacements;
-        if !podman_result.succeeded() {
-            warnings.push("tool probe `podman` did not succeed".to_string());
+        if !result.succeeded() {
+            warnings.push(format!("tool probe `{tool}` did not succeed"));
         }
-        results.push(podman_result);
+        results.push(result);
     }
 
     (results, redaction_replacements, warnings)
