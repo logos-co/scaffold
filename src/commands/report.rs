@@ -921,10 +921,6 @@ fn scrub_path_string(raw: &str, sanitize_ctx: &SanitizeContext) -> String {
     scrubbed
 }
 
-fn scrub_manifest_text(raw: &str, sanitize_ctx: &SanitizeContext) -> String {
-    scrub_path_string(raw, sanitize_ctx)
-}
-
 fn scrub_manifest_entries(
     collected: &mut [CollectedItem],
     skipped: &mut [SkippedItem],
@@ -932,20 +928,20 @@ fn scrub_manifest_entries(
     sanitize_ctx: &SanitizeContext,
 ) {
     for item in collected {
-        item.path = scrub_manifest_text(&item.path, sanitize_ctx);
-        item.source = scrub_manifest_text(&item.source, sanitize_ctx);
+        item.path = scrub_path_string(&item.path, sanitize_ctx);
+        item.source = scrub_path_string(&item.source, sanitize_ctx);
         if let Some(notes) = &item.notes {
-            item.notes = Some(scrub_manifest_text(notes, sanitize_ctx));
+            item.notes = Some(scrub_path_string(notes, sanitize_ctx));
         }
     }
 
     for item in skipped {
-        item.path = scrub_manifest_text(&item.path, sanitize_ctx);
-        item.reason = scrub_manifest_text(&item.reason, sanitize_ctx);
+        item.path = scrub_path_string(&item.path, sanitize_ctx);
+        item.reason = scrub_path_string(&item.reason, sanitize_ctx);
     }
 
     for warning in warnings {
-        *warning = scrub_manifest_text(warning, sanitize_ctx);
+        *warning = scrub_path_string(warning, sanitize_ctx);
     }
 }
 
