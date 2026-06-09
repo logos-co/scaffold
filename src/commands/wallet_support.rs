@@ -337,25 +337,16 @@ fn extract_tx_hash_from_hash_type_bytes(text: &str) -> Option<String> {
         };
         let inside = &after_open[..close_bracket];
 
-        let mut bytes = Vec::new();
-        let mut parse_failed = false;
-        for chunk in inside.split(|ch: char| ch == ',' || ch.is_whitespace()) {
-            if chunk.is_empty() {
-                continue;
-            }
-            match chunk.parse::<u8>() {
-                Ok(value) => bytes.push(value),
-                Err(_) => {
-                    parse_failed = true;
-                    break;
-                }
-            }
-        }
+        let bytes: Option<Vec<u8>> = inside
+            .split(|ch: char| ch == ',' || ch.is_whitespace())
+            .filter(|chunk| !chunk.is_empty())
+            .map(|chunk| chunk.parse::<u8>().ok())
+            .collect();
 
-        if parse_failed || bytes.is_empty() {
+        let Some(bytes) = bytes.filter(|bytes| !bytes.is_empty()) else {
             offset = field_start;
             continue;
-        }
+        };
 
         return Some(format!("0x{}", hex_encode(&bytes)));
     }
