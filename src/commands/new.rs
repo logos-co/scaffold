@@ -108,29 +108,24 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
     );
     let lez_repo_path = {
         let _echo_guard = crate::process::EchoGuard::suppress();
-        if cmd.vendor_deps {
+        let (lez_path, sync_opts) = if cmd.vendor_deps {
             let root = target.join(".scaffold/repos");
             fs::create_dir_all(&root)?;
-            let lez_vendor = root.join("lez");
-            sync_repo_to_pin_at_path_with_opts(
-                &lez_vendor,
-                &lez_source,
-                DEFAULT_LEZ.sha,
-                "lez",
-                RepoSyncOptions::fail_on_source_mismatch(),
-            )?;
-            lez_vendor
+            (root.join("lez"), RepoSyncOptions::fail_on_source_mismatch())
         } else {
-            let lez_cached = bootstrap_cache.join("repos/lez").join(DEFAULT_LEZ.sha);
-            sync_repo_to_pin_at_path_with_opts(
-                &lez_cached,
-                &lez_source,
-                DEFAULT_LEZ.sha,
-                "lez",
+            (
+                bootstrap_cache.join("repos/lez").join(DEFAULT_LEZ.sha),
                 RepoSyncOptions::auto_reclone_cache_repo(),
-            )?;
-            lez_cached
-        }
+            )
+        };
+        sync_repo_to_pin_at_path_with_opts(
+            &lez_path,
+            &lez_source,
+            DEFAULT_LEZ.sha,
+            "lez",
+            sync_opts,
+        )?;
+        lez_path
     };
 
     // spel is recorded in scaffold.toml here but actually cloned + built by
