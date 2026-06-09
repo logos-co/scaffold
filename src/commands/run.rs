@@ -697,20 +697,14 @@ fn build_hook_command(
 ) -> Command {
     let sequencer_url =
         crate::commands::wallet_support::default_sequencer_http_url_for_project(project);
-    let wallet_home = project
-        .root
-        .join(&project.config.wallet_home_dir)
-        .canonicalize()
-        .unwrap_or_else(|_| project.root.join(&project.config.wallet_home_dir));
+    let wallet_home = project.root.join(&project.config.wallet_home_dir);
+    let wallet_home = wallet_home.canonicalize().unwrap_or(wallet_home);
     let project_root = project
         .root
         .canonicalize()
         .unwrap_or_else(|_| project.root.clone());
-    let idl_dir = project
-        .root
-        .join(&project.config.framework.idl.path)
-        .canonicalize()
-        .unwrap_or_else(|_| project.root.join(&project.config.framework.idl.path));
+    let idl_dir = project.root.join(&project.config.framework.idl.path);
+    let idl_dir = idl_dir.canonicalize().unwrap_or(idl_dir);
 
     let run_deploy_skipped = deployed.skipped;
 

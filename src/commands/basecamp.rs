@@ -142,36 +142,25 @@ fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
         .basecamp_repo
         .clone()
         .unwrap_or_else(|| default_basecamp_repo(DEFAULT_BASECAMP_PIN));
-    if basecamp_repo.source.is_empty() {
-        basecamp_repo.source = BASECAMP_SOURCE.to_string();
-    }
-    if basecamp_repo.pin.is_empty() {
-        basecamp_repo.pin = DEFAULT_BASECAMP_PIN.to_string();
-    }
-    if basecamp_repo.attr.is_empty() {
-        basecamp_repo.attr = BASECAMP_ATTR.to_string();
-    }
+    fill_repo_defaults(
+        &mut basecamp_repo,
+        BASECAMP_SOURCE,
+        DEFAULT_BASECAMP_PIN,
+        BASECAMP_ATTR,
+    );
 
-    // Same defaults for lgpm.
+    // Same defaults for lgpm; its attr tracks whether basecamp is portable.
     let mut lgpm_repo = project
         .config
         .lgpm_repo
         .clone()
         .unwrap_or_else(|| default_lgpm_repo(DEFAULT_LGPM_PIN));
-    if lgpm_repo.source.is_empty() {
-        lgpm_repo.source = LGPM_SOURCE.to_string();
-    }
-    if lgpm_repo.pin.is_empty() {
-        lgpm_repo.pin = DEFAULT_LGPM_PIN.to_string();
-    }
-    if lgpm_repo.attr.is_empty() {
-        lgpm_repo.attr = if is_portable_basecamp(Some(&basecamp_repo)) {
-            LGPM_ATTR_PORTABLE
-        } else {
-            LGPM_ATTR
-        }
-        .to_string();
-    }
+    let lgpm_attr = if is_portable_basecamp(Some(&basecamp_repo)) {
+        LGPM_ATTR_PORTABLE
+    } else {
+        LGPM_ATTR
+    };
+    fill_repo_defaults(&mut lgpm_repo, LGPM_SOURCE, DEFAULT_LGPM_PIN, lgpm_attr);
 
     let (cache_root, _) = resolve_cache_root(&project)?;
     let basecamp_repo_path = cache_root.join("repos/basecamp").join(&basecamp_repo.pin);
@@ -232,6 +221,20 @@ fn format_flake_ref(repo: &RepoRef) -> String {
         format!("{}/{}", repo.source, repo.pin)
     } else {
         format!("{}/{}#{}", repo.source, repo.pin, repo.attr)
+    }
+}
+
+/// Fill empty `source`/`pin`/`attr` fields of a `[repos.*]` entry with the
+/// canonical defaults, leaving any field the user already set untouched.
+fn fill_repo_defaults(repo: &mut RepoRef, source: &str, pin: &str, attr: &str) {
+    if repo.source.is_empty() {
+        repo.source = source.to_string();
+    }
+    if repo.pin.is_empty() {
+        repo.pin = pin.to_string();
+    }
+    if repo.attr.is_empty() {
+        repo.attr = attr.to_string();
     }
 }
 
