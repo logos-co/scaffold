@@ -431,29 +431,35 @@ pub(crate) fn pid_alive(_pid: u32) -> bool {
     false
 }
 
+/// Query a single `ps -o <field>=` value for `pid`, returning the first
+/// non-empty output line. `None` when `ps` can't be run, exits non-zero
+/// (pid gone), or prints nothing.
 #[cfg(unix)]
-fn pid_is_zombie(pid: u32) -> bool {
+fn ps_field(pid: u32, field: &str) -> Option<String> {
     let output = Command::new("ps")
         .arg("-o")
-        .arg("stat=")
+        .arg(field)
         .arg("-p")
         .arg(pid.to_string())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .output();
+        .output()
+        .ok()?;
 
-    let Ok(output) = output else {
-        return false;
-    };
     if !output.status.success() {
-        return false;
+        return None;
     }
 
-    let stat = String::from_utf8_lossy(&output.stdout);
-    stat.lines()
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
-        .is_some_and(|line| line.starts_with('Z'))
+        .map(ToString::to_string)
+}
+
+#[cfg(unix)]
+fn pid_is_zombie(pid: u32) -> bool {
+    ps_field(pid, "stat=").is_some_and(|line| line.starts_with('Z'))
 }
 
 #[cfg(not(unix))]
@@ -473,26 +479,7 @@ pub(crate) fn pid_running(_pid: u32) -> bool {
 
 #[cfg(unix)]
 pub(crate) fn pid_command(pid: u32) -> Option<String> {
-    let output = Command::new("ps")
-        .arg("-o")
-        .arg("command=")
-        .arg("-p")
-        .arg(pid.to_string())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(ToString::to_string)
+    ps_field(pid, "command=")
 }
 
 #[cfg(not(unix))]
