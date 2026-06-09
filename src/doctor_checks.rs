@@ -37,20 +37,18 @@ pub(crate) fn check_container_runtime() -> CheckRow {
 }
 
 fn container_runtime_row(docker: Option<PathBuf>, podman: Option<PathBuf>) -> CheckRow {
-    match (docker, podman) {
-        (Some(path), _) => CheckRow {
+    // Prefer docker over podman when both are present.
+    let found = docker
+        .map(|path| ("docker", path))
+        .or_else(|| podman.map(|path| ("podman", path)));
+    match found {
+        Some((runtime, path)) => CheckRow {
             status: CheckStatus::Pass,
             name: "container runtime".to_string(),
-            detail: format!("found docker at {}", path.display()),
+            detail: format!("found {runtime} at {}", path.display()),
             remediation: None,
         },
-        (None, Some(path)) => CheckRow {
-            status: CheckStatus::Pass,
-            name: "container runtime".to_string(),
-            detail: format!("found podman at {}", path.display()),
-            remediation: None,
-        },
-        (None, None) => CheckRow {
+        None => CheckRow {
             status: CheckStatus::Warn,
             name: "container runtime".to_string(),
             detail: "neither docker nor podman found on PATH".to_string(),
