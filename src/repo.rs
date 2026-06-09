@@ -121,6 +121,10 @@ pub(crate) fn ensure_repo_present(
         fs::create_dir_all(parent)?;
     }
 
+    clone_repo(source, path, &format!("clone {label}"))
+}
+
+fn clone_repo(source: &str, path: &Path, label: &str) -> DynResult<()> {
     run_forwarded(
         Command::new("git")
             .arg("clone")
@@ -128,7 +132,7 @@ pub(crate) fn ensure_repo_present(
             .arg("--")
             .arg(source)
             .arg(path),
-        &format!("clone {label}"),
+        label,
     )
 }
 
@@ -172,15 +176,7 @@ fn reconcile_repo_source(
             }
 
             fs::remove_dir_all(path)?;
-            run_forwarded(
-                Command::new("git")
-                    .arg("clone")
-                    .arg("--no-hardlinks")
-                    .arg("--")
-                    .arg(source)
-                    .arg(path),
-                &format!("refresh clone {label}"),
-            )?;
+            clone_repo(source, path, &format!("refresh clone {label}"))?;
         }
     }
 
