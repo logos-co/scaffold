@@ -99,11 +99,7 @@ fn parse_run(doc: &DocumentMut) -> DynResult<RunConfig> {
     };
 
     let default_profile = read_string(run_table, "default_profile");
-    let inline_reset = run_table
-        .get("reset")
-        .and_then(Item::as_value)
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let inline_reset = read_bool(run_table, "reset", false);
     let inline_post_deploy = parse_post_deploy(run_table.get("post_deploy"))?;
 
     let mut profiles: std::collections::BTreeMap<String, RunProfile> =
@@ -113,11 +109,7 @@ fn parse_run(doc: &DocumentMut) -> DynResult<RunConfig> {
             let table = item.as_table().ok_or_else(|| {
                 anyhow!("invalid scaffold.toml: [run.profiles.{name}] is not a table")
             })?;
-            let reset = table
-                .get("reset")
-                .and_then(Item::as_value)
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
+            let reset = read_bool(table, "reset", false);
             let post_deploy = parse_post_deploy(table.get("post_deploy"))?;
             profiles.insert(name.to_string(), RunProfile { reset, post_deploy });
         }
@@ -573,6 +565,14 @@ fn read_string(table: &Table, key: &str) -> Option<String> {
         .and_then(Item::as_str)
         .map(str::to_string)
         .filter(|s| !s.is_empty())
+}
+
+fn read_bool(table: &Table, key: &str, default: bool) -> bool {
+    table
+        .get(key)
+        .and_then(Item::as_value)
+        .and_then(Value::as_bool)
+        .unwrap_or(default)
 }
 
 /// Serialize a `Config` to TOML text. Used for fresh writes (`new`, `init`
