@@ -573,13 +573,11 @@ fn apply_launch_env_overrides(
         combined.push(paths.join(":"));
         env.insert(key.clone(), combined);
     }
-    for (key, val) in &cfg.env {
+    // Global `[basecamp.env]` first, then the launched profile's `env` so its
+    // entries win on collision.
+    let profile_env = cfg.profile_env.get(profile).into_iter().flatten();
+    for (key, val) in cfg.env.iter().chain(profile_env) {
         env.insert(key.clone(), OsString::from(val));
-    }
-    if let Some(profile_env) = cfg.profile_env.get(profile) {
-        for (key, val) in profile_env {
-            env.insert(key.clone(), OsString::from(val));
-        }
     }
 }
 
