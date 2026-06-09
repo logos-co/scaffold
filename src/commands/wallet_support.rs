@@ -22,6 +22,20 @@ pub(crate) struct WalletRuntimeContext {
     pub(crate) sequencer_addr: Option<String>,
 }
 
+impl WalletRuntimeContext {
+    /// Build a `Command` for the vendored wallet binary with
+    /// `NSSA_WALLET_HOME_DIR` pre-set so the invocation targets the project
+    /// wallet home. Callers append the subcommand and its arguments.
+    pub(crate) fn command(&self) -> std::process::Command {
+        let mut command = std::process::Command::new(&self.wallet_binary);
+        command.env(
+            "NSSA_WALLET_HOME_DIR",
+            self.wallet_home.as_os_str().to_string_lossy().to_string(),
+        );
+        command
+    }
+}
+
 /// When `wallet_config.json` omits `sequencer_addr`, RPC calls should target the same host/port
 /// as `logos-scaffold localnet` (`[localnet] port` in `scaffold.toml`, default 3040).
 pub(crate) fn default_sequencer_http_url_for_project(project: &Project) -> String {

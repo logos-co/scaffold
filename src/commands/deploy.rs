@@ -107,14 +107,8 @@ pub(crate) fn cmd_deploy(
             continue;
         };
 
-        let mut command = Command::new(&wallet.wallet_binary);
-        command
-            .env(
-                "NSSA_WALLET_HOME_DIR",
-                wallet.wallet_home.as_os_str().to_string_lossy().to_string(),
-            )
-            .arg("deploy-program")
-            .arg(&binary_path);
+        let mut command = wallet.command();
+        command.arg("deploy-program").arg(&binary_path);
 
         let output = match run_with_stdin(command, format!("{}\n", wallet_password())) {
             Ok(output) => output,
@@ -337,14 +331,8 @@ fn deploy_single_program(
 ) -> DynResult<()> {
     preflight_sequencer_reachability(sequencer_addr)?;
 
-    let mut command = std::process::Command::new(&wallet.wallet_binary);
-    command
-        .env(
-            "NSSA_WALLET_HOME_DIR",
-            wallet.wallet_home.as_os_str().to_string_lossy().to_string(),
-        )
-        .arg("deploy-program")
-        .arg(binary_path);
+    let mut command = wallet.command();
+    command.arg("deploy-program").arg(binary_path);
 
     // Suppress the `$ <cmd>` echo on stdout for --json so the output is a
     // pure JSON object that pipes cleanly into `jq`. RAII guard restores echo

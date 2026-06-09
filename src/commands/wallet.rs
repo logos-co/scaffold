@@ -62,14 +62,8 @@ pub(crate) fn cmd_wallet(action: WalletAction) -> DynResult<()> {
 fn cmd_wallet_list(project: &crate::model::Project, long: bool, json: bool) -> DynResult<()> {
     let wallet = load_wallet_runtime(project)?;
 
-    let mut command = Command::new(&wallet.wallet_binary);
-    command
-        .env(
-            "NSSA_WALLET_HOME_DIR",
-            wallet.wallet_home.as_os_str().to_string_lossy().to_string(),
-        )
-        .arg("account")
-        .arg("list");
+    let mut command = wallet.command();
+    command.arg("account").arg("list");
 
     if long {
         command.arg("--long");
@@ -127,11 +121,7 @@ fn cmd_wallet_proxy(project: &crate::model::Project, args: &[String]) -> DynResu
 
     let wallet = load_wallet_runtime(project)?;
 
-    let mut command = Command::new(&wallet.wallet_binary);
-    command.env(
-        "NSSA_WALLET_HOME_DIR",
-        wallet.wallet_home.as_os_str().to_string_lossy().to_string(),
-    );
+    let mut command = wallet.command();
     for arg in args {
         command.arg(arg);
     }
