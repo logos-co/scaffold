@@ -31,6 +31,7 @@ Once a project exists on disk, also pull in the matching template / integration 
 | Project | `setup` | Sync LEZ + spel to pinned commits, build `sequencer_service` / `wallet` / `spel` locally, seed default wallet. Project-local; no PATH installs. |
 | Project | `build [project-path]` | Runs `setup` then `cargo build --workspace`; auto-compiles `methods/Cargo.toml` if present. |
 | Project | `deploy [program-name]` | Deploys one or all guest programs discovered in `methods/guest/src/bin/*.rs`. Prints `program_id` (risc0 image ID) on success. `--json` only structured when combined with `--program-path`. |
+| Project | `run [--profile NAME] [--reset \| --no-reset] [--post-deploy <cmd>…] [--no-post-deploy] [--watch] [--localnet-timeout N]` | Inner loop: build (chains setup) → IDL → localnet → topup → deploy → optional post-deploy hooks. Prefer over manual setup/build/deploy/topup for daily work. Works with zero config; deploy is skipped when inputs + sequencer are unchanged. Does **not** run `check-health` or any `basecamp` command. |
 | Runtime | `localnet start [--timeout-sec N]` | Spawn sequencer; waits for pid alive + 127.0.0.1:3040 reachable. |
 | Runtime | `localnet stop` | Stop tracked sequencer. |
 | Runtime | `localnet status [--json]` | Distinguishes managed / stale / foreign listener. |
@@ -54,18 +55,19 @@ Once a project exists on disk, also pull in the matching template / integration 
 
 ## First Success Path
 
-From a scratch directory (per `templates/default/README.md` and DOGFOODING.md scenario D1):
+From a scratch directory (per `templates/default/README.md`):
 
 ```bash
 lgs new my-app
 cd my-app
-lgs setup
-lgs localnet start
-lgs build
-lgs deploy
-lgs wallet topup
+lgs run
 lgs wallet -- check-health
 ```
+
+`lgs run` chains setup → build → IDL → localnet → topup → deploy. The
+step-by-step path (`setup` / `localnet start` / `build` / `deploy` / `topup`)
+lives in the repo README under "Step-by-step (optional)" — reach for it to
+debug or learn a single phase.
 
 Checkpoint at any time:
 
