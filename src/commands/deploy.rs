@@ -262,7 +262,7 @@ fn preflight_sequencer_reachability(sequencer_addr: &str) -> DynResult<()> {
             )
         }
         Err(err) => {
-            println!(
+            eprintln!(
                 "warning: sequencer reachability probe failed ({err}); continuing with wallet submission mode"
             );
             Ok(())
