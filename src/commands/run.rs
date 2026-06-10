@@ -20,7 +20,9 @@ use crate::commands::run_state::{
 };
 use crate::commands::setup::ensure_default_wallet_seeded;
 use crate::commands::wallet::{cmd_wallet_topup_inner, TopupOutcome};
-use crate::constants::{DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, SPEL_BIN_REL_PATH};
+use crate::constants::{
+    DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, FRAMEWORK_KIND_LEZ_FRAMEWORK, SPEL_BIN_REL_PATH,
+};
 use crate::model::{LocalnetOwnership, Project, RunProfile};
 use crate::project::{load_project, resolve_repo_path, run_in_project_dir};
 use crate::state::prepare_wallet_home;
@@ -138,9 +140,19 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
     println!("[1/{total_steps}] Building...");
     cmd_build_shortcut(None, false)?;
 
-    // Step 2: Build IDL (no-op for non-lez-framework projects)
+    // Step 2: Build IDL (no-op for non-lez-framework projects). `build_idl_for_current_project`
+    // deliberately bails when typed directly against a non-lez-framework project, so the
+    // pipeline must gate on framework kind here the same way `lgs build` does — otherwise
+    // `lgs run` aborts at this step for every `default`-template project.
     println!("[2/{total_steps}] Building IDL...");
-    build_idl_for_current_project()?;
+    if project.config.framework.kind == FRAMEWORK_KIND_LEZ_FRAMEWORK {
+        build_idl_for_current_project()?;
+    } else {
+        println!(
+            "Skipping IDL build for framework kind `{}`",
+            project.config.framework.kind
+        );
+    }
 
     // Step 3: Reset OR ensure localnet.
     if effective_reset {
