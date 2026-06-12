@@ -22,6 +22,7 @@ pub mod accounts;
 pub mod blocks;
 pub mod client;
 pub mod pins;
+pub mod state;
 #[cfg(test)]
 pub(crate) mod test_support;
 
@@ -537,26 +538,52 @@ fn ensure_dir_empty_enough(dir: &Path) -> DynResult<()> {
     Ok(())
 }
 
-/// Copy a caller-provided state directory's database into the node work dir.
-/// Accepts either a directory containing `rocksdb/` or a bare database
-/// directory.
+/// Materialise a caller-provided state into the node work dir before the
+/// sequencer first opens it. Accepts:
+/// - a directory containing `rocksdb/` (or a bare database directory):
+///   copied verbatim — the node resumes from that exact state;
+/// - a `state seed`-produced directory containing `seed.json`: the seed is
+///   copied and later injected into the node's sequencer config as genesis
+///   `initial_public_accounts` / `initial_private_accounts`, so the node
+///   starts from exactly those accounts and nothing else.
 fn seed_state_dir(state_src: &Path, work_dir: &Path) -> DynResult<()> {
     if !state_src.is_dir() {
         bail!("state directory not found at {}", state_src.display());
     }
-    let src_db = if state_src.join("rocksdb").is_dir() {
-        state_src.join("rocksdb")
-    } else {
-        state_src.to_path_buf()
-    };
-    let dest_db = work_dir.join("rocksdb");
-    copy_dir_recursive(&src_db, &dest_db).with_context(|| {
-        format!(
-            "failed to seed state from {} into {}",
-            src_db.display(),
-            dest_db.display()
-        )
-    })
+
+    let seed_file = state_src.join(state::SEED_FILE);
+    let has_db = state_src.join("rocksdb").is_dir() || state_src.join("CURRENT").exists();
+
+    if has_db {
+        let src_db = if state_src.join("rocksdb").is_dir() {
+            state_src.join("rocksdb")
+        } else {
+            state_src.to_path_buf()
+        };
+        let dest_db = work_dir.join("rocksdb");
+        return copy_dir_recursive(&src_db, &dest_db).with_context(|| {
+            format!(
+                "failed to seed state from {} into {}",
+                src_db.display(),
+                dest_db.display()
+            )
+        });
+    }
+
+    if seed_file.exists() {
+        // Validate now so a malformed seed fails before the node spawns.
+        state::load_seed_from_state_dir(state_src)?;
+        fs::copy(&seed_file, work_dir.join(state::SEED_FILE))
+            .with_context(|| format!("failed to copy seed file from {}", seed_file.display()))?;
+        return Ok(());
+    }
+
+    bail!(
+        "{} is neither a database state directory (rocksdb/) nor a seeded state directory \
+         ({}). Produce one with `lgs test-node state seed`.",
+        state_src.display(),
+        state::SEED_FILE
+    )
 }
 
 fn copy_dir_recursive(src: &Path, dest: &Path) -> DynResult<()> {
@@ -600,6 +627,16 @@ fn write_node_config(lez: &Path, work_dir: &Path, port: u16) -> DynResult<(PathB
         "max_block_size".to_string(),
         Value::String("8 MiB".to_string()),
     );
+
+    // Genesis-config seeding: a seed.json placed in the work dir (by
+    // `--state <seeded dir>`) becomes the node's initial accounts. The
+    // sequencer builds its genesis state from exactly these values when no
+    // database exists — no testnet default accounts are added.
+    if let Some(snapshot) = state::load_seed_from_state_dir(work_dir)? {
+        let (public, private) = snapshot.to_config_values();
+        obj.insert("initial_public_accounts".to_string(), public);
+        obj.insert("initial_private_accounts".to_string(), private);
+    }
 
     let genesis_block_id = obj
         .get("genesis_id")
@@ -777,6 +814,49 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
         assert_eq!(src["home"], serde_json::json!("."));
         assert_eq!(src["port"], serde_json::json!(3040));
+    }
+
+    #[test]
+    fn write_node_config_injects_seeded_initial_accounts() {
+        let temp = tempdir().unwrap();
+        let lez = temp.path().join("lez");
+        let work = temp.path().join("node");
+        fs::create_dir_all(&work).unwrap();
+        let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(&config_path, r#"{ "home": ".", "genesis_id": 1 }"#).unwrap();
+
+        // Place a seed.json as `--state <seeded dir>` would.
+        fs::write(
+            work.join("seed.json"),
+            serde_json::json!({
+                "format": "lgs-state-snapshot/1",
+                "public_accounts": [
+                    { "account_id": "6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV", "balance": 42 }
+                ],
+                "private_accounts": [],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let (dest, _) = write_node_config(&lez, &work, 41234).unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
+        assert_eq!(
+            doc["initial_public_accounts"][0]["account_id"],
+            serde_json::json!("6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV")
+        );
+        assert_eq!(
+            doc["initial_public_accounts"][0]["balance"],
+            serde_json::json!(42)
+        );
+        assert_eq!(
+            doc["initial_private_accounts"],
+            serde_json::json!([]),
+            "private accounts key must be present (empty) so the sequencer skips the \
+             testnet default state"
+        );
     }
 
     #[test]

@@ -42,6 +42,10 @@ pub use crate::testnode::pins::{
     CheckoutOwnership, PinOrigin, PinOverrides, PreparedTestNode, TestNodeCheck,
     TestNodeCheckCategory, TestNodeDoctorReport, TestNodePins,
 };
+pub use crate::testnode::state::{
+    PrivateSeedAccount, PublicSeedAccount, SeedAccountState, SeedError, SeededState, StateSchema,
+    StateSnapshot,
+};
 pub use crate::testnode::{
     PortSelection, TestNodeConfig, TestNodeInfo, TestNodeStatus, DEFAULT_TEST_NODE_TIMEOUT_SEC,
 };
@@ -163,6 +167,36 @@ pub fn prepare_test_node(
 /// support — each reported as a separate categorized check.
 pub fn doctor_test_node(project: &Project) -> Result<TestNodeDoctorReport> {
     crate::testnode::pins::doctor_test_node(&project.inner).map_err(classify)
+}
+
+/// Identify the exact state snapshot formats the project's pins accept for
+/// test-node seeding.
+pub fn state_schema(project: &Project) -> Result<StateSchema> {
+    StateSchema::for_project(&project.inner).map_err(classify)
+}
+
+/// Validate a snapshot (file) or state directory and produce a state
+/// directory `TestNodeConfig::state` / `test-node start --state` accepts.
+/// Validation errors distinguish format mismatch, storage-schema mismatch,
+/// pin mismatch, and account decode errors (see [`SeedError`]).
+pub fn seed_state(
+    project: &Project,
+    input: impl AsRef<Path>,
+    output_dir: Option<&Path>,
+) -> Result<SeededState> {
+    crate::testnode::state::seed_state(&project.inner, input.as_ref(), output_dir).map_err(classify)
+}
+
+/// Export named public accounts from a running node into an
+/// `lgs-state-snapshot/1` file usable by [`seed_state`].
+pub fn export_state_snapshot(
+    rpc_url: &str,
+    account_ids: &[String],
+    lez_commit: Option<String>,
+    output: impl AsRef<Path>,
+) -> Result<StateSnapshot> {
+    crate::testnode::state::export_state_snapshot(rpc_url, account_ids, lez_commit, output.as_ref())
+        .map_err(classify)
 }
 
 /// Start a node, run `command` with the node's connection details exported

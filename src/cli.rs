@@ -390,6 +390,74 @@ enum TestNodeSubcommand {
     Proof(TestNodeProofArgs),
     #[command(about = "Write account snapshots for later comparison or seeding")]
     Snapshot(TestNodeSnapshotArgs),
+    #[command(about = "Seed test nodes from caller-provided state snapshots")]
+    State(TestNodeStateArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeStateArgs {
+    #[command(subcommand)]
+    command: TestNodeStateSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum TestNodeStateSubcommand {
+    #[command(about = "Identify the exact state snapshot formats the current project pins accept")]
+    Schema(TestNodeStateSchemaArgs),
+    #[command(
+        about = "Export named public accounts from a node into a state snapshot file",
+        long_about = "Export named public accounts from a running node into an \
+                      lgs-state-snapshot/1 JSON file usable by `state seed`.\n\n\
+                      The pinned sequencer RPC exposes public account balances only (no \
+                      enumeration, no private state). For a complete, full-fidelity state \
+                      snapshot, stop a node with --preserve-work-dir and pass its state \
+                      directory to `state seed` instead."
+    )]
+    Export(TestNodeStateExportArgs),
+    #[command(
+        about = "Validate a snapshot and produce a state directory for `test-node start --state`"
+    )]
+    Seed(TestNodeStateSeedArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeStateSchemaArgs {
+    /// Project root (default: discover from the current directory).
+    #[arg(long, value_name = "DIR")]
+    project: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeStateExportArgs {
+    /// Sequencer JSON-RPC URL.
+    #[arg(long, value_name = "URL")]
+    url: String,
+    /// Base58 account ids to export (repeat the flag per account).
+    #[arg(long = "account-id", value_name = "ID", required = true)]
+    account_ids: Vec<String>,
+    /// Output snapshot file (JSON, lgs-state-snapshot/1).
+    #[arg(long, value_name = "PATH")]
+    output: PathBuf,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeStateSeedArgs {
+    /// Project root (default: discover from the current directory).
+    #[arg(long, value_name = "DIR")]
+    project: Option<PathBuf>,
+    /// Snapshot file (lgs-state-snapshot/1 or lgs-account-snapshot/1) or a
+    /// state directory containing a rocksdb database.
+    #[arg(long, value_name = "PATH")]
+    input: PathBuf,
+    /// Output state directory (default: .scaffold/test-nodes/seeds/<id>).
+    #[arg(long, value_name = "DIR")]
+    output: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -1258,6 +1326,24 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                             json: args.json,
                         }
                     }
+                },
+                TestNodeSubcommand::State(state) => match state.command {
+                    TestNodeStateSubcommand::Schema(args) => TestNodeAction::StateSchema {
+                        project: args.project,
+                        json: args.json,
+                    },
+                    TestNodeStateSubcommand::Export(args) => TestNodeAction::StateExport {
+                        url: args.url,
+                        account_ids: args.account_ids,
+                        output: args.output,
+                        json: args.json,
+                    },
+                    TestNodeStateSubcommand::Seed(args) => TestNodeAction::StateSeed {
+                        project: args.project,
+                        input: args.input,
+                        output: args.output,
+                        json: args.json,
+                    },
                 },
             };
             cmd_test_node(action)
