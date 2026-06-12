@@ -4,6 +4,7 @@ use anyhow::Context;
 
 use crate::model::{CheckStatus, Project};
 use crate::project::{load_project, load_project_at, resolve_cache_root};
+use crate::testnode::accounts::{AccountValue, ReadAt};
 use crate::testnode::blocks::{BlockInfo, BlockRange, ClockReadMode, ClockSnapshot};
 use crate::testnode::client::{
     SubmitOutcome, TestNodeClient, TransactionBytes, TransactionOutcome, WaitOptions,
@@ -108,6 +109,62 @@ pub(crate) enum TestNodeAction {
         timeout_sec: u64,
         json: bool,
     },
+    AccountGet {
+        url: String,
+        account_id: String,
+        at_block: Option<u64>,
+        json: bool,
+    },
+    AccountBatchGet {
+        url: String,
+        account_ids: Vec<String>,
+        at_block: Option<u64>,
+        json: bool,
+    },
+    ProofGet {
+        url: String,
+        commitment: String,
+        at_block: Option<u64>,
+        json: bool,
+    },
+    SnapshotAccounts {
+        url: String,
+        account_ids: Vec<String>,
+        output: PathBuf,
+        json: bool,
+    },
+}
+
+fn read_at(at_block: Option<u64>) -> ReadAt {
+    match at_block {
+        Some(block) => ReadAt::Block(block),
+        None => ReadAt::Latest,
+    }
+}
+
+fn print_account_value(account_id: &str, value: &AccountValue) {
+    println!("account {account_id}");
+    match value {
+        AccountValue::Present {
+            balance,
+            nonce,
+            program_owner,
+            data,
+            data_len,
+            ..
+        } => {
+            println!("  state: present");
+            println!("  balance: {balance}");
+            println!("  nonce: {nonce}");
+            println!("  program_owner: {program_owner}");
+            println!("  data ({data_len} bytes, base64): {data}");
+        }
+        AccountValue::Missing => println!("  state: missing (never written)"),
+        AccountValue::DecodeError { message, .. } => {
+            println!("  state: decode_error");
+            println!("  message: {message}");
+        }
+    }
 }
 
 fn print_block_info(info: &BlockInfo) {
@@ -595,6 +652,104 @@ pub(crate) fn cmd_test_node(action: TestNodeAction) -> DynResult<()> {
                 println!("{}", serde_json::to_string_pretty(&snapshot)?);
             } else {
                 print_clock_snapshot(&snapshot);
+            }
+            Ok(())
+        }
+        TestNodeAction::AccountGet {
+            url,
+            account_id,
+            at_block,
+            json,
+        } => {
+            let client = TestNodeClient::new(url);
+            let read = client.account(&account_id, read_at(at_block))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&read)?);
+            } else {
+                println!("block_id: {}", read.block_id);
+                print_account_value(&read.account_id, &read.value);
+            }
+            Ok(())
+        }
+        TestNodeAction::AccountBatchGet {
+            url,
+            account_ids,
+            at_block,
+            json,
+        } => {
+            let client = TestNodeClient::new(url);
+            let batch = client.accounts(&account_ids, read_at(at_block))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&batch)?);
+            } else {
+                println!("block_id: {}", batch.block_id);
+                for entry in &batch.accounts {
+                    print_account_value(&entry.account_id, &entry.value);
+                }
+            }
+            Ok(())
+        }
+        TestNodeAction::ProofGet {
+            url,
+            commitment,
+            at_block,
+            json,
+        } => {
+            let client = TestNodeClient::new(url);
+            let read = client.proof(&commitment, read_at(at_block))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&read)?);
+            } else {
+                println!("commitment: {}", read.commitment);
+                println!("block_id: {}", read.block_id);
+                match &read.proof {
+                    Some(proof) => {
+                        println!("leaf_index: {}", proof.leaf_index);
+                        for node in &proof.path {
+                            println!("  path: {node}");
+                        }
+                    }
+                    None => println!("proof: missing (commitment unknown to the node)"),
+                }
+            }
+            Ok(())
+        }
+        TestNodeAction::SnapshotAccounts {
+            url,
+            account_ids,
+            output,
+            json,
+        } => {
+            let client = TestNodeClient::new(url.clone());
+            let batch = client.accounts(&account_ids, ReadAt::Latest)?;
+            let snapshot = serde_json::json!({
+                "format": "lgs-account-snapshot/1",
+                "rpc_url": url,
+                "block_id": batch.block_id,
+                "accounts": batch.accounts,
+            });
+            if let Some(parent) = output.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(
+                &output,
+                format!("{}\n", serde_json::to_string_pretty(&snapshot)?),
+            )
+            .with_context(|| format!("failed to write {}", output.display()))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "snapshot": output.display().to_string(),
+                        "block_id": batch.block_id,
+                        "account_count": batch.accounts.len(),
+                    }))?
+                );
+            } else {
+                println!("snapshot written");
+                println!("  file: {}", output.display());
+                println!("  block_id: {}", batch.block_id);
+                println!("  accounts: {}", batch.accounts.len());
             }
             Ok(())
         }
