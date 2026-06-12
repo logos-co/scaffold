@@ -4,6 +4,9 @@ use anyhow::Context;
 
 use crate::model::{CheckStatus, Project};
 use crate::project::{load_project, load_project_at, resolve_cache_root};
+use crate::testnode::client::{
+    SubmitOutcome, TestNodeClient, TransactionBytes, TransactionOutcome, WaitOptions,
+};
 use crate::testnode::pins::{
     doctor_test_node, prepare_test_node, resolve_test_node_pins, PinOverrides,
 };
@@ -57,6 +60,115 @@ pub(crate) enum TestNodeAction {
         timeout_sec: u64,
         command: Vec<String>,
     },
+    TxSubmit {
+        url: String,
+        file: PathBuf,
+        encoding: TxEncoding,
+        json: bool,
+    },
+    TxWait {
+        url: String,
+        hash: String,
+        after_block: Option<u64>,
+        timeout_sec: u64,
+        json: bool,
+    },
+    TxSubmitAndWait {
+        url: String,
+        file: PathBuf,
+        encoding: TxEncoding,
+        timeout_sec: u64,
+        json: bool,
+    },
+}
+
+/// On-disk encoding of a transaction file passed to `tx submit`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TxEncoding {
+    /// File contains base64 text of the borsh bytes (the wire encoding).
+    BorshBase64,
+    /// File contains raw borsh bytes.
+    Borsh,
+}
+
+fn read_transaction_file(file: &PathBuf, encoding: TxEncoding) -> DynResult<TransactionBytes> {
+    match encoding {
+        TxEncoding::BorshBase64 => {
+            let text = std::fs::read_to_string(file)
+                .with_context(|| format!("failed to read {}", file.display()))?;
+            Ok(TransactionBytes::borsh_base64(&text)?)
+        }
+        TxEncoding::Borsh => {
+            let bytes = std::fs::read(file)
+                .with_context(|| format!("failed to read {}", file.display()))?;
+            Ok(TransactionBytes::borsh(bytes))
+        }
+    }
+}
+
+/// Print a terminal outcome (JSON or human form) and convert non-committed
+/// outcomes into a non-zero exit.
+fn finish_tx_outcome(outcome: &TransactionOutcome, json: bool) -> DynResult<()> {
+    if json {
+        println!("{}", serde_json::to_string(outcome)?);
+    } else {
+        match outcome {
+            TransactionOutcome::Committed { tx_hash, block } => {
+                println!("committed");
+                println!("  tx_hash: {tx_hash}");
+                println!("  block_id: {}", block.block_id);
+                println!("  timestamp: {}", block.timestamp);
+            }
+            TransactionOutcome::Rejected {
+                tx_hash,
+                phase,
+                reason,
+                observed_after_block_id,
+            } => {
+                println!("rejected ({phase:?})");
+                if let Some(tx_hash) = tx_hash {
+                    println!("  tx_hash: {tx_hash}");
+                }
+                if let Some(reason) = reason {
+                    println!("  reason: {reason}");
+                }
+                if let Some(block) = observed_after_block_id {
+                    println!("  observed_after_block_id: {block}");
+                }
+            }
+            TransactionOutcome::Timeout {
+                tx_hash,
+                last_observed_block_id,
+            } => {
+                println!("timeout");
+                println!("  tx_hash: {tx_hash}");
+                println!("  last_observed_block_id: {last_observed_block_id}");
+            }
+            TransactionOutcome::TransportError { operation, message } => {
+                println!("transport_error");
+                println!("  operation: {operation}");
+                println!("  message: {message}");
+            }
+            TransactionOutcome::WireMismatch {
+                returned_hash,
+                submitted_tx,
+                echoed_tx,
+                ..
+            } => {
+                println!("wire_mismatch");
+                println!("  returned_hash: {returned_hash}");
+                println!("  submitted_tx: {submitted_tx}");
+                println!("  echoed_tx: {echoed_tx}");
+            }
+        }
+    }
+
+    if !outcome.is_committed() {
+        // The JSON object on stdout is the structured contract; the process
+        // exit code is the pass/fail signal for harnesses.
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 pub(crate) fn cmd_test_node(action: TestNodeAction) -> DynResult<()> {
@@ -274,6 +386,71 @@ pub(crate) fn cmd_test_node(action: TestNodeAction) -> DynResult<()> {
                 std::process::exit(status.code().unwrap_or(1));
             }
             Ok(())
+        }
+        TestNodeAction::TxSubmit {
+            url,
+            file,
+            encoding,
+            json,
+        } => {
+            let tx = read_transaction_file(&file, encoding)?;
+            let client = TestNodeClient::new(url);
+            let outcome = client.submit(&tx);
+            if json {
+                println!("{}", serde_json::to_string(&outcome)?);
+            } else {
+                match &outcome {
+                    SubmitOutcome::Submitted { tx_hash } => {
+                        println!("submitted");
+                        println!("  tx_hash: {tx_hash}");
+                    }
+                    SubmitOutcome::Rejected { phase, reason } => {
+                        println!("rejected ({phase:?})");
+                        println!("  reason: {reason}");
+                    }
+                    SubmitOutcome::TransportError { operation, message } => {
+                        println!("transport_error");
+                        println!("  operation: {operation}");
+                        println!("  message: {message}");
+                    }
+                }
+            }
+            if !matches!(outcome, SubmitOutcome::Submitted { .. }) {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        TestNodeAction::TxWait {
+            url,
+            hash,
+            after_block,
+            timeout_sec,
+            json,
+        } => {
+            let client = TestNodeClient::new(url);
+            let options = WaitOptions {
+                after_block,
+                timeout: std::time::Duration::from_secs(timeout_sec),
+                ..WaitOptions::default()
+            };
+            let outcome = client.wait(&hash, None, &options);
+            finish_tx_outcome(&outcome, json)
+        }
+        TestNodeAction::TxSubmitAndWait {
+            url,
+            file,
+            encoding,
+            timeout_sec,
+            json,
+        } => {
+            let tx = read_transaction_file(&file, encoding)?;
+            let client = TestNodeClient::new(url);
+            let options = WaitOptions {
+                timeout: std::time::Duration::from_secs(timeout_sec),
+                ..WaitOptions::default()
+            };
+            let outcome = client.submit_and_wait(&tx, &options);
+            finish_tx_outcome(&outcome, json)
         }
     }
 }

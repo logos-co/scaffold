@@ -18,6 +18,7 @@
 //! - `node.json` — node metadata used by `status` / `stop` and by handles
 //!   reconnecting from another process.
 
+pub mod client;
 pub mod pins;
 
 use std::fs;

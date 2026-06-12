@@ -376,6 +376,101 @@ enum TestNodeSubcommand {
                       Example:\n  lgs test-node run --serial -- cargo test --test sequencer_it"
     )]
     Run(TestNodeRunArgs),
+    #[command(
+        about = "Submit transactions and observe definitive committed/rejected/timeout outcomes"
+    )]
+    Tx(TestNodeTxArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeTxArgs {
+    #[command(subcommand)]
+    command: TestNodeTxSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum TestNodeTxSubcommand {
+    #[command(
+        about = "Submit a transaction; prints the tx hash or a structured stateless rejection"
+    )]
+    Submit(TestNodeTxSubmitArgs),
+    #[command(
+        about = "Wait for a definitive outcome of a submitted transaction (committed, rejected, timeout)"
+    )]
+    Wait(TestNodeTxWaitArgs),
+    #[command(
+        name = "submit-and-wait",
+        about = "Submit a transaction and wait for exactly one terminal outcome"
+    )]
+    SubmitAndWait(TestNodeTxSubmitAndWaitArgs),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum TxEncodingArg {
+    /// File contains base64 text of the transaction's borsh bytes.
+    BorshBase64,
+    /// File contains the raw borsh bytes.
+    Borsh,
+}
+
+impl TxEncodingArg {
+    fn into_encoding(self) -> crate::commands::testnode::TxEncoding {
+        match self {
+            Self::BorshBase64 => crate::commands::testnode::TxEncoding::BorshBase64,
+            Self::Borsh => crate::commands::testnode::TxEncoding::Borsh,
+        }
+    }
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeTxSubmitArgs {
+    /// Sequencer JSON-RPC URL (e.g. from `test-node start --json`).
+    #[arg(long, value_name = "URL")]
+    url: String,
+    /// Transaction file.
+    #[arg(long, value_name = "PATH")]
+    file: PathBuf,
+    /// Encoding of the transaction file.
+    #[arg(long, value_enum, default_value_t = TxEncodingArg::BorshBase64)]
+    encoding: TxEncodingArg,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeTxWaitArgs {
+    /// Sequencer JSON-RPC URL.
+    #[arg(long, value_name = "URL")]
+    url: String,
+    /// Transaction hash returned by submit.
+    #[arg(long, value_name = "HASH")]
+    hash: String,
+    /// Only observe the transaction after this block boundary.
+    #[arg(long, value_name = "BLOCK")]
+    after_block: Option<u64>,
+    /// Seconds to wait for a terminal outcome.
+    #[arg(long, default_value_t = 60)]
+    timeout_sec: u64,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeTxSubmitAndWaitArgs {
+    /// Sequencer JSON-RPC URL.
+    #[arg(long, value_name = "URL")]
+    url: String,
+    /// Transaction file.
+    #[arg(long, value_name = "PATH")]
+    file: PathBuf,
+    /// Encoding of the transaction file.
+    #[arg(long, value_enum, default_value_t = TxEncodingArg::BorshBase64)]
+    encoding: TxEncodingArg,
+    /// Seconds to wait for a terminal outcome.
+    #[arg(long, default_value_t = 60)]
+    timeout_sec: u64,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -865,6 +960,28 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                     parallel: args.parallel,
                     timeout_sec: args.timeout_sec,
                     command: args.command,
+                },
+                TestNodeSubcommand::Tx(tx) => match tx.command {
+                    TestNodeTxSubcommand::Submit(args) => TestNodeAction::TxSubmit {
+                        url: args.url,
+                        file: args.file,
+                        encoding: args.encoding.into_encoding(),
+                        json: args.json,
+                    },
+                    TestNodeTxSubcommand::Wait(args) => TestNodeAction::TxWait {
+                        url: args.url,
+                        hash: args.hash,
+                        after_block: args.after_block,
+                        timeout_sec: args.timeout_sec,
+                        json: args.json,
+                    },
+                    TestNodeTxSubcommand::SubmitAndWait(args) => TestNodeAction::TxSubmitAndWait {
+                        url: args.url,
+                        file: args.file,
+                        encoding: args.encoding.into_encoding(),
+                        timeout_sec: args.timeout_sec,
+                        json: args.json,
+                    },
                 },
             };
             cmd_test_node(action)

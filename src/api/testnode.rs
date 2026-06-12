@@ -27,6 +27,10 @@
 use std::path::Path;
 use std::time::Duration;
 
+pub use crate::testnode::client::{
+    BlockContext, RejectionPhase, RpcError, SubmitOutcome, TestNodeClient, TransactionBytes,
+    TransactionOutcome, WaitOptions,
+};
 pub use crate::testnode::pins::{
     CheckoutOwnership, PinOrigin, PinOverrides, PreparedTestNode, TestNodeCheck,
     TestNodeCheckCategory, TestNodeDoctorReport, TestNodePins,
@@ -76,6 +80,26 @@ impl TestNode {
     /// The node's JSON-RPC endpoint.
     pub fn rpc_url(&self) -> &str {
         self.inner.rpc_url()
+    }
+
+    /// A [`TestNodeClient`] for this node — typed transaction submission and
+    /// terminal-outcome observation.
+    ///
+    /// ```no_run
+    /// # use logos_scaffold::api::testnode::{TestNode, TestNodeConfig, TransactionBytes, WaitOptions};
+    /// # use logos_scaffold::api::Project;
+    /// # fn main() -> logos_scaffold::api::Result<()> {
+    /// # let project = Project::open("/path/to/my-app")?;
+    /// let node = TestNode::start(&project, &TestNodeConfig::default())?;
+    /// let client = node.client();
+    /// let tx = TransactionBytes::borsh_base64("…").unwrap();
+    /// let outcome = client.submit_and_wait(&tx, &WaitOptions::default());
+    /// assert!(outcome.is_committed());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn client(&self) -> TestNodeClient {
+        TestNodeClient::new(self.inner.rpc_url())
     }
 
     /// The node's runtime directory.
