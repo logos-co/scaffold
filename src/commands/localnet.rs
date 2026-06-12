@@ -1061,7 +1061,7 @@ fn verify_block_production(localnet_addr: &str, timeout_sec: u64) -> DynResult<(
 /// rzup-managed extension dir: ~/.risc0/extensions/v<version>-cargo-risczero-<arch>-<os>/r0vm.
 /// Returns None (without guessing) if the version cannot be determined or the exact path
 /// does not exist. The caller should error with a clear diagnostic if None is returned.
-fn find_r0vm_path_for_lez(lez: &std::path::Path) -> Option<std::path::PathBuf> {
+pub(crate) fn find_r0vm_path_for_lez(lez: &std::path::Path) -> Option<std::path::PathBuf> {
     // Read risc0-zkvm version from LEZ Cargo.lock
     let lockfile = lez.join("Cargo.lock");
     let lock_content = std::fs::read_to_string(&lockfile).ok()?;

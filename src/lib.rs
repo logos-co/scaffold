@@ -17,6 +17,7 @@ pub(crate) mod project;
 pub(crate) mod repo;
 pub(crate) mod state;
 pub(crate) mod template;
+pub(crate) mod testnode;
 
 pub fn run(args: Vec<String>) -> DynResult<()> {
     cli::run(args)

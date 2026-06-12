@@ -91,6 +91,11 @@ logos-scaffold localnet stop
 logos-scaffold localnet status [--json]
 logos-scaffold localnet logs [--tail N]
 logos-scaffold localnet reset (--yes | --dry-run) [--reset-wallet] [--verify-timeout-sec N]
+logos-scaffold test-node prepare [--project DIR] [--json]
+logos-scaffold test-node start [--project DIR] [--state DIR] [--port N] [--work-dir DIR] [--preserve-work-dir] [--json]
+logos-scaffold test-node status --node <id|dir> [--json]
+logos-scaffold test-node stop --node <id|dir> [--preserve-work-dir]
+logos-scaffold test-node run [--project DIR] [--state DIR] [--serial | --parallel N] -- <command...>
 logos-scaffold build idl [project-path]
 logos-scaffold build client [project-path]
 logos-scaffold wallet list [--long]
@@ -127,6 +132,7 @@ Each subcommand documents copy-paste examples under `--help`. Global `-q` / `--q
 - `localnet start` waits until localnet is actually ready (`pid alive` + `127.0.0.1:3040` reachable), otherwise fails with diagnostics.
 - `localnet status` distinguishes managed process, stale state, and foreign listeners.
 - `localnet reset` stops the sequencer, clears sequencer chain state, restarts, and verifies blocks. Destructive: `--yes` is required unless `--dry-run` is passed (`--dry-run` prints the plan without changing anything). `--reset-wallet` also deletes the project wallet home and default-address state (irrecoverable).
+- `test-node` manages isolated, short-lived sequencer instances for integration tests — unlike `localnet` (one long-lived developer sequencer per project on a fixed port), each test node gets its own RPC port, config, database, log, and runtime directory under `.scaffold/test-nodes/<id>`. `prepare` verifies the standalone sequencer binary and circuits release are available. `start` spawns a node (`--port 0`/default picks a free port; `--state DIR` seeds the database from a caller-provided state directory) and prints connection details — machine-readable with `--json` (`rpc_url`, `pid`, `state_dir`, `config_path`, `log_path`, `genesis_block_id`, `block_height`). `status --node <id>` reports health and the served RPC URL. `stop --node <id>` terminates only that node and removes its runtime state unless `--preserve-work-dir` is passed. `run -- <cmd>` starts a node, waits for health, runs the command with `LGS_TEST_NODE_RPC_URL` / `LGS_TEST_NODE_PORT` / `LGS_TEST_NODE_STATE_DIR` (and friends) exported, forwards the command's exit status, and stops the node; `--serial` caps machine-wide node concurrency at one for low-resource CI, `--parallel N` at N. The same surface is available in Rust via `logos_scaffold::api::testnode::TestNode`.
 - `wallet list` shows known wallet accounts (`wallet account list`).
 - `wallet topup` checks account state first (`wallet account get --account-id ...`), runs `wallet auth-transfer init --account-id ...` only when the destination is uninitialized, then performs Piñata faucet claim (`wallet pinata claim --to ...`). If address is omitted, scaffold uses project default wallet from `.scaffold/state/wallet.state`.
 - `wallet default set` stores a project-scoped default wallet address in `.scaffold/state/wallet.state`.

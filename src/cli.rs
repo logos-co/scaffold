@@ -25,6 +25,7 @@ use crate::commands::report::cmd_report;
 use crate::commands::run::{cmd_run, RunInvocation};
 use crate::commands::setup::cmd_setup;
 use crate::commands::spel::cmd_spel;
+use crate::commands::testnode::{cmd_test_node, TestNodeAction};
 use crate::commands::wallet::{cmd_wallet, WalletAction};
 use crate::constants::{DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, VERSION};
 use crate::process::set_command_echo;
@@ -92,6 +93,11 @@ enum Commands {
     Deploy(DeployArgs),
     #[command(about = "Manage the local sequencer (start, stop, status, logs, reset)")]
     Localnet(LocalnetArgs),
+    #[command(
+        name = "test-node",
+        about = "Manage isolated, short-lived sequencer test nodes for integration tests"
+    )]
+    TestNode(TestNodeArgs),
     #[command(about = "Manage project wallet accounts and faucet top-ups")]
     Wallet(WalletArgs),
     /// `spel` is dispatched via the early `spel_passthrough_args` intercept
@@ -333,6 +339,115 @@ struct RunArgs {
 struct LocalnetArgs {
     #[command(subcommand)]
     command: LocalnetSubcommand,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeArgs {
+    #[command(subcommand)]
+    command: TestNodeSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum TestNodeSubcommand {
+    #[command(
+        about = "Verify the standalone sequencer binary and circuits are available for this project"
+    )]
+    Prepare(TestNodePrepareArgs),
+    #[command(about = "Start an isolated sequencer test node with its own port, state, and logs")]
+    Start(TestNodeStartArgs),
+    #[command(about = "Report whether a test node is healthy and which RPC URL it serves")]
+    Status(TestNodeStatusArgs),
+    #[command(about = "Stop a test node and remove its runtime state")]
+    Stop(TestNodeStopArgs),
+    #[command(
+        about = "Start a node, run a command with its connection exported, then stop the node",
+        long_about = "Start a test node, wait until it is healthy, run the given command with the \
+                      node's connection details exported (LGS_TEST_NODE_RPC_URL, \
+                      LGS_TEST_NODE_PORT, LGS_TEST_NODE_STATE_DIR, ...), forward the command's \
+                      exit status, and stop the node when the command exits.\n\n\
+                      Example:\n  lgs test-node run --serial -- cargo test --test sequencer_it"
+    )]
+    Run(TestNodeRunArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodePrepareArgs {
+    /// Project root (default: discover from the current directory).
+    #[arg(long, value_name = "DIR")]
+    project: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeStartArgs {
+    /// Project root (default: discover from the current directory).
+    #[arg(long, value_name = "DIR")]
+    project: Option<PathBuf>,
+    /// Pre-seeded state directory (containing a rocksdb database) to start from.
+    #[arg(long, value_name = "DIR")]
+    state: Option<PathBuf>,
+    /// RPC port. 0 (the default) picks an unused localhost port.
+    #[arg(long, default_value_t = 0)]
+    port: u16,
+    /// Runtime directory for this node (default: .scaffold/test-nodes/<id>).
+    #[arg(long, value_name = "DIR")]
+    work_dir: Option<PathBuf>,
+    /// Keep the runtime directory when the node is stopped.
+    #[arg(long)]
+    preserve_work_dir: bool,
+    /// Seconds to wait for the node to become healthy.
+    #[arg(long, default_value_t = crate::testnode::DEFAULT_TEST_NODE_TIMEOUT_SEC)]
+    timeout_sec: u64,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeStatusArgs {
+    /// Node id (directory name under .scaffold/test-nodes/) or runtime dir path.
+    #[arg(long, value_name = "ID|DIR")]
+    node: String,
+    /// Project root (default: discover from the current directory).
+    #[arg(long, value_name = "DIR")]
+    project: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeStopArgs {
+    /// Node id (directory name under .scaffold/test-nodes/) or runtime dir path.
+    #[arg(long, value_name = "ID|DIR")]
+    node: String,
+    /// Project root (default: discover from the current directory).
+    #[arg(long, value_name = "DIR")]
+    project: Option<PathBuf>,
+    /// Keep the runtime directory instead of removing it.
+    #[arg(long)]
+    preserve_work_dir: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeRunArgs {
+    /// Project root (default: discover from the current directory).
+    #[arg(long, value_name = "DIR")]
+    project: Option<PathBuf>,
+    /// Pre-seeded state directory (containing a rocksdb database) to start from.
+    #[arg(long, value_name = "DIR")]
+    state: Option<PathBuf>,
+    /// Low-resource CI path: at most one test node at a time (machine-wide).
+    #[arg(long, conflicts_with = "parallel")]
+    serial: bool,
+    /// Cap concurrent test-node creation at N (machine-wide).
+    #[arg(long, value_name = "N")]
+    parallel: Option<usize>,
+    /// Seconds to wait for the node to become healthy before running the command.
+    #[arg(long, default_value_t = crate::testnode::DEFAULT_TEST_NODE_TIMEOUT_SEC)]
+    timeout_sec: u64,
+    /// Command (after `--`) to run with the node's connection exported.
+    #[arg(last = true, required = true)]
+    command: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -650,6 +765,42 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 },
             };
             cmd_localnet(action)
+        }
+        Some(Commands::TestNode(test_node)) => {
+            let action = match test_node.command {
+                TestNodeSubcommand::Prepare(args) => TestNodeAction::Prepare {
+                    project: args.project,
+                    json: args.json,
+                },
+                TestNodeSubcommand::Start(args) => TestNodeAction::Start {
+                    project: args.project,
+                    state: args.state,
+                    port: args.port,
+                    work_dir: args.work_dir,
+                    preserve_work_dir: args.preserve_work_dir,
+                    timeout_sec: args.timeout_sec,
+                    json: args.json,
+                },
+                TestNodeSubcommand::Status(args) => TestNodeAction::Status {
+                    project: args.project,
+                    node: args.node,
+                    json: args.json,
+                },
+                TestNodeSubcommand::Stop(args) => TestNodeAction::Stop {
+                    project: args.project,
+                    node: args.node,
+                    preserve_work_dir: args.preserve_work_dir,
+                },
+                TestNodeSubcommand::Run(args) => TestNodeAction::Run {
+                    project: args.project,
+                    state: args.state,
+                    serial: args.serial,
+                    parallel: args.parallel,
+                    timeout_sec: args.timeout_sec,
+                    command: args.command,
+                },
+            };
+            cmd_test_node(action)
         }
         Some(Commands::Spel(_)) => {
             // The early `spel_passthrough_args` intercept above always
