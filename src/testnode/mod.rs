@@ -18,8 +18,11 @@
 //! - `node.json` — node metadata used by `status` / `stop` and by handles
 //!   reconnecting from another process.
 
+pub mod blocks;
 pub mod client;
 pub mod pins;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use std::fs;
 use std::net::TcpListener;

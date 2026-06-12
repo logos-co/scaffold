@@ -4,6 +4,7 @@ use anyhow::Context;
 
 use crate::model::{CheckStatus, Project};
 use crate::project::{load_project, load_project_at, resolve_cache_root};
+use crate::testnode::blocks::{BlockInfo, BlockRange, ClockReadMode, ClockSnapshot};
 use crate::testnode::client::{
     SubmitOutcome, TestNodeClient, TransactionBytes, TransactionOutcome, WaitOptions,
 };
@@ -80,6 +81,71 @@ pub(crate) enum TestNodeAction {
         timeout_sec: u64,
         json: bool,
     },
+    BlocksHead {
+        url: String,
+        json: bool,
+    },
+    BlocksRange {
+        url: String,
+        from: u64,
+        to: u64,
+        json: bool,
+    },
+    BlocksWait {
+        url: String,
+        after: u64,
+        count: u64,
+        timeout_sec: u64,
+        json: bool,
+    },
+    ClockRead {
+        url: String,
+        json: bool,
+    },
+    ClockWaitStable {
+        url: String,
+        samples: u32,
+        timeout_sec: u64,
+        json: bool,
+    },
+}
+
+fn print_block_info(info: &BlockInfo) {
+    println!("block {}", info.block_id);
+    println!("  timestamp: {}", info.timestamp);
+    println!("  transactions: {}", info.transaction_count);
+    println!("  is_genesis: {}", info.is_genesis);
+    println!("  has_clock_transaction: {}", info.has_clock_transaction);
+    println!("  has_user_transactions: {}", info.has_user_transactions);
+    for tx in &info.transactions {
+        println!(
+            "  tx {} ({:?}{})",
+            tx.hash,
+            tx.kind,
+            if tx.is_clock { ", clock" } else { "" }
+        );
+    }
+    if !info.fully_parsed {
+        println!(
+            "  note: block contains privacy-preserving transaction(s); per-tx list is partial"
+        );
+    }
+}
+
+fn print_clock_snapshot(snapshot: &ClockSnapshot) {
+    println!("read_block_id: {}", snapshot.read_block_id);
+    for account in &snapshot.accounts {
+        println!("clock account {}", account.account_id);
+        println!("  balance: {}", account.balance);
+        println!("  nonce: {}", account.nonce);
+        match (account.block_id, account.timestamp) {
+            (Some(block_id), Some(timestamp)) => {
+                println!("  block_id: {block_id}");
+                println!("  timestamp: {timestamp}");
+            }
+            _ => println!("  (clock not ticked yet — empty account data)"),
+        }
+    }
 }
 
 /// On-disk encoding of a transaction file passed to `tx submit`.
@@ -451,6 +517,86 @@ pub(crate) fn cmd_test_node(action: TestNodeAction) -> DynResult<()> {
             };
             let outcome = client.submit_and_wait(&tx, &options);
             finish_tx_outcome(&outcome, json)
+        }
+        TestNodeAction::BlocksHead { url, json } => {
+            let client = TestNodeClient::new(url);
+            let head = client.block_head()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&head)?);
+            } else {
+                print_block_info(&head);
+            }
+            Ok(())
+        }
+        TestNodeAction::BlocksRange {
+            url,
+            from,
+            to,
+            json,
+        } => {
+            let client = TestNodeClient::new(url);
+            let blocks = client.blocks(BlockRange { from, to })?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({ "blocks": blocks }))?
+                );
+            } else {
+                for info in &blocks {
+                    print_block_info(info);
+                }
+            }
+            Ok(())
+        }
+        TestNodeAction::BlocksWait {
+            url,
+            after,
+            count,
+            timeout_sec,
+            json,
+        } => {
+            let client = TestNodeClient::new(url);
+            let blocks =
+                client.wait_blocks(after, count, std::time::Duration::from_secs(timeout_sec))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({ "blocks": blocks }))?
+                );
+            } else {
+                for info in &blocks {
+                    print_block_info(info);
+                }
+            }
+            Ok(())
+        }
+        TestNodeAction::ClockRead { url, json } => {
+            let client = TestNodeClient::new(url);
+            let snapshot = client.clock_snapshot(ClockReadMode::Latest)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&snapshot)?);
+            } else {
+                print_clock_snapshot(&snapshot);
+            }
+            Ok(())
+        }
+        TestNodeAction::ClockWaitStable {
+            url,
+            samples,
+            timeout_sec,
+            json,
+        } => {
+            let client = TestNodeClient::new(url);
+            let snapshot = client.clock_snapshot(ClockReadMode::Stable {
+                samples,
+                timeout: std::time::Duration::from_secs(timeout_sec),
+            })?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&snapshot)?);
+            } else {
+                print_clock_snapshot(&snapshot);
+            }
+            Ok(())
         }
     }
 }

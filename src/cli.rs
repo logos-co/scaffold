@@ -380,6 +380,109 @@ enum TestNodeSubcommand {
         about = "Submit transactions and observe definitive committed/rejected/timeout outcomes"
     )]
     Tx(TestNodeTxArgs),
+    #[command(about = "Inspect blocks: head, ranges, and waiting for block production")]
+    Blocks(TestNodeBlocksArgs),
+    #[command(about = "Read the sequencer clock accounts at a stable boundary")]
+    Clock(TestNodeClockArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeBlocksArgs {
+    #[command(subcommand)]
+    command: TestNodeBlocksSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum TestNodeBlocksSubcommand {
+    #[command(about = "Current head block: id, timestamp, and transaction summaries")]
+    Head(TestNodeBlocksHeadArgs),
+    #[command(
+        about = "Inclusive block range with per-block clock/user transaction classification"
+    )]
+    Range(TestNodeBlocksRangeArgs),
+    #[command(about = "Wait for a number of blocks after a known boundary, then print them")]
+    Wait(TestNodeBlocksWaitArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeBlocksHeadArgs {
+    /// Sequencer JSON-RPC URL.
+    #[arg(long, value_name = "URL")]
+    url: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeBlocksRangeArgs {
+    /// Sequencer JSON-RPC URL.
+    #[arg(long, value_name = "URL")]
+    url: String,
+    #[arg(long, value_name = "BLOCK")]
+    from: u64,
+    #[arg(long, value_name = "BLOCK")]
+    to: u64,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeBlocksWaitArgs {
+    /// Sequencer JSON-RPC URL.
+    #[arg(long, value_name = "URL")]
+    url: String,
+    /// Block boundary; only blocks after this id are returned.
+    #[arg(long, value_name = "BLOCK")]
+    after: u64,
+    /// How many blocks after the boundary to wait for.
+    #[arg(long, default_value_t = 1)]
+    count: u64,
+    /// Seconds to wait for the blocks to be produced.
+    #[arg(long, default_value_t = 60)]
+    timeout_sec: u64,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeClockArgs {
+    #[command(subcommand)]
+    command: TestNodeClockSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum TestNodeClockSubcommand {
+    #[command(about = "Read all clock accounts at the current head")]
+    Read(TestNodeClockReadArgs),
+    #[command(
+        name = "wait-stable",
+        about = "Read the clock accounts behind a stability barrier (consecutive identical samples)"
+    )]
+    WaitStable(TestNodeClockWaitStableArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeClockReadArgs {
+    /// Sequencer JSON-RPC URL.
+    #[arg(long, value_name = "URL")]
+    url: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeClockWaitStableArgs {
+    /// Sequencer JSON-RPC URL.
+    #[arg(long, value_name = "URL")]
+    url: String,
+    /// Consecutive identical samples required for a stable snapshot.
+    #[arg(long, default_value_t = 2)]
+    samples: u32,
+    /// Seconds before giving up with a retryable error.
+    #[arg(long, default_value_t = 30)]
+    timeout_sec: u64,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -979,6 +1082,37 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                         url: args.url,
                         file: args.file,
                         encoding: args.encoding.into_encoding(),
+                        timeout_sec: args.timeout_sec,
+                        json: args.json,
+                    },
+                },
+                TestNodeSubcommand::Blocks(blocks) => match blocks.command {
+                    TestNodeBlocksSubcommand::Head(args) => TestNodeAction::BlocksHead {
+                        url: args.url,
+                        json: args.json,
+                    },
+                    TestNodeBlocksSubcommand::Range(args) => TestNodeAction::BlocksRange {
+                        url: args.url,
+                        from: args.from,
+                        to: args.to,
+                        json: args.json,
+                    },
+                    TestNodeBlocksSubcommand::Wait(args) => TestNodeAction::BlocksWait {
+                        url: args.url,
+                        after: args.after,
+                        count: args.count,
+                        timeout_sec: args.timeout_sec,
+                        json: args.json,
+                    },
+                },
+                TestNodeSubcommand::Clock(clock) => match clock.command {
+                    TestNodeClockSubcommand::Read(args) => TestNodeAction::ClockRead {
+                        url: args.url,
+                        json: args.json,
+                    },
+                    TestNodeClockSubcommand::WaitStable(args) => TestNodeAction::ClockWaitStable {
+                        url: args.url,
+                        samples: args.samples,
                         timeout_sec: args.timeout_sec,
                         json: args.json,
                     },
