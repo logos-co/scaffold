@@ -350,9 +350,17 @@ struct TestNodeArgs {
 #[derive(Debug, Subcommand)]
 enum TestNodeSubcommand {
     #[command(
-        about = "Verify the standalone sequencer binary and circuits are available for this project"
+        about = "Report the LEZ and circuits pins test-node commands will use for this project"
+    )]
+    Pins(TestNodePinsArgs),
+    #[command(
+        about = "Resolve the project's LEZ/circuits pins, build the standalone sequencer for them, and fetch circuits"
     )]
     Prepare(TestNodePrepareArgs),
+    #[command(
+        about = "Check test-node prerequisites: pins, checkout state, sequencer binary, circuits, platform"
+    )]
+    Doctor(TestNodeDoctorArgs),
     #[command(about = "Start an isolated sequencer test node with its own port, state, and logs")]
     Start(TestNodeStartArgs),
     #[command(about = "Report whether a test node is healthy and which RPC URL it serves")]
@@ -371,7 +379,47 @@ enum TestNodeSubcommand {
 }
 
 #[derive(Debug, clap::Args)]
+struct TestNodePinsArgs {
+    /// Project root (default: discover from the current directory).
+    #[arg(long, value_name = "DIR")]
+    project: Option<PathBuf>,
+    /// Override the LEZ source (clone URL or local checkout directory).
+    #[arg(long, value_name = "URL|DIR")]
+    lez_source: Option<String>,
+    /// Override the LEZ ref (SHA, tag, or branch).
+    #[arg(long, value_name = "REF")]
+    lez_ref: Option<String>,
+    /// Override the circuits release version.
+    #[arg(long, value_name = "VER")]
+    circuits_version: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
 struct TestNodePrepareArgs {
+    /// Project root (default: discover from the current directory).
+    #[arg(long, value_name = "DIR")]
+    project: Option<PathBuf>,
+    /// Override the cache root used for managed checkouts and circuits.
+    #[arg(long, value_name = "DIR")]
+    cache_root: Option<PathBuf>,
+    /// Override the LEZ source (clone URL or local checkout directory).
+    /// Local checkouts are validated, never modified.
+    #[arg(long, value_name = "URL|DIR")]
+    lez_source: Option<String>,
+    /// Override the LEZ ref (SHA, tag, or branch).
+    #[arg(long, value_name = "REF")]
+    lez_ref: Option<String>,
+    /// Override the circuits release version.
+    #[arg(long, value_name = "VER")]
+    circuits_version: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeDoctorArgs {
     /// Project root (default: discover from the current directory).
     #[arg(long, value_name = "DIR")]
     project: Option<PathBuf>,
@@ -768,7 +816,26 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
         }
         Some(Commands::TestNode(test_node)) => {
             let action = match test_node.command {
+                TestNodeSubcommand::Pins(args) => TestNodeAction::Pins {
+                    project: args.project,
+                    overrides: crate::testnode::pins::PinOverrides {
+                        lez_source: args.lez_source,
+                        lez_ref: args.lez_ref,
+                        circuits_version: args.circuits_version,
+                    },
+                    json: args.json,
+                },
                 TestNodeSubcommand::Prepare(args) => TestNodeAction::Prepare {
+                    project: args.project,
+                    overrides: crate::testnode::pins::PinOverrides {
+                        lez_source: args.lez_source,
+                        lez_ref: args.lez_ref,
+                        circuits_version: args.circuits_version,
+                    },
+                    cache_root: args.cache_root,
+                    json: args.json,
+                },
+                TestNodeSubcommand::Doctor(args) => TestNodeAction::Doctor {
                     project: args.project,
                     json: args.json,
                 },

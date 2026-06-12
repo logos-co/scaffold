@@ -27,9 +27,12 @@
 use std::path::Path;
 use std::time::Duration;
 
+pub use crate::testnode::pins::{
+    CheckoutOwnership, PinOrigin, PinOverrides, PreparedTestNode, TestNodeCheck,
+    TestNodeCheckCategory, TestNodeDoctorReport, TestNodePins,
+};
 pub use crate::testnode::{
-    PortSelection, PreparedTestNode, TestNodeConfig, TestNodeInfo, TestNodeStatus,
-    DEFAULT_TEST_NODE_TIMEOUT_SEC,
+    PortSelection, TestNodeConfig, TestNodeInfo, TestNodeStatus, DEFAULT_TEST_NODE_TIMEOUT_SEC,
 };
 
 use super::error::{classify, Result};
@@ -104,10 +107,31 @@ impl TestNode {
     }
 }
 
-/// Verify (and materialise where possible) the test-node prerequisites for
-/// `project`: the standalone sequencer binary and the circuits release.
-pub fn prepare(project: &Project) -> Result<PreparedTestNode> {
-    crate::testnode::prepare_for_project(&project.inner).map_err(classify)
+/// Resolve the LEZ and circuits pins test-node commands will use for
+/// `project`: overrides win, then the project's `scaffold.toml`, then
+/// scaffold defaults. Read-only — nothing is cloned, built, or downloaded.
+pub fn resolve_test_node_pins(project: &Project, overrides: &PinOverrides) -> Result<TestNodePins> {
+    crate::testnode::pins::resolve_test_node_pins(&project.inner, overrides).map_err(classify)
+}
+
+/// Resolve pins, materialise the LEZ checkout and circuits release, and
+/// build the standalone sequencer for those pins. Managed cache checkouts
+/// may be cloned/fetched/checked out; caller-provided checkouts are only
+/// validated (clean worktree at the requested commit) and never modified.
+pub fn prepare_test_node(
+    project: &Project,
+    overrides: &PinOverrides,
+    cache_root: Option<&Path>,
+) -> Result<PreparedTestNode> {
+    crate::testnode::pins::prepare_test_node(&project.inner, overrides, cache_root)
+        .map_err(classify)
+}
+
+/// Run the test-node health checks: pin drift, checkout state (missing,
+/// dirty, mismatched commit), sequencer binary, circuits release, platform
+/// support — each reported as a separate categorized check.
+pub fn doctor_test_node(project: &Project) -> Result<TestNodeDoctorReport> {
+    crate::testnode::pins::doctor_test_node(&project.inner).map_err(classify)
 }
 
 /// Start a node, run `command` with the node's connection details exported

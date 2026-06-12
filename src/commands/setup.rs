@@ -26,7 +26,7 @@ use super::wallet_support::{
 /// Client" on any host that isn't already running a Bedrock + Indexer stack
 /// (i.e. every standalone dev box). Pinned as a const so the unit test below
 /// fails loudly if the feature is ever dropped from the build invocation.
-const SEQUENCER_BUILD_ARGS: &[&str] = &[
+pub(crate) const SEQUENCER_BUILD_ARGS: &[&str] = &[
     "build",
     "--release",
     "--features",

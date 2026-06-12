@@ -84,13 +84,18 @@ pub(crate) fn ensure_circuits_for_subprocess(cache_root: &Path) -> DynResult<()>
 /// `LOGOS_BLOCKCHAIN_CIRCUITS` env override wins when it points at a
 /// populated checkout — mirroring `ensure_circuits_for_subprocess`.
 pub(crate) fn circuits_dir_for_cache_root(cache_root: &Path) -> DynResult<PathBuf> {
+    circuits_dir_for_version(cache_root, DEFAULT_CIRCUITS_VERSION)
+}
+
+/// Like `circuits_dir_for_cache_root`, for an explicit release version.
+pub(crate) fn circuits_dir_for_version(cache_root: &Path, version: &str) -> DynResult<PathBuf> {
     if let Some(path) = circuits_path_from_env() {
         return Ok(path);
     }
     let triple = release_triple()?;
     Ok(cache_root
         .join("circuits")
-        .join(format!("v{DEFAULT_CIRCUITS_VERSION}-{triple}")))
+        .join(format!("v{version}-{triple}")))
 }
 
 fn circuits_path_from_env() -> Option<PathBuf> {
@@ -109,7 +114,7 @@ fn circuits_path_from_env() -> Option<PathBuf> {
 /// Materialise (or hit the cache for) the circuits release at `version`,
 /// returning the directory that contains `pol/`, `poc/`, ... — the layout
 /// `LOGOS_BLOCKCHAIN_CIRCUITS` consumers expect.
-fn ensure_circuits_release(cache_root: &Path, version: &str) -> DynResult<PathBuf> {
+pub(crate) fn ensure_circuits_release(cache_root: &Path, version: &str) -> DynResult<PathBuf> {
     let triple = release_triple()?;
     let dir = cache_root
         .join("circuits")
