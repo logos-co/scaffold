@@ -1,4 +1,33 @@
+use std::path::PathBuf;
+
 use thiserror::Error;
+
+/// Structured failure of an external command (cargo, git, wallet, nix, …).
+///
+/// Carries the rendered command line, the step label scaffold attached to the
+/// invocation, the exit code (when the process exited normally), any captured
+/// stdout/stderr, and the log file when output was redirected to one. The
+/// `Display` output is preserved per call site so existing CLI error text is
+/// unchanged; API consumers should read the structured fields instead of
+/// parsing the message.
+#[derive(Debug, Error)]
+#[error("{message}")]
+pub struct CommandFailed {
+    /// Rendered command line (`program arg1 arg2 …`).
+    pub command: String,
+    /// Human-readable step label (e.g. `build wallet`).
+    pub label: String,
+    /// Exit code if the process exited normally; `None` when killed by a
+    /// signal or the status could not be determined.
+    pub exit_code: Option<i32>,
+    /// Captured stdout (empty when output was streamed or logged to a file).
+    pub stdout: String,
+    /// Captured stderr (empty when output was streamed or logged to a file).
+    pub stderr: String,
+    /// Log file holding the full output, when the step captured to one.
+    pub log_path: Option<PathBuf>,
+    pub(crate) message: String,
+}
 
 #[derive(Debug, Error)]
 pub(crate) enum LocalnetError {

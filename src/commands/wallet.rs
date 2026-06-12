@@ -20,9 +20,87 @@ use super::wallet_support::{
 /// rather than continue with uncertain funding. Standalone `wallet topup`
 /// treats both as success (matching prior behavior).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TopupOutcome {
+pub enum TopupOutcome {
     Success,
-    ConfirmationTimeout { message: String },
+    /// The topup was submitted but confirmation timed out — funding is
+    /// uncertain. `message` carries the full diagnostic (address, network,
+    /// tx identifier when known).
+    ConfirmationTimeout {
+        message: String,
+    },
+}
+
+/// Captured output of `wallet account list`, shared by `--json` mode and the
+/// public API.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WalletListReport {
+    /// Rendered wallet command that produced this output.
+    pub command: String,
+    /// Exit code (`128 + signal` when killed by a signal, `-1` if unknown).
+    pub exit_code: i32,
+    /// Best-effort line split of stdout (trimmed, blanks removed).
+    pub accounts: Vec<String>,
+    /// Raw stdout from the wallet binary.
+    pub stdout: String,
+    /// Raw stderr from the wallet binary.
+    pub stderr: String,
+}
+
+/// Run `wallet account list` for `project` and capture the output. Used by
+/// `wallet list --json` and the public API.
+pub(crate) fn wallet_list_for_project(
+    project: &crate::model::Project,
+    long: bool,
+) -> DynResult<WalletListReport> {
+    let wallet = load_wallet_runtime(project)?;
+
+    let mut command = Command::new(&wallet.wallet_binary);
+    command
+        .env(
+            "NSSA_WALLET_HOME_DIR",
+            wallet.wallet_home.as_os_str().to_string_lossy().to_string(),
+        )
+        .arg("account")
+        .arg("list");
+    if long {
+        command.arg("--long");
+    }
+
+    let rendered_command = render_command(&command);
+    let output = command
+        .output()
+        .context("failed to execute wallet list command")?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    // Always emit a number: a wallet killed by a signal has no exit code,
+    // so map that to the shell convention `128 + signal` (else -1) rather
+    // than letting `exit_code` serialize as `null`.
+    let exit_code = output.status.code().unwrap_or_else(|| {
+        use std::os::unix::process::ExitStatusExt;
+        output.status.signal().map(|s| 128 + s).unwrap_or(-1)
+    });
+    let accounts: Vec<String> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect();
+
+    Ok(WalletListReport {
+        command: rendered_command,
+        exit_code,
+        accounts,
+        stdout,
+        stderr,
+    })
+}
+
+/// Set the project default wallet address; returns the normalized form.
+pub(crate) fn wallet_default_set_for_project(
+    project: &crate::model::Project,
+    address: &str,
+) -> DynResult<String> {
+    write_default_wallet_address(&project.root, address)
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +138,21 @@ pub(crate) fn cmd_wallet(action: WalletAction) -> DynResult<()> {
 }
 
 fn cmd_wallet_list(project: &crate::model::Project, long: bool, json: bool) -> DynResult<()> {
+    if json {
+        // Capture the inner wallet output and re-emit a structured envelope so
+        // consumers can read `exit_code` instead of guessing success from text.
+        // `accounts` is the best-effort line split; `stdout`/`stderr` keep the
+        // raw output for callers that need the wallet's own formatting.
+        // `command` is the actual rendered invocation (binary + args, so it
+        // reflects `--long`) rather than a hard-coded label.
+        let report = wallet_list_for_project(project, long)?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        if report.exit_code != 0 {
+            bail!("wallet account list failed");
+        }
+        return Ok(());
+    }
+
     let wallet = load_wallet_runtime(project)?;
 
     let mut command = Command::new(&wallet.wallet_binary);
@@ -75,52 +168,13 @@ fn cmd_wallet_list(project: &crate::model::Project, long: bool, json: bool) -> D
         command.arg("--long");
     }
 
-    if json {
-        // Capture the inner wallet output and re-emit a structured envelope so
-        // consumers can read `exit_code` instead of guessing success from text.
-        // `accounts` is the best-effort line split; `stdout`/`stderr` keep the
-        // raw output for callers that need the wallet's own formatting.
-        // `command` is the actual rendered invocation (binary + args, so it
-        // reflects `--long`) rather than a hard-coded label.
-        let rendered_command = render_command(&command);
-        let output = command
-            .output()
-            .context("failed to execute wallet list command")?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        // Always emit a number: a wallet killed by a signal has no exit code,
-        // so map that to the shell convention `128 + signal` (else -1) rather
-        // than letting `exit_code` serialize as `null`.
-        let exit_code = output.status.code().unwrap_or_else(|| {
-            use std::os::unix::process::ExitStatusExt;
-            output.status.signal().map(|s| 128 + s).unwrap_or(-1)
-        });
-        let accounts: Vec<&str> = stdout
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .collect();
-        let report = json!({
-            "command": rendered_command,
-            "exit_code": exit_code,
-            "accounts": accounts,
-            "stdout": stdout,
-            "stderr": stderr,
-        });
-        println!("{}", serde_json::to_string_pretty(&report)?);
-        if !output.status.success() {
-            bail!("wallet account list failed");
-        }
-        return Ok(());
-    }
-
     run_forwarded(&mut command, "wallet account list")
         .context("failed to execute wallet list command")?;
 
     Ok(())
 }
 
-fn cmd_wallet_proxy(project: &crate::model::Project, args: &[String]) -> DynResult<()> {
+pub(crate) fn cmd_wallet_proxy(project: &crate::model::Project, args: &[String]) -> DynResult<()> {
     if args.is_empty() {
         bail!("wallet passthrough requires at least one argument after `--`. Example: `logos-scaffold wallet -- account list`");
     }
@@ -428,7 +482,7 @@ fn confirmation_timeout_message(
 }
 
 fn cmd_wallet_default_set(project: &crate::model::Project, address: &str) -> DynResult<()> {
-    let normalized_address = write_default_wallet_address(&project.root, address)?;
+    let normalized_address = wallet_default_set_for_project(project, address)?;
     let state_path = wallet_state_path(&project.root);
 
     println!("default wallet updated");

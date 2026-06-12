@@ -50,6 +50,14 @@ pub(crate) struct RunInvocation {
 
 pub(crate) fn cmd_run(inv: RunInvocation) -> DynResult<()> {
     let project = load_project()?;
+    run_for_project(&project, inv)
+}
+
+/// Execute the `lgs run` pipeline (build → IDL → localnet → topup → deploy →
+/// hooks) for `project`. Streams step progress to stdout. With `inv.watch`
+/// set, blocks in the watch loop until interrupted — API callers normally
+/// leave `watch` off.
+pub(crate) fn run_for_project(project: &Project, inv: RunInvocation) -> DynResult<()> {
     let resolved = project.config.run.resolve_profile(inv.profile.as_deref())?;
     if let Some(name) = inv.profile.as_deref() {
         println!("Using [run.profiles.{name}]");

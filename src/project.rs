@@ -35,10 +35,26 @@ pub(crate) fn load_project() -> DynResult<Project> {
         )
     })?;
 
+    load_project_at(&root)
+}
+
+/// Load a project from an explicit root directory (no upward discovery).
+/// The API layer uses this so consumers can target a project without
+/// depending on the process working directory.
+pub(crate) fn load_project_at(root: &Path) -> DynResult<Project> {
     let config_path = root.join("scaffold.toml");
+    if !config_path.exists() {
+        bail!(
+            "no scaffold.toml found at {}. Pass the root directory of a logos-scaffold project.",
+            root.display()
+        );
+    }
     let cfg_text = fs::read_to_string(&config_path)?;
     let cfg = parse_config(&cfg_text)?;
-    Ok(Project { root, config: cfg })
+    Ok(Project {
+        root: root.to_path_buf(),
+        config: cfg,
+    })
 }
 
 pub(crate) fn run_in_project_dir(

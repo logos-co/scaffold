@@ -163,18 +163,18 @@ pub(crate) struct BasecampState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum CheckStatus {
+pub enum CheckStatus {
     Pass,
     Warn,
     Fail,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct CheckRow {
-    pub(crate) status: CheckStatus,
-    pub(crate) name: String,
-    pub(crate) detail: String,
-    pub(crate) remediation: Option<String>,
+pub struct CheckRow {
+    pub status: CheckStatus,
+    pub name: String,
+    pub detail: String,
+    pub remediation: Option<String>,
 }
 
 pub(crate) struct Captured {
@@ -185,7 +185,7 @@ pub(crate) struct Captured {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum LocalnetOwnership {
+pub enum LocalnetOwnership {
     Managed,
     Foreign,
     StaleState,
@@ -194,15 +194,15 @@ pub(crate) enum LocalnetOwnership {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct LocalnetStatusReport {
-    pub(crate) tracked_pid: Option<u32>,
-    pub(crate) tracked_running: bool,
-    pub(crate) listener_present: bool,
-    pub(crate) listener_pid: Option<u32>,
-    pub(crate) ownership: LocalnetOwnership,
-    pub(crate) ready: bool,
-    pub(crate) log_path: String,
-    pub(crate) remediation: Vec<String>,
+pub struct LocalnetStatusReport {
+    pub tracked_pid: Option<u32>,
+    pub tracked_running: bool,
+    pub listener_present: bool,
+    pub listener_pid: Option<u32>,
+    pub ownership: LocalnetOwnership,
+    pub ready: bool,
+    pub log_path: String,
+    pub remediation: Vec<String>,
 }
 
 /// Machine-readable shape for `localnet logs --json`. Mirrors the human
@@ -210,68 +210,68 @@ pub(crate) struct LocalnetStatusReport {
 /// when the log is missing or empty), and `exists` lets consumers tell an
 /// absent log file apart from an empty one without parsing prose.
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct LocalnetLogsReport {
-    pub(crate) log_path: String,
-    pub(crate) exists: bool,
-    pub(crate) tail: usize,
-    pub(crate) lines: Vec<String>,
+pub struct LocalnetLogsReport {
+    pub log_path: String,
+    pub exists: bool,
+    pub tail: usize,
+    pub lines: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct DoctorSummary {
-    pub(crate) pass: usize,
-    pub(crate) warn: usize,
-    pub(crate) fail: usize,
+pub struct DoctorSummary {
+    pub pass: usize,
+    pub warn: usize,
+    pub fail: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct DoctorReport {
-    pub(crate) status: String,
-    pub(crate) summary: DoctorSummary,
-    pub(crate) checks: Vec<CheckRow>,
-    pub(crate) next_steps: Vec<String>,
+pub struct DoctorReport {
+    pub status: String,
+    pub summary: DoctorSummary,
+    pub checks: Vec<CheckRow>,
+    pub next_steps: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct CollectedItem {
-    pub(crate) path: String,
-    pub(crate) source: String,
-    pub(crate) notes: Option<String>,
+pub struct CollectedItem {
+    pub path: String,
+    pub source: String,
+    pub notes: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct SkippedItem {
-    pub(crate) path: String,
-    pub(crate) reason: String,
+pub struct SkippedItem {
+    pub path: String,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
-pub(crate) struct RedactionSummary {
-    pub(crate) files_redacted: usize,
-    pub(crate) replacements: usize,
+pub struct RedactionSummary {
+    pub files_redacted: usize,
+    pub replacements: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct ToolCommandResult {
-    pub(crate) name: String,
-    pub(crate) command: String,
-    pub(crate) status: Option<i32>,
-    pub(crate) stdout: String,
-    pub(crate) stderr: String,
-    pub(crate) error: Option<String>,
+pub struct ToolCommandResult {
+    pub name: String,
+    pub command: String,
+    pub status: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct ReportManifest {
-    pub(crate) generated_at_unix: u64,
-    pub(crate) project_root: String,
-    pub(crate) output_archive: String,
-    pub(crate) include_count: usize,
-    pub(crate) skip_count: usize,
-    pub(crate) redaction: RedactionSummary,
-    pub(crate) collected: Vec<CollectedItem>,
-    pub(crate) skipped: Vec<SkippedItem>,
-    pub(crate) warnings: Vec<String>,
+pub struct ReportManifest {
+    pub generated_at_unix: u64,
+    pub project_root: String,
+    pub output_archive: String,
+    pub include_count: usize,
+    pub skip_count: usize,
+    pub redaction: RedactionSummary,
+    pub collected: Vec<CollectedItem>,
+    pub skipped: Vec<SkippedItem>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
