@@ -64,10 +64,11 @@ pub(crate) fn run_checked(cmd: &mut Command, label: &str) -> DynResult<()> {
 }
 
 pub(crate) fn run_forwarded(cmd: &mut Command, label: &str) -> DynResult<()> {
-    if should_echo() {
-        println!("$ {}", render_command(cmd));
-    }
+    // Render once and reuse for both the echo line and any `CommandFailed`.
     let command = render_command(cmd);
+    if should_echo() {
+        println!("$ {command}");
+    }
     let status = cmd.status()?;
     if !status.success() {
         return Err(CommandFailed {
@@ -521,10 +522,11 @@ mod logged_tests {
 }
 
 pub(crate) fn run_capture(cmd: &mut Command, label: &str) -> DynResult<Captured> {
-    if should_echo() {
-        println!("$ {}", render_command(cmd));
-    }
+    // Render once and reuse for both the echo line and any `CommandFailed`.
     let command = render_command(cmd);
+    if should_echo() {
+        println!("$ {command}");
+    }
     let Output {
         status,
         stdout,

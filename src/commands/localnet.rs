@@ -614,7 +614,12 @@ fn build_logs_report(log_path: &Path, tail: usize) -> DynResult<LocalnetLogsRepo
         lines: Vec::new(),
     };
 
-    if !log_path.exists() {
+    // `try_exists()` (not `exists()`): an unreadable log (permission/IO error)
+    // must surface as an error, not be reported as a missing log file.
+    if !log_path
+        .try_exists()
+        .with_context(|| format!("checking sequencer log at {}", log_path.display()))?
+    {
         return Ok(report);
     }
     report.exists = true;
