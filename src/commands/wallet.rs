@@ -55,11 +55,10 @@ pub(crate) fn wallet_list_for_project(
     let wallet = load_wallet_runtime(project)?;
 
     let mut command = Command::new(&wallet.wallet_binary);
+    // Pass the path as an `OsStr` (not via `to_string_lossy`) so a non-UTF8
+    // wallet-home path reaches the child verbatim instead of being corrupted.
     command
-        .env(
-            "NSSA_WALLET_HOME_DIR",
-            wallet.wallet_home.as_os_str().to_string_lossy().to_string(),
-        )
+        .env("NSSA_WALLET_HOME_DIR", &wallet.wallet_home)
         .arg("account")
         .arg("list");
     if long {
