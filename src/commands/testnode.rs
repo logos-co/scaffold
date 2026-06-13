@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 
 use crate::model::{CheckStatus, Project};
+use crate::process::EchoGuard;
 use crate::project::{load_project, load_project_at, resolve_cache_root};
 use crate::testnode::client::{
     SubmitOutcome, TestNodeClient, TransactionBytes, TransactionOutcome, WaitOptions,
@@ -178,6 +179,9 @@ pub(crate) fn cmd_test_node(action: TestNodeAction) -> DynResult<()> {
             overrides,
             json,
         } => {
+            // Keep `--json` stdout a single JSON object: suppress the `$ git …`
+            // echoes the pin resolver emits while shelling out.
+            let _echo = json.then(EchoGuard::suppress);
             let project = load_selected_project(project.as_deref())?;
             let pins = resolve_test_node_pins(&project, &overrides)?;
             if json {
@@ -212,6 +216,9 @@ pub(crate) fn cmd_test_node(action: TestNodeAction) -> DynResult<()> {
             cache_root,
             json,
         } => {
+            // `--json`: drop the `$ …` echoes (cargo still streams build
+            // progress to stderr, so stdout stays the JSON object).
+            let _echo = json.then(EchoGuard::suppress);
             let project = load_selected_project(project.as_deref())?;
             let prepared = prepare_test_node(&project, &overrides, cache_root.as_deref())?;
             if json {
@@ -237,6 +244,7 @@ pub(crate) fn cmd_test_node(action: TestNodeAction) -> DynResult<()> {
             Ok(())
         }
         TestNodeAction::Doctor { project, json } => {
+            let _echo = json.then(EchoGuard::suppress);
             let project = load_selected_project(project.as_deref())?;
             let report = doctor_test_node(&project)?;
             if json {
@@ -272,6 +280,9 @@ pub(crate) fn cmd_test_node(action: TestNodeAction) -> DynResult<()> {
             timeout_sec,
             json,
         } => {
+            // `--json`: suppress the `$ ./sequencer_service …` spawn echo so
+            // stdout is the node's JSON connection record only.
+            let _echo = json.then(EchoGuard::suppress);
             let project = load_selected_project(project.as_deref())?;
             let config = TestNodeConfig {
                 state,
