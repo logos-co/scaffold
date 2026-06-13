@@ -782,6 +782,7 @@ pub(crate) fn cmd_test_node(action: TestNodeAction) -> DynResult<()> {
             Ok(())
         }
         TestNodeAction::StateSchema { project, json } => {
+            let _echo = json.then(EchoGuard::suppress);
             let project = load_selected_project(project.as_deref())?;
             let schema = StateSchema::for_project(&project)?;
             if json {
@@ -843,6 +844,7 @@ pub(crate) fn cmd_test_node(action: TestNodeAction) -> DynResult<()> {
             output,
             json,
         } => {
+            let _echo = json.then(EchoGuard::suppress);
             let project = load_selected_project(project.as_deref())?;
             let seeded = seed_state(&project, &input, output.as_deref())?;
             if json {

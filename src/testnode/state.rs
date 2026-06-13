@@ -85,7 +85,9 @@ pub struct StateSchema {
 
 impl StateSchema {
     /// Identify the exact snapshot shapes accepted by `project`'s pins.
-    pub fn for_project(project: &Project) -> DynResult<Self> {
+    /// Internal entry point; the public path is
+    /// [`crate::api::testnode::state_schema`], which takes an `api::Project`.
+    pub(crate) fn for_project(project: &Project) -> DynResult<Self> {
         let pins = resolve_test_node_pins(project, &PinOverrides::default())?;
         Ok(Self {
             state_format_version: STATE_FORMAT_VERSION.to_string(),
