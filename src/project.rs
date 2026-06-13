@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail};
+use anyhow::{anyhow, bail, Context};
 
 use crate::config::{parse_config, serialize_config};
 use crate::model::{Project, RepoRef};
@@ -43,7 +43,12 @@ pub(crate) fn load_project() -> DynResult<Project> {
 /// depending on the process working directory.
 pub(crate) fn load_project_at(root: &Path) -> DynResult<Project> {
     let config_path = root.join("scaffold.toml");
-    if !config_path.exists() {
+    // `try_exists()` (not `exists()`): a permission/IO error on the path must
+    // surface as a real error, not be silently reported as a missing config.
+    if !config_path
+        .try_exists()
+        .with_context(|| format!("checking for {}", config_path.display()))?
+    {
         bail!(
             "no scaffold.toml found at {}. Pass the root directory of a logos-scaffold project.",
             root.display()
