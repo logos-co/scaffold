@@ -18,6 +18,8 @@
 //! - `node.json` — node metadata used by `status` / `stop` and by handles
 //!   reconnecting from another process.
 
+pub mod pins;
+
 use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -344,41 +346,28 @@ impl Drop for TestNode {
     }
 }
 
-/// Result of preparing/verifying the test-node prerequisites for a project.
-#[derive(Clone, Debug, Serialize)]
-pub struct PreparedTestNode {
-    /// Pinned LEZ checkout the sequencer binary comes from.
-    pub lez: PathBuf,
-    /// Standalone sequencer binary.
-    pub sequencer_binary: PathBuf,
-    /// Circuits release directory exported to spawned nodes.
-    pub circuits_dir: PathBuf,
+/// Prerequisites a node start needs: the LEZ checkout (for the sequencer
+/// config template and r0vm pinning) and the built sequencer binary.
+struct StartPrereqs {
+    lez: PathBuf,
+    sequencer_binary: PathBuf,
 }
 
-/// Verify the standalone sequencer binary and circuits release are available
-/// for `project`, materialising the circuits release if needed.
-pub fn prepare_for_project(project: &Project) -> DynResult<PreparedTestNode> {
-    let prepared = verify_prepared(project)?;
-    Ok(prepared)
-}
-
-fn verify_prepared(project: &Project) -> DynResult<PreparedTestNode> {
+fn verify_prepared(project: &Project) -> DynResult<StartPrereqs> {
     let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
     let sequencer_binary = lez.join(SEQUENCER_BIN_REL_PATH);
     if !sequencer_binary.exists() {
         bail!(
             "missing standalone sequencer binary at {}.\n\
-             Next step: run `lgs setup` (or `lgs test-node prepare`) to build it.",
+             Next step: run `lgs test-node prepare` (or `lgs setup`) to build it.",
             sequencer_binary.display()
         );
     }
     let (cache_root, _) = resolve_cache_root(project)?;
     ensure_circuits_for_subprocess(&cache_root)?;
-    let circuits_dir = crate::circuits::circuits_dir_for_cache_root(&cache_root)?;
-    Ok(PreparedTestNode {
+    Ok(StartPrereqs {
         lez,
         sequencer_binary,
-        circuits_dir,
     })
 }
 

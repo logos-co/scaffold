@@ -2,17 +2,32 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 
-use crate::model::Project;
+use crate::model::{CheckStatus, Project};
+use crate::process::EchoGuard;
 use crate::project::{load_project, load_project_at, resolve_cache_root};
+use crate::testnode::pins::{
+    doctor_test_node, prepare_test_node, resolve_test_node_pins, PinOverrides,
+};
 use crate::testnode::{
-    acquire_run_slot, prepare_for_project, resolve_node_dir, run_with_test_node, stop_node_in_dir,
-    PortSelection, TestNode, TestNodeConfig,
+    acquire_run_slot, resolve_node_dir, run_with_test_node, stop_node_in_dir, PortSelection,
+    TestNode, TestNodeConfig,
 };
 use crate::DynResult;
 
 #[derive(Debug, Clone)]
 pub(crate) enum TestNodeAction {
+    Pins {
+        project: Option<PathBuf>,
+        overrides: PinOverrides,
+        json: bool,
+    },
     Prepare {
+        project: Option<PathBuf>,
+        overrides: PinOverrides,
+        cache_root: Option<PathBuf>,
+        json: bool,
+    },
+    Doctor {
         project: Option<PathBuf>,
         json: bool,
     },
@@ -47,19 +62,100 @@ pub(crate) enum TestNodeAction {
 
 pub(crate) fn cmd_test_node(action: TestNodeAction) -> DynResult<()> {
     match action {
-        TestNodeAction::Prepare { project, json } => {
+        TestNodeAction::Pins {
+            project,
+            overrides,
+            json,
+        } => {
+            // Keep `--json` stdout a single JSON object: suppress the `$ git …`
+            // echoes the pin resolver emits while shelling out.
+            let _echo = json.then(EchoGuard::suppress);
             let project = load_selected_project(project.as_deref())?;
-            let prepared = prepare_for_project(&project)?;
+            let pins = resolve_test_node_pins(&project, &overrides)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&pins)?);
+            } else {
+                println!(
+                    "lez source: {} ({:?})",
+                    pins.lez_source, pins.lez_source_origin
+                );
+                println!("lez ref: {} ({:?})", pins.lez_ref, pins.lez_ref_origin);
+                match &pins.lez_resolved_commit {
+                    Some(commit) => println!("lez resolved commit: {commit}"),
+                    None => println!("lez resolved commit: <checkout not materialised>"),
+                }
+                println!(
+                    "lez checkout: {} ({:?})",
+                    pins.lez_checkout.display(),
+                    pins.checkout_ownership
+                );
+                println!("sequencer binary: {}", pins.sequencer_binary.display());
+                println!(
+                    "circuits version: {} ({:?})",
+                    pins.circuits_version, pins.circuits_version_origin
+                );
+                println!("circuits path: {}", pins.circuits_path.display());
+            }
+            Ok(())
+        }
+        TestNodeAction::Prepare {
+            project,
+            overrides,
+            cache_root,
+            json,
+        } => {
+            // `--json`: drop the `$ …` echoes (cargo still streams build
+            // progress to stderr, so stdout stays the JSON object).
+            let _echo = json.then(EchoGuard::suppress);
+            let project = load_selected_project(project.as_deref())?;
+            let prepared = prepare_test_node(&project, &overrides, cache_root.as_deref())?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&prepared)?);
             } else {
                 println!("test-node prerequisites ready");
-                println!("  lez: {}", prepared.lez.display());
+                println!(
+                    "  lez checkout: {} ({:?})",
+                    prepared.checkout.display(),
+                    prepared.checkout_ownership
+                );
+                println!("  lez commit: {}", prepared.lez_commit);
                 println!(
                     "  sequencer binary: {}",
                     prepared.sequencer_binary.display()
                 );
-                println!("  circuits: {}", prepared.circuits_dir.display());
+                println!(
+                    "  circuits: v{} at {}",
+                    prepared.circuits_version,
+                    prepared.circuits_path.display()
+                );
+            }
+            Ok(())
+        }
+        TestNodeAction::Doctor { project, json } => {
+            let _echo = json.then(EchoGuard::suppress);
+            let project = load_selected_project(project.as_deref())?;
+            let report = doctor_test_node(&project)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                for check in &report.checks {
+                    let label = match check.status {
+                        CheckStatus::Pass => "PASS",
+                        CheckStatus::Warn => "WARN",
+                        CheckStatus::Fail => "FAIL",
+                    };
+                    println!("{label} {} — {}", check.name, check.detail);
+                    if let Some(remediation) = &check.remediation {
+                        println!("     fix: {remediation}");
+                    }
+                }
+                println!(
+                    "test-node doctor: {}",
+                    if report.ok { "ok" } else { "failing" }
+                );
+            }
+            if !report.ok {
+                anyhow::bail!("test-node doctor reported failing checks");
             }
             Ok(())
         }
@@ -72,6 +168,9 @@ pub(crate) fn cmd_test_node(action: TestNodeAction) -> DynResult<()> {
             timeout_sec,
             json,
         } => {
+            // `--json`: suppress the `$ ./sequencer_service …` spawn echo so
+            // stdout is the node's JSON connection record only.
+            let _echo = json.then(EchoGuard::suppress);
             let project = load_selected_project(project.as_deref())?;
             let config = TestNodeConfig {
                 state,
