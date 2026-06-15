@@ -18,6 +18,7 @@
 //! - `node.json` — node metadata used by `status` / `stop` and by handles
 //!   reconnecting from another process.
 
+pub mod accounts;
 pub mod blocks;
 pub mod client;
 pub mod pins;

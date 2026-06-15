@@ -384,6 +384,116 @@ enum TestNodeSubcommand {
     Blocks(TestNodeBlocksArgs),
     #[command(about = "Read the sequencer clock accounts at a stable boundary")]
     Clock(TestNodeClockArgs),
+    #[command(about = "Block-scoped account reads for parity assertions")]
+    Account(TestNodeAccountArgs),
+    #[command(about = "Block-scoped membership-proof reads")]
+    Proof(TestNodeProofArgs),
+    #[command(about = "Write account snapshots for later comparison or seeding")]
+    Snapshot(TestNodeSnapshotArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeAccountArgs {
+    #[command(subcommand)]
+    command: TestNodeAccountSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum TestNodeAccountSubcommand {
+    #[command(about = "Read one account at a stable block boundary")]
+    Get(TestNodeAccountGetArgs),
+    #[command(
+        name = "batch-get",
+        about = "Read several accounts at ONE consistent block boundary"
+    )]
+    BatchGet(TestNodeAccountBatchGetArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeAccountGetArgs {
+    /// Sequencer JSON-RPC URL.
+    #[arg(long, value_name = "URL")]
+    url: String,
+    /// Base58 account id.
+    #[arg(long, value_name = "ID")]
+    account_id: String,
+    /// Require the read to happen exactly at this block (default: latest,
+    /// with a head-stability barrier).
+    #[arg(long, value_name = "BLOCK")]
+    at_block: Option<u64>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeAccountBatchGetArgs {
+    /// Sequencer JSON-RPC URL.
+    #[arg(long, value_name = "URL")]
+    url: String,
+    /// Base58 account ids (repeat the flag per account).
+    #[arg(long = "account-id", value_name = "ID", required = true)]
+    account_ids: Vec<String>,
+    /// Require the reads to happen exactly at this block (default: latest,
+    /// with a head-stability barrier).
+    #[arg(long, value_name = "BLOCK")]
+    at_block: Option<u64>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeProofArgs {
+    #[command(subcommand)]
+    command: TestNodeProofSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum TestNodeProofSubcommand {
+    #[command(about = "Read the membership proof for a commitment at a stable block boundary")]
+    Get(TestNodeProofGetArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeProofGetArgs {
+    /// Sequencer JSON-RPC URL.
+    #[arg(long, value_name = "URL")]
+    url: String,
+    /// Commitment (64 hex chars or base58 of 32 bytes).
+    #[arg(long, value_name = "COMMITMENT")]
+    commitment: String,
+    /// Require the read to happen exactly at this block (default: latest,
+    /// with a head-stability barrier).
+    #[arg(long, value_name = "BLOCK")]
+    at_block: Option<u64>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeSnapshotArgs {
+    #[command(subcommand)]
+    command: TestNodeSnapshotSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum TestNodeSnapshotSubcommand {
+    #[command(about = "Write a block-consistent account snapshot to a JSON file")]
+    Accounts(TestNodeSnapshotAccountsArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeSnapshotAccountsArgs {
+    /// Sequencer JSON-RPC URL.
+    #[arg(long, value_name = "URL")]
+    url: String,
+    /// Base58 account ids (repeat the flag per account).
+    #[arg(long = "account-id", value_name = "ID", required = true)]
+    account_ids: Vec<String>,
+    /// Output JSON file.
+    #[arg(long, value_name = "PATH")]
+    output: PathBuf,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -1116,6 +1226,38 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                         timeout_sec: args.timeout_sec,
                         json: args.json,
                     },
+                },
+                TestNodeSubcommand::Account(account) => match account.command {
+                    TestNodeAccountSubcommand::Get(args) => TestNodeAction::AccountGet {
+                        url: args.url,
+                        account_id: args.account_id,
+                        at_block: args.at_block,
+                        json: args.json,
+                    },
+                    TestNodeAccountSubcommand::BatchGet(args) => TestNodeAction::AccountBatchGet {
+                        url: args.url,
+                        account_ids: args.account_ids,
+                        at_block: args.at_block,
+                        json: args.json,
+                    },
+                },
+                TestNodeSubcommand::Proof(proof) => match proof.command {
+                    TestNodeProofSubcommand::Get(args) => TestNodeAction::ProofGet {
+                        url: args.url,
+                        commitment: args.commitment,
+                        at_block: args.at_block,
+                        json: args.json,
+                    },
+                },
+                TestNodeSubcommand::Snapshot(snapshot) => match snapshot.command {
+                    TestNodeSnapshotSubcommand::Accounts(args) => {
+                        TestNodeAction::SnapshotAccounts {
+                            url: args.url,
+                            account_ids: args.account_ids,
+                            output: args.output,
+                            json: args.json,
+                        }
+                    }
                 },
             };
             cmd_test_node(action)

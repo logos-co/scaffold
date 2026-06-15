@@ -27,6 +27,9 @@
 use std::path::Path;
 use std::time::Duration;
 
+pub use crate::testnode::accounts::{
+    AccountRead, AccountValue, BatchAccountEntry, BatchAccountRead, ProofRead, ProofValue, ReadAt,
+};
 pub use crate::testnode::blocks::{
     clock_account_ids, BlockInfo, BlockRange, ClockAccount, ClockReadMode, ClockSnapshot, TxKind,
     TxSummary,
