@@ -27,6 +27,10 @@
 use std::path::Path;
 use std::time::Duration;
 
+pub use crate::testnode::blocks::{
+    clock_account_ids, BlockInfo, BlockRange, ClockAccount, ClockReadMode, ClockSnapshot, TxKind,
+    TxSummary,
+};
 pub use crate::testnode::client::{
     BlockContext, RejectionPhase, RpcError, SubmitOutcome, TestNodeClient, TransactionBytes,
     TransactionOutcome, WaitOptions,
