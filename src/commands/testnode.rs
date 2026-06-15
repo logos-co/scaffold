@@ -13,6 +13,7 @@ use crate::testnode::client::{
 use crate::testnode::pins::{
     doctor_test_node, prepare_test_node, resolve_test_node_pins, PinOverrides,
 };
+use crate::testnode::state::{export_state_snapshot, seed_state, StateSchema};
 use crate::testnode::{
     acquire_run_slot, resolve_node_dir, run_with_test_node, stop_node_in_dir, PortSelection,
     TestNode, TestNodeConfig,
@@ -132,6 +133,22 @@ pub(crate) enum TestNodeAction {
         url: String,
         account_ids: Vec<String>,
         output: PathBuf,
+        json: bool,
+    },
+    StateSchema {
+        project: Option<PathBuf>,
+        json: bool,
+    },
+    StateExport {
+        url: String,
+        account_ids: Vec<String>,
+        output: PathBuf,
+        json: bool,
+    },
+    StateSeed {
+        project: Option<PathBuf>,
+        input: PathBuf,
+        output: Option<PathBuf>,
         json: bool,
     },
 }
@@ -761,6 +778,95 @@ pub(crate) fn cmd_test_node(action: TestNodeAction) -> DynResult<()> {
                 println!("  file: {}", output.display());
                 println!("  block_id: {}", batch.block_id);
                 println!("  accounts: {}", batch.accounts.len());
+            }
+            Ok(())
+        }
+        TestNodeAction::StateSchema { project, json } => {
+            let _echo = json.then(EchoGuard::suppress);
+            let project = load_selected_project(project.as_deref())?;
+            let schema = StateSchema::for_project(&project)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&schema)?);
+            } else {
+                println!("state format: {}", schema.state_format_version);
+                println!("lez ref: {}", schema.lez_ref);
+                match &schema.lez_commit {
+                    Some(commit) => println!("lez commit: {commit}"),
+                    None => println!("lez commit: <checkout not materialised>"),
+                }
+                println!("accepted seed inputs:");
+                for input in &schema.accepted_inputs {
+                    println!("  - {input}");
+                }
+                println!(
+                    "public account fields (genesis-config seeding): {}",
+                    schema.public_account_fields.join(", ")
+                );
+                println!(
+                    "private account fields: {}",
+                    schema.private_account_fields.join(", ")
+                );
+                println!("config keys: {}", schema.config_keys.join(", "));
+            }
+            Ok(())
+        }
+        TestNodeAction::StateExport {
+            url,
+            account_ids,
+            output,
+            json,
+        } => {
+            let snapshot = export_state_snapshot(&url, &account_ids, None, &output)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "snapshot": output.display().to_string(),
+                        "format": snapshot.format,
+                        "public_account_count": snapshot.public_accounts.len(),
+                    }))?
+                );
+            } else {
+                println!("state snapshot written");
+                println!("  file: {}", output.display());
+                println!("  format: {}", snapshot.format);
+                println!("  public accounts: {}", snapshot.public_accounts.len());
+                println!(
+                    "  note: the RPC exposes public balances only; for full-fidelity state, \
+                     stop the node with --preserve-work-dir and seed from its state directory."
+                );
+            }
+            Ok(())
+        }
+        TestNodeAction::StateSeed {
+            project,
+            input,
+            output,
+            json,
+        } => {
+            let _echo = json.then(EchoGuard::suppress);
+            let project = load_selected_project(project.as_deref())?;
+            let seeded = seed_state(&project, &input, output.as_deref())?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&seeded)?);
+            } else {
+                println!("state seeded");
+                println!("  state_dir: {}", seeded.state_dir.display());
+                println!("  kind: {}", seeded.seed_kind);
+                println!("  state format: {}", seeded.state_format_version);
+                match &seeded.lez_commit {
+                    Some(commit) => println!("  lez commit: {commit}"),
+                    None => println!("  lez commit: <unverified>"),
+                }
+                println!("  public accounts: {}", seeded.public_account_count);
+                println!("  private accounts: {}", seeded.private_account_count);
+                for warning in &seeded.warnings {
+                    println!("  warning: {warning}");
+                }
+                println!(
+                    "Start a node from it with: lgs test-node start --state {}",
+                    seeded.state_dir.display()
+                );
             }
             Ok(())
         }
