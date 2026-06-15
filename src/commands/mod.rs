@@ -14,5 +14,6 @@ pub(crate) mod run_state;
 pub(crate) mod self_test;
 pub(crate) mod setup;
 pub(crate) mod spel;
+pub(crate) mod testnode;
 pub(crate) mod wallet;
 pub(crate) mod wallet_support;

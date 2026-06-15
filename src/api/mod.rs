@@ -87,6 +87,7 @@
 //! ```
 
 mod error;
+pub mod testnode;
 
 use std::path::{Path, PathBuf};
 
