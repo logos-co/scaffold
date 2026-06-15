@@ -32,6 +32,15 @@ pub(crate) struct NewCommand {
 }
 
 pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
+    let cwd = env::current_dir()?;
+    create_project_in(&cwd, cmd)?;
+    Ok(())
+}
+
+/// Create a new project at `base_dir/<cmd.name>` and return the project root.
+/// Used by the CLI (with the current directory) and the public API (with an
+/// explicit parent directory).
+pub(crate) fn create_project_in(base_dir: &Path, cmd: NewCommand) -> DynResult<PathBuf> {
     let template_variant = match cmd.template.as_str() {
         FRAMEWORK_KIND_DEFAULT | FRAMEWORK_KIND_LEZ_FRAMEWORK => cmd.template.clone(),
         other => {
@@ -39,8 +48,7 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
         }
     };
 
-    let cwd = env::current_dir()?;
-    let target = cwd.join(&cmd.name);
+    let target = base_dir.join(&cmd.name);
 
     if target.exists() {
         bail!("target exists: {}", target.display());
@@ -63,7 +71,7 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
             ),
         }
     }
-    result
+    result.map(|()| target)
 }
 
 fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> DynResult<()> {

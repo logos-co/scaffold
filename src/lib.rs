@@ -1,5 +1,7 @@
 pub(crate) type DynResult<T> = anyhow::Result<T>;
 
+pub mod api;
+
 pub(crate) mod circuits;
 pub(crate) mod cli;
 pub(crate) mod cli_help;

@@ -24,9 +24,34 @@ use crate::DynResult;
 
 const REPORT_WARNING: &str = "WARNING: This diagnostics bundle is sanitized on a best-effort basis and may still contain sensitive data. Inspect every file before sharing it publicly.";
 
+/// Outcome of a diagnostics-report run: the archive that was written plus the
+/// manifest describing what was collected, skipped, and redacted.
+#[derive(Clone, Debug)]
+pub(crate) struct ReportOutcome {
+    pub(crate) archive: PathBuf,
+    pub(crate) manifest: ReportManifest,
+}
+
 pub(crate) fn cmd_report(out: Option<PathBuf>, tail: usize) -> DynResult<()> {
     let project = load_project()?;
+    let outcome = report_for_project(&project, out, tail)?;
 
+    println!("report complete");
+    println!("  archive: {}", outcome.archive.display());
+    println!("  included items: {}", outcome.manifest.include_count);
+    println!("  skipped items: {}", outcome.manifest.skip_count);
+    println!("{REPORT_WARNING}");
+
+    Ok(())
+}
+
+/// Collect and pack the sanitized diagnostics archive for `project`. Returns
+/// the archive path and manifest; prints only incidental warnings.
+pub(crate) fn report_for_project(
+    project: &crate::model::Project,
+    out: Option<PathBuf>,
+    tail: usize,
+) -> DynResult<ReportOutcome> {
     let now = unix_timestamp_now()?;
     let output_path = resolve_output_path(&project.root, out, now)?;
 
@@ -40,7 +65,7 @@ pub(crate) fn cmd_report(out: Option<PathBuf>, tail: usize) -> DynResult<()> {
     let staging_dir = reports_dir.join(format!(".tmp-report-{now}-{}", std::process::id()));
     fs::create_dir_all(&staging_dir)?;
 
-    let collection = collect_report_artifacts(&project, tail, now, &staging_dir, &output_path);
+    let collection = collect_report_artifacts(project, tail, now, &staging_dir, &output_path);
 
     let manifest = match collection {
         Ok(manifest) => manifest,
@@ -67,13 +92,10 @@ pub(crate) fn cmd_report(out: Option<PathBuf>, tail: usize) -> DynResult<()> {
         );
     }
 
-    println!("report complete");
-    println!("  archive: {}", output_path.display());
-    println!("  included items: {}", manifest.include_count);
-    println!("  skipped items: {}", manifest.skip_count);
-    println!("{REPORT_WARNING}");
-
-    Ok(())
+    Ok(ReportOutcome {
+        archive: output_path,
+        manifest,
+    })
 }
 
 fn resolve_home_dir_for_scrubbing() -> Option<PathBuf> {
@@ -169,7 +191,7 @@ fn collect_report_artifacts(
     });
 
     set_command_echo(false);
-    let doctor_result = build_doctor_report();
+    let doctor_result = build_doctor_report(project);
     set_command_echo(true);
     match doctor_result {
         Ok(report) => {

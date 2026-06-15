@@ -79,6 +79,20 @@ pub(crate) fn ensure_circuits_for_subprocess(cache_root: &Path) -> DynResult<()>
     Ok(())
 }
 
+/// Resolve the directory the circuits release lives at (or would be
+/// materialised at) for `cache_root`, without downloading anything. The
+/// `LOGOS_BLOCKCHAIN_CIRCUITS` env override wins when it points at a
+/// populated checkout — mirroring `ensure_circuits_for_subprocess`.
+pub(crate) fn circuits_dir_for_cache_root(cache_root: &Path) -> DynResult<PathBuf> {
+    if let Some(path) = circuits_path_from_env() {
+        return Ok(path);
+    }
+    let triple = release_triple()?;
+    Ok(cache_root
+        .join("circuits")
+        .join(format!("v{DEFAULT_CIRCUITS_VERSION}-{triple}")))
+}
+
 fn circuits_path_from_env() -> Option<PathBuf> {
     let raw = std::env::var(LOGOS_BLOCKCHAIN_CIRCUITS_ENV).ok()?;
     let path = PathBuf::from(raw);

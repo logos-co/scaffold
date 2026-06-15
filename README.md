@@ -7,6 +7,25 @@
 - [FURPS+](FURPS.md) — Functional and non-functional requirements
 - [ADR](ADR.md) — Architecture Decision Records
 
+## Using scaffold as a Rust library
+
+Everything the CLI does is also exposed as a typed Rust API under
+`logos_scaffold::api`, so tests and dev tooling can drive scaffold-managed
+projects (setup, localnet lifecycle, wallet top-ups, deploys, diagnostics)
+without shelling out to `lgs` and parsing text:
+
+```rust
+use logos_scaffold::api::{LocalnetStartOptions, Project};
+
+let project = Project::open("/path/to/my-app")?;
+let node = project.localnet_start(&LocalnetStartOptions::default())?;
+println!("sequencer pid={} rpc={}", node.pid(), node.rpc_url());
+node.stop()?;
+```
+
+See the `api` module rustdoc for the full surface, typed result models, and
+categorized errors.
+
 ## Platform
 
 The CLI is currently Unix-only.

@@ -41,16 +41,23 @@ pub(crate) fn cmd_setup(prebuilt: bool) -> DynResult<()> {
     // gripes (circuits artifact, etc.). Tests assert the migration hint
     // wins on pre-v0.2.0 configs.
     let project = load_project()?;
+    setup_for_project(&project, prebuilt)
+}
+
+/// Sync pinned repos and build project-local binaries (sequencer, wallet,
+/// spel) for `project`. Streams build progress to stdout; failures surface as
+/// typed `CommandFailed` errors where an external command is at fault.
+pub(crate) fn setup_for_project(project: &crate::model::Project, prebuilt: bool) -> DynResult<()> {
     ensure_logos_blockchain_circuits_present()?;
-    let lez = resolve_repo_path(&project, &project.config.lez, "lez")?;
-    let spel = resolve_repo_path(&project, &project.config.spel, "spel")?;
+    let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
+    let spel = resolve_repo_path(project, &project.config.spel, "spel")?;
 
     // Both the LEZ standalone-sequencer build below and (downstream) the
     // user-project workspace build pull in `logos-blockchain-{pol,poc,poq,zksign}`
     // build scripts, which panic when their circuits release isn't visible.
     // Materialise it once before any cargo invocation; the export propagates
     // to every subprocess for the rest of the process.
-    let (cache_root, _) = resolve_cache_root(&project)?;
+    let (cache_root, _) = resolve_cache_root(project)?;
     ensure_circuits_for_subprocess(&cache_root)?;
 
     sync_pinned_repo(&project.config.lez, &lez, "lez")?;
