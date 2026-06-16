@@ -166,6 +166,9 @@ pub(crate) struct BasecampProfile {
     /// macOS `sun_path == 104` Unix-socket path limit. Project-relative or
     /// absolute; defaults to `/tmp/lgs-<profile>` on macOS when unset.
     pub(crate) runtime_dir: Option<String>,
+    /// `.log_file` — tee basecamp's stdout/stderr to this file on launch
+    /// (project-relative or absolute). Overridden by `launch --log-file`.
+    pub(crate) log_file: Option<String>,
 }
 
 #[derive(Clone, Debug)]

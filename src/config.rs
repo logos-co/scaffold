@@ -513,6 +513,10 @@ fn parse_basecamp_runtime(doc: &DocumentMut) -> DynResult<Option<BasecampConfig>
             if let Some(d) = &profile.runtime_dir {
                 check_toml_value(&format!("basecamp.profiles.{name}.runtime_dir"), d)?;
             }
+            profile.log_file = read_string(ptable, "log_file");
+            if let Some(l) = &profile.log_file {
+                check_toml_value(&format!("basecamp.profiles.{name}.log_file"), l)?;
+            }
             // Drop fully-default profiles so an empty `[basecamp.profiles.foo]`
             // doesn't make `[basecamp]` non-empty and round-trip back.
             if profile != BasecampProfile::default() {
@@ -705,6 +709,9 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
             if let Some(d) = &p.runtime_dir {
                 check_toml_value(&format!("basecamp.profiles.{profile}.runtime_dir"), d)?;
             }
+            if let Some(l) = &p.log_file {
+                check_toml_value(&format!("basecamp.profiles.{profile}.log_file"), l)?;
+            }
         }
 
         let basecamp = doc.entry("basecamp").or_insert(Item::Table(Table::new()));
@@ -764,6 +771,10 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
                 }
                 if let Some(d) = &p.runtime_dir {
                     profile_table["runtime_dir"] = value(d);
+                    wrote_scalar = true;
+                }
+                if let Some(l) = &p.log_file {
+                    profile_table["log_file"] = value(l);
                     wrote_scalar = true;
                 }
                 if !p.env.is_empty() {
@@ -1232,27 +1243,35 @@ LOGOS_STORAGE_API_PORT = "8081"
     }
 
     #[test]
-    fn basecamp_profile_env_file_and_custom_name_round_trip() {
-        // A custom profile name (not alice/bob) carrying both `env` and an
-        // `env_file` parses, exposes both, and survives serialize -> parse.
+    fn basecamp_profile_scalars_and_custom_name_round_trip() {
+        // A custom profile name (not alice/bob) carrying `env` plus all three
+        // per-profile scalars parses, exposes them, and survives serialize ->
+        // parse so `save_project_config` never drops them.
         let toml = minimal_v0_2_0()
             + r#"
 [basecamp.profiles.carol]
 env_file = ".scaffold/carol.env"
+runtime_dir = "/tmp/lgs-carol"
+log_file = ".scaffold/carol.log"
 
 [basecamp.profiles.carol.env]
 LOGOS_STORAGE_API_PORT = "8083"
 "#;
+        let assert_carol = |c: &BasecampProfile| {
+            assert_eq!(c.env_file.as_deref(), Some(".scaffold/carol.env"));
+            assert_eq!(c.runtime_dir.as_deref(), Some("/tmp/lgs-carol"));
+            assert_eq!(c.log_file.as_deref(), Some(".scaffold/carol.log"));
+            assert_eq!(
+                c.env.get("LOGOS_STORAGE_API_PORT").map(String::as_str),
+                Some("8083")
+            );
+        };
         let cfg = parse_config(&toml).expect("parse");
-        let carol = cfg
-            .basecamp
-            .as_ref()
-            .and_then(|bc| bc.profiles.get("carol"))
-            .expect("carol profile");
-        assert_eq!(carol.env_file.as_deref(), Some(".scaffold/carol.env"));
-        assert_eq!(
-            carol.env.get("LOGOS_STORAGE_API_PORT").map(String::as_str),
-            Some("8083")
+        assert_carol(
+            cfg.basecamp
+                .as_ref()
+                .and_then(|bc| bc.profiles.get("carol"))
+                .expect("carol profile"),
         );
 
         let serialized = serialize_config(&cfg).expect("serialize");
@@ -1263,11 +1282,7 @@ LOGOS_STORAGE_API_PORT = "8083"
             .profiles
             .remove("carol")
             .expect("carol after round-trip");
-        assert_eq!(carol2.env_file.as_deref(), Some(".scaffold/carol.env"));
-        assert_eq!(
-            carol2.env.get("LOGOS_STORAGE_API_PORT").map(String::as_str),
-            Some("8083")
-        );
+        assert_carol(&carol2);
     }
 
     #[test]

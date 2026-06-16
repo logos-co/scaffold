@@ -45,6 +45,9 @@ pub(crate) enum BasecampAction {
     },
     Launch {
         profile: String,
+        /// `--log-file` selector: `None` = flag absent (fall back to config);
+        /// `Some(None)` = bare flag (default path); `Some(Some(p))` = explicit.
+        log_file: Option<Option<PathBuf>>,
     },
     /// Enter a module's Nix dev shell. Resolves the module's flake from
     /// `[modules.<name>]`, strips its output fragment, and execs
@@ -100,7 +103,9 @@ pub(crate) fn basecamp_for_project(project: Project, action: BasecampAction) -> 
             }
             cmd_basecamp_install(project, &NixLgxProbe)
         }
-        BasecampAction::Launch { profile } => cmd_basecamp_launch(project, profile),
+        BasecampAction::Launch { profile, log_file } => {
+            cmd_basecamp_launch(project, profile, log_file)
+        }
         BasecampAction::Develop { module, dev_shell } => {
             cmd_basecamp_develop(project, module, dev_shell)
         }
@@ -337,7 +342,11 @@ fn resolve_basecamp_binary(app_link: &Path) -> DynResult<PathBuf> {
 
 // Concurrent `launch <same-profile>` is undefined: no lock; two racing
 // invocations leave partial state.
-fn cmd_basecamp_launch(project: Project, profile: String) -> DynResult<()> {
+fn cmd_basecamp_launch(
+    project: Project,
+    profile: String,
+    log_file: Option<Option<PathBuf>>,
+) -> DynResult<()> {
     let state_path = project.root.join(".scaffold/state/basecamp.state");
     let state = match read_basecamp_state(&state_path).ok() {
         Some(s) if !s.basecamp_bin.is_empty() && !s.lgpm_bin.is_empty() => s,
@@ -356,6 +365,21 @@ fn cmd_basecamp_launch(project: Project, profile: String) -> DynResult<()> {
 
     let profiles_root = project.root.join(BASECAMP_PROFILES_REL);
     let profile_dir = profiles_root.join(&profile);
+
+    // Resolve the optional log destination: `--log-file` wins over the
+    // per-profile `[basecamp.profiles.<profile>].log_file`. A bare `--log-file`
+    // defaults to `<profile_dir>/basecamp.log`; `None` means no logging (exec).
+    let log_dest: Option<PathBuf> = match log_file {
+        Some(Some(p)) => Some(project.root.join(p)),
+        Some(None) => Some(profile_dir.join("basecamp.log")),
+        None => project
+            .config
+            .basecamp
+            .as_ref()
+            .and_then(|bc| bc.profiles.get(&profile))
+            .and_then(|p| p.log_file.as_deref())
+            .map(|rel| project.root.join(rel)),
+    };
 
     let launch_state_path = profile_dir.join("launch.state");
     let expected_comm = basecamp_comm_name(&state.basecamp_bin);
@@ -447,14 +471,95 @@ fn cmd_basecamp_launch(project: Project, profile: String) -> DynResult<()> {
     // via a registry — empty in v1 since no modules have published names.
     // Concurrent alice/bob on the same host may collide on module-level ports
     // until upstreams adopt overrides.
-    write_launch_pid(&launch_state_path, std::process::id())?;
-    let err = cmd.exec();
-    // exec() only returns on failure. On Linux/Unix exec preserves the PID, so
-    // launch.state is valid once exec succeeds — but on failure the PID we wrote
-    // belongs to the scaffold process that's about to exit. Remove the file so a
-    // later launch doesn't kill whatever reuses the PID.
-    let _ = fs::remove_file(&launch_state_path);
-    bail!("failed to exec basecamp at {}: {err}", state.basecamp_bin);
+    match log_dest {
+        // No log file: exec and hand the terminal straight to basecamp. exec
+        // preserves the PID, so launch.state stays valid once it succeeds; on
+        // failure the PID we wrote belongs to this about-to-exit scaffold
+        // process, so remove the file before a later launch can kill whatever
+        // reuses the PID.
+        None => {
+            write_launch_pid(&launch_state_path, std::process::id())?;
+            let err = cmd.exec();
+            let _ = fs::remove_file(&launch_state_path);
+            bail!("failed to exec basecamp at {}: {err}", state.basecamp_bin);
+        }
+        // Log requested: exec can't tee, so spawn and fan output to the
+        // terminal + file, recording the child's PID.
+        Some(dest) => run_with_log_tee(cmd, &state.basecamp_bin, &launch_state_path, &dest),
+    }
+}
+
+/// Spawn basecamp with stdout/stderr teed to both the terminal and `log_path`,
+/// wait for it, and exit with its status. Used instead of `exec` when a log
+/// file is requested — `exec` would replace this process, leaving nowhere to
+/// copy output into a file. The spawned child's PID is what `launch.state`
+/// records.
+fn run_with_log_tee(
+    mut cmd: Command,
+    bin: &str,
+    launch_state_path: &Path,
+    log_path: &Path,
+) -> DynResult<()> {
+    use std::io::{Read, Write};
+    use std::process::Stdio;
+    use std::sync::{Arc, Mutex};
+
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create log dir {}", parent.display()))?;
+    }
+    let log = fs::File::create(log_path)
+        .with_context(|| format!("create log file {}", log_path.display()))?;
+    println!("teeing basecamp output to {}", log_path.display());
+
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("spawn basecamp at {bin}"))?;
+    write_launch_pid(launch_state_path, child.id())?;
+
+    let log = Arc::new(Mutex::new(log));
+    // One thread per stream copies bytes to the inherited fd and the shared log.
+    let tee = |mut src: Box<dyn Read + Send>,
+               mut sink: Box<dyn Write + Send>,
+               log: Arc<Mutex<fs::File>>| {
+        thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = src.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                let _ = sink.write_all(&buf[..n]);
+                let _ = sink.flush();
+                if let Ok(mut f) = log.lock() {
+                    let _ = f.write_all(&buf[..n]);
+                }
+            }
+        })
+    };
+    let mut handles = Vec::new();
+    if let Some(out) = child.stdout.take() {
+        handles.push(tee(
+            Box::new(out),
+            Box::new(std::io::stdout()),
+            Arc::clone(&log),
+        ));
+    }
+    if let Some(err) = child.stderr.take() {
+        handles.push(tee(
+            Box::new(err),
+            Box::new(std::io::stderr()),
+            Arc::clone(&log),
+        ));
+    }
+    let status = child
+        .wait()
+        .with_context(|| format!("wait basecamp at {bin}"))?;
+    for h in handles {
+        let _ = h.join();
+    }
+    let _ = fs::remove_file(launch_state_path);
+    std::process::exit(status.code().unwrap_or(if status.success() { 0 } else { 1 }));
 }
 
 /// Env map exported to the basecamp child on launch. Scaffold-owned names only;

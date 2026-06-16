@@ -684,7 +684,12 @@ impl BasecampCommand {
             Self::Install => BasecampAction::Install {
                 print_output: false,
             },
-            Self::Launch { profile } => BasecampAction::Launch { profile },
+            // The public API doesn't surface `--log-file`; default to no log
+            // (falls back to `[basecamp.profiles.<name>].log_file` if set).
+            Self::Launch { profile } => BasecampAction::Launch {
+                profile,
+                log_file: None,
+            },
             Self::Develop { module, dev_shell } => BasecampAction::Develop { module, dev_shell },
             Self::BuildPortable => BasecampAction::BuildPortable,
             Self::Doctor => BasecampAction::Doctor { json: false },

@@ -1089,6 +1089,11 @@ struct BasecampInstallArgs {
 struct BasecampLaunchArgs {
     #[arg(value_name = "PROFILE")]
     profile: String,
+    /// Tee basecamp's stdout/stderr to a log file. Bare `--log-file` uses
+    /// `.scaffold/basecamp/profiles/<profile>/basecamp.log`; `--log-file=PATH`
+    /// picks a path. Overrides `[basecamp.profiles.<profile>].log_file`.
+    #[arg(long, value_name = "PATH", num_args = 0..=1, require_equals = true)]
+    log_file: Option<Option<PathBuf>>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -1399,6 +1404,7 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 },
                 BasecampSubcommand::Launch(args) => BasecampAction::Launch {
                     profile: args.profile,
+                    log_file: args.log_file,
                 },
                 BasecampSubcommand::Develop(args) => BasecampAction::Develop {
                     module: args.module,
