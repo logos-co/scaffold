@@ -1033,8 +1033,12 @@ enum BasecampSubcommand {
     )]
     Develop(BasecampDevelopArgs),
     #[command(
+        about = "Build the project's .lgx artefacts for a flake variant (lgx/lgx-portable/all) without installing them. See `basecamp docs` for project requirements."
+    )]
+    Build(BasecampBuildArgs),
+    #[command(
         name = "build-portable",
-        about = "Build the project's .#lgx-portable artefacts for hand-loading into a basecamp AppImage. See `basecamp docs` for project requirements."
+        about = "Build the project's .#lgx-portable artefacts for hand-loading into a basecamp AppImage (alias for `build --variant lgx-portable`). See `basecamp docs` for project requirements."
     )]
     BuildPortable(BasecampBuildPortableArgs),
     #[command(
@@ -1066,11 +1070,47 @@ struct BasecampModulesArgs {
     show: bool,
 }
 
+/// Flake output variant(s) `basecamp build` resolves against per module.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum BuildVariant {
+    /// `#lgx` — the dev artefact (same output `install` builds).
+    Lgx,
+    /// `#lgx-portable` — for hand-loading into a basecamp AppImage.
+    #[value(name = "lgx-portable")]
+    LgxPortable,
+    /// Both `lgx` and `lgx-portable`.
+    All,
+}
+
+impl BuildVariant {
+    /// Flake attr names this selection expands to (build order).
+    fn attrs(self) -> Vec<String> {
+        match self {
+            Self::Lgx => vec!["lgx".to_string()],
+            Self::LgxPortable => vec!["lgx-portable".to_string()],
+            Self::All => vec!["lgx".to_string(), "lgx-portable".to_string()],
+        }
+    }
+}
+
+#[derive(Debug, clap::Args)]
+struct BasecampBuildArgs {
+    /// Flake variant(s) to build. Defaults to `lgx` (the dev artefact).
+    #[arg(long, value_enum, default_value_t = BuildVariant::Lgx)]
+    variant: BuildVariant,
+    /// Restrict the build to a single captured project module.
+    #[arg(long, value_name = "NAME")]
+    module: Option<String>,
+}
+
 #[derive(Debug, clap::Args)]
 struct BasecampBuildPortableArgs {
-    // `build-portable` takes no CLI source flags: it attr-swaps
-    // `state.project_sources` (`#lgx` → `#lgx-portable`) and builds that.
-    // `state.dependencies` are ignored — the target AppImage provides them.
+    // `build-portable` is the alias for `build --variant lgx-portable`. It
+    // attr-swaps `#lgx` → `#lgx-portable` and builds that; `role = dependency`
+    // modules are ignored — the target AppImage provides them.
+    /// Restrict the build to a single captured project module.
+    #[arg(long, value_name = "NAME")]
+    module: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -1404,7 +1444,14 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                     module: args.module,
                     dev_shell: args.dev_shell,
                 },
-                BasecampSubcommand::BuildPortable(_) => BasecampAction::BuildPortable,
+                BasecampSubcommand::Build(args) => BasecampAction::Build {
+                    variants: args.variant.attrs(),
+                    module: args.module,
+                },
+                BasecampSubcommand::BuildPortable(args) => BasecampAction::Build {
+                    variants: vec!["lgx-portable".to_string()],
+                    module: args.module,
+                },
                 BasecampSubcommand::Doctor(args) => BasecampAction::Doctor { json: args.json },
                 BasecampSubcommand::Docs => BasecampAction::Docs,
             };
