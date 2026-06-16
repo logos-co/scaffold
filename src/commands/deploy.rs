@@ -37,14 +37,41 @@ pub(crate) fn cmd_deploy(
     json: bool,
 ) -> DynResult<()> {
     let project = load_project()?;
-    let wallet = load_wallet_runtime(&project)?;
+    let results = deploy_for_project(&project, program_name, program_path, json)?;
+
+    let failed_count = results
+        .iter()
+        .filter(|result| matches!(result.status, DeployStatus::Failed))
+        .count();
+    if failed_count > 0 {
+        if results.len() == 1 {
+            bail!("deploy failed: {}", results[0].detail);
+        }
+        bail!("deploy completed with {failed_count} failed program(s)");
+    }
+
+    Ok(())
+}
+
+/// Deploy guest programs for `project`. Returns one `DeployResult` per
+/// attempted program; the caller decides whether failures are fatal. With
+/// `json = true` the CLI JSON object is printed and `$ <cmd>` echoes are
+/// suppressed; with `json = false` per-program progress lines stream to
+/// stdout (API callers should read the returned results, not the output).
+pub(crate) fn deploy_for_project(
+    project: &crate::model::Project,
+    program_name: Option<String>,
+    program_path: Option<PathBuf>,
+    json: bool,
+) -> DynResult<Vec<DeployResult>> {
+    let wallet = load_wallet_runtime(project)?;
     let spel_bin =
-        resolve_repo_path(&project, &project.config.spel, "spel")?.join(SPEL_BIN_REL_PATH);
+        resolve_repo_path(project, &project.config.spel, "spel")?.join(SPEL_BIN_REL_PATH);
 
     let sequencer_addr = wallet
         .sequencer_addr
         .clone()
-        .unwrap_or_else(|| default_sequencer_http_url_for_project(&project));
+        .unwrap_or_else(|| default_sequencer_http_url_for_project(project));
 
     // --program-path: deploy a single custom ELF directly, skip auto-discovery
     if let Some(custom_path) = program_path {
@@ -56,14 +83,15 @@ pub(crate) fn cmd_deploy(
             .and_then(|s| s.to_str())
             .unwrap_or("unknown")
             .to_string();
-        return deploy_single_program(
+        let result = deploy_single_program(
             &wallet,
             &program_name,
             &custom_path,
             &sequencer_addr,
             &spel_bin,
             json,
-        );
+        )?;
+        return Ok(vec![result]);
     }
 
     let available_programs = discover_deployable_programs(&project.root)?;
@@ -215,11 +243,7 @@ pub(crate) fn cmd_deploy(
         }
     }
 
-    if failed_count > 0 {
-        bail!("deploy completed with {failed_count} failed program(s)");
-    }
-
-    Ok(())
+    Ok(results)
 }
 
 pub(crate) fn render_deploy_result_json(result: &DeployResult) -> serde_json::Value {
@@ -338,7 +362,7 @@ fn deploy_single_program(
     sequencer_addr: &str,
     spel_bin: &Path,
     json: bool,
-) -> DynResult<()> {
+) -> DynResult<DeployResult> {
     preflight_sequencer_reachability(sequencer_addr)?;
 
     let mut command = std::process::Command::new(&wallet.wallet_binary);
@@ -372,7 +396,13 @@ fn deploy_single_program(
             println!("FAIL {program_name} deployment failed");
             println!("  Error: {summary}");
         }
-        bail!("deploy failed: {summary}");
+        return Ok(DeployResult {
+            program: program_name.to_string(),
+            status: DeployStatus::Failed,
+            detail: summary,
+            tx,
+            program_id: None,
+        });
     }
 
     let program_id = extract_program_id(spel_bin, binary_path);
@@ -415,7 +445,13 @@ fn deploy_single_program(
         );
     }
 
-    Ok(())
+    Ok(DeployResult {
+        program: program_name.to_string(),
+        status: DeployStatus::Submitted,
+        detail: "wallet submission command exited successfully".to_string(),
+        tx,
+        program_id,
+    })
 }
 
 /// Wall-clock cap for `spel inspect`. The CLI typically returns in
@@ -493,17 +529,24 @@ fn print_program_id_line(program_id: &Option<String>) {
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct DeployResult {
-    pub(crate) program: String,
-    pub(crate) status: DeployStatus,
-    pub(crate) detail: String,
-    pub(crate) tx: Option<String>,
-    pub(crate) program_id: Option<String>,
+/// Outcome of one program deployment attempt.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct DeployResult {
+    pub program: String,
+    pub status: DeployStatus,
+    pub detail: String,
+    /// Transaction identifier extracted from the wallet output, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx: Option<String>,
+    /// Locally computed risc0 image ID (the on-chain program ID), when the
+    /// vendored `spel` binary was available to compute it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub program_id: Option<String>,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) enum DeployStatus {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeployStatus {
     Submitted,
     Failed,
 }

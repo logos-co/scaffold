@@ -25,6 +25,7 @@ use crate::commands::report::cmd_report;
 use crate::commands::run::{cmd_run, RunInvocation};
 use crate::commands::setup::cmd_setup;
 use crate::commands::spel::cmd_spel;
+use crate::commands::testnode::{cmd_test_node, TestNodeAction};
 use crate::commands::wallet::{cmd_wallet, WalletAction};
 use crate::constants::{DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, VERSION};
 use crate::process::set_command_echo;
@@ -92,6 +93,11 @@ enum Commands {
     Deploy(DeployArgs),
     #[command(about = "Manage the local sequencer (start, stop, status, logs, reset)")]
     Localnet(LocalnetArgs),
+    #[command(
+        name = "test-node",
+        about = "Manage isolated, short-lived sequencer test nodes for integration tests"
+    )]
+    TestNode(TestNodeArgs),
     #[command(about = "Manage project wallet accounts and faucet top-ups")]
     Wallet(WalletArgs),
     /// `spel` is dispatched via the early `spel_passthrough_args` intercept
@@ -333,6 +339,539 @@ struct RunArgs {
 struct LocalnetArgs {
     #[command(subcommand)]
     command: LocalnetSubcommand,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeArgs {
+    #[command(subcommand)]
+    command: TestNodeSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum TestNodeSubcommand {
+    #[command(
+        about = "Report the LEZ and circuits pins test-node commands will use for this project"
+    )]
+    Pins(TestNodePinsArgs),
+    #[command(
+        about = "Resolve the project's LEZ/circuits pins, build the standalone sequencer for them, and fetch circuits"
+    )]
+    Prepare(TestNodePrepareArgs),
+    #[command(
+        about = "Check test-node prerequisites: pins, checkout state, sequencer binary, circuits, platform"
+    )]
+    Doctor(TestNodeDoctorArgs),
+    #[command(about = "Start an isolated sequencer test node with its own port, state, and logs")]
+    Start(TestNodeStartArgs),
+    #[command(about = "Report whether a test node is healthy and which RPC URL it serves")]
+    Status(TestNodeStatusArgs),
+    #[command(about = "Stop a test node and remove its runtime state")]
+    Stop(TestNodeStopArgs),
+    #[command(
+        about = "Start a node, run a command with its connection exported, then stop the node",
+        long_about = "Start a test node, wait until it is healthy, run the given command with the \
+                      node's connection details exported (LGS_TEST_NODE_RPC_URL, \
+                      LGS_TEST_NODE_PORT, LGS_TEST_NODE_STATE_DIR, ...), forward the command's \
+                      exit status, and stop the node when the command exits.\n\n\
+                      Example:\n  lgs test-node run --serial -- cargo test --test sequencer_it"
+    )]
+    Run(TestNodeRunArgs),
+    #[command(
+        about = "Submit transactions and observe definitive committed/rejected/timeout outcomes"
+    )]
+    Tx(TestNodeTxArgs),
+    #[command(about = "Inspect blocks: head, ranges, and waiting for block production")]
+    Blocks(TestNodeBlocksArgs),
+    #[command(about = "Read the sequencer clock accounts at a stable boundary")]
+    Clock(TestNodeClockArgs),
+    #[command(about = "Block-scoped account reads for parity assertions")]
+    Account(TestNodeAccountArgs),
+    #[command(about = "Block-scoped membership-proof reads")]
+    Proof(TestNodeProofArgs),
+    #[command(about = "Write account snapshots for later comparison or seeding")]
+    Snapshot(TestNodeSnapshotArgs),
+    #[command(about = "Seed test nodes from caller-provided state snapshots")]
+    State(TestNodeStateArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeStateArgs {
+    #[command(subcommand)]
+    command: TestNodeStateSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum TestNodeStateSubcommand {
+    #[command(about = "Identify the exact state snapshot formats the current project pins accept")]
+    Schema(TestNodeStateSchemaArgs),
+    #[command(
+        about = "Export named public accounts from a node into a state snapshot file",
+        long_about = "Export named public accounts from a running node into an \
+                      lgs-state-snapshot/1 JSON file usable by `state seed`.\n\n\
+                      The pinned sequencer RPC exposes public account balances only (no \
+                      enumeration, no private state). For a complete, full-fidelity state \
+                      snapshot, stop a node with --preserve-work-dir and pass its state \
+                      directory to `state seed` instead."
+    )]
+    Export(TestNodeStateExportArgs),
+    #[command(
+        about = "Validate a snapshot and produce a state directory for `test-node start --state`"
+    )]
+    Seed(TestNodeStateSeedArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeStateSchemaArgs {
+    /// Project root (default: discover from the current directory).
+    #[arg(long, value_name = "DIR")]
+    project: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeStateExportArgs {
+    /// Sequencer JSON-RPC URL.
+    #[arg(long, value_name = "URL")]
+    url: String,
+    /// Base58 account ids to export (repeat the flag per account).
+    #[arg(long = "account-id", value_name = "ID", required = true)]
+    account_ids: Vec<String>,
+    /// Output snapshot file (JSON, lgs-state-snapshot/1).
+    #[arg(long, value_name = "PATH")]
+    output: PathBuf,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeStateSeedArgs {
+    /// Project root (default: discover from the current directory).
+    #[arg(long, value_name = "DIR")]
+    project: Option<PathBuf>,
+    /// Snapshot file (lgs-state-snapshot/1 or lgs-account-snapshot/1) or a
+    /// state directory containing a rocksdb database.
+    #[arg(long, value_name = "PATH")]
+    input: PathBuf,
+    /// Output state directory (default: .scaffold/test-nodes/seeds/<id>).
+    #[arg(long, value_name = "DIR")]
+    output: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeAccountArgs {
+    #[command(subcommand)]
+    command: TestNodeAccountSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum TestNodeAccountSubcommand {
+    #[command(about = "Read one account at a stable block boundary")]
+    Get(TestNodeAccountGetArgs),
+    #[command(
+        name = "batch-get",
+        about = "Read several accounts at ONE consistent block boundary"
+    )]
+    BatchGet(TestNodeAccountBatchGetArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeAccountGetArgs {
+    /// Sequencer JSON-RPC URL.
+    #[arg(long, value_name = "URL")]
+    url: String,
+    /// Base58 account id.
+    #[arg(long, value_name = "ID")]
+    account_id: String,
+    /// Require the read to happen exactly at this block (default: latest,
+    /// with a head-stability barrier).
+    #[arg(long, value_name = "BLOCK")]
+    at_block: Option<u64>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeAccountBatchGetArgs {
+    /// Sequencer JSON-RPC URL.
+    #[arg(long, value_name = "URL")]
+    url: String,
+    /// Base58 account ids (repeat the flag per account).
+    #[arg(long = "account-id", value_name = "ID", required = true)]
+    account_ids: Vec<String>,
+    /// Require the reads to happen exactly at this block (default: latest,
+    /// with a head-stability barrier).
+    #[arg(long, value_name = "BLOCK")]
+    at_block: Option<u64>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeProofArgs {
+    #[command(subcommand)]
+    command: TestNodeProofSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum TestNodeProofSubcommand {
+    #[command(about = "Read the membership proof for a commitment at a stable block boundary")]
+    Get(TestNodeProofGetArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeProofGetArgs {
+    /// Sequencer JSON-RPC URL.
+    #[arg(long, value_name = "URL")]
+    url: String,
+    /// Commitment (64 hex chars or base58 of 32 bytes).
+    #[arg(long, value_name = "COMMITMENT")]
+    commitment: String,
+    /// Require the read to happen exactly at this block (default: latest,
+    /// with a head-stability barrier).
+    #[arg(long, value_name = "BLOCK")]
+    at_block: Option<u64>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeSnapshotArgs {
+    #[command(subcommand)]
+    command: TestNodeSnapshotSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum TestNodeSnapshotSubcommand {
+    #[command(about = "Write a block-consistent account snapshot to a JSON file")]
+    Accounts(TestNodeSnapshotAccountsArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeSnapshotAccountsArgs {
+    /// Sequencer JSON-RPC URL.
+    #[arg(long, value_name = "URL")]
+    url: String,
+    /// Base58 account ids (repeat the flag per account).
+    #[arg(long = "account-id", value_name = "ID", required = true)]
+    account_ids: Vec<String>,
+    /// Output JSON file.
+    #[arg(long, value_name = "PATH")]
+    output: PathBuf,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeBlocksArgs {
+    #[command(subcommand)]
+    command: TestNodeBlocksSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum TestNodeBlocksSubcommand {
+    #[command(about = "Current head block: id, timestamp, and transaction summaries")]
+    Head(TestNodeBlocksHeadArgs),
+    #[command(
+        about = "Inclusive block range with per-block clock/user transaction classification"
+    )]
+    Range(TestNodeBlocksRangeArgs),
+    #[command(about = "Wait for a number of blocks after a known boundary, then print them")]
+    Wait(TestNodeBlocksWaitArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeBlocksHeadArgs {
+    /// Sequencer JSON-RPC URL.
+    #[arg(long, value_name = "URL")]
+    url: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeBlocksRangeArgs {
+    /// Sequencer JSON-RPC URL.
+    #[arg(long, value_name = "URL")]
+    url: String,
+    #[arg(long, value_name = "BLOCK")]
+    from: u64,
+    #[arg(long, value_name = "BLOCK")]
+    to: u64,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeBlocksWaitArgs {
+    /// Sequencer JSON-RPC URL.
+    #[arg(long, value_name = "URL")]
+    url: String,
+    /// Block boundary; only blocks after this id are returned.
+    #[arg(long, value_name = "BLOCK")]
+    after: u64,
+    /// How many blocks after the boundary to wait for.
+    #[arg(long, default_value_t = 1)]
+    count: u64,
+    /// Seconds to wait for the blocks to be produced.
+    #[arg(long, default_value_t = 60)]
+    timeout_sec: u64,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeClockArgs {
+    #[command(subcommand)]
+    command: TestNodeClockSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum TestNodeClockSubcommand {
+    #[command(about = "Read all clock accounts at the current head")]
+    Read(TestNodeClockReadArgs),
+    #[command(
+        name = "wait-stable",
+        about = "Read the clock accounts behind a stability barrier (consecutive identical samples)"
+    )]
+    WaitStable(TestNodeClockWaitStableArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeClockReadArgs {
+    /// Sequencer JSON-RPC URL.
+    #[arg(long, value_name = "URL")]
+    url: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeClockWaitStableArgs {
+    /// Sequencer JSON-RPC URL.
+    #[arg(long, value_name = "URL")]
+    url: String,
+    /// Consecutive identical samples required for a stable snapshot.
+    #[arg(long, default_value_t = 2)]
+    samples: u32,
+    /// Seconds before giving up with a retryable error.
+    #[arg(long, default_value_t = 30)]
+    timeout_sec: u64,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeTxArgs {
+    #[command(subcommand)]
+    command: TestNodeTxSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum TestNodeTxSubcommand {
+    #[command(
+        about = "Submit a transaction; prints the tx hash or a structured stateless rejection"
+    )]
+    Submit(TestNodeTxSubmitArgs),
+    #[command(
+        about = "Wait for a definitive outcome of a submitted transaction (committed, rejected, timeout)"
+    )]
+    Wait(TestNodeTxWaitArgs),
+    #[command(
+        name = "submit-and-wait",
+        about = "Submit a transaction and wait for exactly one terminal outcome"
+    )]
+    SubmitAndWait(TestNodeTxSubmitAndWaitArgs),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum TxEncodingArg {
+    /// File contains base64 text of the transaction's borsh bytes.
+    BorshBase64,
+    /// File contains the raw borsh bytes.
+    Borsh,
+}
+
+impl TxEncodingArg {
+    fn into_encoding(self) -> crate::commands::testnode::TxEncoding {
+        match self {
+            Self::BorshBase64 => crate::commands::testnode::TxEncoding::BorshBase64,
+            Self::Borsh => crate::commands::testnode::TxEncoding::Borsh,
+        }
+    }
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeTxSubmitArgs {
+    /// Sequencer JSON-RPC URL (e.g. from `test-node start --json`).
+    #[arg(long, value_name = "URL")]
+    url: String,
+    /// Transaction file.
+    #[arg(long, value_name = "PATH")]
+    file: PathBuf,
+    /// Encoding of the transaction file.
+    #[arg(long, value_enum, default_value_t = TxEncodingArg::BorshBase64)]
+    encoding: TxEncodingArg,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeTxWaitArgs {
+    /// Sequencer JSON-RPC URL.
+    #[arg(long, value_name = "URL")]
+    url: String,
+    /// Transaction hash returned by submit.
+    #[arg(long, value_name = "HASH")]
+    hash: String,
+    /// Only observe the transaction after this block boundary.
+    #[arg(long, value_name = "BLOCK")]
+    after_block: Option<u64>,
+    /// Seconds to wait for a terminal outcome.
+    #[arg(long, default_value_t = 60)]
+    timeout_sec: u64,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeTxSubmitAndWaitArgs {
+    /// Sequencer JSON-RPC URL.
+    #[arg(long, value_name = "URL")]
+    url: String,
+    /// Transaction file.
+    #[arg(long, value_name = "PATH")]
+    file: PathBuf,
+    /// Encoding of the transaction file.
+    #[arg(long, value_enum, default_value_t = TxEncodingArg::BorshBase64)]
+    encoding: TxEncodingArg,
+    /// Seconds to wait for a terminal outcome.
+    #[arg(long, default_value_t = 60)]
+    timeout_sec: u64,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodePinsArgs {
+    /// Project root (default: discover from the current directory).
+    #[arg(long, value_name = "DIR")]
+    project: Option<PathBuf>,
+    /// Override the LEZ source (clone URL or local checkout directory).
+    #[arg(long, value_name = "URL|DIR")]
+    lez_source: Option<String>,
+    /// Override the LEZ ref (SHA, tag, or branch).
+    #[arg(long, value_name = "REF")]
+    lez_ref: Option<String>,
+    /// Override the circuits release version.
+    #[arg(long, value_name = "VER")]
+    circuits_version: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodePrepareArgs {
+    /// Project root (default: discover from the current directory).
+    #[arg(long, value_name = "DIR")]
+    project: Option<PathBuf>,
+    /// Override the cache root used for managed checkouts and circuits.
+    #[arg(long, value_name = "DIR")]
+    cache_root: Option<PathBuf>,
+    /// Override the LEZ source (clone URL or local checkout directory).
+    /// Local checkouts are validated, never modified.
+    #[arg(long, value_name = "URL|DIR")]
+    lez_source: Option<String>,
+    /// Override the LEZ ref (SHA, tag, or branch).
+    #[arg(long, value_name = "REF")]
+    lez_ref: Option<String>,
+    /// Override the circuits release version.
+    #[arg(long, value_name = "VER")]
+    circuits_version: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeDoctorArgs {
+    /// Project root (default: discover from the current directory).
+    #[arg(long, value_name = "DIR")]
+    project: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeStartArgs {
+    /// Project root (default: discover from the current directory).
+    #[arg(long, value_name = "DIR")]
+    project: Option<PathBuf>,
+    /// Pre-seeded state directory (containing a rocksdb database) to start from.
+    #[arg(long, value_name = "DIR")]
+    state: Option<PathBuf>,
+    /// RPC port. 0 (the default) picks an unused localhost port.
+    #[arg(long, default_value_t = 0)]
+    port: u16,
+    /// Runtime directory for this node (default: .scaffold/test-nodes/<id>).
+    #[arg(long, value_name = "DIR")]
+    work_dir: Option<PathBuf>,
+    /// Keep the runtime directory when the node is stopped.
+    #[arg(long)]
+    preserve_work_dir: bool,
+    /// Seconds to wait for the node to become healthy.
+    #[arg(long, default_value_t = crate::testnode::DEFAULT_TEST_NODE_TIMEOUT_SEC)]
+    timeout_sec: u64,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeStatusArgs {
+    /// Node id (directory name under .scaffold/test-nodes/) or runtime dir path.
+    #[arg(long, value_name = "ID|DIR")]
+    node: String,
+    /// Project root (default: discover from the current directory).
+    #[arg(long, value_name = "DIR")]
+    project: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeStopArgs {
+    /// Node id (directory name under .scaffold/test-nodes/) or runtime dir path.
+    #[arg(long, value_name = "ID|DIR")]
+    node: String,
+    /// Project root (default: discover from the current directory).
+    #[arg(long, value_name = "DIR")]
+    project: Option<PathBuf>,
+    /// Keep the runtime directory instead of removing it.
+    #[arg(long)]
+    preserve_work_dir: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestNodeRunArgs {
+    /// Project root (default: discover from the current directory).
+    #[arg(long, value_name = "DIR")]
+    project: Option<PathBuf>,
+    /// Pre-seeded state directory (containing a rocksdb database) to start from.
+    #[arg(long, value_name = "DIR")]
+    state: Option<PathBuf>,
+    /// Low-resource CI path: at most one test node at a time (machine-wide).
+    #[arg(long, conflicts_with = "parallel")]
+    serial: bool,
+    /// Cap concurrent test-node creation at N (machine-wide).
+    #[arg(long, value_name = "N")]
+    parallel: Option<usize>,
+    /// Seconds to wait for the node to become healthy before running the command.
+    #[arg(long, default_value_t = crate::testnode::DEFAULT_TEST_NODE_TIMEOUT_SEC)]
+    timeout_sec: u64,
+    /// Command (after `--`) to run with the node's connection exported.
+    #[arg(last = true, required = true)]
+    command: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -650,6 +1189,164 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 },
             };
             cmd_localnet(action)
+        }
+        Some(Commands::TestNode(test_node)) => {
+            let action = match test_node.command {
+                TestNodeSubcommand::Pins(args) => TestNodeAction::Pins {
+                    project: args.project,
+                    overrides: crate::testnode::pins::PinOverrides {
+                        lez_source: args.lez_source,
+                        lez_ref: args.lez_ref,
+                        circuits_version: args.circuits_version,
+                    },
+                    json: args.json,
+                },
+                TestNodeSubcommand::Prepare(args) => TestNodeAction::Prepare {
+                    project: args.project,
+                    overrides: crate::testnode::pins::PinOverrides {
+                        lez_source: args.lez_source,
+                        lez_ref: args.lez_ref,
+                        circuits_version: args.circuits_version,
+                    },
+                    cache_root: args.cache_root,
+                    json: args.json,
+                },
+                TestNodeSubcommand::Doctor(args) => TestNodeAction::Doctor {
+                    project: args.project,
+                    json: args.json,
+                },
+                TestNodeSubcommand::Start(args) => TestNodeAction::Start {
+                    project: args.project,
+                    state: args.state,
+                    port: args.port,
+                    work_dir: args.work_dir,
+                    preserve_work_dir: args.preserve_work_dir,
+                    timeout_sec: args.timeout_sec,
+                    json: args.json,
+                },
+                TestNodeSubcommand::Status(args) => TestNodeAction::Status {
+                    project: args.project,
+                    node: args.node,
+                    json: args.json,
+                },
+                TestNodeSubcommand::Stop(args) => TestNodeAction::Stop {
+                    project: args.project,
+                    node: args.node,
+                    preserve_work_dir: args.preserve_work_dir,
+                },
+                TestNodeSubcommand::Run(args) => TestNodeAction::Run {
+                    project: args.project,
+                    state: args.state,
+                    serial: args.serial,
+                    parallel: args.parallel,
+                    timeout_sec: args.timeout_sec,
+                    command: args.command,
+                },
+                TestNodeSubcommand::Tx(tx) => match tx.command {
+                    TestNodeTxSubcommand::Submit(args) => TestNodeAction::TxSubmit {
+                        url: args.url,
+                        file: args.file,
+                        encoding: args.encoding.into_encoding(),
+                        json: args.json,
+                    },
+                    TestNodeTxSubcommand::Wait(args) => TestNodeAction::TxWait {
+                        url: args.url,
+                        hash: args.hash,
+                        after_block: args.after_block,
+                        timeout_sec: args.timeout_sec,
+                        json: args.json,
+                    },
+                    TestNodeTxSubcommand::SubmitAndWait(args) => TestNodeAction::TxSubmitAndWait {
+                        url: args.url,
+                        file: args.file,
+                        encoding: args.encoding.into_encoding(),
+                        timeout_sec: args.timeout_sec,
+                        json: args.json,
+                    },
+                },
+                TestNodeSubcommand::Blocks(blocks) => match blocks.command {
+                    TestNodeBlocksSubcommand::Head(args) => TestNodeAction::BlocksHead {
+                        url: args.url,
+                        json: args.json,
+                    },
+                    TestNodeBlocksSubcommand::Range(args) => TestNodeAction::BlocksRange {
+                        url: args.url,
+                        from: args.from,
+                        to: args.to,
+                        json: args.json,
+                    },
+                    TestNodeBlocksSubcommand::Wait(args) => TestNodeAction::BlocksWait {
+                        url: args.url,
+                        after: args.after,
+                        count: args.count,
+                        timeout_sec: args.timeout_sec,
+                        json: args.json,
+                    },
+                },
+                TestNodeSubcommand::Clock(clock) => match clock.command {
+                    TestNodeClockSubcommand::Read(args) => TestNodeAction::ClockRead {
+                        url: args.url,
+                        json: args.json,
+                    },
+                    TestNodeClockSubcommand::WaitStable(args) => TestNodeAction::ClockWaitStable {
+                        url: args.url,
+                        samples: args.samples,
+                        timeout_sec: args.timeout_sec,
+                        json: args.json,
+                    },
+                },
+                TestNodeSubcommand::Account(account) => match account.command {
+                    TestNodeAccountSubcommand::Get(args) => TestNodeAction::AccountGet {
+                        url: args.url,
+                        account_id: args.account_id,
+                        at_block: args.at_block,
+                        json: args.json,
+                    },
+                    TestNodeAccountSubcommand::BatchGet(args) => TestNodeAction::AccountBatchGet {
+                        url: args.url,
+                        account_ids: args.account_ids,
+                        at_block: args.at_block,
+                        json: args.json,
+                    },
+                },
+                TestNodeSubcommand::Proof(proof) => match proof.command {
+                    TestNodeProofSubcommand::Get(args) => TestNodeAction::ProofGet {
+                        url: args.url,
+                        commitment: args.commitment,
+                        at_block: args.at_block,
+                        json: args.json,
+                    },
+                },
+                TestNodeSubcommand::Snapshot(snapshot) => match snapshot.command {
+                    TestNodeSnapshotSubcommand::Accounts(args) => {
+                        TestNodeAction::SnapshotAccounts {
+                            url: args.url,
+                            account_ids: args.account_ids,
+                            output: args.output,
+                            json: args.json,
+                        }
+                    }
+                },
+                TestNodeSubcommand::State(state) => match state.command {
+                    TestNodeStateSubcommand::Schema(args) => TestNodeAction::StateSchema {
+                        project: args.project,
+                        json: args.json,
+                    },
+                    TestNodeStateSubcommand::Export(args) => TestNodeAction::StateExport {
+                        url: args.url,
+                        account_ids: args.account_ids,
+                        output: args.output,
+                        json: args.json,
+                    },
+                    TestNodeStateSubcommand::Seed(args) => TestNodeAction::StateSeed {
+                        project: args.project,
+                        input: args.input,
+                        output: args.output,
+                        json: args.json,
+                    },
+                },
+            };
+            cmd_test_node(action)
         }
         Some(Commands::Spel(_)) => {
             // The early `spel_passthrough_args` intercept above always

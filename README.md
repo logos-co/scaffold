@@ -7,6 +7,25 @@
 - [FURPS+](FURPS.md) — Functional and non-functional requirements
 - [ADR](ADR.md) — Architecture Decision Records
 
+## Using scaffold as a Rust library
+
+Everything the CLI does is also exposed as a typed Rust API under
+`logos_scaffold::api`, so tests and dev tooling can drive scaffold-managed
+projects (setup, localnet lifecycle, wallet top-ups, deploys, diagnostics)
+without shelling out to `lgs` and parsing text:
+
+```rust
+use logos_scaffold::api::{LocalnetStartOptions, Project};
+
+let project = Project::open("/path/to/my-app")?;
+let node = project.localnet_start(&LocalnetStartOptions::default())?;
+println!("sequencer pid={} rpc={}", node.pid(), node.rpc_url());
+node.stop()?;
+```
+
+See the `api` module rustdoc for the full surface, typed result models, and
+categorized errors.
+
 ## Platform
 
 The CLI is currently Unix-only.
@@ -72,6 +91,28 @@ logos-scaffold localnet stop
 logos-scaffold localnet status [--json]
 logos-scaffold localnet logs [--tail N]
 logos-scaffold localnet reset (--yes | --dry-run) [--reset-wallet] [--verify-timeout-sec N]
+logos-scaffold test-node pins [--project DIR] [--lez-source URL|DIR] [--lez-ref REF] [--circuits-version VER] [--json]
+logos-scaffold test-node prepare [--project DIR] [--cache-root DIR] [--lez-source URL|DIR] [--lez-ref REF] [--circuits-version VER] [--json]
+logos-scaffold test-node doctor [--project DIR] [--json]
+logos-scaffold test-node start [--project DIR] [--state DIR] [--port N] [--work-dir DIR] [--preserve-work-dir] [--json]
+logos-scaffold test-node status --node <id|dir> [--json]
+logos-scaffold test-node stop --node <id|dir> [--preserve-work-dir]
+logos-scaffold test-node run [--project DIR] [--state DIR] [--serial | --parallel N] -- <command...>
+logos-scaffold test-node tx submit --url URL --file PATH [--encoding borsh-base64|borsh] [--json]
+logos-scaffold test-node tx wait --url URL --hash HASH [--after-block N] [--timeout-sec N] [--json]
+logos-scaffold test-node tx submit-and-wait --url URL --file PATH [--encoding borsh-base64|borsh] [--timeout-sec N] [--json]
+logos-scaffold test-node blocks head --url URL [--json]
+logos-scaffold test-node blocks range --url URL --from N --to N [--json]
+logos-scaffold test-node blocks wait --url URL --after N [--count N] [--timeout-sec N] [--json]
+logos-scaffold test-node clock read --url URL [--json]
+logos-scaffold test-node clock wait-stable --url URL [--samples N] [--timeout-sec N] [--json]
+logos-scaffold test-node account get --url URL --account-id ID [--at-block N] [--json]
+logos-scaffold test-node account batch-get --url URL --account-id ID... [--at-block N] [--json]
+logos-scaffold test-node proof get --url URL --commitment HEX|BASE58 [--at-block N] [--json]
+logos-scaffold test-node snapshot accounts --url URL --account-id ID... --output PATH [--json]
+logos-scaffold test-node state schema [--project DIR] [--json]
+logos-scaffold test-node state export --url URL --account-id ID... --output PATH [--json]
+logos-scaffold test-node state seed [--project DIR] --input PATH [--output DIR] [--json]
 logos-scaffold build idl [project-path]
 logos-scaffold build client [project-path]
 logos-scaffold wallet list [--long]
@@ -108,6 +149,7 @@ Each subcommand documents copy-paste examples under `--help`. Global `-q` / `--q
 - `localnet start` waits until localnet is actually ready (`pid alive` + `127.0.0.1:3040` reachable), otherwise fails with diagnostics.
 - `localnet status` distinguishes managed process, stale state, and foreign listeners.
 - `localnet reset` stops the sequencer, clears sequencer chain state, restarts, and verifies blocks. Destructive: `--yes` is required unless `--dry-run` is passed (`--dry-run` prints the plan without changing anything). `--reset-wallet` also deletes the project wallet home and default-address state (irrecoverable).
+- `test-node` manages isolated, short-lived sequencer instances for integration tests — unlike `localnet` (one long-lived developer sequencer per project on a fixed port), each test node gets its own RPC port, config, database, log, and runtime directory under `.scaffold/test-nodes/<id>`. Test-node commands follow the **caller project's pins**: `pins` reports the LEZ source/ref, resolved commit, checkout location and ownership, sequencer binary path, and circuits version/path that test-node commands will use — each value annotated with where it came from (CLI override → `scaffold.toml` → scaffold default). `prepare` resolves those pins, materialises the LEZ checkout and circuits release, and builds the standalone sequencer for them; managed cache checkouts may be cloned/re-synced, while caller-provided checkouts (`[repos.lez].path`, or a local directory passed via `--lez-source`) are only validated — clean worktree at the requested commit, any origin URL form — and never reset or force-checked-out. `doctor` reports pin drift, missing/dirty/mismatched checkouts, missing binaries, missing circuits, and unsupported platforms as separate categorized checks. `start` spawns a node (`--port 0`/default picks a free port; `--state DIR` seeds the database from a caller-provided state directory) and prints connection details — machine-readable with `--json` (`rpc_url`, `pid`, `state_dir`, `config_path`, `log_path`, `genesis_block_id`, `block_height`). `status --node <id>` reports health and the served RPC URL. `stop --node <id>` terminates only that node and removes its runtime state unless `--preserve-work-dir` is passed. `run -- <cmd>` starts a node, waits for health, runs the command with `LGS_TEST_NODE_RPC_URL` / `LGS_TEST_NODE_PORT` / `LGS_TEST_NODE_STATE_DIR` (and friends) exported, forwards the command's exit status, and stops the node; `--serial` caps machine-wide node concurrency at one for low-resource CI, `--parallel N` at N. The same surface is available in Rust via `logos_scaffold::api::testnode::TestNode`. `tx submit` / `tx wait` / `tx submit-and-wait` give test harnesses definitive transaction outcomes: `submit` returns the tx hash or a structured stateless rejection; `submit-and-wait --json` prints exactly one terminal outcome object — `committed` (with the actual sequencer `block_id` and `timestamp`), `rejected` (`phase: stateless|stateful`, with reason or `observed_after_block_id`), `timeout` (`last_observed_block_id`), `transport_error`, or `wire_mismatch` — and exits non-zero for anything but `committed`. Stateful rejection follows an explicit observation rule (a configurable number of new blocks past the submission boundary without inclusion), never a single sleep; transport failures are never reported as business rejections. In Rust: `node.client().submit_and_wait(&TransactionBytes::borsh_base64(..)?, &WaitOptions::default())`. `blocks head|range|wait` expose deterministic block context for replay: per block they report the real sequencer `block_id` and `timestamp`, transaction count, and explicit classification — genesis (the only zero-transaction block; no clock tick to replay), clock-only (empty post-genesis blocks still advance clock state via the mandatory clock transaction), and user transactions — plus per-transaction hashes for public/deployment transactions. `clock read` returns all three `/LEZ/ClockProgramAccount/…` accounts with their decoded `block_id`/`timestamp` data; `clock wait-stable` is a read barrier that requires consecutive identical samples (head + clock state) before returning, so tests comparing local expected state against an always-ticking sequencer get a consistent snapshot or a retryable timeout. In Rust: `client.block_head()`, `client.blocks(BlockRange { from, to })`, `client.wait_blocks(after, count, timeout)`, `client.clock_snapshot(ClockReadMode::Stable { samples, timeout })`. `account get` / `account batch-get` / `proof get` give parity assertions stable, block-scoped state reads: every read reports the `block_id` it was performed at (head verified identical before and after, retried when a clock block landed mid-read, structured retryable error when the head keeps advancing); `batch-get` reads all accounts at ONE consistent boundary. Account values distinguish `present` (with lossless base64 account bytes plus decoded balance/nonce/owner/data), `missing` (never written), and `decode_error` (raw payload preserved); proof reads distinguish a missing commitment (`proof: null`), an invalid commitment (local error before any RPC), and transport failures. `snapshot accounts` writes a block-consistent JSON snapshot for later comparison. In Rust: `client.account(id, ReadAt::Latest)`, `client.accounts(&ids, ReadAt::Block(n))`, `client.proof(commitment, ReadAt::Latest)`. `state schema|export|seed` support caller-provided state: `schema` identifies the exact snapshot formats the project's pins accept; `seed` validates a snapshot (`lgs-state-snapshot/1` JSON with public balances + private commitment accounts, the `lgs-account-snapshot/1` output of `snapshot accounts`, or a rocksdb state directory) and produces a state directory for `test-node start --state` — validation distinguishes format mismatch, storage-schema mismatch (e.g. public-account data, which the pinned genesis config cannot seed), LEZ pin mismatch, and account decode errors, and the output reports the LEZ commit, state format version, and account counts. Config-seeded nodes start from exactly the snapshot's accounts (the sequencer builds genesis state from `initial_public_accounts`/`initial_private_accounts`; no testnet defaults or implicit wallets); database-seeded nodes resume from the copied rocksdb exactly. `export` writes named public-account balances from a running node (the pinned RPC has no account enumeration or private-state export; for full fidelity, stop a node with `--preserve-work-dir` and seed from its state directory). In Rust: `StateSchema::for_project`, `StateSnapshot::from_file/new`, `api::testnode::seed_state(&project, input, output)`.
 - `wallet list` shows known wallet accounts (`wallet account list`).
 - `wallet topup` checks account state first (`wallet account get --account-id ...`), runs `wallet auth-transfer init --account-id ...` only when the destination is uninitialized, then performs Piñata faucet claim (`wallet pinata claim --to ...`). If address is omitted, scaffold uses project default wallet from `.scaffold/state/wallet.state`.
 - `wallet default set` stores a project-scoped default wallet address in `.scaffold/state/wallet.state`.
