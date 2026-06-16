@@ -419,7 +419,12 @@ fn cmd_basecamp_launch(project: Project, profile: String) -> DynResult<()> {
         }
     }
 
-    let mut env = launch_env(&profile_dir, &profile);
+    let runtime_dir =
+        resolve_profile_runtime_dir(&project.root, &profile, project.config.basecamp.as_ref());
+    if let Some(rt) = &runtime_dir {
+        fs::create_dir_all(rt).with_context(|| format!("create runtime dir {}", rt.display()))?;
+    }
+    let mut env = launch_env(&profile_dir, &profile, runtime_dir.as_deref());
     // Layer scaffold.toml-declared launch env on top of the scaffold-owned
     // base (#163): [basecamp.env_append] path joins, then the per-profile
     // env_file, then [basecamp.env] globals, then
@@ -453,8 +458,14 @@ fn cmd_basecamp_launch(project: Project, profile: String) -> DynResult<()> {
 }
 
 /// Env map exported to the basecamp child on launch. Scaffold-owned names only;
-/// module port-override vars are not yet registered.
-fn launch_env(profile_dir: &Path, profile_name: &str) -> BTreeMap<String, OsString> {
+/// module port-override vars are not yet registered. `runtime_dir`, when set,
+/// becomes both `TMPDIR` and `XDG_RUNTIME_DIR`; otherwise `TMPDIR` falls back to
+/// the in-profile `xdg-tmp`.
+fn launch_env(
+    profile_dir: &Path,
+    profile_name: &str,
+    runtime_dir: Option<&Path>,
+) -> BTreeMap<String, OsString> {
     let mut env = BTreeMap::new();
     env.insert(
         "XDG_CONFIG_HOME".into(),
@@ -476,12 +487,42 @@ fn launch_env(profile_dir: &Path, profile_name: &str) -> BTreeMap<String, OsStri
     // first profile's Qt RemoteObjects replica then derefs a dangling
     // QMetaObject on its next socket read → SIGSEGV. A distinct temp root per
     // profile removes the race without any upstream change.
-    env.insert(
-        "TMPDIR".into(),
-        profile_dir.join("xdg-tmp").into_os_string(),
-    );
+    //
+    // A short `runtime_dir` (e.g. `/tmp/lgs-<profile>`) additionally dodges the
+    // macOS `sun_path == 104` Unix-socket path limit that the long in-profile
+    // `xdg-tmp` path can exceed; it also sets `XDG_RUNTIME_DIR`.
+    match runtime_dir {
+        Some(rt) => {
+            env.insert("TMPDIR".into(), rt.as_os_str().to_owned());
+            env.insert("XDG_RUNTIME_DIR".into(), rt.as_os_str().to_owned());
+        }
+        None => {
+            env.insert("TMPDIR".into(), profile_dir.join("xdg-tmp").into_os_string());
+        }
+    }
     env.insert("LOGOS_PROFILE".into(), profile_name.into());
     env
+}
+
+/// Resolve the per-profile runtime dir (`TMPDIR` / `XDG_RUNTIME_DIR` root).
+/// Precedence: configured `[basecamp.profiles.<name>].runtime_dir`
+/// (project-relative or absolute) > macOS default `/tmp/lgs-<profile>` > `None`
+/// (Linux keeps the in-profile `xdg-tmp`).
+fn resolve_profile_runtime_dir(
+    project_root: &Path,
+    profile: &str,
+    basecamp: Option<&BasecampConfig>,
+) -> Option<PathBuf> {
+    if let Some(rt) = basecamp
+        .and_then(|bc| bc.profiles.get(profile))
+        .and_then(|p| p.runtime_dir.as_deref())
+    {
+        return Some(project_root.join(rt));
+    }
+    if cfg!(target_os = "macos") {
+        return Some(PathBuf::from(format!("/tmp/lgs-{profile}")));
+    }
+    None
 }
 
 /// `lgs basecamp develop <module>` — enter a module's Nix dev shell.
@@ -3449,7 +3490,7 @@ mod tests {
     #[test]
     fn launch_env_exports_xdg_under_profile_dir_and_profile_name() {
         let profile_dir = Path::new("/p/alice");
-        let env = launch_env(profile_dir, "alice");
+        let env = launch_env(profile_dir, "alice", None);
         assert_eq!(
             env.get("XDG_CONFIG_HOME").unwrap(),
             &OsString::from("/p/alice/xdg-config")
@@ -3491,7 +3532,7 @@ mod tests {
             },
         );
 
-        let mut env = launch_env(Path::new("/p/alice"), "alice");
+        let mut env = launch_env(Path::new("/p/alice"), "alice", None);
         apply_launch_env_overrides(&mut env, &cfg, "alice", &BTreeMap::new(), |k| {
             (k == "QT_PLUGIN_PATH").then(|| OsString::from("/usr/lib/qt/plugins"))
         });
@@ -3533,7 +3574,7 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let mut env = launch_env(Path::new("/p/alice"), "alice");
+        let mut env = launch_env(Path::new("/p/alice"), "alice", None);
         apply_launch_env_overrides(&mut env, &cfg, "alice", &env_file_vars, |_| None);
         // global env wins over env_file for the shared key.
         assert_eq!(env.get("SHARED").unwrap(), &OsString::from("from-global"));
@@ -3566,7 +3607,7 @@ mod tests {
         let mut cfg = BasecampConfig::default();
         cfg.env_append
             .insert("LD_LIBRARY_PATH".into(), vec!["/nix/store/x/lib".into()]);
-        let mut env = launch_env(Path::new("/p/bob"), "bob");
+        let mut env = launch_env(Path::new("/p/bob"), "bob", None);
         apply_launch_env_overrides(&mut env, &cfg, "bob", &BTreeMap::new(), |_| None);
         assert_eq!(
             env.get("LD_LIBRARY_PATH").unwrap(),
@@ -3583,7 +3624,7 @@ mod tests {
         let mut cfg = BasecampConfig::default();
         cfg.env_append
             .insert("LD_LIBRARY_PATH".into(), vec!["/nix/store/x/lib".into()]);
-        let mut env = launch_env(Path::new("/p/bob"), "bob");
+        let mut env = launch_env(Path::new("/p/bob"), "bob", None);
         let weird_for_closure = weird.clone();
         apply_launch_env_overrides(&mut env, &cfg, "bob", &BTreeMap::new(), move |k| {
             (k == "LD_LIBRARY_PATH").then(|| weird_for_closure.clone())
@@ -3605,7 +3646,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let mut bob_env = launch_env(Path::new("/p/bob"), "bob");
+        let mut bob_env = launch_env(Path::new("/p/bob"), "bob", None);
         apply_launch_env_overrides(&mut bob_env, &cfg, "bob", &BTreeMap::new(), |_| None);
         assert!(
             bob_env.get("PORT").is_none(),
@@ -3617,9 +3658,37 @@ mod tests {
     fn launch_env_tmpdir_is_distinct_per_profile() {
         // The whole point of #89: alice and bob must not share a temp root,
         // or their `logos_token_<module>` sockets collide.
-        let alice = launch_env(Path::new("/p/alice"), "alice");
-        let bob = launch_env(Path::new("/p/bob"), "bob");
+        let alice = launch_env(Path::new("/p/alice"), "alice", None);
+        let bob = launch_env(Path::new("/p/bob"), "bob", None);
         assert_ne!(alice.get("TMPDIR"), bob.get("TMPDIR"));
+    }
+
+    #[test]
+    fn launch_env_runtime_dir_sets_tmpdir_and_xdg_runtime_dir() {
+        let rt = Path::new("/tmp/lgs-alice");
+        let env = launch_env(Path::new("/p/alice"), "alice", Some(rt));
+        assert_eq!(env.get("TMPDIR").unwrap(), &OsString::from("/tmp/lgs-alice"));
+        assert_eq!(
+            env.get("XDG_RUNTIME_DIR").unwrap(),
+            &OsString::from("/tmp/lgs-alice")
+        );
+    }
+
+    #[test]
+    fn resolve_profile_runtime_dir_prefers_config_over_default() {
+        let mut cfg = BasecampConfig::default();
+        cfg.profiles.insert(
+            "alice".into(),
+            crate::model::BasecampProfile {
+                runtime_dir: Some("run/alice".into()),
+                ..Default::default()
+            },
+        );
+        // Configured path wins (project-relative -> joined to root) on any OS.
+        assert_eq!(
+            resolve_profile_runtime_dir(Path::new("/proj"), "alice", Some(&cfg)),
+            Some(PathBuf::from("/proj/run/alice"))
+        );
     }
 
     #[test]
