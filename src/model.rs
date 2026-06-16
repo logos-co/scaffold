@@ -21,7 +21,24 @@ pub(crate) struct RepoRef {
     pub(crate) pin: String,
     pub(crate) build: RepoBuild,
     pub(crate) attr: String,
+    /// `[repos.<name>.attr]` per-platform map (nix system triple -> flake
+    /// output attribute), e.g. `attr.aarch64-darwin = "bin-macos-app"`. Empty
+    /// when `attr` is given in scalar form; `effective_attr` prefers a matching
+    /// entry here and falls back to the scalar `attr`.
+    pub(crate) attr_platform: std::collections::BTreeMap<String, String>,
     pub(crate) path: String,
+}
+
+impl RepoRef {
+    /// Resolve the flake output attribute for `system` (a nix system triple).
+    /// Prefers a per-platform `attr_platform` entry; falls back to the scalar
+    /// `attr` when the platform isn't mapped (or no map was given).
+    pub(crate) fn effective_attr(&self, system: &str) -> &str {
+        self.attr_platform
+            .get(system)
+            .map(String::as_str)
+            .unwrap_or(self.attr.as_str())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
