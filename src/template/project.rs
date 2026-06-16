@@ -262,7 +262,7 @@ mod tests {
         // as a no-op and refuses to resolve, breaking `lgs build` on every
         // freshly-scaffolded project. The user-side build-script panic the
         // patch was meant to mitigate is now handled by
-        // `circuits::ensure_circuits_for_subprocess` (which exports
+        // `circuits::ensure_circuits_for_project` (which exports
         // `LOGOS_BLOCKCHAIN_CIRCUITS` and bypasses the version check inside
         // every `logos-blockchain` rev's circuits-utils crate).
         for variant in ["default", "lez-framework"] {

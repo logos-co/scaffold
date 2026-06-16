@@ -3,6 +3,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
+use crate::circuits::ensure_circuits_for_project;
 use crate::commands::client::generate_clients_from_current_idl;
 use crate::commands::idl::build_idl_for_current_project;
 use crate::commands::setup::cmd_setup;
@@ -17,6 +18,7 @@ pub(crate) fn cmd_build_shortcut(project_dir: Option<PathBuf>, prebuilt: bool) -
         let cwd = env::current_dir()?;
 
         let project = load_project()?;
+        ensure_circuits_for_project(&project)?;
         build_workspace_for_current_project(&cwd)?;
         match project.config.framework.kind.as_str() {
             FRAMEWORK_KIND_DEFAULT => {}

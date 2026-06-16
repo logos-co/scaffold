@@ -45,7 +45,7 @@ pub(crate) const DEFAULT_SPEL: GitRef = GitRef {
 /// `DEFAULT_LB_PIN` / `DEFAULT_LEZ`.
 ///
 /// Materialised on demand into `<cache_root>/circuits/v<ver>-<triple>/` by
-/// `circuits::ensure_circuits_for_subprocess`. Override the version hop by
+/// `circuits::ensure_circuits_for_project`. Override the version hop by
 /// setting `LOGOS_BLOCKCHAIN_CIRCUITS` to a populated checkout; the env var
 /// short-circuits the download.
 pub(crate) const DEFAULT_CIRCUITS_VERSION: &str = "0.4.1";

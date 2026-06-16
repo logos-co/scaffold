@@ -15,7 +15,7 @@
 //! user-project build, since the patch table redirects the same crates)
 //! fails on a fresh machine.
 //!
-//! `ensure_circuits_for_subprocess` materialises the matching release tarball
+//! `ensure_circuits_for_project` materialises the matching release tarball
 //! into the scaffold cache and exports `LOGOS_BLOCKCHAIN_CIRCUITS` for the
 //! rest of the process. It's idempotent: a populated cache dir or a pre-set
 //! env var both short-circuit the download.
@@ -41,9 +41,8 @@ use anyhow::{anyhow, bail};
 use flate2::read::GzDecoder;
 use tar::Archive;
 
-use crate::constants::{
-    CIRCUITS_RELEASE_BASE_URL, DEFAULT_CIRCUITS_VERSION, LOGOS_BLOCKCHAIN_CIRCUITS_ENV,
-};
+use crate::constants::{CIRCUITS_RELEASE_BASE_URL, LOGOS_BLOCKCHAIN_CIRCUITS_ENV};
+use crate::model::{CircuitsConfig, Project};
 use crate::process::which;
 use crate::DynResult;
 
@@ -62,12 +61,12 @@ const CIRCUITS_SENTINEL_FILE: &str = "pol/verification_key.json";
 /// `<cache_root>/circuits/v<ver>-<os>-<arch>` (idempotent) and export the
 /// env var pointing there. We deliberately do NOT fall back to
 /// `~/.logos-blockchain-circuits/` — see the module docs for why.
-pub(crate) fn ensure_circuits_for_subprocess(cache_root: &Path) -> DynResult<()> {
+pub(crate) fn ensure_circuits_for_project(project: &Project) -> DynResult<()> {
     if circuits_path_from_env().is_some() {
         return Ok(());
     }
 
-    let path = ensure_circuits_release(cache_root, DEFAULT_CIRCUITS_VERSION)?;
+    let path = ensure_circuits_release_for_config(&project.root, &project.config.circuits)?;
     // SAFETY: `set_var` is `unsafe` from Rust 2024 because it is racy when
     // other threads call `env::var`. Scaffold is a single-threaded CLI by the
     // time this runs (only the main thread has touched env vars; subprocesses
@@ -80,14 +79,17 @@ pub(crate) fn ensure_circuits_for_subprocess(cache_root: &Path) -> DynResult<()>
 }
 
 /// Resolve the directory the circuits release lives at (or would be
-/// materialised at) for `cache_root`, without downloading anything. The
+/// materialised at) for `project`, without downloading anything. The
 /// `LOGOS_BLOCKCHAIN_CIRCUITS` env override wins when it points at a
-/// populated checkout — mirroring `ensure_circuits_for_subprocess`.
-pub(crate) fn circuits_dir_for_cache_root(cache_root: &Path) -> DynResult<PathBuf> {
-    circuits_dir_for_version(cache_root, DEFAULT_CIRCUITS_VERSION)
+/// populated checkout — mirroring `ensure_circuits_for_project`.
+pub(crate) fn circuits_dir_for_project(project: &Project) -> PathBuf {
+    if let Some(path) = circuits_path_from_env() {
+        return path;
+    }
+    circuits_install_dir(&project.root, &project.config.circuits)
 }
 
-/// Like `circuits_dir_for_cache_root`, for an explicit release version.
+/// Resolve the legacy cache-root directory for an explicit release version.
 pub(crate) fn circuits_dir_for_version(cache_root: &Path, version: &str) -> DynResult<PathBuf> {
     if let Some(path) = circuits_path_from_env() {
         return Ok(path);
@@ -96,6 +98,15 @@ pub(crate) fn circuits_dir_for_version(cache_root: &Path, version: &str) -> DynR
     Ok(cache_root
         .join("circuits")
         .join(format!("v{version}-{triple}")))
+}
+
+pub(crate) fn circuits_install_dir(project_root: &Path, config: &CircuitsConfig) -> PathBuf {
+    let path = PathBuf::from(&config.install_dir);
+    if path.is_absolute() {
+        path
+    } else {
+        project_root.join(path)
+    }
 }
 
 fn circuits_path_from_env() -> Option<PathBuf> {
@@ -119,17 +130,37 @@ pub(crate) fn ensure_circuits_release(cache_root: &Path, version: &str) -> DynRe
     let dir = cache_root
         .join("circuits")
         .join(format!("v{version}-{triple}"));
+    ensure_circuits_release_at(&dir, version, triple, None)
+}
 
+fn ensure_circuits_release_for_config(
+    project_root: &Path,
+    config: &CircuitsConfig,
+) -> DynResult<PathBuf> {
+    let triple = release_triple()?;
+    let dir = circuits_install_dir(project_root, config);
+    ensure_circuits_release_at(
+        &dir,
+        &config.version,
+        triple,
+        config.url_template.as_deref(),
+    )
+}
+
+fn ensure_circuits_release_at(
+    dir: &Path,
+    version: &str,
+    triple: &str,
+    url_template: Option<&str>,
+) -> DynResult<PathBuf> {
     if dir.join(CIRCUITS_SENTINEL_FILE).is_file() {
-        return Ok(dir);
+        return Ok(dir.to_path_buf());
     }
 
     fs::create_dir_all(&dir)
         .map_err(|e| anyhow!("create circuits cache dir {}: {e}", dir.display()))?;
 
-    let url = format!(
-        "{CIRCUITS_RELEASE_BASE_URL}/v{version}/logos-blockchain-circuits-v{version}-{triple}.tar.gz",
-    );
+    let url = circuits_release_url(version, triple, url_template);
 
     println!("Downloading logos-blockchain-circuits v{version} ({triple})");
     println!("  from {url}");
@@ -147,7 +178,18 @@ pub(crate) fn ensure_circuits_release(cache_root: &Path, version: &str) -> DynRe
         );
     }
 
-    Ok(dir)
+    Ok(dir.to_path_buf())
+}
+
+fn circuits_release_url(version: &str, triple: &str, template: Option<&str>) -> String {
+    match template {
+        Some(template) => template
+            .replace("{version}", version)
+            .replace("{triple}", triple),
+        None => format!(
+            "{CIRCUITS_RELEASE_BASE_URL}/v{version}/logos-blockchain-circuits-v{version}-{triple}.tar.gz",
+        ),
+    }
 }
 
 /// Map (`std::env::consts::OS`, `ARCH`) onto the suffix the
@@ -319,6 +361,31 @@ mod tests {
 
         let resolved = ensure_circuits_release(tmp.path(), "9.9.9").expect("cache hit");
         assert_eq!(resolved, preinstalled);
+    }
+
+    #[test]
+    fn circuits_install_dir_joins_relative_path_to_project_root() {
+        let cfg = CircuitsConfig {
+            install_dir: "vendor/circuits".to_string(),
+            ..CircuitsConfig::default()
+        };
+        assert_eq!(
+            circuits_install_dir(Path::new("/project"), &cfg),
+            PathBuf::from("/project/vendor/circuits")
+        );
+    }
+
+    #[test]
+    fn custom_url_template_replaces_version_and_triple() {
+        let url = circuits_release_url(
+            "9.9.9",
+            "linux-x86_64",
+            Some("https://example.invalid/v{version}/circuits-{triple}.tar.gz"),
+        );
+        assert_eq!(
+            url,
+            "https://example.invalid/v9.9.9/circuits-linux-x86_64.tar.gz"
+        );
     }
 
     #[test]

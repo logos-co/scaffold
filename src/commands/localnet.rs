@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context};
 use serde_json::Value;
 
-use crate::circuits::ensure_circuits_for_subprocess;
+use crate::circuits::ensure_circuits_for_project;
 use crate::constants::{SEQUENCER_BIN_REL_PATH, SEQUENCER_CONFIG_REL_PATH};
 use crate::error::{LocalnetError, ResetError};
 use crate::model::{
@@ -18,9 +18,7 @@ use crate::process::{
     command_echo_enabled, listener_pid, pid_alive, pid_command, pid_running, port_open,
     spawn_to_log,
 };
-use crate::project::{
-    ensure_dir_exists, find_project_root, load_project, resolve_cache_root, resolve_repo_path,
-};
+use crate::project::{ensure_dir_exists, find_project_root, load_project, resolve_repo_path};
 use crate::state::{read_localnet_state, write_localnet_state};
 use crate::DynResult;
 
@@ -136,8 +134,7 @@ pub(crate) fn localnet_start_for_project(
     timeout_sec: u64,
 ) -> DynResult<LocalnetStartOutcome> {
     let ctx = localnet_context(project)?;
-    let (cache_root, _) = resolve_cache_root(project)?;
-    ensure_circuits_for_subprocess(&cache_root)?;
+    ensure_circuits_for_project(project)?;
     let (pid, reused) = start_localnet(
         &ctx.lez,
         &ctx.state_path,
@@ -180,8 +177,7 @@ pub(crate) fn localnet_reset_for_project(
     verify_timeout_sec: u64,
 ) -> DynResult<()> {
     let ctx = localnet_context(project)?;
-    let (cache_root, _) = resolve_cache_root(project)?;
-    ensure_circuits_for_subprocess(&cache_root)?;
+    ensure_circuits_for_project(project)?;
     cmd_localnet_reset(
         project,
         &ctx.lez,
@@ -198,21 +194,9 @@ pub(crate) fn localnet_reset_for_project(
 fn cmd_localnet_in_project(project: &Project, action: LocalnetAction) -> DynResult<()> {
     let ctx = localnet_context(project)?;
 
-    // The standalone `sequencer_service` binary calls into the
-    // `logos-blockchain-zksign` runtime, which loads circuit witness
-    // generators from `LOGOS_BLOCKCHAIN_CIRCUITS` (or `~/.logos-blockchain-circuits`)
-    // and panics if neither exists. Materialise the release if absent and
-    // export the env var so any subprocess we spawn here inherits it.
-    if matches!(
-        action,
-        LocalnetAction::Start { .. } | LocalnetAction::Reset { .. }
-    ) {
-        let (cache_root, _) = resolve_cache_root(project)?;
-        ensure_circuits_for_subprocess(&cache_root)?;
-    }
-
     match action {
         LocalnetAction::Start { timeout_sec } => {
+            ensure_circuits_for_project(project)?;
             let (pid, _) = start_localnet(
                 &ctx.lez,
                 &ctx.state_path,
@@ -243,17 +227,22 @@ fn cmd_localnet_in_project(project: &Project, action: LocalnetAction) -> DynResu
             yes,
             reset_wallet,
             verify_timeout_sec,
-        } => cmd_localnet_reset(
-            project,
-            &ctx.lez,
-            &ctx.state_path,
-            &ctx.log_path,
-            &ctx.localnet_addr,
-            dry_run,
-            yes,
-            reset_wallet,
-            verify_timeout_sec,
-        ),
+        } => {
+            if yes && !dry_run {
+                ensure_circuits_for_project(project)?;
+            }
+            cmd_localnet_reset(
+                project,
+                &ctx.lez,
+                &ctx.state_path,
+                &ctx.log_path,
+                &ctx.localnet_addr,
+                dry_run,
+                yes,
+                reset_wallet,
+                verify_timeout_sec,
+            )
+        }
     }
 }
 
@@ -1168,6 +1157,7 @@ mod tests {
             basecamp_repo: None,
             lgpm_repo: None,
             wallet_home_dir: ".scaffold/wallet".to_string(),
+            circuits: crate::model::CircuitsConfig::default(),
             framework: FrameworkConfig {
                 kind: String::new(),
                 version: String::new(),

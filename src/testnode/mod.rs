@@ -37,13 +37,13 @@ use anyhow::{anyhow, bail, Context};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::circuits::ensure_circuits_for_subprocess;
+use crate::circuits::ensure_circuits_for_project;
 use crate::commands::localnet::find_r0vm_path_for_lez;
 use crate::commands::wallet_support::{rpc_get_last_block_id, RpcReachabilityError};
 use crate::constants::{SEQUENCER_BIN_REL_PATH, SEQUENCER_CONFIG_REL_PATH};
 use crate::model::Project;
 use crate::process::{pid_running, port_open, spawn_to_log};
-use crate::project::{resolve_cache_root, resolve_repo_path};
+use crate::project::resolve_repo_path;
 use crate::DynResult;
 
 /// Project-relative directory holding test-node runtime directories.
@@ -369,8 +369,7 @@ fn verify_prepared(project: &Project) -> DynResult<StartPrereqs> {
             sequencer_binary.display()
         );
     }
-    let (cache_root, _) = resolve_cache_root(project)?;
-    ensure_circuits_for_subprocess(&cache_root)?;
+    ensure_circuits_for_project(project)?;
     Ok(StartPrereqs {
         lez,
         sequencer_binary,

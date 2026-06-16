@@ -12,7 +12,8 @@
 //!   they aren't basecamp's property — moved out from `[basecamp.modules.*]`
 //!   in 0.2.0.
 //! - `[<feature>]` — runtime config per feature: `[scaffold]`, `[wallet]`,
-//!   `[framework]`, `[localnet]`, `[basecamp]` (port allocation only).
+//!   `[framework]`, `[localnet]`, `[circuits]`, `[basecamp]`
+//!   (port allocation only).
 //!
 //! Pre-0.2.0 configs (with `[basecamp].pin` / `.source` / `.lgpm_flake`,
 //! `[basecamp.modules.*]`, or `[repos.{lez,spel}].url`) are rejected by
@@ -28,8 +29,8 @@ use crate::constants::{
     SCAFFOLD_TOML_SCHEMA_VERSION, SPEL_SOURCE,
 };
 use crate::model::{
-    BasecampConfig, Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, ModuleEntry,
-    ModuleRole, RepoBuild, RepoRef, RunConfig, RunProfile, WatchConfig,
+    BasecampConfig, CircuitsConfig, Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig,
+    ModuleEntry, ModuleRole, RepoBuild, RepoRef, RunConfig, RunProfile, WatchConfig,
 };
 use crate::DynResult;
 
@@ -71,6 +72,7 @@ pub(crate) fn parse_config(text: &str) -> DynResult<Config> {
     let run = parse_run(&doc)?;
     let framework = parse_framework(&doc);
     let localnet = parse_localnet(&doc)?;
+    let circuits = parse_circuits(&doc)?;
     let wallet_home_dir = doc
         .get("wallet")
         .and_then(Item::as_table)
@@ -85,6 +87,7 @@ pub(crate) fn parse_config(text: &str) -> DynResult<Config> {
         basecamp_repo,
         lgpm_repo,
         wallet_home_dir,
+        circuits,
         framework,
         localnet,
         modules,
@@ -569,6 +572,30 @@ fn parse_localnet(doc: &DocumentMut) -> DynResult<LocalnetConfig> {
     Ok(cfg)
 }
 
+fn parse_circuits(doc: &DocumentMut) -> DynResult<CircuitsConfig> {
+    let Some(table) = doc.get("circuits").and_then(Item::as_table) else {
+        return Ok(CircuitsConfig::default());
+    };
+
+    let version = read_string(table, "version")
+        .ok_or_else(|| anyhow!("invalid scaffold.toml: missing [circuits].version"))?;
+    let url_template = read_string(table, "url_template");
+    let install_dir =
+        read_string(table, "install_dir").unwrap_or_else(|| ".scaffold/circuits".to_string());
+
+    check_toml_value("circuits.version", &version)?;
+    if let Some(template) = &url_template {
+        check_toml_value("circuits.url_template", template)?;
+    }
+    check_toml_value("circuits.install_dir", &install_dir)?;
+
+    Ok(CircuitsConfig {
+        version,
+        url_template,
+        install_dir,
+    })
+}
+
 fn read_string(table: &Table, key: &str) -> Option<String> {
     table
         .get(key)
@@ -645,6 +672,22 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
     let localnet_table = localnet.as_table_mut().expect("localnet table");
     localnet_table["port"] = value(i64::from(cfg.localnet.port));
     localnet_table["risc0_dev_mode"] = value(cfg.localnet.risc0_dev_mode);
+
+    // [circuits]
+    check_toml_value("circuits.version", &cfg.circuits.version)?;
+    if let Some(template) = &cfg.circuits.url_template {
+        check_toml_value("circuits.url_template", template)?;
+    }
+    check_toml_value("circuits.install_dir", &cfg.circuits.install_dir)?;
+    let circuits = doc.entry("circuits").or_insert(Item::Table(Table::new()));
+    let circuits_table = circuits.as_table_mut().expect("circuits table");
+    circuits_table["version"] = value(&cfg.circuits.version);
+    if let Some(template) = &cfg.circuits.url_template {
+        circuits_table["url_template"] = value(template);
+    }
+    if cfg.circuits.install_dir != CircuitsConfig::default().install_dir {
+        circuits_table["install_dir"] = value(&cfg.circuits.install_dir);
+    }
 
     // [basecamp]
     if let Some(bc) = &cfg.basecamp {
@@ -937,7 +980,9 @@ pub(crate) fn default_lgpm_repo(pin: &str) -> RepoRef {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{DEFAULT_BASECAMP_PIN, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL};
+    use crate::constants::{
+        DEFAULT_BASECAMP_PIN, DEFAULT_CIRCUITS_VERSION, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL,
+    };
 
     fn base_config() -> Config {
         parse_config(&minimal_v0_2_0()).expect("parse minimal v0.2.0")
@@ -991,6 +1036,56 @@ risc0_dev_mode = true
         assert!(cfg.lgpm_repo.is_none());
         assert!(cfg.modules.is_empty());
         assert!(cfg.basecamp.is_none());
+        assert_eq!(cfg.circuits.version, DEFAULT_CIRCUITS_VERSION);
+        assert_eq!(cfg.circuits.install_dir, ".scaffold/circuits");
+        assert_eq!(cfg.circuits.url_template, None);
+    }
+
+    #[test]
+    fn parses_circuits_section() {
+        let toml = minimal_v0_2_0()
+            + r#"
+[circuits]
+version = "9.9.9"
+url_template = "https://example.invalid/circuits-v{version}-{triple}.tar.gz"
+install_dir = "vendor/circuits"
+"#;
+        let cfg = parse_config(&toml).expect("parse");
+        assert_eq!(cfg.circuits.version, "9.9.9");
+        assert_eq!(
+            cfg.circuits.url_template.as_deref(),
+            Some("https://example.invalid/circuits-v{version}-{triple}.tar.gz")
+        );
+        assert_eq!(cfg.circuits.install_dir, "vendor/circuits");
+    }
+
+    #[test]
+    fn circuits_section_requires_version_when_present() {
+        let toml = minimal_v0_2_0() + "[circuits]\ninstall_dir = \"vendor/circuits\"\n";
+        let err = parse_config(&toml).unwrap_err();
+        assert!(err.to_string().contains("[circuits].version"), "{err}");
+    }
+
+    #[test]
+    fn circuits_round_trips_through_serialize() {
+        let toml = minimal_v0_2_0()
+            + r#"
+[circuits]
+version = "9.9.9"
+url_template = "https://example.invalid/circuits-v{version}-{triple}.tar.gz"
+install_dir = "vendor/circuits"
+"#;
+        let cfg1 = parse_config(&toml).expect("parse");
+        let serialized = serialize_config(&cfg1).expect("serialize");
+        assert!(serialized.contains("[circuits]"), "{serialized}");
+        assert!(serialized.contains("version = \"9.9.9\""), "{serialized}");
+        assert!(
+            serialized.contains("install_dir = \"vendor/circuits\""),
+            "{serialized}"
+        );
+        let cfg2 = parse_config(&serialized).expect("re-parse");
+        assert_eq!(cfg2.circuits.version, "9.9.9");
+        assert_eq!(cfg2.circuits.install_dir, "vendor/circuits");
     }
 
     #[test]
