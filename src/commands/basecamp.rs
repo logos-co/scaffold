@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::process::CommandExt;
-use std::path::{Component, Path, PathBuf, MAIN_SEPARATOR};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -347,6 +347,25 @@ fn resolve_basecamp_binary(app_link: &Path) -> DynResult<PathBuf> {
     )
 }
 
+/// Reject a profile name that isn't exactly one normal path component, so it
+/// can't escape the profiles root when joined: `..`, `.`, an empty name, an
+/// absolute path, or anything containing a separator are all refused. Shared
+/// by `launch` (which seeds/scrubs under the name) and `paths`.
+fn validate_profile_name(profile: &str) -> DynResult<()> {
+    let mut comps = Path::new(profile).components();
+    let single_normal = matches!(
+        (comps.next(), comps.next()),
+        (Some(Component::Normal(_)), None)
+    );
+    if !single_normal {
+        bail!(
+            "invalid profile name `{profile}`: must be a single path component \
+             (no `/`, `..`, `.`, or absolute paths)"
+        );
+    }
+    Ok(())
+}
+
 // Concurrent `launch <same-profile>` is undefined: no lock; two racing
 // invocations leave partial state.
 fn cmd_basecamp_launch(
@@ -364,11 +383,10 @@ fn cmd_basecamp_launch(
     }
 
     // Any profile name is accepted (custom profiles beyond the alice/bob pair
-    // setup seeds); an unknown profile is seeded on first launch below. Still
-    // refuse names that could escape the profiles root via path separators.
-    if profile.contains('/') || profile.contains(MAIN_SEPARATOR) {
-        bail!("profile name `{profile}` must not contain path separators");
-    }
+    // setup seeds); an unknown profile is seeded on first launch below. The
+    // name must be a single normal path component so it can't escape the
+    // profiles root via `..`, a separator, or an absolute path.
+    validate_profile_name(&profile)?;
 
     let profiles_root = project.root.join(BASECAMP_PROFILES_REL);
     let profile_dir = profiles_root.join(&profile);
@@ -604,9 +622,7 @@ struct BasecampProfilePaths {
 /// Pure path resolution: no nix, no filesystem mutation, so it works before
 /// `setup` to preview where a profile's data will live.
 fn cmd_basecamp_paths(project: Project, profile: String, json: bool) -> DynResult<()> {
-    if profile.contains('/') || profile.contains(MAIN_SEPARATOR) {
-        bail!("profile name `{profile}` must not contain path separators");
-    }
+    validate_profile_name(&profile)?;
     let basecamp_repo = project.config.basecamp_repo.as_ref();
     let bc = project.config.basecamp.as_ref();
     let profiles_root = project.root.join(BASECAMP_PROFILES_REL);
@@ -3891,6 +3907,17 @@ mod tests {
             env.get("XDG_RUNTIME_DIR").unwrap(),
             &OsString::from("/tmp/lgs-alice")
         );
+    }
+
+    #[test]
+    fn validate_profile_name_rejects_path_escapes() {
+        for ok in ["alice", "bob", "carol-1", "team_2"] {
+            assert!(validate_profile_name(ok).is_ok(), "should accept {ok:?}");
+        }
+        // Single-component names that would escape or misbehave when joined.
+        for bad in ["", "..", ".", "a/b", "/abs", "../evil", "sub/../x"] {
+            assert!(validate_profile_name(bad).is_err(), "should reject {bad:?}");
+        }
     }
 
     #[test]
