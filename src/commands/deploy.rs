@@ -536,9 +536,11 @@ pub struct DeployResult {
     pub status: DeployStatus,
     pub detail: String,
     /// Transaction identifier extracted from the wallet output, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tx: Option<String>,
     /// Locally computed risc0 image ID (the on-chain program ID), when the
     /// vendored `spel` binary was available to compute it.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub program_id: Option<String>,
 }
 
