@@ -520,6 +520,10 @@ fn parse_basecamp_runtime(doc: &DocumentMut) -> DynResult<Option<BasecampConfig>
             if let Some(f) = &profile.env_file {
                 check_toml_value(&format!("basecamp.profiles.{name}.env_file"), f)?;
             }
+            profile.runtime_dir = read_string(ptable, "runtime_dir");
+            if let Some(d) = &profile.runtime_dir {
+                check_toml_value(&format!("basecamp.profiles.{name}.runtime_dir"), d)?;
+            }
             // Drop fully-default profiles so an empty `[basecamp.profiles.foo]`
             // doesn't make `[basecamp]` non-empty and round-trip back.
             if profile != BasecampProfile::default() {
@@ -713,6 +717,9 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
             if let Some(f) = &p.env_file {
                 check_toml_value(&format!("basecamp.profiles.{profile}.env_file"), f)?;
             }
+            if let Some(d) = &p.runtime_dir {
+                check_toml_value(&format!("basecamp.profiles.{profile}.runtime_dir"), d)?;
+            }
         }
 
         let basecamp = doc.entry("basecamp").or_insert(Item::Table(Table::new()));
@@ -768,6 +775,10 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
                 let mut wrote_scalar = false;
                 if let Some(f) = &p.env_file {
                     profile_table["env_file"] = value(f);
+                    wrote_scalar = true;
+                }
+                if let Some(d) = &p.runtime_dir {
+                    profile_table["runtime_dir"] = value(d);
                     wrote_scalar = true;
                 }
                 if !p.env.is_empty() {

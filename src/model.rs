@@ -166,6 +166,10 @@ pub(crate) struct BasecampProfile {
     /// `.env_file` — path (project-relative or absolute) to a dotenv-style
     /// `KEY=VALUE` file sourced before the `env` layers override it.
     pub(crate) env_file: Option<String>,
+    /// `.runtime_dir` — short `TMPDIR`/`XDG_RUNTIME_DIR` root, to dodge the
+    /// macOS `sun_path == 104` Unix-socket path limit. Project-relative or
+    /// absolute; defaults to `/tmp/lgs-<profile>` on macOS when unset.
+    pub(crate) runtime_dir: Option<String>,
 }
 
 #[derive(Clone, Debug)]
