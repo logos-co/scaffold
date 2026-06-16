@@ -63,6 +63,13 @@ pub(crate) enum BasecampAction {
         variants: Vec<String>,
         module: Option<String>,
     },
+    /// Run a captured module via `nix run`. `host` selects the module's
+    /// standalone app vs the basecamp-hosted app; `None` derives it from the
+    /// module's `metadata.json` `type` (`ui_qml` → standalone, else basecamp).
+    Run {
+        module: String,
+        host: Option<String>,
+    },
     /// Basecamp-specific doctor: captured modules summary, manifest variant
     /// check per seeded profile, and uncaptured-module drift against
     /// auto-discovery.
@@ -111,6 +118,7 @@ pub(crate) fn basecamp_for_project(project: Project, action: BasecampAction) -> 
             cmd_basecamp_develop(project, module, dev_shell)
         }
         BasecampAction::Build { variants, module } => cmd_basecamp_build(project, variants, module),
+        BasecampAction::Run { module, host } => cmd_basecamp_run(project, module, host),
         BasecampAction::Doctor { json } => cmd_basecamp_doctor(project, json),
         // Handled above via early return (project-context-free).
         BasecampAction::Docs => unreachable!("handled before load_project"),
@@ -519,7 +527,7 @@ fn cmd_basecamp_develop(
 
     ensure_nix_present()?;
 
-    let target = nix_develop_target(&project.root, &entry.flake, dev_shell.as_deref());
+    let target = nix_flake_target(&project.root, &entry.flake, dev_shell.as_deref());
     println!("entering dev shell for module `{module}` ({target})");
 
     let mut cmd = Command::new("nix");
@@ -540,17 +548,89 @@ fn cmd_basecamp_develop(
     bail!("failed to exec `nix develop {target}`: {err}");
 }
 
-/// Build the `nix develop` target from a module's stored flake ref. Strips any
-/// output fragment after `#` (e.g. `#lgx`), absolutizes path-style refs the
-/// same way `launch`/`install` do, then re-attaches the requested dev-shell
-/// attr (if any). `None` selects the flake's default dev shell.
-fn nix_develop_target(project_root: &Path, flake: &str, dev_shell: Option<&str>) -> String {
+/// Build a `nix develop`/`nix run` target from a module's stored flake ref.
+/// Strips any output fragment after `#` (e.g. `#lgx`), absolutizes path-style
+/// refs the same way `launch`/`install` do, then re-attaches the requested
+/// attr (if any). `None` selects the flake's default output.
+fn nix_flake_target(project_root: &Path, flake: &str, attr: Option<&str>) -> String {
     let bare = flake.split_once('#').map_or(flake, |(b, _)| b);
     let normalized = normalize_flake_ref(project_root, bare);
-    match dev_shell {
+    match attr {
         Some(attr) => format!("{normalized}#{attr}"),
         None => normalized,
     }
+}
+
+/// `lgs basecamp run <module> [--host standalone|basecamp]` — run a captured
+/// module via `nix run`, mirroring `develop`'s exec model (resolve the flake
+/// from `[modules.<module>]`, then exec from the project root).
+///
+/// Host resolution (explicit `--host` always wins; otherwise derived from the
+/// module's `metadata.json` `type`: `ui_qml` → standalone, else basecamp):
+///   - `standalone` — the module's own app. Flake attr =
+///     `[modules.<name>].standalone_app` if set, else `standalone`.
+///   - `basecamp`   — the basecamp-hosted app. Flake attr = `app`.
+///
+/// The module lookup runs before the `nix` presence check so an unknown module
+/// name fails fast with the known-module list even on a host without Nix.
+fn cmd_basecamp_run(project: Project, module: String, host: Option<String>) -> DynResult<()> {
+    let entry = project.config.modules.get(&module).ok_or_else(|| {
+        let known: Vec<&str> = project.config.modules.keys().map(String::as_str).collect();
+        let known = if known.is_empty() {
+            "none captured yet".to_string()
+        } else {
+            known.join(", ")
+        };
+        anyhow!(
+            "no module `{module}` in scaffold.toml [modules] (known: {known}). \
+             Capture project sources with `logos-scaffold basecamp modules`."
+        )
+    })?;
+
+    ensure_nix_present()?;
+
+    let host = host.unwrap_or_else(|| default_run_host(&project.root, entry));
+    let attr = match host.as_str() {
+        "standalone" => entry
+            .standalone_app
+            .clone()
+            .unwrap_or_else(|| "standalone".to_string()),
+        "basecamp" => "app".to_string(),
+        other => bail!("unknown --host `{other}`; expected `standalone` or `basecamp`"),
+    };
+
+    let target = nix_flake_target(&project.root, &entry.flake, Some(&attr));
+    println!("running module `{module}` ({host} host: {target})");
+
+    let mut cmd = Command::new("nix");
+    cmd.current_dir(&project.root).arg("run").arg(&target);
+    let err = cmd.exec();
+    // exec() only returns on failure.
+    bail!("failed to exec `nix run {target}`: {err}");
+}
+
+/// Default `run` host for a module: `standalone` when its `metadata.json`
+/// `type` is `ui_qml` (a module shipping its own QML app), else `basecamp`.
+/// Falls back to `basecamp` when the manifest can't be read (remote flake or
+/// missing file) — the basecamp host doesn't need a local standalone attr.
+fn default_run_host(project_root: &Path, entry: &ModuleEntry) -> String {
+    let src = module_entry_to_source(project_root, entry);
+    match read_source_metadata_type(&src).as_deref() {
+        Some("ui_qml") => "standalone".to_string(),
+        _ => "basecamp".to_string(),
+    }
+}
+
+/// Read the `type` string from a local source's `metadata.json`. `None` for
+/// remote flakes, `.lgx` path sources, or an absent/unparseable manifest.
+fn read_source_metadata_type(src: &BasecampSource) -> Option<String> {
+    let BasecampSource::Flake(flake_ref) = src else {
+        return None;
+    };
+    let local_path = flake_path_prefix(flake_ref)?;
+    let text = fs::read_to_string(Path::new(local_path).join("metadata.json")).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    json.get("type")?.as_str().map(|s| s.to_string())
 }
 
 /// Layer scaffold.toml-declared launch env (#163) onto the scaffold-owned
@@ -1326,6 +1406,7 @@ fn cmd_basecamp_modules(
         new_modules.entry(name).or_insert_with(|| ModuleEntry {
             flake: relativize_flake_ref(&project.root, &flake_ref(src)),
             role: ModuleRole::Project,
+            standalone_app: None,
         });
     }
 
@@ -1613,6 +1694,7 @@ fn resolve_manifest_dependencies(
                     ModuleEntry {
                         flake: resolved,
                         role: ModuleRole::Dependency,
+                        standalone_app: None,
                     },
                 );
                 continue;
@@ -1624,6 +1706,7 @@ fn resolve_manifest_dependencies(
                 ModuleEntry {
                     flake: (*flake_ref).to_string(),
                     role: ModuleRole::Dependency,
+                    standalone_app: None,
                 },
             );
             continue;
@@ -3924,6 +4007,7 @@ mod tests {
         let entry = ModuleEntry {
             flake: "path:./sub#lgx".to_string(),
             role: ModuleRole::Project,
+            standalone_app: None,
         };
         match module_entry_to_source(tmp.path(), &entry) {
             BasecampSource::Flake(f) => {
@@ -4061,6 +4145,7 @@ mod tests {
         ModuleEntry {
             flake: flake.to_string(),
             role: ModuleRole::Project,
+            standalone_app: None,
         }
     }
 
@@ -4437,6 +4522,7 @@ mod tests {
             ModuleEntry {
                 flake: "github:logos-co/logos-storage-module/abc123#lgx".to_string(),
                 role: ModuleRole::Project,
+                standalone_app: None,
             },
         );
 
@@ -4493,6 +4579,7 @@ mod tests {
             ModuleEntry {
                 flake: format!("path:{}#lgx", tmp_a.path().display()),
                 role: ModuleRole::Project,
+                standalone_app: None,
             },
         );
         captured.insert(
@@ -4500,6 +4587,7 @@ mod tests {
             ModuleEntry {
                 flake: format!("path:{}#lgx", tmp_b.path().display()),
                 role: ModuleRole::Project,
+                standalone_app: None,
             },
         );
 
@@ -4901,7 +4989,7 @@ role = "dependency"
         // develop` wants the bare flake (default dev shell).
         let root = Path::new("/proj");
         assert_eq!(
-            nix_develop_target(root, "github:logos-co/swap-module/1.0.0#lgx", None),
+            nix_flake_target(root, "github:logos-co/swap-module/1.0.0#lgx", None),
             "github:logos-co/swap-module/1.0.0"
         );
     }
@@ -4910,7 +4998,7 @@ role = "dependency"
     fn nix_develop_target_appends_requested_dev_shell_attr() {
         let root = Path::new("/proj");
         assert_eq!(
-            nix_develop_target(root, "github:logos-co/swap-module#lgx", Some("dev")),
+            nix_flake_target(root, "github:logos-co/swap-module#lgx", Some("dev")),
             "github:logos-co/swap-module#dev"
         );
     }
@@ -4923,11 +5011,11 @@ role = "dependency"
         let tmp = tempfile::tempdir().expect("tempdir");
         let sub = tmp.path().join("swap-module");
         std::fs::create_dir_all(&sub).unwrap();
-        let target = nix_develop_target(tmp.path(), "path:./swap-module#lgx", None);
+        let target = nix_flake_target(tmp.path(), "path:./swap-module#lgx", None);
         let expected = format!("path:{}", sub.canonicalize().unwrap().display());
         assert_eq!(target, expected);
         // Dev-shell attr is re-attached after absolutization.
-        let with_attr = nix_develop_target(tmp.path(), "path:./swap-module#lgx", Some("dev"));
+        let with_attr = nix_flake_target(tmp.path(), "path:./swap-module#lgx", Some("dev"));
         assert_eq!(with_attr, format!("{expected}#dev"));
     }
 

@@ -1068,6 +1068,10 @@ enum BasecampSubcommand {
     )]
     BuildPortable(BasecampBuildPortableArgs),
     #[command(
+        about = "Run a captured module via `nix run` — its standalone app or the basecamp-hosted app. See `basecamp docs` for project requirements."
+    )]
+    Run(BasecampRunArgs),
+    #[command(
         about = "Basecamp-specific doctor: captured modules, manifest variants, and state drift. See `basecamp docs` for project requirements."
     )]
     Doctor(BasecampDoctorArgs),
@@ -1166,6 +1170,26 @@ struct BasecampDevelopArgs {
     /// to the flake's default dev shell.
     #[arg(long, value_name = "ATTR")]
     dev_shell: Option<String>,
+}
+
+/// How `basecamp run` runs a module.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum RunHost {
+    /// The module's own app (`nix run <flake>#<standalone_app|standalone>`).
+    Standalone,
+    /// The basecamp-hosted app (`nix run <flake>#app`).
+    Basecamp,
+}
+
+#[derive(Debug, clap::Args)]
+struct BasecampRunArgs {
+    /// Name of the module to run, keyed in `[modules.<name>]`.
+    #[arg(value_name = "MODULE")]
+    module: String,
+    /// How to run the module. Defaults from the module's metadata.json `type`
+    /// (`ui_qml` → standalone, else basecamp).
+    #[arg(long, value_enum)]
+    host: Option<RunHost>,
 }
 
 pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
@@ -1489,6 +1513,13 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 BasecampSubcommand::BuildPortable(args) => BasecampAction::Build {
                     variants: vec!["lgx-portable".to_string()],
                     module: args.module,
+                },
+                BasecampSubcommand::Run(args) => BasecampAction::Run {
+                    module: args.module,
+                    host: args.host.map(|h| match h {
+                        RunHost::Standalone => "standalone".to_string(),
+                        RunHost::Basecamp => "basecamp".to_string(),
+                    }),
                 },
                 BasecampSubcommand::Doctor(args) => BasecampAction::Doctor { json: args.json },
                 BasecampSubcommand::Docs => BasecampAction::Docs,
