@@ -672,6 +672,12 @@ pub enum BasecampCommand {
     /// Attr-swap replay producing portable module builds (alias for
     /// `Build { variants: ["lgx-portable"], module: None }`).
     BuildPortable,
+    /// Run a captured module via `nix run`. `host` is `standalone`/`basecamp`;
+    /// `None` derives it from the module's `metadata.json` `type`.
+    Run {
+        module: String,
+        host: Option<String>,
+    },
     /// Basecamp-specific health checks.
     Doctor,
 }
@@ -699,6 +705,7 @@ impl BasecampCommand {
                 variants: vec!["lgx-portable".to_string()],
                 module: None,
             },
+            Self::Run { module, host } => BasecampAction::Run { module, host },
             Self::Doctor => BasecampAction::Doctor { json: false },
         }
     }

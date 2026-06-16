@@ -103,6 +103,10 @@ pub(crate) enum ModuleRole {
 pub(crate) struct ModuleEntry {
     pub(crate) flake: String,
     pub(crate) role: ModuleRole,
+    /// `[modules.<name>].standalone_app` — optional flake output attr that
+    /// `basecamp run --host standalone` invokes via `nix run`. `None` falls
+    /// back to the `standalone` attr.
+    pub(crate) standalone_app: Option<String>,
 }
 
 /// `[basecamp]` runtime config only. Pin and source moved to

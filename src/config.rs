@@ -402,7 +402,18 @@ fn parse_modules(doc: &DocumentMut) -> DynResult<std::collections::BTreeMap<Stri
             ),
         };
         check_toml_value(&format!("modules.{name}.flake"), &flake)?;
-        out.insert(name.to_string(), ModuleEntry { flake, role });
+        let standalone_app = read_string(table, "standalone_app").filter(|s| !s.is_empty());
+        if let Some(app) = &standalone_app {
+            check_toml_value(&format!("modules.{name}.standalone_app"), app)?;
+        }
+        out.insert(
+            name.to_string(),
+            ModuleEntry {
+                flake,
+                role,
+                standalone_app,
+            },
+        );
     }
     Ok(out)
 }
@@ -615,6 +626,10 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
         let table = ensure_subtable(&mut doc, "modules", name);
         table["flake"] = value(&entry.flake);
         table["role"] = value(role_str);
+        if let Some(app) = &entry.standalone_app {
+            check_toml_value(&format!("modules.{name}.standalone_app"), app)?;
+            table["standalone_app"] = value(app);
+        }
         // Defensive: the function's check above already covered both fields.
         let _ = path;
     }
