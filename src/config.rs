@@ -28,8 +28,8 @@ use crate::constants::{
     SCAFFOLD_TOML_SCHEMA_VERSION, SPEL_SOURCE,
 };
 use crate::model::{
-    BasecampConfig, Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, ModuleEntry,
-    ModuleRole, RepoBuild, RepoRef, RunConfig, RunProfile, WatchConfig,
+    BasecampConfig, BasecampProfile, Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig,
+    ModuleEntry, ModuleRole, RepoBuild, RepoRef, RunConfig, RunProfile, WatchConfig,
 };
 use crate::DynResult;
 
@@ -494,20 +494,28 @@ fn parse_basecamp_runtime(doc: &DocumentMut) -> DynResult<Option<BasecampConfig>
         }
         any_field = any_field || !cfg.env_append.is_empty();
     }
-    // [basecamp.profiles.<name>.env] — per-profile plain string maps.
+    // [basecamp.profiles.<name>] — per-profile launch config.
     if let Some(profiles) = table.get("profiles").and_then(Item::as_table) {
         for (name, item) in profiles.iter() {
             let ptable = item.as_table().ok_or_else(|| {
                 anyhow!("invalid scaffold.toml: [basecamp.profiles.{name}] is not a table")
             })?;
+            let mut profile = BasecampProfile::default();
             if let Some(env_table) = ptable.get("env").and_then(Item::as_table) {
-                let env = parse_string_map(env_table, &format!("basecamp.profiles.{name}.env"))?;
-                if !env.is_empty() {
-                    cfg.profile_env.insert(name.to_string(), env);
-                }
+                profile.env =
+                    parse_string_map(env_table, &format!("basecamp.profiles.{name}.env"))?;
+            }
+            profile.env_file = read_string(ptable, "env_file");
+            if let Some(f) = &profile.env_file {
+                check_toml_value(&format!("basecamp.profiles.{name}.env_file"), f)?;
+            }
+            // Drop fully-default profiles so an empty `[basecamp.profiles.foo]`
+            // doesn't make `[basecamp]` non-empty and round-trip back.
+            if profile != BasecampProfile::default() {
+                cfg.profiles.insert(name.to_string(), profile);
             }
         }
-        any_field = any_field || !cfg.profile_env.is_empty();
+        any_field = any_field || !cfg.profiles.is_empty();
     }
 
     Ok(if any_field { Some(cfg) } else { None })
@@ -683,9 +691,12 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
                 check_toml_value(&format!("basecamp.env_append.{k}"), p)?;
             }
         }
-        for (profile, env) in &bc.profile_env {
-            for (k, v) in env {
+        for (profile, p) in &bc.profiles {
+            for (k, v) in &p.env {
                 check_toml_value(&format!("basecamp.profiles.{profile}.env.{k}"), v)?;
+            }
+            if let Some(f) = &p.env_file {
+                check_toml_value(&format!("basecamp.profiles.{profile}.env_file"), f)?;
             }
         }
 
@@ -728,16 +739,30 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
                 append_table[k] = string_array(list);
             }
         }
-        if !bc.profile_env.is_empty() {
+        if !bc.profiles.is_empty() {
             let profiles = child_table(basecamp_table, "profiles");
-            // Implicit so `[basecamp.profiles.<name>.env]` renders as the
-            // nested header without an empty `[basecamp.profiles]` line.
+            // Implicit so `[basecamp.profiles.<name>]` renders as the nested
+            // header without an empty `[basecamp.profiles]` line.
             profiles.set_implicit(true);
-            for (profile, env) in &bc.profile_env {
+            for (profile, p) in &bc.profiles {
                 let profile_table = child_table(profiles, profile);
-                let env_table = child_table(profile_table, "env");
-                for (k, v) in env {
-                    env_table[k] = value(v);
+                // Scalar keys (env_file) render under the
+                // `[basecamp.profiles.<name>]` header; the `env` child table
+                // follows. With no scalar key, keep the profile table implicit
+                // so only `[basecamp.profiles.<name>.env]` renders.
+                let mut wrote_scalar = false;
+                if let Some(f) = &p.env_file {
+                    profile_table["env_file"] = value(f);
+                    wrote_scalar = true;
+                }
+                if !p.env.is_empty() {
+                    let env_table = child_table(profile_table, "env");
+                    for (k, v) in &p.env {
+                        env_table[k] = value(v);
+                    }
+                }
+                if !wrote_scalar {
+                    profile_table.set_implicit(true);
                 }
             }
         }
@@ -1133,16 +1158,16 @@ LOGOS_STORAGE_API_PORT = "8082"
             )
         );
         assert_eq!(
-            bc.profile_env
+            bc.profiles
                 .get("alice")
-                .and_then(|e| e.get("LOGOS_STORAGE_API_PORT"))
+                .and_then(|p| p.env.get("LOGOS_STORAGE_API_PORT"))
                 .map(String::as_str),
             Some("8081")
         );
         assert_eq!(
-            bc.profile_env
+            bc.profiles
                 .get("bob")
-                .and_then(|e| e.get("LOGOS_STORAGE_API_PORT"))
+                .and_then(|p| p.env.get("LOGOS_STORAGE_API_PORT"))
                 .map(String::as_str),
             Some("8082")
         );
@@ -1187,11 +1212,50 @@ LOGOS_STORAGE_API_PORT = "8081"
             Some(&["/nix/store/a/plugins".to_string()][..])
         );
         assert_eq!(
-            bc.profile_env
+            bc.profiles
                 .get("alice")
-                .and_then(|e| e.get("LOGOS_STORAGE_API_PORT"))
+                .and_then(|p| p.env.get("LOGOS_STORAGE_API_PORT"))
                 .map(String::as_str),
             Some("8081")
+        );
+    }
+
+    #[test]
+    fn basecamp_profile_env_file_and_custom_name_round_trip() {
+        // A custom profile name (not alice/bob) carrying both `env` and an
+        // `env_file` parses, exposes both, and survives serialize -> parse.
+        let toml = minimal_v0_2_0()
+            + r#"
+[basecamp.profiles.carol]
+env_file = ".scaffold/carol.env"
+
+[basecamp.profiles.carol.env]
+LOGOS_STORAGE_API_PORT = "8083"
+"#;
+        let cfg = parse_config(&toml).expect("parse");
+        let carol = cfg
+            .basecamp
+            .as_ref()
+            .and_then(|bc| bc.profiles.get("carol"))
+            .expect("carol profile");
+        assert_eq!(carol.env_file.as_deref(), Some(".scaffold/carol.env"));
+        assert_eq!(
+            carol.env.get("LOGOS_STORAGE_API_PORT").map(String::as_str),
+            Some("8083")
+        );
+
+        let serialized = serialize_config(&cfg).expect("serialize");
+        let carol2 = parse_config(&serialized)
+            .expect("re-parse")
+            .basecamp
+            .expect("basecamp present")
+            .profiles
+            .remove("carol")
+            .expect("carol after round-trip");
+        assert_eq!(carol2.env_file.as_deref(), Some(".scaffold/carol.env"));
+        assert_eq!(
+            carol2.env.get("LOGOS_STORAGE_API_PORT").map(String::as_str),
+            Some("8083")
         );
     }
 
