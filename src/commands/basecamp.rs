@@ -76,6 +76,15 @@ pub(crate) fn cmd_basecamp(action: BasecampAction) -> DynResult<()> {
     }
 
     let project = load_project()?;
+    basecamp_for_project(project, action)
+}
+
+/// Dispatch a basecamp action against an explicit project. Used by the CLI
+/// (after cwd discovery) and the public API (with a caller-provided root).
+pub(crate) fn basecamp_for_project(project: Project, action: BasecampAction) -> DynResult<()> {
+    if matches!(action, BasecampAction::Docs) {
+        return cmd_basecamp_docs();
+    }
 
     match action {
         BasecampAction::Setup => cmd_basecamp_setup(project),

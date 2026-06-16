@@ -50,8 +50,11 @@ You may replace `"$SCAFFOLD_BIN"` with `logos-scaffold` when the install path it
 | Repo root | Build the latest CLI, inspect docs, validate help/version output, verify out-of-project errors | `cargo build`, `"$SCAFFOLD_BIN" --help`, `"$SCAFFOLD_BIN" --version`, `"$SCAFFOLD_BIN" build` (expect error) |
 | Scratch workspace | Create fresh generated projects without polluting the repo; test advanced creation flags | `"$SCAFFOLD_BIN" new dogfood-default`, `"$SCAFFOLD_BIN" new ... --template ...` |
 | Generated project root | Execute scaffold workflows and example runners against a fresh project | `setup`, `localnet`, `build`, `deploy`, `wallet`, `doctor`, `report`, `cargo run --bin run_*` |
+| Test-node host | Drive isolated, short-lived integration-test sequencers from inside a project (or any directory via `--project <root>`); the RPC-scoped reads target a node URL directly | `test-node prepare`, `test-node start --json`, `test-node run -- <cmd>`, `test-node tx submit-and-wait --url ...` |
 
-Do not run project-scoped commands from the repository root unless the scenario is explicitly checking the "outside project" error path.
+Do not run project-scoped commands from the repository root unless the scenario is explicitly checking the "outside project" error path. `test-node` commands are the exception: they accept an explicit `--project <root>` and may be driven from outside a project directory.
+
+Scaffold is also consumable as a Rust library (`logos_scaffold::api`): the same setup/localnet/wallet/deploy/doctor/report and `test-node` capabilities are exposed as typed functions returning typed results and categorized errors, so downstream tests and tooling can embed scaffold without shelling out to the CLI. Scenario `A1` validates that surface.
 
 ## Shared Preconditions
 
@@ -89,6 +92,10 @@ The `lgs` binary is a short alias for `logos-scaffold` produced by the same crat
 | B3 | external module project | Core | Two-instance p2p dogfooding | `basecamp launch alice`, `basecamp launch bob` (parallel) |
 | B4 | external module project | Advanced | Clean-slate scrub semantics on relaunch | `basecamp launch alice` (×2) |
 | B5 | external module project | Advanced | Portable artefact build for AppImage hand-loading | `basecamp build-portable` |
+| A1 | N/A | Advanced | Public Rust API surface for embedding scaffold in tests/tooling | `logos_scaffold::api::Project`, `cargo doc`, doctests |
+| T1 | `default` | Advanced | Isolated test-node lifecycle and caller-project pins | `test-node pins`, `test-node prepare`, `test-node doctor`, `test-node start`, `test-node status`, `test-node stop`, `test-node run` |
+| T2 | `default` | Advanced | Typed RPC reads against a running test node | `test-node tx submit-and-wait`, `test-node blocks head/range/wait`, `test-node clock read/wait-stable`, `test-node account get/batch-get`, `test-node proof get`, `test-node snapshot accounts` |
+| T3 | `default` | Advanced | Caller-provided state seeding | `test-node state schema`, `test-node state export`, `test-node state seed`, `test-node start --state` |
 
 ## Standing Validation Notes
 
@@ -1156,6 +1163,259 @@ ls .scaffold/basecamp/portable 2>/dev/null || find .scaffold -maxdepth 4 -name '
 
 - This scenario does not exercise the AppImage itself — it stops at producing artefacts. Hand-loading into a basecamp AppImage is owned by the AppImage release, not by scaffold.
 
+## A1. Public Rust API Surface
+
+### Goal
+
+Validate that the public `logos_scaffold::api` library surface exists, is documented, and lets a Rust consumer drive a scaffold project (open by explicit root, inspect paths, read localnet status, categorized errors) without shelling out to the CLI. The API is the library boundary the `test-node` integration features build on.
+
+### Preconditions
+
+- Latest scaffold checkout at the repo root.
+- A generated default-template project exists at `$SCRATCH_ROOT/dogfood-default` (D1).
+
+### Commands / Actions
+
+From the repo root, confirm the surface builds and documents cleanly:
+
+```bash
+cargo doc --no-deps
+cargo test --doc
+```
+
+Then exercise the API from a throwaway consumer. Either add a dev-dependency on the local crate from a scratch crate, or drive it through a one-off integration test inside the repo:
+
+```rust
+use logos_scaffold::api::{LocalnetStartOptions, Project};
+
+fn main() -> logos_scaffold::api::Result<()> {
+    // Explicit root — no cwd discovery.
+    let project = Project::open("/abs/path/to/dogfood-default")?;
+    println!("rpc = {}", project.localnet_rpc_url());
+
+    let paths = project.paths()?;
+    println!("sequencer = {}", paths.sequencer_binary.display());
+    println!("cache_root = {} (from {})", paths.cache_root.display(), paths.cache_root_source);
+
+    // Typed status — same model as `localnet status --json`.
+    let status = project.localnet_status();
+    println!("ready = {}", status.ready);
+
+    // Opening a non-project directory yields a categorized Config error.
+    if let Err(err) = Project::open("/tmp") {
+        println!("expected config error: {err}");
+    }
+    Ok(())
+}
+```
+
+### Expected Success Signals
+
+- `cargo doc --no-deps` builds rustdoc for the `api` module, and `cargo test --doc` passes the `api` doctests (setup / localnet lifecycle / wallet topup / deploy / doctor / report / test-node examples).
+- `Project::open(root)` loads a project from an explicit root with no dependency on the process working directory; `Project::discover(dir)` walks upward to find `scaffold.toml`.
+- `Project::paths()` reports the resolved cache root (and which layer supplied it), pinned repo checkouts, vendored binary paths, wallet home, localnet state/log, and circuits dir — whether or not they exist yet.
+- `Project::localnet_status()` returns the same typed model the CLI prints under `localnet status --json`.
+- Errors are categorized (`api::Error::{Config, MissingTool, RepoState, Process, Timeout, Transport, Command, Other}`); a missing/unreadable `scaffold.toml` is a `Config` error, and external-command failures carry a structured `CommandFailed` (rendered command, exit code, captured output).
+
+### Failure Signals / Common Pitfalls
+
+- A doctest failure in the `api` module means a documented example drifted from the surface — fix the example or the doc, do not delete the test.
+- If `Project::open` on a directory without `scaffold.toml` returns an uncategorized error (not `Error::Config`), that is a regression in the error contract.
+- If an operation silently depends on the process cwd instead of the project root passed in, record it — explicit-root targeting is the core API guarantee.
+
+### Evidence to Capture
+
+- `cargo doc` / `cargo test --doc` output lines for the `api` module.
+- The consumer program's output showing the resolved paths, status, and the categorized error.
+
+### Execution Notes
+
+- This scenario validates the library boundary only; it does not require a running localnet. Pair it with T1–T3 when validating the `test-node` API.
+
+## T1. Isolated Test-Node Lifecycle and Caller-Project Pins
+
+### Goal
+
+Validate that `test-node` spins up isolated, short-lived sequencer instances (own port, config, database, logs, runtime dir) for integration tests, that the prerequisite/pin commands resolve the caller project's LEZ and circuits pins, and that lifecycle commands (`start`/`status`/`stop`/`run`) are clean and machine-readable.
+
+### Preconditions
+
+- A default-template project exists at `$SCRATCH_ROOT/dogfood-default` with `setup` complete (so the standalone `sequencer_service` and circuits release are present). `test-node prepare` can also build/fetch these on demand.
+- No requirement that the developer `localnet` is running — test nodes are independent of it.
+
+### Commands / Actions
+
+From the generated project root:
+
+```bash
+"$SCAFFOLD_BIN" test-node pins
+"$SCAFFOLD_BIN" test-node pins --json
+"$SCAFFOLD_BIN" test-node doctor
+"$SCAFFOLD_BIN" test-node prepare --json
+"$SCAFFOLD_BIN" test-node start --json
+# capture the node id (state_dir basename) and rpc_url from the JSON
+"$SCAFFOLD_BIN" test-node status --node <node-id> --json
+"$SCAFFOLD_BIN" test-node stop --node <node-id>
+"$SCAFFOLD_BIN" test-node run --serial -- sh -c 'echo "rpc=$LGS_TEST_NODE_RPC_URL port=$LGS_TEST_NODE_PORT"'
+```
+
+The pin/prepare/doctor commands also accept `--project <root>` so they can be driven from outside the project directory.
+
+### Expected Success Signals
+
+- `test-node pins` reports the LEZ source/ref, resolved commit, checkout path and ownership (`managed_cache` vs `caller_provided`), sequencer binary path, and circuits version/path — each annotated with its origin (`cli_override` → `project_config` → `scaffold_default`).
+- `test-node doctor` reports pin drift, checkout presence/commit/cleanliness, sequencer binary, circuits release, and platform support as separate categorized checks; exits non-zero only when a real prerequisite is missing.
+- `test-node prepare` resolves the project's pins, ensures the checkout + circuits, builds the standalone sequencer, and (with `--json`) reports the checkout, resolved commit, binary path, and circuits path.
+- `test-node start --json` prints at least `rpc_url`, `pid`, `state_dir`, `config_path`, `log_path`, `genesis_block_id`, and current `block_height`; the node runs on its own port under `.scaffold/test-nodes/<id>/` and does not touch the vendored LEZ checkout or the developer localnet.
+- `test-node start --port 0` (the default) selects an unused localhost port; `test-node status --node <id> --json` reports `healthy` and the served `rpc_url`, exiting non-zero when unhealthy.
+- `test-node stop --node <id>` terminates only that node and removes its runtime state (unless `--preserve-work-dir`).
+- `test-node run -- <cmd>` starts a node, waits for health, exports `LGS_TEST_NODE_RPC_URL` / `LGS_TEST_NODE_PORT` / `LGS_TEST_NODE_STATE_DIR` (and friends) to the child, forwards the child's exit status, and stops the node afterward; `--serial` caps concurrent node creation at one and `--parallel N` at N.
+
+### Failure Signals / Common Pitfalls
+
+- A node that reuses the developer `localnet` port, writes into the vendored LEZ checkout, or otherwise is not isolated is a contract violation.
+- `test-node start` with an explicit `--port` already in use must fail fast with a port-conflict error, not hang.
+- If a caller-provided LEZ checkout (`[repos.lez].path`, or a local dir via `--lez-source`) is reset/force-checked-out by `prepare`, that is a severe regression — caller checkouts are validated, never mutated.
+- A `run` that leaks the node (does not stop it) after the child exits, or does not forward the child's non-zero exit, is a regression.
+- Missing sequencer binary or circuits must produce a clear scaffold-side error pointing at `test-node prepare`, not a raw panic.
+
+### Evidence to Capture
+
+- `test-node pins --json` and `test-node doctor` output.
+- `test-node start --json` output (the full connection record) and the `.scaffold/test-nodes/<id>/` listing.
+- `test-node status --json` for the running and stopped states.
+- `test-node run` output showing the exported `LGS_TEST_NODE_*` env reaching the child.
+
+### Execution Notes
+
+- Test nodes are designed to be ephemeral; prefer fresh nodes per scenario and rely on `stop` (or handle `Drop` in the API) for teardown. Use `--preserve-work-dir` only when you need to inspect a node's database/logs after the fact.
+- Keep test-node runs independent of the `localnet` scenarios (D1/D2): they are separate sequencer instances by design.
+
+## T2. Test-Node Typed RPC Reads: Transactions, Blocks, Clock, Accounts, Proofs
+
+### Goal
+
+Validate that the `test-node` RPC subcommands give integration tests definitive, structured observations against a running node — terminal transaction outcomes, block/clock context for replay, and stable account/proof reads for parity assertions — instead of hand-rolled JSON-RPC scraping.
+
+### Preconditions
+
+- A test node is running (T1): capture its `rpc_url` (e.g., `export TN_URL=http://127.0.0.1:<port>`).
+- A transaction file is available for the `tx` checks. For a quick negative-path check, any base64 borsh blob works; for a committed-path check, use a transaction produced by an example runner or wallet against the same node.
+
+### Commands / Actions
+
+Against the running node URL:
+
+```bash
+# Blocks and clock (no transaction needed)
+"$SCAFFOLD_BIN" test-node blocks head --url "$TN_URL" --json
+"$SCAFFOLD_BIN" test-node blocks range --url "$TN_URL" --from 1 --to 3 --json
+"$SCAFFOLD_BIN" test-node blocks wait --url "$TN_URL" --after 1 --count 1 --json
+"$SCAFFOLD_BIN" test-node clock read --url "$TN_URL" --json
+"$SCAFFOLD_BIN" test-node clock wait-stable --url "$TN_URL" --samples 2 --json
+
+# Transactions
+"$SCAFFOLD_BIN" test-node tx submit-and-wait --url "$TN_URL" --file ./tx.b64 --encoding borsh-base64 --json
+"$SCAFFOLD_BIN" test-node tx submit --url "$TN_URL" --file ./tx.b64 --json
+"$SCAFFOLD_BIN" test-node tx wait --url "$TN_URL" --hash <tx-hash> --json
+
+# Accounts and proofs (parity assertions)
+"$SCAFFOLD_BIN" test-node account get --url "$TN_URL" --account-id <id> --json
+"$SCAFFOLD_BIN" test-node account batch-get --url "$TN_URL" --account-id <id-a> --account-id <id-b> --json
+"$SCAFFOLD_BIN" test-node proof get --url "$TN_URL" --commitment <hex-or-base58> --json
+"$SCAFFOLD_BIN" test-node snapshot accounts --url "$TN_URL" --account-id <id> --output ./accounts-snapshot.json --json
+```
+
+### Expected Success Signals
+
+- `tx submit-and-wait --json` emits exactly one terminal outcome object: `committed` (with the actual sequencer `block_id` and `timestamp`), `rejected` (`phase` = `stateless` | `stateful`, with `reason` or `observed_after_block_id`), `timeout` (`last_observed_block_id`), `transport_error`, or `wire_mismatch`; it exits non-zero for anything but `committed`. Transport failures are never reported as business rejections, and a stateful rejection follows an explicit multi-block observation rule (not a single sleep).
+- `tx submit` returns the node-assigned tx hash or a structured stateless rejection; `tx wait` observes a previously submitted hash, honoring `--after-block` when supplied.
+- `blocks head` / `blocks range` report each block's id and timestamp and classify it explicitly: genesis (the only zero-transaction block — no clock tick to replay), clock-only (empty post-genesis blocks still advance clock state via the mandatory clock transaction), and blocks carrying user transactions, with per-tx hashes for public/deployment transactions.
+- `blocks wait` returns the requested number of blocks after the boundary.
+- `clock read` returns all three `/LEZ/ClockProgramAccount/...` accounts with decoded `block_id`/`timestamp`; `clock wait-stable` returns a snapshot only after consecutive identical samples (head + clock state), or a retryable timeout error.
+- `account get` distinguishes `present` (with lossless base64 account bytes plus decoded balance/nonce/owner/data), `missing` (never written), and `decode_error`; every read reports the `block_id` it was scoped to. `batch-get` reads all accounts at one consistent block boundary.
+- `proof get` distinguishes a missing commitment (`proof: null`), an invalid commitment (local error before any RPC), and transport failures.
+- `snapshot accounts` writes a block-consistent JSON snapshot to the `--output` path.
+
+### Failure Signals / Common Pitfalls
+
+- A `tx submit-and-wait` that collapses transport errors or timeouts into "rejected" (or that exits zero for a non-committed outcome) is a regression in the divergence-detection contract.
+- A block classification that marks genesis as having a clock transaction, or hides empty post-genesis (clock-only) blocks, breaks clock-sensitive replay.
+- An account read that does not report its block boundary, or that races a clock block and returns inconsistent data instead of a stable result / structured retryable error, is a parity regression.
+- A `proof get` that conflates "missing commitment" with "invalid commitment" or with a transport failure is a regression.
+
+### Evidence to Capture
+
+- One `tx submit-and-wait --json` committed object and (if probed) one non-committed outcome.
+- `blocks range --json` output showing the genesis / clock-only / user-tx classification.
+- `clock read --json` and a `clock wait-stable` result.
+- `account get --json` for present and missing accounts, and a `proof get --json` for present and missing commitments.
+
+### Execution Notes
+
+- The RPC-scoped subcommands target a node URL, not a project directory, so they can run anywhere once `$TN_URL` is known.
+- These are the typed equivalents of the `logos_scaffold::api::testnode::TestNodeClient` methods; when validating an API change, exercise both the CLI and the client.
+
+## T3. Test-Node Caller-Provided State Seeding
+
+### Goal
+
+Validate that a test node can start from a caller-provided state snapshot — not only from empty localnet state — with validation up front and exact-state startup (no implicit wallets or default testnet accounts).
+
+### Preconditions
+
+- T1 prerequisites met (sequencer binary + circuits available for the project).
+- A running node (T1) if you intend to `state export` from it; otherwise a hand-written snapshot file suffices.
+
+### Commands / Actions
+
+From the generated project root:
+
+```bash
+"$SCAFFOLD_BIN" test-node state schema --json
+
+# Author a minimal snapshot (public account with a balance), then seed from it:
+cat > ./seed.json <<'JSON'
+{ "format": "lgs-state-snapshot/1",
+  "public_accounts": [ { "account_id": "<base58-account-id>", "balance": 5000 } ],
+  "private_accounts": [] }
+JSON
+"$SCAFFOLD_BIN" test-node state seed --input ./seed.json --output ./seeded-state --json
+"$SCAFFOLD_BIN" test-node start --state ./seeded-state --json
+
+# Optionally export public balances from a running node into a snapshot:
+"$SCAFFOLD_BIN" test-node state export --url "$TN_URL" --account-id <id> --output ./exported.json --json
+
+# Negative path: an unsupported format must be rejected with a categorized error.
+echo '{"format":"bogus/1"}' > ./bad.json
+"$SCAFFOLD_BIN" test-node state seed --input ./bad.json   # expect format-mismatch error, non-zero exit
+```
+
+### Expected Success Signals
+
+- `state schema` identifies the exact snapshot formats the project's pins accept (`lgs-state-snapshot/1`, the `lgs-account-snapshot/1` output of `snapshot accounts`, or a rocksdb state directory), the state format version (`nssa-v03`), the LEZ ref/commit, and the seedable account fields.
+- `state seed` validates the snapshot before producing a state directory and reports the seed kind (`config` vs `database`), the LEZ commit, the state format version, and the public/private account counts. Validation errors are distinguished: format mismatch, storage-schema mismatch (e.g. public-account data, which the genesis config cannot seed), LEZ pin mismatch, and account decode errors.
+- `test-node start --state ./seeded-state` starts from exactly the snapshot's accounts — the sequencer builds genesis state from `initial_public_accounts` / `initial_private_accounts` with no implicit wallets, sample programs, or default testnet accounts. A database-seeded directory (a node's preserved `rocksdb/`) resumes from it verbatim.
+- `state export` writes named public-account balances from a running node into an `lgs-state-snapshot/1` file (the pinned RPC exposes public balances only; full-fidelity state comes from a stopped node's database directory, which the command output notes).
+
+### Failure Signals / Common Pitfalls
+
+- A node started with `--state` that injects extra accounts (default testnet wallets, sample programs) beyond the snapshot is a regression — seeded startup must be exact.
+- A snapshot needing unsupported state (e.g. public-account data/nonce via the genesis config) that fails late inside the node instead of up front during `state seed` validation is a regression.
+- A pin mismatch (snapshot's `lez_commit` differs from the project's resolved pin) that is silently accepted is a regression.
+- An unknown snapshot format accepted instead of rejected with a `format mismatch` error is a regression.
+
+### Evidence to Capture
+
+- `state schema --json` output.
+- `state seed --json` output showing the seed kind, account counts, and (for the negative path) the categorized error.
+- `test-node start --state ... --json` output and a `test-node account get` against a seeded account confirming the exact seeded balance.
+
+### Execution Notes
+
+- Pair this scenario with T2: after seeding and starting, use `account get` / `account batch-get` to assert the seeded accounts match the snapshot exactly.
+- Database seeding (`--state <dir with rocksdb/>`) is the full-fidelity path; the JSON snapshot path is balance-and-commitment level by design at the pinned revision.
+
 ## Minimum Rerun Guidance for Future Changes
 
 - Changes to onboarding, project creation, setup, localnet, or build flows: rerun `D1`, `D2`, and `D6`.
@@ -1173,5 +1433,9 @@ ls .scaffold/basecamp/portable 2>/dev/null || find .scaffold -maxdepth 4 -name '
 - Changes to `basecamp launch` (kill-and-scrub semantics, XDG isolation, port-override env vars, p2p surface): rerun `B3`.
 - Changes to clean-slate scrub semantics or the empty `[modules]` guard on `launch`: rerun `B4`.
 - Changes to `basecamp build-portable` (project/dependency role split, ordering, attr selection): rerun `B5`.
+- Changes to the public `logos_scaffold::api` surface (entry points, typed result models, categorized errors, `CommandFailed`, or the documented examples/doctests): rerun `A1`, and rerun the matching CLI scenario for any command whose `*_for_project` core changed.
+- Changes to `test-node` lifecycle, pin resolution, prepare/doctor, run-slot concurrency, or caller-checkout validation: rerun `T1` (and `A1` if the `api::testnode` lifecycle types changed).
+- Changes to the `test-node` RPC client (transaction outcomes, block/clock parsing, account/proof reads, or their JSON shapes): rerun `T2`.
+- Changes to `test-node` state seeding (snapshot formats, validation classes, genesis-config injection, or database seeding): rerun `T3`.
 
 When in doubt, rerun more scenarios rather than fewer.

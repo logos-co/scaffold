@@ -51,6 +51,14 @@ pub(crate) struct RunInvocation {
 
 pub(crate) fn cmd_run(inv: RunInvocation) -> DynResult<()> {
     let project = load_project()?;
+    run_for_project(&project, inv)
+}
+
+/// Execute the `lgs run` pipeline (build → IDL → localnet → topup → deploy →
+/// hooks) for `project`. Streams step progress to stdout. With `inv.watch`
+/// set, blocks in the watch loop until interrupted — API callers normally
+/// leave `watch` off.
+pub(crate) fn run_for_project(project: &Project, inv: RunInvocation) -> DynResult<()> {
     let resolved = project.config.run.resolve_profile(inv.profile.as_deref())?;
     if let Some(name) = inv.profile.as_deref() {
         println!("Using [run.profiles.{name}]");
@@ -76,7 +84,7 @@ pub(crate) fn cmd_run(inv: RunInvocation) -> DynResult<()> {
     // `build_idl_for_current_project`, etc.) would build/deploy from whichever
     // subdirectory the user invoked `lgs run` in.
     run_in_project_dir(Some(&project.root), || {
-        run_pipeline_once(&project, &params)?;
+        run_pipeline_once(project, &params)?;
 
         if inv.watch {
             // Subsequent iterations share the same hook/profile selection but
@@ -89,7 +97,7 @@ pub(crate) fn cmd_run(inv: RunInvocation) -> DynResult<()> {
                 .watch_debounce_ms
                 .or(project.config.run.watch.debounce_ms)
                 .unwrap_or(WATCH_DEBOUNCE_MS);
-            watch_loop(&project, &params, debounce_ms)?;
+            watch_loop(project, &params, debounce_ms)?;
         }
 
         Ok(())

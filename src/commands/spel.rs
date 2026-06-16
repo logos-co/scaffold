@@ -13,17 +13,27 @@ use crate::DynResult;
 /// user at `setup` rather than failing with a raw exec error.
 pub(crate) fn cmd_spel(args: &[String]) -> DynResult<()> {
     let project = load_project()?;
+    let status = spel_passthrough_for_project(&project, args)?;
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
+}
+
+/// Run the project-vendored `spel` binary with `args`, forwarding its output,
+/// and return the exit status. The API path uses the returned status instead
+/// of exiting the process.
+pub(crate) fn spel_passthrough_for_project(
+    project: &crate::model::Project,
+    args: &[String],
+) -> DynResult<std::process::ExitStatus> {
     let spel_bin =
-        resolve_repo_path(&project, &project.config.spel, "spel")?.join(SPEL_BIN_REL_PATH);
+        resolve_repo_path(project, &project.config.spel, "spel")?.join(SPEL_BIN_REL_PATH);
     if !spel_bin.exists() {
         bail!(
             "vendored spel binary not found at `{}`\nNext step: run `logos-scaffold setup` to build it.",
             spel_bin.display()
         );
     }
-    let status = Command::new(&spel_bin).args(args).status()?;
-    if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
-    }
-    Ok(())
+    Ok(Command::new(&spel_bin).args(args).status()?)
 }

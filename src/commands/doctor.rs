@@ -12,7 +12,7 @@ use crate::doctor_checks::{
     check_binary, check_container_runtime, check_logos_blockchain_circuits, check_path,
     check_port_warn, check_repo, check_standalone_support, one_line, print_rows,
 };
-use crate::model::{CheckRow, CheckStatus, DoctorReport, DoctorSummary};
+use crate::model::{CheckRow, CheckStatus, DoctorReport, DoctorSummary, Project};
 use crate::process::{pid_running, run_capture, run_with_stdin, set_command_echo};
 use crate::project::{load_project, resolve_cache_root, resolve_repo_path};
 use crate::state::read_localnet_state;
@@ -38,7 +38,8 @@ pub(crate) fn cmd_doctor(as_json: bool) -> DynResult<()> {
 }
 
 fn cmd_doctor_inner(as_json: bool) -> DynResult<()> {
-    let report = build_doctor_report()?;
+    let project = load_project()?;
+    let report = build_doctor_report(&project)?;
 
     if as_json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -69,10 +70,9 @@ fn cmd_doctor_inner(as_json: bool) -> DynResult<()> {
     Ok(())
 }
 
-pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
-    let project = load_project()?;
-    let lez = resolve_repo_path(&project, &project.config.lez, "lez")?;
-    let spel = resolve_repo_path(&project, &project.config.spel, "spel")?;
+pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> {
+    let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
+    let spel = resolve_repo_path(project, &project.config.spel, "spel")?;
     let wallet_home = project.root.join(&project.config.wallet_home_dir);
     let localnet_state_path = project.root.join(".scaffold/state/localnet.state");
 
@@ -149,7 +149,7 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
 
     rows.push(check_spel_lez_alignment(&spel));
 
-    let (resolved_cache_root, cache_root_source) = resolve_cache_root(&project)?;
+    let (resolved_cache_root, cache_root_source) = resolve_cache_root(project)?;
     rows.push(CheckRow {
         status: CheckStatus::Pass,
         name: "cache root".to_string(),

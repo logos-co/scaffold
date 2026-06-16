@@ -6,8 +6,7 @@ use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::bail;
-
+use crate::error::CommandFailed;
 use crate::model::Captured;
 use crate::DynResult;
 
@@ -45,6 +44,12 @@ fn should_echo() -> bool {
     ECHO_COMMANDS.load(Ordering::Relaxed)
 }
 
+/// Whether `$ <cmd>` echo lines are currently enabled. For call sites that
+/// hand-print an echo line instead of going through `run_*`.
+pub(crate) fn command_echo_enabled() -> bool {
+    should_echo()
+}
+
 pub(crate) fn render_command(cmd: &Command) -> String {
     let mut out = cmd.get_program().to_string_lossy().to_string();
     for arg in cmd.get_args() {
@@ -55,12 +60,23 @@ pub(crate) fn render_command(cmd: &Command) -> String {
 }
 
 pub(crate) fn run_forwarded(cmd: &mut Command, label: &str) -> DynResult<()> {
+    // Render once and reuse for both the echo line and any `CommandFailed`.
+    let command = render_command(cmd);
     if should_echo() {
-        println!("$ {}", render_command(cmd));
+        println!("$ {command}");
     }
     let status = cmd.status()?;
     if !status.success() {
-        bail!("{label} failed with {status}");
+        return Err(CommandFailed {
+            message: format!("{label} failed with {status}"),
+            command,
+            label: label.to_string(),
+            exit_code: status.code(),
+            stdout: String::new(),
+            stderr: String::new(),
+            log_path: None,
+        }
+        .into());
     }
     Ok(())
 }
@@ -172,7 +188,16 @@ pub(crate) fn run_logged(cmd: &mut Command, step: &str, log_path: &Path) -> DynR
                 render_command(cmd)
             ));
         }
-        bail!("{detail}");
+        Err(CommandFailed {
+            message: detail,
+            command: render_command(cmd),
+            label: step.to_string(),
+            exit_code: status.code(),
+            stdout: String::new(),
+            stderr: String::new(),
+            log_path: Some(log_path.to_path_buf()),
+        }
+        .into())
     }
 }
 
@@ -189,7 +214,16 @@ fn run_forwarded_with_status(cmd: &mut Command, step: &str) -> DynResult<()> {
         Ok(())
     } else {
         println!("  ✗ {step} ({duration})");
-        bail!("{step} failed with {status}");
+        Err(CommandFailed {
+            message: format!("{step} failed with {status}"),
+            command: render_command(cmd),
+            label: step.to_string(),
+            exit_code: status.code(),
+            stdout: String::new(),
+            stderr: String::new(),
+            log_path: None,
+        }
+        .into())
     }
 }
 
@@ -358,8 +392,10 @@ fn unix_to_ymdhms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
 }
 
 pub(crate) fn run_capture(cmd: &mut Command, label: &str) -> DynResult<Captured> {
+    // Render once and reuse for both the echo line and any `CommandFailed`.
+    let command = render_command(cmd);
     if should_echo() {
-        println!("$ {}", render_command(cmd));
+        println!("$ {command}");
     }
     let Output {
         status,
@@ -374,7 +410,16 @@ pub(crate) fn run_capture(cmd: &mut Command, label: &str) -> DynResult<Captured>
     };
 
     if !captured.status.success() {
-        bail!("{label} failed: {}", captured.stderr);
+        return Err(CommandFailed {
+            message: format!("{label} failed: {}", captured.stderr),
+            command,
+            label: label.to_string(),
+            exit_code: captured.status.code(),
+            stdout: captured.stdout,
+            stderr: captured.stderr,
+            log_path: None,
+        }
+        .into());
     }
 
     Ok(captured)
