@@ -117,7 +117,7 @@ mkdir -p "$EXT" && cp /tmp/cr/r0vm "$EXT/r0vm" && chmod +x "$EXT/r0vm"
 "$SCAFFOLD_BIN" test-node doctor  --project "$P" --json | jq .ok   # → true (all checks pass)
 ```
 
-**4. (Only for real transactions — T4) build the wallet via `setup`.** Two gotchas distinguish `setup` from `test-node prepare`: its circuits precheck does **not** consult the scaffold cache, so `LOGOS_BLOCKCHAIN_CIRCUITS` must be exported first; and it uses cwd discovery, so it must run **inside** the project (no `--project` flag):
+**4. (Only for real transactions — T4) build the wallet via `setup`.** Two gotchas distinguish `setup` from `test-node prepare`: its circuits precheck does **not** consult the scaffold cache (it only accepts `LOGOS_BLOCKCHAIN_CIRCUITS` or `$HOME/.logos-blockchain-circuits/`), so ensure one of those is present before running it; and it uses cwd discovery, so it must run **inside** the project (no `--project` flag):
 
 ```bash
 export LOGOS_BLOCKCHAIN_CIRCUITS="$("$SCAFFOLD_BIN" test-node pins --project "$P" --json | jq -r .circuits_path)"
