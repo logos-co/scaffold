@@ -567,9 +567,11 @@ fn nix_flake_target(project_root: &Path, flake: &str, attr: Option<&str>) -> Str
 ///
 /// Host resolution (explicit `--host` always wins; otherwise derived from the
 /// module's `metadata.json` `type`: `ui_qml` → standalone, else basecamp):
-///   - `standalone` — the module's own app. Flake attr =
-///     `[modules.<name>].standalone_app` if set, else `standalone`.
-///   - `basecamp`   — the basecamp-hosted app. Flake attr = `app`.
+///   - `standalone` — run the module's own app: `nix run <flake>` (the flake's
+///     `apps.<system>.default`), or `#<standalone_app>` when
+///     `[modules.<name>].standalone_app` is set.
+///   - `basecamp`   — launch a profile with this module preinstalled (not yet
+///     wired; see the bail hint).
 ///
 /// The module lookup runs before the `nix` presence check so an unknown module
 /// name fails fast with the known-module list even on a host without Nix.
@@ -587,26 +589,40 @@ fn cmd_basecamp_run(project: Project, module: String, host: Option<String>) -> D
         )
     })?;
 
+    // `nix run` needs a flake. A module captured via `--path <file.lgx>` is a
+    // prebuilt artefact with no runnable app — reject it with a fix-it hint
+    // rather than letting `nix run path:/…/file.lgx` fail opaquely.
+    if let BasecampSource::Path(p) = module_entry_to_source(&project.root, entry) {
+        bail!(
+            "module `{module}` was captured as a prebuilt `.lgx` path (`{p}`), which \
+             `basecamp run` cannot launch. Re-capture it from its flake with \
+             `basecamp modules --flake <ref>#lgx`."
+        );
+    }
+
     ensure_nix_present()?;
 
     let host = host.unwrap_or_else(|| default_run_host(&project.root, entry));
-    let attr = match host.as_str() {
-        "standalone" => entry
-            .standalone_app
-            .clone()
-            .unwrap_or_else(|| "standalone".to_string()),
-        "basecamp" => "app".to_string(),
+    match host.as_str() {
+        "standalone" => {
+            // `apps.<system>.default` by default (bare `nix run <flake>`); an
+            // explicit `standalone_app` overrides the app attr.
+            let target =
+                nix_flake_target(&project.root, &entry.flake, entry.standalone_app.as_deref());
+            println!("running module `{module}` (standalone host: {target})");
+            let mut cmd = Command::new("nix");
+            cmd.current_dir(&project.root).arg("run").arg(&target);
+            let err = cmd.exec();
+            // exec() only returns on failure.
+            bail!("failed to exec `nix run {target}`: {err}");
+        }
+        "basecamp" => bail!(
+            "`basecamp run {module} --host basecamp` (launch a profile with `{module}` \
+             preinstalled) is not yet wired. Build + install it with \
+             `logos-scaffold basecamp install`, then `logos-scaffold basecamp launch <profile>`."
+        ),
         other => bail!("unknown --host `{other}`; expected `standalone` or `basecamp`"),
-    };
-
-    let target = nix_flake_target(&project.root, &entry.flake, Some(&attr));
-    println!("running module `{module}` ({host} host: {target})");
-
-    let mut cmd = Command::new("nix");
-    cmd.current_dir(&project.root).arg("run").arg(&target);
-    let err = cmd.exec();
-    // exec() only returns on failure.
-    bail!("failed to exec `nix run {target}`: {err}");
+    }
 }
 
 /// Default `run` host for a module: `standalone` when its `metadata.json`
@@ -936,6 +952,16 @@ fn cmd_basecamp_build(
     variants: Vec<String>,
     module: Option<String>,
 ) -> DynResult<()> {
+    // Validate variants before anything touches the filesystem: each value
+    // becomes both a `.scaffold/basecamp/<dir>` path component (wiped via
+    // `remove_dir_all`) and a nix attr. The CLI constrains this to a
+    // `ValueEnum`, but the public Rust API takes a free-form `Vec<String>`.
+    for variant in &variants {
+        if variant != "lgx" && variant != "lgx-portable" {
+            bail!("unknown build variant `{variant}`; expected `lgx` or `lgx-portable`");
+        }
+    }
+
     let mut project_modules: std::collections::BTreeMap<String, ModuleEntry> = project
         .config
         .modules
@@ -1195,7 +1221,11 @@ fn build_portable_nix_invocation(
                 .unwrap_or(default_attr);
             (Some(PathBuf::from(abs)), format!(".#{attr}"))
         }
-        None => (None, flake_ref.to_string()),
+        // Remote ref (github:, git+, …). Pin the requested variant attr when
+        // the captured ref omits a `#<attr>` fragment — otherwise nix would
+        // build the flake's default package, ignoring `--variant`.
+        None if flake_ref.contains('#') => (None, flake_ref.to_string()),
+        None => (None, format!("{flake_ref}#{default_attr}")),
     };
 
     let mut args = vec!["build".to_string(), ref_arg];
@@ -3791,7 +3821,8 @@ mod tests {
 
     #[test]
     fn build_portable_nix_invocation_path_ref_cds_into_flake_dir() {
-        let inv = build_portable_nix_invocation("path:/abs/to/foo#lgx-portable", &[], "lgx-portable");
+        let inv =
+            build_portable_nix_invocation("path:/abs/to/foo#lgx-portable", &[], "lgx-portable");
         assert_eq!(inv.cwd_override.as_deref(), Some(Path::new("/abs/to/foo")));
         assert_eq!(
             inv.args,
@@ -3809,6 +3840,18 @@ mod tests {
         assert_eq!(
             inv.args,
             vec!["build", "github:foo/bar#lgx-portable", "--print-out-paths"]
+        );
+    }
+
+    #[test]
+    fn build_portable_nix_invocation_remote_ref_without_fragment_pins_variant() {
+        // A captured remote ref that omits `#<attr>` must still build the
+        // requested variant — otherwise nix builds the flake's default package.
+        let inv = build_portable_nix_invocation("github:foo/bar", &[], "lgx");
+        assert!(inv.cwd_override.is_none());
+        assert_eq!(
+            inv.args,
+            vec!["build", "github:foo/bar#lgx", "--print-out-paths"]
         );
     }
 
