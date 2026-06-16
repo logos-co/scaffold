@@ -2944,13 +2944,14 @@ fn basecamp_launch_setup_hint_takes_precedence_over_profile_validation() {
 
 #[cfg(unix)]
 #[test]
-fn basecamp_launch_rejects_unknown_profile() {
+fn basecamp_launch_accepts_custom_profile_name() {
     let temp = tempdir().expect("tempdir");
     let project = temp.path();
     fs::write(project.join("scaffold.toml"), MINIMAL_SCAFFOLD_TOML).expect("write scaffold.toml");
 
-    // Fake a completed setup so we get past the first gate and reach profile
-    // validation. Launch never reaches `exec` because the profile check fails first.
+    // Fake a completed setup so we get past the first gate. A custom profile
+    // name (not alice/bob) is now accepted: launch advances to the
+    // modules-captured check instead of rejecting the name outright.
     let state_dir = project.join(".scaffold/state");
     fs::create_dir_all(&state_dir).expect("mkdir state");
     fs::write(state_dir.join("basecamp.state"), fake_basecamp_state()).expect("write state");
@@ -2962,7 +2963,11 @@ fn basecamp_launch_rejects_unknown_profile() {
         .arg("charlie")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("unknown profile `charlie`"));
+        .stderr(
+            predicate::str::contains("unknown profile")
+                .not()
+                .and(predicate::str::contains("no modules captured")),
+        );
 }
 
 #[cfg(unix)]
