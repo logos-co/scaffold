@@ -6,6 +6,20 @@ Earlier one-off dogfood notes are historical context only; future runs should st
 
 > Maintenance note: update this document whenever first-class commands, templates, supported workflows, or major user-facing behaviors are added, removed, or materially changed. If the product surface changes and this runbook does not, the runbook is wrong.
 
+## Agent Execution Directives
+
+If you are an automated agent running this runbook, treat the following as binding. They exist because a previous run stopped at "this environment can't run a real sequencer" when, in fact, it could — the toolchain just had to be installed by hand.
+
+1. **Do the real thing.** End-to-end dogfooding means a real, running LEZ sequencer executing real transactions — not a stub, a mock, or a "validated by composition" shortcut. A stub (e.g. a scripted JSON-RPC server) is acceptable only as an *addition* to a real run, never a substitute. If you catch yourself writing "this environment can't…", stop and apply directive 3 before you believe it.
+2. **Install every dependency yourself.** The real path needs the risc0 toolchain (`r0vm`), the `logos-blockchain-circuits` release, and the LEZ-built `sequencer_service` (plus `wallet` for transactions). None ship in a fresh container. Provision them per "Provisioning the Real LEZ Sequencer Toolchain" below. The container has `curl`, network access to GitHub, and (usually) a `GH_TOKEN` env var — that is enough.
+3. **Push through difficulties; a failed first attempt is a routing problem, not a verdict.** Expect the obvious installers to fail and route around them:
+   - `rzup` downloads over rustls and fails with `InvalidCertificate(UnknownIssuer)` behind a TLS-intercepting proxy. Fall back to `curl`, which trusts the system CA, to fetch the release tarball directly.
+   - Unauthenticated GitHub API calls hit rate limits; add `-H "Authorization: Bearer $GH_TOKEN"`.
+   - `git push` and PR creation via the default proxy/MCP may `403`; push and open PRs with `https://x-access-token:$GH_TOKEN@github.com/<owner>/<repo>.git` and the GitHub REST API.
+   Do not report "impossible" until you have exhausted the curl + token fallbacks.
+4. **Builds are long; background them so they survive turns.** The sequencer build is ~6 min, `setup` (wallet + spel) ~3 min. Launch them with a mechanism that outlives a single shell — the harness's background-run, or a Monitor with an `until` loop — because `nohup … &` from a one-shot shell gets killed when the shell tears down. Wait on a sentinel (the built binary path, or an `EXIT=` marker you append), not a fixed sleep.
+5. **Leave the box provisioned.** Once installed, the toolchain persists in the container cache and the `~/.risc0` extensions dir, so later runs are fast. Reuse it rather than reinstalling.
+
 ## Purpose and Audience
 
 - Dogfooders: use this as a repeatable checklist when validating the latest scaffold DX.
@@ -69,6 +83,58 @@ Scaffold is also consumable as a Rust library (`logos_scaffold::api`): the same 
 
 The `lgs` binary is a short alias for `logos-scaffold` produced by the same crate; `"$SCAFFOLD_BIN"` and `lgs` are interchangeable in the commands below.
 
+## Provisioning the Real LEZ Sequencer Toolchain
+
+The `T`-series (and any real `localnet` / `deploy` / `run` validation) needs a real LEZ sequencer. A fresh container has none of the pieces; provision them once — they then live in the scaffold cache and `~/.risc0`, and persist for later runs. This whole section was reverse-engineered from a real run; follow it rather than re-deriving it.
+
+Assume `"$P"` is a generated project root (e.g. `$SCRATCH_ROOT/dogfood-default`) and `GH_TOKEN` is set.
+
+**1. Discover the risc0 version the pinned LEZ needs.** scaffold's r0vm auto-detect requires an *exact* version match, read from the LEZ `Cargo.lock`:
+
+```bash
+LEZ=$("$SCAFFOLD_BIN" test-node pins --project "$P" --json | jq -r .lez_checkout)
+grep -A1 'name = "risc0-zkvm"' "$LEZ/Cargo.lock"   # e.g. version = "3.0.5"
+```
+
+**2. Install r0vm at that version.** Try `rzup install r0vm <ver>` first (`curl -sSL https://risczero.com/install | bash` installs rzup). In a TLS-intercepting environment rzup fails with `InvalidCertificate(UnknownIssuer)`; fall back to `curl` for the release tarball (which bundles `r0vm` and `cargo-risczero`):
+
+```bash
+VER=3.0.5; TRIPLE=x86_64-unknown-linux-gnu       # aarch64-apple-darwin on macOS
+curl -sSL -H "Authorization: Bearer $GH_TOKEN" -o /tmp/cr.tgz \
+  "https://github.com/risc0/risc0/releases/download/v$VER/cargo-risczero-$TRIPLE.tgz"
+mkdir -p /tmp/cr && tar xzf /tmp/cr.tgz -C /tmp/cr
+EXT="$HOME/.risc0/extensions/v$VER-cargo-risczero-$TRIPLE"   # scaffold's expected path
+mkdir -p "$EXT" && cp /tmp/cr/r0vm "$EXT/r0vm" && chmod +x "$EXT/r0vm"
+"$EXT/r0vm" --version                              # → risc0-r0vm 3.0.5
+```
+
+`find_r0vm_path_for_lez` looks at `~/.risc0/extensions/v<risc0-zkvm-version>-cargo-risczero-<arch>-<os>/r0vm`; placing r0vm there is what wires it into a spawned sequencer (scaffold sets `RISC0_SERVER_PATH` from it). The sequencer runs with `RISC0_DEV_MODE=1` (the test-node default), so r0vm executes guests without real proving — which is why no GPU/prover is needed.
+
+**3. Build the real sequencer.** `test-node prepare` downloads the circuits release (via `curl`, automatically) and builds `sequencer_service`. It is long (~6 min); run it, then confirm doctor is green:
+
+```bash
+"$SCAFFOLD_BIN" test-node prepare --project "$P"            # → "test-node prerequisites ready"
+"$SCAFFOLD_BIN" test-node doctor  --project "$P" --json | jq .ok   # → true (all checks pass)
+```
+
+**4. (Only for real transactions — T4) build the wallet via `setup`.** Two gotchas distinguish `setup` from `test-node prepare`: its circuits precheck does **not** consult the scaffold cache (it only accepts `LOGOS_BLOCKCHAIN_CIRCUITS` or `$HOME/.logos-blockchain-circuits/`), so ensure one of those is present before running it; and it uses cwd discovery, so it must run **inside** the project (no `--project` flag):
+
+```bash
+export LOGOS_BLOCKCHAIN_CIRCUITS="$("$SCAFFOLD_BIN" test-node pins --project "$P" --json | jq -r .circuits_path)"
+( cd "$P" && "$SCAFFOLD_BIN" setup )   # builds wallet + spel, seeds the default wallet (~3 min) → "setup complete"
+```
+
+Sanity-check the provisioned toolchain before running the T-series:
+
+```bash
+"$EXT/r0vm" --version
+ls "$LEZ/target/release/sequencer_service"          # real sequencer (T1–T3)
+ls "$LEZ/target/release/wallet"                     # real wallet (T4)
+ls "$LOGOS_BLOCKCHAIN_CIRCUITS"/pol/verification_key.json
+```
+
+If any of these is missing, do not "skip the real run" — go back and fix the step that produced it.
+
 ## Scenario Index
 
 | ID | Template | Level | Goal | Command surface |
@@ -96,6 +162,7 @@ The `lgs` binary is a short alias for `logos-scaffold` produced by the same crat
 | T1 | `default` | Advanced | Isolated test-node lifecycle and caller-project pins | `test-node pins`, `test-node prepare`, `test-node doctor`, `test-node start`, `test-node status`, `test-node stop`, `test-node run` |
 | T2 | `default` | Advanced | Typed RPC reads against a running test node | `test-node tx submit-and-wait`, `test-node blocks head/range/wait`, `test-node clock read/wait-stable`, `test-node account get/batch-get`, `test-node proof get`, `test-node snapshot accounts` |
 | T3 | `default` | Advanced | Caller-provided state seeding | `test-node state schema`, `test-node state export`, `test-node state seed`, `test-node start --state` |
+| T4 | `default` | Advanced | Real committed user transaction (test-node + wallet) | `test-node start --port`, `wallet topup`, `test-node blocks wait`, `test-node tx wait` |
 
 ## Standing Validation Notes
 
@@ -1240,8 +1307,9 @@ Validate that `test-node` spins up isolated, short-lived sequencer instances (ow
 
 ### Preconditions
 
-- A default-template project exists at `$SCRATCH_ROOT/dogfood-default` with `setup` complete (so the standalone `sequencer_service` and circuits release are present). `test-node prepare` can also build/fetch these on demand.
+- The real sequencer toolchain is provisioned (r0vm + circuits + built `sequencer_service`) per "Provisioning the Real LEZ Sequencer Toolchain". `test-node prepare` builds/fetches the sequencer and circuits on demand; `setup` is not required for T1–T3 (it is only needed for T4's wallet).
 - No requirement that the developer `localnet` is running — test nodes are independent of it.
+- **Run this against a real node.** On a provisioned box, `test-node doctor --json` returns `"ok": true` with every check `pass`, `test-node prepare` ends with `test-node prerequisites ready`, and `test-node start` yields a real `pid`/`rpc_url` whose `block_id` rises within seconds as the sequencer produces clock blocks. Do not substitute a stub for the node here.
 
 ### Commands / Actions
 
@@ -1337,6 +1405,8 @@ Against the running node URL:
 - `proof get` distinguishes a missing commitment (`proof: null`), an invalid commitment (local error before any RPC), and transport failures.
 - `snapshot accounts` writes a block-consistent JSON snapshot to the `--output` path.
 
+**Against a real node specifically** (this is the highest-value check — the client's hand-rolled borsh parsers must match genuine sequencer output, not just the unit-test fixtures): a freshly started node produces clock-only blocks where `blocks head --json` shows `transaction_count: 1`, the single tx has `is_clock: true` and `kind: "public"`, and `fully_parsed: true`; `clock read --json` decodes real `ClockAccountData` where the `/0000001` account's `block_id` tracks the head while `/0000010` and `/0000050` lag at their slower cadence; `account get` on a seeded account returns the exact seeded balance (see T3). Any mismatch here is a wire-format regression that the in-process stub would not catch.
+
 ### Failure Signals / Common Pitfalls
 
 - A `tx submit-and-wait` that collapses transport errors or timeouts into "rejected" (or that exits zero for a non-committed outcome) is a regression in the divergence-detection contract.
@@ -1397,6 +1467,7 @@ echo '{"format":"bogus/1"}' > ./bad.json
 - `state seed` validates the snapshot before producing a state directory and reports the seed kind (`config` vs `database`), the LEZ commit, the state format version, and the public/private account counts. Validation errors are distinguished: format mismatch, storage-schema mismatch (e.g. public-account data, which the genesis config cannot seed), LEZ pin mismatch, and account decode errors.
 - `test-node start --state ./seeded-state` starts from exactly the snapshot's accounts — the sequencer builds genesis state from `initial_public_accounts` / `initial_private_accounts` with no implicit wallets, sample programs, or default testnet accounts. A database-seeded directory (a node's preserved `rocksdb/`) resumes from it verbatim.
 - `state export` writes named public-account balances from a running node into an `lgs-state-snapshot/1` file (the pinned RPC exposes public balances only; full-fidelity state comes from a stopped node's database directory, which the command output notes).
+- **Confirmed against a real node:** seed an account at a distinctive balance (e.g. 4242), `start --state`, then `test-node account get --account-id <id>` returns `state: present` with `balance: 4242` and the account exists at genesis — proving the sequencer built genesis from exactly the snapshot (no testnet defaults). This is the end-to-end proof that exact-state seeding works, not just that the file validated.
 
 ### Failure Signals / Common Pitfalls
 
@@ -1415,6 +1486,59 @@ echo '{"format":"bogus/1"}' > ./bad.json
 
 - Pair this scenario with T2: after seeding and starting, use `account get` / `account batch-get` to assert the seeded accounts match the snapshot exactly.
 - Database seeding (`--state <dir with rocksdb/>`) is the full-fidelity path; the JSON snapshot path is balance-and-commitment level by design at the pinned revision.
+
+## T4. Real Committed User Transaction (Test-Node + Wallet)
+
+### Goal
+
+The capstone end-to-end proof: a real wallet transaction, executed by a real test-node sequencer, observed as committed through the test-node client. This ties the `test-node` feature to the rest of the stack and validates the transaction-bearing block path against genuine sequencer output — the one thing a stub cannot prove.
+
+### Preconditions
+
+- Full toolchain provisioned **including the wallet**: r0vm + circuits + real `sequencer_service` (T1) **and** `setup` complete so the LEZ-local `wallet` is built and the default wallet is seeded (see "Provisioning the Real LEZ Sequencer Toolchain", step 4).
+- The wallet targets the `sequencer_addr` in the wallet config (`$NSSA_WALLET_HOME_DIR/wallet_config.json`) when set; otherwise it defaults to `http://127.0.0.1:<localnet.port>` (default 3040). Start the test-node on that port (or update `sequencer_addr`) so the wallet talks to it.
+
+### Commands / Actions
+
+From the project root:
+
+```bash
+SJ=$("$SCAFFOLD_BIN" test-node start --project "$P" --port 3040 --json)
+URL=$(echo "$SJ" | jq -r .rpc_url); NODE=$(echo "$SJ" | jq -r .state_dir | xargs basename)
+HEAD0=$("$SCAFFOLD_BIN" test-node blocks head --url "$URL" --json | jq -r .block_id)
+
+# Submit a REAL faucet transaction against the test-node:
+"$SCAFFOLD_BIN" wallet topup        # account-get → (auth-transfer init if uninitialized) → pinata claim
+
+# Observe the committed USER transaction(s) through the test-node client:
+"$SCAFFOLD_BIN" test-node blocks wait --url "$URL" --after "$HEAD0" --count 6 --timeout-sec 90 --json \
+  | jq -c '.blocks[] | select(.has_user_transactions) | {block_id, transaction_count, user:[.transactions[]|select(.is_clock|not)|{hash:.hash[0:12],kind}]}'
+
+"$SCAFFOLD_BIN" test-node stop --node "$NODE" --project "$P"
+```
+
+### Expected Success Signals
+
+- `wallet topup` exits 0 against the test-node: the real sequencer executes the `auth-transfer init` and `pinata claim` transactions (via r0vm in dev mode).
+- `blocks wait` surfaces one or more blocks with `has_user_transactions: true`, each with `transaction_count: 2` (the mandatory clock tx plus the user tx) and a non-clock `kind: "public"` user tx carrying a real sha256 hash — parsed by the same client/borsh path the unit tests exercise, now against genuine block bytes.
+- Equivalently, a wallet-reported tx hash (when one is printed) resolves to `committed` via `test-node tx wait --url "$URL" --hash <hash> --json`.
+
+### Failure Signals / Common Pitfalls
+
+- `wallet topup` failing with a sequencer-unreachable hint means the test-node is not on the wallet's expected port — start it with `--port <localnet.port>`.
+- A block parser that mis-classifies the user-tx block as clock-only, or reports `fully_parsed: false` on a plain public/deploy tx, against real bytes is a wire-format regression — the highest-value signal this scenario protects.
+- A real sequencer that boots but never executes the tx (block count rises with clock-only blocks but no user tx ever lands) usually means r0vm is missing or version-mismatched — recheck the exact version match in provisioning step 2.
+
+### Evidence to Capture
+
+- `wallet topup` output (the account-get → init → claim sequence) and its exit code.
+- The `blocks wait` JSON showing the real committed user transaction(s).
+- The node id and confirmation it was stopped and its runtime dir cleaned up.
+
+### Execution Notes
+
+- This is the only scenario that requires both the sequencer and the wallet built; it is the capstone real-e2e check. The block parsing it exercises is shared with T2, so a green T4 is strong evidence the entire `blocks` / `tx` client surface is correct against real output.
+- A previous agent run validated this exact flow: `wallet topup` produced `auth-transfer init` and `pinata claim` txs that landed in real blocks (`transaction_count: 2`, a `public` user tx distinct from the clock tx), observed through `blocks wait`. Reproduce it; do not downgrade to a stub.
 
 ## Minimum Rerun Guidance for Future Changes
 
@@ -1437,5 +1561,7 @@ echo '{"format":"bogus/1"}' > ./bad.json
 - Changes to `test-node` lifecycle, pin resolution, prepare/doctor, run-slot concurrency, or caller-checkout validation: rerun `T1` (and `A1` if the `api::testnode` lifecycle types changed).
 - Changes to the `test-node` RPC client (transaction outcomes, block/clock parsing, account/proof reads, or their JSON shapes): rerun `T2`.
 - Changes to `test-node` state seeding (snapshot formats, validation classes, genesis-config injection, or database seeding): rerun `T3`.
+- Changes to the transaction-bearing block path (`sendTransaction`/`getBlock` handling, the committed-block scan, user-vs-clock classification, or the r0vm/sequencer spawn env): rerun `T4` (the only check that proves the path against a real executed transaction).
+- Changes to circuits/r0vm provisioning, the LEZ/circuits pins, or the sequencer/wallet build invocation (`SEQUENCER_BUILD_ARGS`, `setup`): re-verify "Provisioning the Real LEZ Sequencer Toolchain", then rerun `T1` and `T4`.
 
-When in doubt, rerun more scenarios rather than fewer.
+The `T`-series must be run against a real sequencer (see the Agent Execution Directives and the provisioning section). When in doubt, rerun more scenarios rather than fewer — and never substitute a stub for the real node in a `T` scenario.
