@@ -475,7 +475,11 @@ fn cmd_basecamp_launch(
     // env_file, then [basecamp.env] globals, then
     // [basecamp.profiles.<profile>.env] (profile wins).
     if let Some(bc) = project.config.basecamp.as_ref() {
-        let env_file_vars = match bc.profiles.get(&profile).and_then(|p| p.env_file.as_deref()) {
+        let env_file_vars = match bc
+            .profiles
+            .get(&profile)
+            .and_then(|p| p.env_file.as_deref())
+        {
             Some(rel) => load_env_file(&project.root, rel)?,
             None => BTreeMap::new(),
         };
@@ -526,7 +530,8 @@ fn run_with_log_tee(
     use std::sync::{Arc, Mutex};
 
     if let Some(parent) = log_path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create log dir {}", parent.display()))?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create log dir {}", parent.display()))?;
     }
     let log = fs::File::create(log_path)
         .with_context(|| format!("create log file {}", log_path.display()))?;
@@ -580,7 +585,11 @@ fn run_with_log_tee(
         let _ = h.join();
     }
     let _ = fs::remove_file(launch_state_path);
-    std::process::exit(status.code().unwrap_or(if status.success() { 0 } else { 1 }));
+    std::process::exit(
+        status
+            .code()
+            .unwrap_or(if status.success() { 0 } else { 1 }),
+    );
 }
 
 /// Resolved per-profile path manifest emitted by `basecamp paths`.
@@ -711,7 +720,10 @@ fn launch_env(
             env.insert("XDG_RUNTIME_DIR".into(), rt.as_os_str().to_owned());
         }
         None => {
-            env.insert("TMPDIR".into(), profile_dir.join("xdg-tmp").into_os_string());
+            env.insert(
+                "TMPDIR".into(),
+                profile_dir.join("xdg-tmp").into_os_string(),
+            );
         }
     }
     env.insert("LOGOS_PROFILE".into(), profile_name.into());
@@ -931,7 +943,11 @@ fn load_env_file(project_root: &Path, rel: &str) -> DynResult<BTreeMap<String, S
         }
         let line = line.strip_prefix("export ").unwrap_or(line);
         let Some((k, v)) = line.split_once('=') else {
-            bail!("{}:{}: expected KEY=VALUE, got {raw:?}", path.display(), i + 1);
+            bail!(
+                "{}:{}: expected KEY=VALUE, got {raw:?}",
+                path.display(),
+                i + 1
+            );
         };
         let key = k.trim();
         if key.is_empty() {
@@ -4023,7 +4039,10 @@ mod tests {
     fn launch_env_runtime_dir_sets_tmpdir_and_xdg_runtime_dir() {
         let rt = Path::new("/tmp/lgs-alice");
         let env = launch_env(Path::new("/p/alice"), "alice", Some(rt));
-        assert_eq!(env.get("TMPDIR").unwrap(), &OsString::from("/tmp/lgs-alice"));
+        assert_eq!(
+            env.get("TMPDIR").unwrap(),
+            &OsString::from("/tmp/lgs-alice")
+        );
         assert_eq!(
             env.get("XDG_RUNTIME_DIR").unwrap(),
             &OsString::from("/tmp/lgs-alice")

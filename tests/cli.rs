@@ -5015,6 +5015,8 @@ fn basecamp_paths_json_resolves_custom_profile_manifest() {
         .stdout(
             predicate::str::contains("\"profile\": \"carol\"")
                 .and(predicate::str::contains("\"modules_dir\""))
-                .and(predicate::str::contains(".scaffold/basecamp/profiles/carol")),
+                .and(predicate::str::contains(
+                    ".scaffold/basecamp/profiles/carol",
+                )),
         );
 }
