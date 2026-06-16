@@ -1125,8 +1125,9 @@ impl BuildVariant {
 
 #[derive(Debug, clap::Args)]
 struct BasecampBuildArgs {
-    /// Flake variant(s) to build. Defaults to `lgx` (the dev artefact).
-    #[arg(long, value_enum, default_value_t = BuildVariant::Lgx)]
+    /// Flake variant(s) to build. Defaults to `all` (both `lgx` and
+    /// `lgx-portable`), per #174.
+    #[arg(long, value_enum, default_value_t = BuildVariant::All)]
     variant: BuildVariant,
     /// Restrict the build to a single captured project module.
     #[arg(long, value_name = "NAME")]
@@ -1175,9 +1176,10 @@ struct BasecampDevelopArgs {
 /// How `basecamp run` runs a module.
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 enum RunHost {
-    /// The module's own app (`nix run <flake>#<standalone_app|standalone>`).
+    /// The module's own app: `nix run <flake>` (the flake's
+    /// `apps.<system>.default`), or `#<standalone_app>` when configured.
     Standalone,
-    /// The basecamp-hosted app (`nix run <flake>#app`).
+    /// Run inside basecamp — launch a profile with this module preinstalled.
     Basecamp,
 }
 
