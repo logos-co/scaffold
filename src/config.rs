@@ -317,7 +317,11 @@ fn parse_repo_ref(doc: &DocumentMut, name: &str) -> DynResult<Option<RepoRef>> {
         })?,
         None => RepoBuild::default(),
     };
+    // `attr` is either a scalar (`attr = "app"`) or a per-platform map
+    // (`[repos.<name>.attr]` / inline `attr = { aarch64-darwin = "…" }`).
+    // `read_string` returns None for the table form, leaving `attr` empty.
     let attr = read_string(table, "attr").unwrap_or_default();
+    let attr_platform = parse_attr_platform(table, name)?;
     let path = read_string(table, "path").unwrap_or_default();
 
     check_toml_value(&format!("repos.{name}.source"), &source)?;
@@ -331,8 +335,30 @@ fn parse_repo_ref(doc: &DocumentMut, name: &str) -> DynResult<Option<RepoRef>> {
         pin,
         build,
         attr,
+        attr_platform,
         path,
     }))
+}
+
+/// Parse a per-platform `[repos.<name>.attr]` map. Returns an empty map when
+/// `attr` is absent or given in scalar form (handled by the caller's
+/// `read_string`). Keys are nix system triples (`aarch64-darwin`, etc.).
+fn parse_attr_platform(
+    repo_table: &Table,
+    name: &str,
+) -> DynResult<std::collections::BTreeMap<String, String>> {
+    let mut out = std::collections::BTreeMap::new();
+    let Some(tbl) = repo_table.get("attr").and_then(Item::as_table_like) else {
+        return Ok(out);
+    };
+    for (system, v) in tbl.iter() {
+        let s = v.as_str().ok_or_else(|| {
+            anyhow!("invalid scaffold.toml: [repos.{name}.attr].{system} must be a string")
+        })?;
+        check_toml_value(&format!("repos.{name}.attr.{system}"), s)?;
+        out.insert(system.to_string(), s.to_string());
+    }
+    Ok(out)
 }
 
 /// Reject `[repos.<name>].source` values that would let a malicious
@@ -814,6 +840,9 @@ fn write_repo_ref(doc: &mut DocumentMut, name: &str, repo: &RepoRef) -> DynResul
     check_toml_value(&format!("repos.{name}.source"), &repo.source)?;
     check_toml_value(&format!("repos.{name}.pin"), &repo.pin)?;
     check_toml_value(&format!("repos.{name}.attr"), &repo.attr)?;
+    for (system, a) in &repo.attr_platform {
+        check_toml_value(&format!("repos.{name}.attr.{system}"), a)?;
+    }
     check_toml_value(&format!("repos.{name}.path"), &repo.path)?;
     let table = ensure_subtable(doc, "repos", name);
     table["source"] = value(&repo.source);
@@ -823,7 +852,16 @@ fn write_repo_ref(doc: &mut DocumentMut, name: &str, repo: &RepoRef) -> DynResul
     } else {
         table.remove("build");
     }
-    if !repo.attr.is_empty() {
+    // Per-platform map wins over the scalar form; render it as an inline table
+    // (`attr = { aarch64-darwin = "…" }`) so it stays a value under the
+    // `[repos.<name>]` header rather than a dotted/child table.
+    if !repo.attr_platform.is_empty() {
+        let mut inline = toml_edit::InlineTable::new();
+        for (system, a) in &repo.attr_platform {
+            inline.insert(system, a.as_str().into());
+        }
+        table["attr"] = value(inline);
+    } else if !repo.attr.is_empty() {
         table["attr"] = value(&repo.attr);
     } else {
         table.remove("attr");
@@ -895,6 +933,7 @@ pub(crate) fn default_lez_repo(pin: &str) -> RepoRef {
         pin: pin.to_string(),
         build: RepoBuild::Cargo,
         attr: String::new(),
+        attr_platform: std::collections::BTreeMap::new(),
         path: String::new(),
     }
 }
@@ -905,6 +944,7 @@ pub(crate) fn default_spel_repo(pin: &str) -> RepoRef {
         pin: pin.to_string(),
         build: RepoBuild::Cargo,
         attr: String::new(),
+        attr_platform: std::collections::BTreeMap::new(),
         path: String::new(),
     }
 }
@@ -915,6 +955,7 @@ pub(crate) fn default_basecamp_repo(pin: &str) -> RepoRef {
         pin: pin.to_string(),
         build: RepoBuild::NixFlake,
         attr: BASECAMP_ATTR.to_string(),
+        attr_platform: std::collections::BTreeMap::new(),
         path: String::new(),
     }
 }
@@ -925,6 +966,7 @@ pub(crate) fn default_lgpm_repo(pin: &str) -> RepoRef {
         pin: pin.to_string(),
         build: RepoBuild::NixFlake,
         attr: LGPM_ATTR.to_string(),
+        attr_platform: std::collections::BTreeMap::new(),
         path: String::new(),
     }
 }
@@ -1019,6 +1061,43 @@ attr = "cli"
         let lgpm = cfg.lgpm_repo.expect("lgpm present");
         assert_eq!(lgpm.build, RepoBuild::NixFlake);
         assert_eq!(lgpm.attr, "cli");
+    }
+
+    #[test]
+    fn repos_basecamp_attr_per_platform_map_parses_resolves_and_round_trips() {
+        let toml = minimal_v0_2_0()
+            + &format!(
+                r#"
+[repos.basecamp]
+source = "{}"
+pin = "{}"
+build = "nix-flake"
+
+[repos.basecamp.attr]
+aarch64-darwin = "bin-macos-app"
+x86_64-linux = "app"
+"#,
+                BASECAMP_SOURCE, DEFAULT_BASECAMP_PIN,
+            );
+        let cfg = parse_config(&toml).expect("parse");
+        let bc = cfg.basecamp_repo.clone().expect("basecamp present");
+        // Scalar `attr` stays empty for the table form; the map carries the values.
+        assert!(bc.attr.is_empty());
+        assert_eq!(bc.effective_attr("aarch64-darwin"), "bin-macos-app");
+        assert_eq!(bc.effective_attr("x86_64-linux"), "app");
+        // Unmapped platform falls back to the (empty) scalar.
+        assert_eq!(bc.effective_attr("riscv64-linux"), "");
+
+        // The per-platform map survives a serialize -> parse round-trip so
+        // `save_project_config` (run by `setup`) never clobbers it.
+        let serialized = serialize_config(&cfg).expect("serialize");
+        let bc2 = parse_config(&serialized)
+            .expect("re-parse")
+            .basecamp_repo
+            .expect("basecamp present after round-trip");
+        assert_eq!(bc2.effective_attr("aarch64-darwin"), "bin-macos-app");
+        assert_eq!(bc2.effective_attr("x86_64-linux"), "app");
+        assert!(bc2.attr.is_empty());
     }
 
     #[test]

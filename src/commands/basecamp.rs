@@ -158,7 +158,10 @@ fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
     if basecamp_repo.pin.is_empty() {
         basecamp_repo.pin = DEFAULT_BASECAMP_PIN.to_string();
     }
-    if basecamp_repo.attr.is_empty() {
+    // Only fall back to the scalar default when neither the scalar `attr` nor
+    // a per-platform `attr` map was configured — otherwise we'd clobber a
+    // user's `[repos.basecamp.attr]` map on the next `save_project_config`.
+    if basecamp_repo.attr.is_empty() && basecamp_repo.attr_platform.is_empty() {
         basecamp_repo.attr = BASECAMP_ATTR.to_string();
     }
 
@@ -202,7 +205,7 @@ fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
     let basecamp_bin = build_basecamp_app(
         &project.root,
         &basecamp_repo_path,
-        &basecamp_repo.attr,
+        basecamp_repo.effective_attr(nix_current_system()),
         &pin_artifacts,
     )?;
     // lgpm is built from a flake ref derived from [repos.lgpm].
@@ -238,16 +241,17 @@ fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
 /// the legacy `[basecamp].lgpm_flake` string used).
 fn format_flake_ref(repo: &RepoRef) -> String {
     debug_assert!(repo.build == RepoBuild::NixFlake);
-    if repo.attr.is_empty() {
+    let attr = repo.effective_attr(nix_current_system());
+    if attr.is_empty() {
         format!("{}/{}", repo.source, repo.pin)
     } else {
-        format!("{}/{}#{}", repo.source, repo.pin, repo.attr)
+        format!("{}/{}#{}", repo.source, repo.pin, attr)
     }
 }
 
 fn is_portable_basecamp(basecamp_repo: Option<&RepoRef>) -> bool {
     basecamp_repo
-        .map(|r| BASECAMP_PORTABLE_ATTRS.contains(&r.attr.as_str()))
+        .map(|r| BASECAMP_PORTABLE_ATTRS.contains(&r.effective_attr(nix_current_system())))
         .unwrap_or(false)
 }
 
@@ -3180,6 +3184,7 @@ mod tests {
             pin: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
             build: RepoBuild::NixFlake,
             attr: attr.to_string(),
+            attr_platform: std::collections::BTreeMap::new(),
             path: String::new(),
         }
     }
