@@ -140,10 +140,9 @@ pub(crate) struct BasecampConfig {
     /// appended onto the value `lgs` inherited at launch time (so basecamp's
     /// own paths aren't clobbered). Applied before `env`.
     pub(crate) env_append: std::collections::BTreeMap<String, Vec<String>>,
-    /// `[basecamp.profiles.<name>.env]` — per-profile plain env. Wins over the
-    /// global `[basecamp.env]` for the launched profile.
-    pub(crate) profile_env:
-        std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    /// `[basecamp.profiles.<name>]` — per-profile launch config, keyed by an
+    /// arbitrary profile name (no alice/bob gate).
+    pub(crate) profiles: std::collections::BTreeMap<String, BasecampProfile>,
 }
 
 impl Default for BasecampConfig {
@@ -153,9 +152,20 @@ impl Default for BasecampConfig {
             port_stride: 10,
             env: std::collections::BTreeMap::new(),
             env_append: std::collections::BTreeMap::new(),
-            profile_env: std::collections::BTreeMap::new(),
+            profiles: std::collections::BTreeMap::new(),
         }
     }
+}
+
+/// `[basecamp.profiles.<name>]` — per-profile launch configuration.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BasecampProfile {
+    /// `.env` — per-profile plain env (replace semantics). Wins over the
+    /// global `[basecamp.env]` for the launched profile.
+    pub(crate) env: std::collections::BTreeMap<String, String>,
+    /// `.env_file` — path (project-relative or absolute) to a dotenv-style
+    /// `KEY=VALUE` file sourced before the `env` layers override it.
+    pub(crate) env_file: Option<String>,
 }
 
 #[derive(Clone, Debug)]

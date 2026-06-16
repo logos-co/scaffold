@@ -361,27 +361,15 @@ fn cmd_basecamp_launch(project: Project, profile: String) -> DynResult<()> {
         bail!("basecamp not set up yet; run: logos-scaffold basecamp setup");
     }
 
-    if profile != BASECAMP_PROFILE_ALICE && profile != BASECAMP_PROFILE_BOB {
-        bail!(
-            "unknown profile `{profile}`; v1 only supports `{}` and `{}`",
-            BASECAMP_PROFILE_ALICE,
-            BASECAMP_PROFILE_BOB
-        );
-    }
-    // Defense-in-depth against a future caller bypassing the allowlist: refuse
-    // any profile name that could escape the profiles root via path separators.
+    // Any profile name is accepted (custom profiles beyond the alice/bob pair
+    // setup seeds); an unknown profile is seeded on first launch below. Still
+    // refuse names that could escape the profiles root via path separators.
     if profile.contains('/') || profile.contains(MAIN_SEPARATOR) {
         bail!("profile name `{profile}` must not contain path separators");
     }
 
     let profiles_root = project.root.join(BASECAMP_PROFILES_REL);
     let profile_dir = profiles_root.join(&profile);
-    if !profile_dir.is_dir() {
-        bail!(
-            "profile `{profile}` missing under {}; re-run `logos-scaffold basecamp setup`",
-            profiles_root.display()
-        );
-    }
 
     let launch_state_path = profile_dir.join("launch.state");
     let expected_comm = basecamp_comm_name(&state.basecamp_bin);
@@ -447,10 +435,17 @@ fn cmd_basecamp_launch(project: Project, profile: String) -> DynResult<()> {
 
     let mut env = launch_env(&profile_dir, &profile);
     // Layer scaffold.toml-declared launch env on top of the scaffold-owned
-    // base (#163): [basecamp.env_append] path joins, then [basecamp.env]
-    // globals, then [basecamp.profiles.<profile>.env] (profile wins).
+    // base (#163): [basecamp.env_append] path joins, then the per-profile
+    // env_file, then [basecamp.env] globals, then
+    // [basecamp.profiles.<profile>.env] (profile wins).
     if let Some(bc) = project.config.basecamp.as_ref() {
-        apply_launch_env_overrides(&mut env, bc, &profile, |k| std::env::var_os(k));
+        let env_file_vars = match bc.profiles.get(&profile).and_then(|p| p.env_file.as_deref()) {
+            Some(rel) => load_env_file(&project.root, rel)?,
+            None => BTreeMap::new(),
+        };
+        apply_launch_env_overrides(&mut env, bc, &profile, &env_file_vars, |k| {
+            std::env::var_os(k)
+        });
     }
     println!("launching basecamp for profile {profile}");
     let mut cmd = Command::new(&state.basecamp_bin);
@@ -633,14 +628,17 @@ fn cmd_basecamp_run(project: Project, module: String, host: Option<String>) -> D
 /// `launch_env` base. Resolution order, last-writer-wins per key:
 ///   1. `[basecamp.env_append]` — `:`-join each list onto the value `lgs`
 ///      inherited (`inherited(key)`), so basecamp's own paths aren't clobbered.
-///   2. `[basecamp.env]` — global plain replace.
-///   3. `[basecamp.profiles.<profile>.env]` — per-profile plain replace (wins).
+///   2. `[basecamp.profiles.<profile>.env_file]` — already parsed into
+///      `env_file_vars` by the caller; sourced before the `env` layers.
+///   3. `[basecamp.env]` — global plain replace.
+///   4. `[basecamp.profiles.<profile>.env]` — per-profile plain replace (wins).
 /// `inherited` is injected (real caller passes `std::env::var_os`) so the
 /// append semantics are unit-testable without touching the process environment.
 fn apply_launch_env_overrides(
     env: &mut BTreeMap<String, OsString>,
     cfg: &BasecampConfig,
     profile: &str,
+    env_file_vars: &BTreeMap<String, String>,
     inherited: impl Fn(&str) -> Option<OsString>,
 ) {
     for (key, paths) in &cfg.env_append {
@@ -663,14 +661,50 @@ fn apply_launch_env_overrides(
         combined.push(paths.join(":"));
         env.insert(key.clone(), combined);
     }
+    for (key, val) in env_file_vars {
+        env.insert(key.clone(), OsString::from(val));
+    }
     for (key, val) in &cfg.env {
         env.insert(key.clone(), OsString::from(val));
     }
-    if let Some(profile_env) = cfg.profile_env.get(profile) {
-        for (key, val) in profile_env {
+    if let Some(p) = cfg.profiles.get(profile) {
+        for (key, val) in &p.env {
             env.insert(key.clone(), OsString::from(val));
         }
     }
+}
+
+/// Parse a per-profile `env_file` (dotenv-style `KEY=VALUE` lines) into a map,
+/// resolved relative to the project root. Blank lines and `#` comments are
+/// skipped, an optional leading `export ` is stripped, and matching single or
+/// double quotes around the value are removed.
+fn load_env_file(project_root: &Path, rel: &str) -> DynResult<BTreeMap<String, String>> {
+    let path = project_root.join(rel);
+    let text = fs::read_to_string(&path)
+        .with_context(|| format!("read basecamp profile env_file {}", path.display()))?;
+    let mut out = BTreeMap::new();
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((k, v)) = line.split_once('=') else {
+            bail!("{}:{}: expected KEY=VALUE, got {raw:?}", path.display(), i + 1);
+        };
+        let key = k.trim();
+        if key.is_empty() {
+            bail!("{}:{}: empty env var name", path.display(), i + 1);
+        }
+        let val = v.trim();
+        let val = val
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .or_else(|| val.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+            .unwrap_or(val);
+        out.insert(key.to_string(), val.to_string());
+    }
+    Ok(out)
 }
 
 /// Remove a profile's `xdg-data` and `xdg-cache` trees. Refuses to operate on any
@@ -3603,15 +3637,18 @@ mod tests {
             "QT_PLUGIN_PATH".into(),
             vec!["/nix/store/a/plugins".into(), "/nix/store/b/plugins".into()],
         );
-        cfg.profile_env.insert(
+        cfg.profiles.insert(
             "alice".into(),
-            [("LOGOS_STORAGE_API_PORT".to_string(), "8081".to_string())]
-                .into_iter()
-                .collect(),
+            crate::model::BasecampProfile {
+                env: [("LOGOS_STORAGE_API_PORT".to_string(), "8081".to_string())]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
         );
 
         let mut env = launch_env(Path::new("/p/alice"), "alice");
-        apply_launch_env_overrides(&mut env, &cfg, "alice", |k| {
+        apply_launch_env_overrides(&mut env, &cfg, "alice", &BTreeMap::new(), |k| {
             (k == "QT_PLUGIN_PATH").then(|| OsString::from("/usr/lib/qt/plugins"))
         });
 
@@ -3632,12 +3669,61 @@ mod tests {
     }
 
     #[test]
+    fn launch_env_file_vars_sourced_before_env_overrides() {
+        // env_file is a base layer: global [basecamp.env] and per-profile env
+        // both override it, while keys only in env_file pass through.
+        let mut cfg = BasecampConfig::default();
+        cfg.env.insert("SHARED".into(), "from-global".into());
+        cfg.profiles.insert(
+            "alice".into(),
+            crate::model::BasecampProfile {
+                env: [("PROFILE_ONLY".to_string(), "from-profile".to_string())]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+        );
+        let env_file_vars: BTreeMap<String, String> = [
+            ("SHARED".to_string(), "from-file".to_string()),
+            ("FILE_ONLY".to_string(), "kept".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let mut env = launch_env(Path::new("/p/alice"), "alice");
+        apply_launch_env_overrides(&mut env, &cfg, "alice", &env_file_vars, |_| None);
+        // global env wins over env_file for the shared key.
+        assert_eq!(env.get("SHARED").unwrap(), &OsString::from("from-global"));
+        // env_file-only key survives.
+        assert_eq!(env.get("FILE_ONLY").unwrap(), &OsString::from("kept"));
+        // per-profile env applied.
+        assert_eq!(
+            env.get("PROFILE_ONLY").unwrap(),
+            &OsString::from("from-profile")
+        );
+    }
+
+    #[test]
+    fn load_env_file_parses_dotenv_lines() {
+        let tmp = tempdir().expect("tempdir");
+        let root = tmp.path();
+        fs::write(
+            root.join("alice.env"),
+            "# comment\n\nexport FOO=bar\nQUOTED=\"a b\"\nSINGLE='x'\n",
+        )
+        .unwrap();
+        let vars = load_env_file(root, "alice.env").expect("load");
+        assert_eq!(vars.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(vars.get("QUOTED").map(String::as_str), Some("a b"));
+        assert_eq!(vars.get("SINGLE").map(String::as_str), Some("x"));
+    }
+
+    #[test]
     fn launch_env_append_uses_only_configured_when_no_inherited_value() {
         let mut cfg = BasecampConfig::default();
         cfg.env_append
             .insert("LD_LIBRARY_PATH".into(), vec!["/nix/store/x/lib".into()]);
         let mut env = launch_env(Path::new("/p/bob"), "bob");
-        apply_launch_env_overrides(&mut env, &cfg, "bob", |_| None);
+        apply_launch_env_overrides(&mut env, &cfg, "bob", &BTreeMap::new(), |_| None);
         assert_eq!(
             env.get("LD_LIBRARY_PATH").unwrap(),
             &OsString::from("/nix/store/x/lib")
@@ -3655,7 +3741,7 @@ mod tests {
             .insert("LD_LIBRARY_PATH".into(), vec!["/nix/store/x/lib".into()]);
         let mut env = launch_env(Path::new("/p/bob"), "bob");
         let weird_for_closure = weird.clone();
-        apply_launch_env_overrides(&mut env, &cfg, "bob", move |k| {
+        apply_launch_env_overrides(&mut env, &cfg, "bob", &BTreeMap::new(), move |k| {
             (k == "LD_LIBRARY_PATH").then(|| weird_for_closure.clone())
         });
         let mut expected = weird;
@@ -3666,14 +3752,17 @@ mod tests {
     #[test]
     fn launch_env_profile_env_does_not_leak_across_profiles() {
         let mut cfg = BasecampConfig::default();
-        cfg.profile_env.insert(
+        cfg.profiles.insert(
             "alice".into(),
-            [("PORT".to_string(), "1".to_string())]
-                .into_iter()
-                .collect(),
+            crate::model::BasecampProfile {
+                env: [("PORT".to_string(), "1".to_string())]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
         );
         let mut bob_env = launch_env(Path::new("/p/bob"), "bob");
-        apply_launch_env_overrides(&mut bob_env, &cfg, "bob", |_| None);
+        apply_launch_env_overrides(&mut bob_env, &cfg, "bob", &BTreeMap::new(), |_| None);
         assert!(
             bob_env.get("PORT").is_none(),
             "alice's profile env must not leak to bob"
