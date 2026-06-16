@@ -4544,33 +4544,24 @@ fn setup_hard_fails_on_pre_v0_2_0_scaffold_toml() {
     assert_pre_v0_2_0_rejection(&["setup"]);
 }
 
-/// F1: `setup` must bail with the scaffold-styled circuits-prereq error
-/// before any cargo work when neither `LOGOS_BLOCKCHAIN_CIRCUITS` nor
-/// `~/.logos-blockchain-circuits/` is reachable. End-to-end check that the
-/// `check_logos_blockchain_circuits` precheck is wired into `cmd_setup`.
+/// F1: `doctor` must surface the configured circuits install directory when
+/// the release has not been fetched yet.
 #[test]
-fn setup_bails_with_scaffold_styled_error_when_circuits_missing() {
+fn doctor_reports_configured_circuits_missing() {
     let temp = tempdir().expect("tempdir");
     let project = temp.path();
     fs::write(project.join("scaffold.toml"), MINIMAL_SCAFFOLD_TOML).expect("write scaffold.toml");
 
-    // Point HOME at a directory with no `.logos-blockchain-circuits` so the
-    // home-dir fallback also fails — otherwise the developer running the
-    // suite would silently pass via their real $HOME.
-    let fake_home = project.join("fake-home");
-    fs::create_dir_all(&fake_home).expect("mkdir fake home");
-
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(project)
-        .env("HOME", &fake_home)
         .env_remove("LOGOS_BLOCKCHAIN_CIRCUITS")
-        .arg("setup")
+        .arg("doctor")
         .assert()
         .failure()
-        .stderr(
+        .stdout(
             predicate::str::contains("logos-blockchain-circuits")
-                .and(predicate::str::contains("$LOGOS_BLOCKCHAIN_CIRCUITS unset"))
-                .and(predicate::str::contains("logos-scaffold doctor"))
+                .and(predicate::str::contains(".scaffold/circuits"))
+                .and(predicate::str::contains("logos-scaffold setup"))
                 // Must NOT surface a raw cargo build-script panic.
                 .and(predicate::str::contains("logos-blockchain-pol").not())
                 .and(predicate::str::contains("build script").not()),
