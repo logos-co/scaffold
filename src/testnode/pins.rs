@@ -300,7 +300,7 @@ pub fn prepare_test_node(
     };
     let circuits_path = ensure_circuits_release(&cache_root_resolved, &pins.circuits_version)?;
     // Export for the sequencer build below and for any node spawned later in
-    // this process. See `ensure_circuits_for_subprocess` for the safety note.
+    // this process. See `ensure_circuits_for_project` for the safety note.
     std::env::set_var(LOGOS_BLOCKCHAIN_CIRCUITS_ENV, &circuits_path);
 
     let mut build_cmd = Command::new("cargo");
@@ -584,6 +584,7 @@ mod tests {
                 basecamp_repo: None,
                 lgpm_repo: None,
                 wallet_home_dir: ".scaffold/wallet".into(),
+                circuits: crate::model::CircuitsConfig::default(),
                 framework: FrameworkConfig {
                     kind: "default".into(),
                     version: "0.1.0".into(),
