@@ -66,6 +66,12 @@ pub(crate) enum BasecampAction {
     Doctor {
         json: bool,
     },
+    /// Print the resolved per-profile path manifest (xdg dirs, runtime dir,
+    /// module/plugin dirs, log file). Read-only; no nix.
+    Paths {
+        profile: String,
+        json: bool,
+    },
     /// Print the canonical compatibility doc (`docs/basecamp-module-requirements.md`,
     /// embedded at compile time). Runnable outside a scaffold project so LLMs
     /// exploring the CLI can retrieve the rules before setup.
@@ -111,6 +117,7 @@ pub(crate) fn basecamp_for_project(project: Project, action: BasecampAction) -> 
         }
         BasecampAction::BuildPortable => cmd_basecamp_build_portable(project),
         BasecampAction::Doctor { json } => cmd_basecamp_doctor(project, json),
+        BasecampAction::Paths { profile, json } => cmd_basecamp_paths(project, profile, json),
         // Handled above via early return (project-context-free).
         BasecampAction::Docs => unreachable!("handled before load_project"),
     }
@@ -560,6 +567,94 @@ fn run_with_log_tee(
     }
     let _ = fs::remove_file(launch_state_path);
     std::process::exit(status.code().unwrap_or(if status.success() { 0 } else { 1 }));
+}
+
+/// Resolved per-profile path manifest emitted by `basecamp paths`.
+#[derive(Debug, serde::Serialize)]
+struct BasecampProfilePaths {
+    profile: String,
+    profile_dir: String,
+    xdg_config_home: String,
+    xdg_data_home: String,
+    xdg_cache_home: String,
+    /// `TMPDIR` launch would export (runtime_dir if resolved, else `xdg-tmp`).
+    tmpdir: String,
+    /// `XDG_RUNTIME_DIR` launch would export; `None` when no runtime_dir resolves.
+    xdg_runtime_dir: Option<String>,
+    modules_dir: String,
+    plugins_dir: String,
+    launch_state: String,
+    /// Where logs go when logging is enabled (configured `log_file`, else the
+    /// path a bare `--log-file` would use).
+    log_file: String,
+    /// Resolved per-profile `env_file`, if configured.
+    env_file: Option<String>,
+}
+
+/// `basecamp paths <profile>` — print the resolved per-profile path manifest.
+/// Pure path resolution: no nix, no filesystem mutation, so it works before
+/// `setup` to preview where a profile's data will live.
+fn cmd_basecamp_paths(project: Project, profile: String, json: bool) -> DynResult<()> {
+    if profile.contains('/') || profile.contains(MAIN_SEPARATOR) {
+        bail!("profile name `{profile}` must not contain path separators");
+    }
+    let basecamp_repo = project.config.basecamp_repo.as_ref();
+    let bc = project.config.basecamp.as_ref();
+    let profiles_root = project.root.join(BASECAMP_PROFILES_REL);
+    let profile_dir = profiles_root.join(&profile);
+    let (modules_dir, plugins_dir) =
+        profile_modules_and_plugins(&profiles_root, &profile, basecamp_repo);
+    let runtime_dir = resolve_profile_runtime_dir(&project.root, &profile, bc);
+    let tmpdir = runtime_dir
+        .clone()
+        .unwrap_or_else(|| profile_dir.join("xdg-tmp"));
+    let profile_cfg = bc.and_then(|c| c.profiles.get(&profile));
+    let log_file = profile_cfg
+        .and_then(|p| p.log_file.as_deref())
+        .map(|rel| project.root.join(rel))
+        .unwrap_or_else(|| profile_dir.join("basecamp.log"));
+    let env_file = profile_cfg
+        .and_then(|p| p.env_file.as_deref())
+        .map(|rel| project.root.join(rel));
+
+    let paths = BasecampProfilePaths {
+        profile: profile.clone(),
+        profile_dir: profile_dir.display().to_string(),
+        xdg_config_home: profile_dir.join("xdg-config").display().to_string(),
+        xdg_data_home: profile_dir.join("xdg-data").display().to_string(),
+        xdg_cache_home: profile_dir.join("xdg-cache").display().to_string(),
+        tmpdir: tmpdir.display().to_string(),
+        xdg_runtime_dir: runtime_dir.as_ref().map(|p| p.display().to_string()),
+        modules_dir: modules_dir.display().to_string(),
+        plugins_dir: plugins_dir.display().to_string(),
+        launch_state: profile_dir.join("launch.state").display().to_string(),
+        log_file: log_file.display().to_string(),
+        env_file: env_file.as_ref().map(|p| p.display().to_string()),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&paths)?);
+    } else {
+        println!("basecamp profile `{}` paths:", paths.profile);
+        println!("  profile_dir:      {}", paths.profile_dir);
+        println!("  xdg_config_home:  {}", paths.xdg_config_home);
+        println!("  xdg_data_home:    {}", paths.xdg_data_home);
+        println!("  xdg_cache_home:   {}", paths.xdg_cache_home);
+        println!("  tmpdir:           {}", paths.tmpdir);
+        println!(
+            "  xdg_runtime_dir:  {}",
+            paths.xdg_runtime_dir.as_deref().unwrap_or("(unset)")
+        );
+        println!("  modules_dir:      {}", paths.modules_dir);
+        println!("  plugins_dir:      {}", paths.plugins_dir);
+        println!("  launch_state:     {}", paths.launch_state);
+        println!("  log_file:         {}", paths.log_file);
+        println!(
+            "  env_file:         {}",
+            paths.env_file.as_deref().unwrap_or("(unset)")
+        );
+    }
+    Ok(())
 }
 
 /// Env map exported to the basecamp child on launch. Scaffold-owned names only;

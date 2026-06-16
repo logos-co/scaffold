@@ -4543,3 +4543,27 @@ fn run_no_reset_flag_overrides_config_reset_true() {
         .stdout(predicate::str::contains("[1/5] Building..."))
         .stderr(predicate::str::contains("scaffold.toml requested reset = true").not());
 }
+
+#[test]
+fn basecamp_paths_json_resolves_custom_profile_manifest() {
+    // `basecamp paths` is pure path resolution: it needs only a loadable
+    // project (no setup, no nix) and accepts any profile name.
+    let temp = tempdir().expect("tempdir");
+    let lez_path = temp.path().join("lez");
+    fs::create_dir_all(&lez_path).expect("create lez path");
+    write_scaffold_toml(temp.path(), &lez_path);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("basecamp")
+        .arg("paths")
+        .arg("carol")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("\"profile\": \"carol\"")
+                .and(predicate::str::contains("\"modules_dir\""))
+                .and(predicate::str::contains(".scaffold/basecamp/profiles/carol")),
+        );
+}
