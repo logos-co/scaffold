@@ -1496,7 +1496,7 @@ The capstone end-to-end proof: a real wallet transaction, executed by a real tes
 ### Preconditions
 
 - Full toolchain provisioned **including the wallet**: r0vm + circuits + real `sequencer_service` (T1) **and** `setup` complete so the LEZ-local `wallet` is built and the default wallet is seeded (see "Provisioning the Real LEZ Sequencer Toolchain", step 4).
-- The default wallet's sequencer address resolves to `http://127.0.0.1:<localnet.port>` (default 3040). Start the test-node on that port so the wallet talks to it (the wallet has no node-URL override; matching the port is the supported way to point it at a test-node).
+- The wallet targets the `sequencer_addr` in the wallet config (`$NSSA_WALLET_HOME_DIR/wallet_config.json`) when set; otherwise it defaults to `http://127.0.0.1:<localnet.port>` (default 3040). Start the test-node on that port (or update `sequencer_addr`) so the wallet talks to it.
 
 ### Commands / Actions
 
