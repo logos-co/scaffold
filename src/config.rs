@@ -588,6 +588,18 @@ fn parse_circuits(doc: &DocumentMut) -> DynResult<CircuitsConfig> {
         check_toml_value("circuits.url_template", template)?;
     }
     check_toml_value("circuits.install_dir", &install_dir)?;
+    // `install_dir` is joined onto the project root and handed to
+    // `create_dir_all` + tarball extraction; a `..` component would let the
+    // config write outside the project. Reject parent-dir traversal.
+    if std::path::Path::new(&install_dir)
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        bail!(
+            "invalid scaffold.toml: [circuits].install_dir must not contain `..` \
+             components (would escape the project root): {install_dir:?}"
+        );
+    }
 
     Ok(CircuitsConfig {
         version,
@@ -1057,6 +1069,22 @@ install_dir = "vendor/circuits"
             Some("https://example.invalid/circuits-v{version}-{triple}.tar.gz")
         );
         assert_eq!(cfg.circuits.install_dir, "vendor/circuits");
+    }
+
+    #[test]
+    fn circuits_install_dir_rejects_parent_dir_traversal() {
+        // `install_dir` is create_dir_all'd + extracted into; a `..` component
+        // would escape the project root when joined.
+        let toml = minimal_v0_2_0()
+            + r#"
+[circuits]
+version = "9.9.9"
+install_dir = "../../etc/evil"
+"#;
+        let err = parse_config(&toml).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("install_dir"), "{msg}");
+        assert!(msg.contains(".."), "{msg}");
     }
 
     #[test]
