@@ -215,7 +215,7 @@ When a module loads, liblogos opens a Unix-domain socket (a `QLocalServer` named
 [SubprocessContainer] Unix socket path too long (122 >= 104)
 ```
 
-scaffold's default per-profile runtime root is the long in-profile `…/.scaffold/basecamp/profiles/<profile>/xdg-tmp`, which for a typical project path plus the `logos_token_<module>_<pid>` socket name easily blows the 104-byte budget. To avoid that, `launch` resolves `runtime_dir` with this precedence and exports it as both `TMPDIR` and `XDG_RUNTIME_DIR`:
+the in-profile runtime root `…/.scaffold/basecamp/profiles/<profile>/xdg-tmp` is long: for a typical project path plus the `logos_token_<module>_<pid>` socket name it easily blows the 104-byte budget. To avoid that, `launch` resolves `runtime_dir` with this precedence and exports it as both `TMPDIR` and `XDG_RUNTIME_DIR`:
 
 1. **`[basecamp.profiles.<name>].runtime_dir`** if set (project-relative paths are joined to the project root).
 2. **`/tmp/lgs-<profile>`** — the automatic default on macOS (short, well under the budget).
