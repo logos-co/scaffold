@@ -129,6 +129,19 @@ jobs:
             exit 1
           fi
 
+      # The rendered project ships a risc0 guest crate (methods/), whose build
+      # script cross-compiles to riscv32im-risc0-zkvm-elf and needs the Risc Zero
+      # Rust toolchain. Without it the `lgs build` step below panics with
+      # "Risc Zero Rust toolchain not found. Try running `rzup install rust`".
+      # rzup is risc0's toolchain manager; it registers a `risc0` rustup
+      # toolchain that risc0-build then discovers.
+      - name: Install Risc Zero toolchain
+        run: |
+          set -euo pipefail
+          curl -L https://risczero.com/install | bash
+          echo "$HOME/.risc0/bin" >> "$GITHUB_PATH"
+          "$HOME/.risc0/bin/rzup" install rust
+
       - name: Build rendered project workspace
         run: |
           set -euo pipefail
