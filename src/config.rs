@@ -649,9 +649,10 @@ fn parse_circuits(doc: &DocumentMut) -> DynResult<CircuitsConfig> {
         check_toml_value("circuits.url_template", template)?;
     }
     check_toml_value("circuits.install_dir", &install_dir)?;
-    // `install_dir` is joined onto the project root and handed to
-    // `create_dir_all` + tarball extraction; a `..` component would let the
-    // config write outside the project. Reject parent-dir traversal.
+    // A relative `install_dir` is joined onto the project root (an absolute one
+    // is used as-is — see `circuits_install_dir`) and handed to `create_dir_all`
+    // + tarball extraction; a `..` component would let the config write outside
+    // the project. Reject parent-dir traversal.
     if std::path::Path::new(&install_dir)
         .components()
         .any(|c| matches!(c, std::path::Component::ParentDir))
