@@ -947,20 +947,36 @@ fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
 /// the build to a single captured project module.
 ///
 /// `build-portable` is the back-compat alias for `build --variant lgx-portable`.
-fn cmd_basecamp_build(
-    project: Project,
-    variants: Vec<String>,
-    module: Option<String>,
-) -> DynResult<()> {
-    // Validate variants before anything touches the filesystem: each value
-    // becomes both a `.scaffold/basecamp/<dir>` path component (wiped via
-    // `remove_dir_all`) and a nix attr. The CLI constrains this to a
-    // `ValueEnum`, but the public Rust API takes a free-form `Vec<String>`.
+/// Validate, reject-empty, and de-duplicate the requested build variants. The
+/// CLI constrains these to a `ValueEnum`, but the public Rust API takes a
+/// free-form `Vec<String>`, so an unexpected value (empty list, unknown attr,
+/// or one with path separators — each becomes a `.scaffold/basecamp/<dir>`
+/// component wiped via `remove_dir_all`) must be rejected here. Duplicates are
+/// dropped (first-seen order preserved) so the same output dir isn't wiped and
+/// rebuilt twice.
+fn normalize_build_variants(variants: Vec<String>) -> DynResult<Vec<String>> {
+    if variants.is_empty() {
+        bail!("no build variant requested; expected at least one of `lgx`, `lgx-portable`");
+    }
     for variant in &variants {
         if variant != "lgx" && variant != "lgx-portable" {
             bail!("unknown build variant `{variant}`; expected `lgx` or `lgx-portable`");
         }
     }
+    let mut seen = std::collections::HashSet::new();
+    let mut out = variants;
+    out.retain(|v| seen.insert(v.clone()));
+    Ok(out)
+}
+
+fn cmd_basecamp_build(
+    project: Project,
+    variants: Vec<String>,
+    module: Option<String>,
+) -> DynResult<()> {
+    // Reject empty/unknown input and drop duplicates before anything touches
+    // the filesystem (see `normalize_build_variants`).
+    let variants = normalize_build_variants(variants)?;
 
     let mut project_modules: std::collections::BTreeMap<String, ModuleEntry> = project
         .config
@@ -4069,6 +4085,23 @@ mod tests {
         // bare attr name.
         assert_eq!(variant_output_subdir("lgx-portable"), "portable");
         assert_eq!(variant_output_subdir("lgx"), "lgx");
+    }
+
+    #[test]
+    fn normalize_build_variants_rejects_empty_unknown_and_dedupes() {
+        // Empty (public-API misuse) is rejected rather than silently building
+        // nothing.
+        assert!(normalize_build_variants(vec![]).is_err());
+        // Unknown attrs — including path-separator values that would escape
+        // `.scaffold/basecamp/` via `remove_dir_all` — are rejected.
+        assert!(normalize_build_variants(vec!["bogus".into()]).is_err());
+        assert!(normalize_build_variants(vec!["../escape".into()]).is_err());
+        // Duplicates collapse, first-seen order preserved.
+        assert_eq!(
+            normalize_build_variants(vec!["lgx".into(), "lgx".into(), "lgx-portable".into(),])
+                .unwrap(),
+            vec!["lgx".to_string(), "lgx-portable".to_string()]
+        );
     }
 
     #[test]
