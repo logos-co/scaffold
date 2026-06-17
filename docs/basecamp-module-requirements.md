@@ -179,6 +179,50 @@ The `.scaffold/basecamp/portable/` directory is wiped and recreated on every `bu
 
 If a flake exposes only `lgx` (not `lgx-portable`), `build-portable` fails with a targeted hint — mirror of the `install` portable-only failure, in reverse.
 
+## Per-profile launch configuration
+
+`launch` defaults to the pre-seeded `alice` / `bob` profiles, but a project can declare its own profiles — with domain names — under `[basecamp.profiles.<name>]` in `scaffold.toml`. Any declared profile launches; unknown profiles are seeded on first launch. When `[basecamp.profiles.*]` is omitted entirely, the `alice` / `bob` default is preserved.
+
+```toml
+[basecamp.profiles.maker]
+env_file    = ".env"                          # dotenv KEY=VALUE, sourced before `env`
+env         = { SWAP_UI_AUTO_ROLE = "maker" }  # per-profile overrides (win over [basecamp.env])
+runtime_dir = "/tmp/lgs-maker"                 # see the socket-path budget below
+log_file    = ".scaffold/basecamp/profiles/maker/basecamp.log"
+
+[basecamp.profiles.taker]
+env_file    = ".env.taker"
+env         = { SWAP_UI_AUTO_ROLE = "taker" }
+```
+
+- **`env_file`** is sourced first, then `[basecamp.env]`/`[basecamp.env_append]`, then the profile's inline `env` (last writer wins).
+- **`launch --log-file[=PATH]`** tees basecamp's stdout/stderr to the terminal *and* a file (bare `--log-file` → `.scaffold/basecamp/profiles/<profile>/basecamp.log`; overrides `log_file`). Without it, `launch` `exec`s as before.
+- **`lgs basecamp paths <profile> [--json]`** prints the resolved per-profile path manifest (xdg dirs, runtime dir, module/plugin dirs, `launch.state`, log file, env file) without building or mutating anything.
+
+A project that ships more than one basecamp variant can map the flake attr per host instead of hard-coding one:
+
+```toml
+[repos.basecamp.attr]              # scalar `attr = "app"` still works as the fallback
+aarch64-darwin = "bin-macos-app"
+aarch64-linux  = "bin-appimage"
+```
+
+### The macOS `sun_path == 104` socket-path budget
+
+When a module loads, liblogos opens a Unix-domain socket (a `QLocalServer` named `logos_token_<module>_<pid>`) under `XDG_RUNTIME_DIR`. macOS caps the full socket path (`sockaddr_un.sun_path`) at **104 bytes**, so a long runtime root overflows it and basecamp aborts module loading with:
+
+```
+[SubprocessContainer] Unix socket path too long (122 >= 104)
+```
+
+scaffold's default per-profile runtime root is the long in-profile `…/.scaffold/basecamp/profiles/<profile>/xdg-tmp`, which for a typical project path plus the `logos_token_<module>_<pid>` socket name easily blows the 104-byte budget. To avoid that, `launch` resolves `runtime_dir` with this precedence and exports it as both `TMPDIR` and `XDG_RUNTIME_DIR`:
+
+1. **`[basecamp.profiles.<name>].runtime_dir`** if set (project-relative paths are joined to the project root).
+2. **`/tmp/lgs-<profile>`** — the automatic default on macOS (short, well under the budget).
+3. The in-profile `xdg-tmp` on Linux, where the path budget is far larger and not a practical concern.
+
+If you override `runtime_dir` on macOS, keep it short (a `/tmp/…` root is safest) — a deep or project-relative path can still exceed 104 bytes once the socket name is appended.
+
 ## Quick checklist
 
 - [ ] `scaffold.toml` exists at the project root.
@@ -187,3 +231,4 @@ If a flake exposes only `lgx` (not `lgx-portable`), `build-portable` fails with 
 - [ ] Sibling sub-flake URLs use the `path:../<sibling-dir>` form, declared on a single `<name>.url = "…"` line (not split across multiple lines inside a nested attrset — parser limitation).
 - [ ] Transitive `logos-module-builder` references are unified with a `follows` onto the top-level pin (see "Transitive inputs must `follows` …" above).
 - [ ] No project relies on `lgx-portable` as the only output without passing `--flake` explicitly.
+- [ ] On macOS, the per-profile `runtime_dir` stays short enough that `<runtime_dir>/logos_token_<module>_<pid>` fits the 104-byte `sun_path` budget (the `/tmp/lgs-<profile>` default does; a custom override must too).
