@@ -352,6 +352,13 @@ fn parse_attr_platform(
         return Ok(out);
     };
     for (system, v) in tbl.iter() {
+        if system.is_empty() {
+            bail!("invalid scaffold.toml: [repos.{name}.attr] has an empty system key");
+        }
+        // Validate the key, not just the value: a quoted TOML key carrying
+        // control characters would otherwise corrupt the line-oriented
+        // serializer on the next `save_project_config`.
+        check_toml_value(&format!("repos.{name}.attr system key {system:?}"), system)?;
         let s = v.as_str().ok_or_else(|| {
             anyhow!("invalid scaffold.toml: [repos.{name}.attr].{system} must be a string")
         })?;
@@ -903,6 +910,7 @@ fn write_repo_ref(doc: &mut DocumentMut, name: &str, repo: &RepoRef) -> DynResul
     check_toml_value(&format!("repos.{name}.pin"), &repo.pin)?;
     check_toml_value(&format!("repos.{name}.attr"), &repo.attr)?;
     for (system, a) in &repo.attr_platform {
+        check_toml_value(&format!("repos.{name}.attr system key {system:?}"), system)?;
         check_toml_value(&format!("repos.{name}.attr.{system}"), a)?;
     }
     check_toml_value(&format!("repos.{name}.path"), &repo.path)?;
@@ -1160,6 +1168,20 @@ x86_64-linux = "app"
         assert_eq!(bc2.effective_attr("aarch64-darwin"), "bin-macos-app");
         assert_eq!(bc2.effective_attr("x86_64-linux"), "app");
         assert!(bc2.attr.is_empty());
+    }
+
+    #[test]
+    fn repos_basecamp_attr_map_rejects_control_char_system_key() {
+        // A quoted TOML key carrying a control char must be rejected at parse
+        // so it can't corrupt the line-oriented serializer on the next save.
+        let toml = minimal_v0_2_0()
+            + &format!(
+                "\n[repos.basecamp]\nsource = \"{}\"\npin = \"{}\"\nbuild = \"nix-flake\"\n",
+                BASECAMP_SOURCE, DEFAULT_BASECAMP_PIN,
+            )
+            + "\n[repos.basecamp.attr]\n\"bad\\nkey\" = \"app\"\n";
+        let err = parse_config(&toml).unwrap_err();
+        assert!(err.to_string().contains("attr"), "{err}");
     }
 
     #[test]
