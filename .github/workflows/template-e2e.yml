@@ -144,9 +144,14 @@ jobs:
       - name: Install Risc Zero toolchain
         run: |
           set -euo pipefail
-          # -fsSL so an HTTP 4xx/5xx error page fails the step instead of being
-          # piped into bash (curl exits 0 on error bodies without -f).
-          curl -fsSL https://risczero.com/install | bash
+          # Download the official rzup installer to disk first rather than
+          # piping it straight into bash: a failed/partial fetch is caught
+          # before anything executes, and the script is on disk if a run needs
+          # debugging. -fsSL fails on an HTTP 4xx/5xx error page; --retry rides
+          # out flaky networking (matches the circuits-fetch curl above).
+          curl -fsSL --retry 3 --retry-delay 2 \
+            https://risczero.com/install -o "$RUNNER_TEMP/rzup-install.sh"
+          bash "$RUNNER_TEMP/rzup-install.sh"
           echo "$HOME/.risc0/bin" >> "$GITHUB_PATH"
           "$HOME/.risc0/bin/rzup" install rust
 
