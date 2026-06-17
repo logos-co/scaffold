@@ -4062,6 +4062,51 @@ mod tests {
         }
     }
 
+    #[test]
+    fn variant_output_subdir_keeps_portable_name_for_backcompat() {
+        // `lgx-portable` must keep the historical `portable/` dir (docs + the
+        // AppImage hand-load workflow reference it); other variants use the
+        // bare attr name.
+        assert_eq!(variant_output_subdir("lgx-portable"), "portable");
+        assert_eq!(variant_output_subdir("lgx"), "lgx");
+    }
+
+    #[test]
+    fn default_run_host_is_standalone_only_for_ui_qml_modules() {
+        let tmp = tempdir().expect("tempdir");
+        let entry = |sub: &str| ModuleEntry {
+            flake: format!("path:./{sub}#lgx"),
+            role: ModuleRole::Project,
+            standalone_app: None,
+        };
+        let with_metadata = |sub: &str, ty: &str| {
+            let dir = tmp.path().join(sub);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("metadata.json"), format!(r#"{{"type":"{ty}"}}"#)).unwrap();
+        };
+
+        // `ui_qml` → standalone (the module ships its own QML app).
+        with_metadata("ui", "ui_qml");
+        assert_eq!(default_run_host(tmp.path(), &entry("ui")), "standalone");
+
+        // Any other declared type → basecamp.
+        with_metadata("svc", "swap");
+        assert_eq!(default_run_host(tmp.path(), &entry("svc")), "basecamp");
+
+        // Missing/unreadable manifest (local dir, no metadata.json) → basecamp:
+        // we can't prove `ui_qml`, and the basecamp host needs no local attr.
+        fs::create_dir_all(tmp.path().join("bare")).unwrap();
+        assert_eq!(default_run_host(tmp.path(), &entry("bare")), "basecamp");
+
+        // Remote flake (no local metadata) → basecamp.
+        let remote = ModuleEntry {
+            flake: "github:logos-co/swap-ui#lgx".to_string(),
+            role: ModuleRole::Project,
+            standalone_app: None,
+        };
+        assert_eq!(default_run_host(tmp.path(), &remote), "basecamp");
+    }
+
     // ---- resolve_sibling_overrides (I1 fix) — exercised via the command paths;
     //      a focused test pins the helper's Path-source short-circuit ----
 

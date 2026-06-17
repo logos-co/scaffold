@@ -1226,6 +1226,50 @@ role = "dependency"
     }
 
     #[test]
+    fn module_standalone_app_parses_and_round_trips() {
+        let toml = minimal_v0_2_0()
+            + r#"
+[modules.swap_ui]
+flake = "path:./swap-ui#lgx"
+role = "project"
+standalone_app = "swap-ui-standalone"
+
+[modules.swap]
+flake = "path:./swap#lgx"
+role = "project"
+"#;
+        let cfg = parse_config(toml.as_str()).expect("parse");
+        assert_eq!(
+            cfg.modules
+                .get("swap_ui")
+                .expect("swap_ui")
+                .standalone_app
+                .as_deref(),
+            Some("swap-ui-standalone")
+        );
+        // A module that omits the field must stay `None` (not `Some("")`).
+        assert_eq!(cfg.modules.get("swap").expect("swap").standalone_app, None);
+
+        let serialized = serialize_config(&cfg).expect("serialize");
+        let cfg2 = parse_config(&serialized).expect("re-parse");
+        assert_eq!(
+            cfg2.modules
+                .get("swap_ui")
+                .expect("swap_ui")
+                .standalone_app
+                .as_deref(),
+            Some("swap-ui-standalone"),
+            "standalone_app must survive serialize→parse so setup never clobbers it"
+        );
+        assert_eq!(cfg2.modules.get("swap").expect("swap").standalone_app, None);
+        // An omitted/empty value must not be persisted as `standalone_app = ""`.
+        assert!(
+            !serialized.contains("standalone_app = \"\""),
+            "empty standalone_app should be omitted: {serialized}"
+        );
+    }
+
+    #[test]
     fn rejects_basecamp_pin_field_with_init_hint() {
         let toml = minimal_v0_2_0()
             + r#"

@@ -1739,3 +1739,24 @@ fn require_address(
         )
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::BuildVariant;
+
+    #[test]
+    fn build_variant_all_expands_to_both_variants_in_build_order() {
+        // `--variant all` must build BOTH `#lgx` and `#lgx-portable`, in that
+        // order (lgx first), so `cmd_basecamp_build`'s per-variant loop runs
+        // each pass. The single-variant forms select exactly one attr.
+        assert_eq!(BuildVariant::Lgx.attrs(), vec!["lgx".to_string()]);
+        assert_eq!(
+            BuildVariant::LgxPortable.attrs(),
+            vec!["lgx-portable".to_string()]
+        );
+        assert_eq!(
+            BuildVariant::All.attrs(),
+            vec!["lgx".to_string(), "lgx-portable".to_string()]
+        );
+    }
+}
