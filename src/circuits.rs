@@ -16,9 +16,11 @@
 //! fails on a fresh machine.
 //!
 //! `ensure_circuits_for_project` materialises the matching release tarball
-//! into the scaffold cache and exports `LOGOS_BLOCKCHAIN_CIRCUITS` for the
-//! rest of the process. It's idempotent: a populated cache dir or a pre-set
-//! env var both short-circuit the download.
+//! into the project's configured `[circuits].install_dir` (default
+//! `.scaffold/circuits`) and exports `LOGOS_BLOCKCHAIN_CIRCUITS` for the rest
+//! of the process. It's idempotent: a pre-set env var, or an install dir whose
+//! `VERSION` already matches `[circuits].version`, short-circuits the download;
+//! a stale install (an older version) is replaced.
 //!
 //! Why we always export the env var rather than relying on
 //! `~/.logos-blockchain-circuits/`: every `logos-blockchain` rev we depend on
@@ -153,11 +155,21 @@ fn ensure_circuits_release_at(
     triple: &str,
     url_template: Option<&str>,
 ) -> DynResult<PathBuf> {
-    if dir.join(CIRCUITS_SENTINEL_FILE).is_file() {
+    // Cache hit only when the sentinel is present AND, if the release ships a
+    // top-level VERSION marker, it matches the requested version. The install
+    // dir is no longer version-namespaced (it can be a fixed
+    // `[circuits].install_dir`), so a stale tree would otherwise survive a
+    // `[circuits].version` bump forever — `setup` hits this same short-circuit.
+    if dir.join(CIRCUITS_SENTINEL_FILE).is_file() && installed_version_matches(dir, version) {
         return Ok(dir.to_path_buf());
     }
+    // Stale or partial install: clear it so extraction lands a clean tree.
+    if dir.exists() {
+        fs::remove_dir_all(dir)
+            .map_err(|e| anyhow!("remove stale circuits dir {}: {e}", dir.display()))?;
+    }
 
-    fs::create_dir_all(&dir)
+    fs::create_dir_all(dir)
         .map_err(|e| anyhow!("create circuits cache dir {}: {e}", dir.display()))?;
 
     let url = circuits_release_url(version, triple, url_template);
@@ -179,6 +191,19 @@ fn ensure_circuits_release_at(
     }
 
     Ok(dir.to_path_buf())
+}
+
+/// Whether the install at `dir` already satisfies `version`. Release tarballs
+/// ship a top-level `VERSION` file; when present we require it to match
+/// (normalising a leading `v` on either side, so `v0.4.1` vs `0.4.1` is a hit
+/// rather than an endless re-download). When absent — an older or renamed
+/// layout — we don't force a re-download and treat the sentinel as enough,
+/// preserving the prior behaviour.
+fn installed_version_matches(dir: &Path, version: &str) -> bool {
+    match fs::read_to_string(dir.join("VERSION")) {
+        Ok(text) => text.trim().trim_start_matches('v') == version.trim().trim_start_matches('v'),
+        Err(_) => true,
+    }
 }
 
 fn circuits_release_url(version: &str, triple: &str, template: Option<&str>) -> String {
@@ -277,20 +302,23 @@ fn extract_tarball(bytes: &[u8], dest: &Path) -> DynResult<()> {
     for entry in archive.entries()? {
         let mut entry = entry?;
         let path = entry.path()?.to_path_buf();
-        let mut components = path.components();
-        // Drop the single top-level dir from every entry. If a tarball ever
-        // ships without one (e.g. plain files at the root), preserve the
-        // original layout — `unpack` will fall back to using `path`.
-        components.next();
-        let stripped: PathBuf = components.as_path().to_path_buf();
-        let target = if stripped.as_os_str().is_empty() {
+        let Some(stripped) = safe_stripped_entry_path(&path)? else {
             // Top-level directory entry itself; the strip leaves nothing to
-            // create, and `entry.unpack` would otherwise try to write to
-            // `dest` directly.
+            // create, and `entry.unpack` would otherwise write to `dest`.
             continue;
-        } else {
-            dest.join(&stripped)
         };
+        // The download source is user-influenced ([circuits].url_template), so
+        // tar entries are untrusted. A symlink/hardlink could redirect a later
+        // write outside `dest` even when its own path is in-bounds.
+        let etype = entry.header().entry_type();
+        if etype.is_symlink() || etype.is_hard_link() {
+            bail!(
+                "refusing to extract circuits tar entry `{}` of type {etype:?} \
+                 (symlinks and hardlinks are not allowed)",
+                stripped.display()
+            );
+        }
+        let target = dest.join(&stripped);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -299,10 +327,65 @@ fn extract_tarball(bytes: &[u8], dest: &Path) -> DynResult<()> {
     Ok(())
 }
 
+/// Strip the single top-level dir from a tar entry path and reject anything
+/// that would escape the destination. Returns the safe relative path, or
+/// `None` for the top-level dir entry itself (nothing to write). Because the
+/// download source is user-influenced via `[circuits].url_template`, an entry
+/// like `root/../../etc/x` (which strips to `../../etc/x`) must not be joined
+/// onto `dest`.
+fn safe_stripped_entry_path(path: &Path) -> DynResult<Option<PathBuf>> {
+    let mut components = path.components();
+    components.next();
+    let stripped: PathBuf = components.as_path().to_path_buf();
+    if stripped.as_os_str().is_empty() {
+        return Ok(None);
+    }
+    if stripped.is_absolute()
+        || stripped
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        bail!(
+            "refusing to extract circuits tar entry with unsafe path `{}`",
+            stripped.display()
+        );
+    }
+    Ok(Some(stripped))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn installed_version_matches_normalizes_v_prefix_and_detects_bumps() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No VERSION marker → don't force a re-download.
+        assert!(installed_version_matches(tmp.path(), "0.4.1"));
+        // A leading `v` on either side must not trigger a re-download loop.
+        fs::write(tmp.path().join("VERSION"), "v0.4.1\n").unwrap();
+        assert!(installed_version_matches(tmp.path(), "0.4.1"));
+        fs::write(tmp.path().join("VERSION"), "0.4.1").unwrap();
+        assert!(installed_version_matches(tmp.path(), "v0.4.1"));
+        // A genuine version bump is detected so the stale tree is replaced.
+        assert!(!installed_version_matches(tmp.path(), "0.4.2"));
+    }
+
+    #[test]
+    fn safe_stripped_entry_path_strips_top_dir_and_rejects_traversal() {
+        assert_eq!(
+            safe_stripped_entry_path(Path::new("release-root/pol/vk.json")).unwrap(),
+            Some(PathBuf::from("pol/vk.json"))
+        );
+        // Top-level dir entry → nothing to write.
+        assert_eq!(
+            safe_stripped_entry_path(Path::new("release-root")).unwrap(),
+            None
+        );
+        // A `..` that escapes `dest` after stripping is rejected.
+        assert!(safe_stripped_entry_path(Path::new("release-root/../../escape")).is_err());
+    }
 
     fn make_tarball() -> Vec<u8> {
         let mut header = tar::Header::new_gnu();
