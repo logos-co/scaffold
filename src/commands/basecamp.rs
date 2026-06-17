@@ -595,8 +595,11 @@ fn cmd_basecamp_run(project: Project, module: String, host: Option<String>) -> D
     if let BasecampSource::Path(p) = module_entry_to_source(&project.root, entry) {
         bail!(
             "module `{module}` was captured as a prebuilt `.lgx` path (`{p}`), which \
-             `basecamp run` cannot launch. Re-capture it from its flake with \
-             `basecamp modules --flake <ref>#lgx`."
+             `basecamp run` cannot launch. Point `[modules.{module}]` at a flake \
+             source instead: edit its entry in scaffold.toml, or remove it and \
+             re-capture with `basecamp modules --flake <ref>#lgx` (re-running \
+             `basecamp modules` keeps existing entries, so it won't replace a path \
+             capture on its own)."
         );
     }
 
@@ -1005,9 +1008,10 @@ fn cmd_basecamp_build(
     if project_modules.is_empty() {
         bail!(
             "no project modules captured in scaffold.toml; run `basecamp modules` \
-             first (auto-discover) or `basecamp modules --flake <ref>#lgx \
-             --path <file.lgx>` to capture explicitly. `build` \
-             operates on captured project sources only — it never discovers."
+             first (auto-discover), or capture explicitly with \
+             `basecamp modules --flake <ref>#lgx` or `basecamp modules --path \
+             <file.lgx>`. `build` operates on captured project sources only — it \
+             never discovers."
         );
     }
 
