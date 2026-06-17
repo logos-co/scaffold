@@ -170,10 +170,13 @@ fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
     if basecamp_repo.pin.is_empty() {
         basecamp_repo.pin = DEFAULT_BASECAMP_PIN.to_string();
     }
-    // Only fall back to the scalar default when neither the scalar `attr` nor
-    // a per-platform `attr` map was configured — otherwise we'd clobber a
-    // user's `[repos.basecamp.attr]` map on the next `save_project_config`.
-    if basecamp_repo.attr.is_empty() && basecamp_repo.attr_platform.is_empty() {
+    // Always give the scalar `attr` a default when it's unset, even when a
+    // per-platform `attr` map is configured: `effective_attr` falls back to
+    // the scalar on a host the map doesn't cover, so without this the build
+    // below would run `nix build .#` with an empty attr on unmapped systems.
+    // The scalar is a fallback only — serialization still prefers the map, so
+    // the user's `[repos.basecamp.attr]` map is not clobbered.
+    if basecamp_repo.attr.is_empty() {
         basecamp_repo.attr = BASECAMP_ATTR.to_string();
     }
 

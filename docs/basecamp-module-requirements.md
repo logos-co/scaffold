@@ -195,7 +195,7 @@ env_file    = ".env.taker"
 env         = { SWAP_UI_AUTO_ROLE = "taker" }
 ```
 
-- **`env_file`** is sourced first, then `[basecamp.env]`/`[basecamp.env_append]`, then the profile's inline `env` (last writer wins).
+- **Env layering** (last writer wins): `[basecamp.env_append]` path joins first, then the per-profile **`env_file`**, then `[basecamp.env]` globals, then the profile's inline **`env`**.
 - **`launch --log-file[=PATH]`** tees basecamp's stdout/stderr to the terminal *and* a file (bare `--log-file` → `.scaffold/basecamp/profiles/<profile>/basecamp.log`; overrides `log_file`). Without it, `launch` `exec`s as before.
 - **`lgs basecamp paths <profile> [--json]`** prints the resolved per-profile path manifest (xdg dirs, runtime dir, module/plugin dirs, `launch.state`, log file, env file) without building or mutating anything.
 
