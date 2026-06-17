@@ -380,6 +380,12 @@ fn validate_profile_name(profile: &str) -> DynResult<()> {
              (no `/`, `..`, `.`, or absolute paths)"
         );
     }
+    // A control char (e.g. a newline) passes the `Component::Normal` check but
+    // yields surprising filesystem paths (`launch.state` under a `\n` name) and
+    // unsafe terminal output.
+    if profile.chars().any(char::is_control) {
+        bail!("invalid profile name `{profile}`: must not contain control characters");
+    }
     Ok(())
 }
 
@@ -971,6 +977,16 @@ fn load_env_file(project_root: &Path, rel: &str) -> DynResult<BTreeMap<String, S
         let key = k.trim();
         if key.is_empty() {
             bail!("{}:{}: empty env var name", path.display(), i + 1);
+        }
+        // A control char in the name reaches `Command::env` and fails opaquely
+        // at spawn; reject it here with a located, deterministic error. (`=`
+        // can't occur — `split_once('=')` already consumed the first one.)
+        if key.chars().any(char::is_control) {
+            bail!(
+                "{}:{}: env var name {key:?} must not contain control characters",
+                path.display(),
+                i + 1
+            );
         }
         let val = v.trim();
         let val = val
@@ -3994,6 +4010,20 @@ mod tests {
     }
 
     #[test]
+    fn load_env_file_rejects_control_char_in_key() {
+        let tmp = tempdir().expect("tempdir");
+        let root = tmp.path();
+        // A tab inside the key reaches `Command::env` and fails opaquely; the
+        // loader must reject it up front with a located error.
+        fs::write(root.join("bad.env"), "FO\tO=bar\n").unwrap();
+        let err = load_env_file(root, "bad.env").unwrap_err();
+        assert!(
+            format!("{err}").contains("control characters"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
     fn launch_env_append_uses_only_configured_when_no_inherited_value() {
         let mut cfg = BasecampConfig::default();
         cfg.env_append
@@ -4073,8 +4103,11 @@ mod tests {
         for ok in ["alice", "bob", "carol-1", "team_2"] {
             assert!(validate_profile_name(ok).is_ok(), "should accept {ok:?}");
         }
-        // Single-component names that would escape or misbehave when joined.
-        for bad in ["", "..", ".", "a/b", "/abs", "../evil", "sub/../x"] {
+        // Single-component names that would escape or misbehave when joined,
+        // plus single-component names carrying control characters.
+        for bad in [
+            "", "..", ".", "a/b", "/abs", "../evil", "sub/../x", "a\nb", "a\tb",
+        ] {
             assert!(validate_profile_name(bad).is_err(), "should reject {bad:?}");
         }
     }
