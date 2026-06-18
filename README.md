@@ -1,32 +1,32 @@
 # logos-scaffold
 
 `logos-scaffold` is a Rust CLI that takes a LEZ (Logos Execution Zone)
-program from an empty directory all the way to a deployed, transacting app —
-think Anchor for Solana, but for Logos. It scaffolds the project, runs a
-local chain, builds and deploys your program, and then runs it inside
+program from an empty directory all the way to a deployed, transacting app
+(think Anchor for Solana, but for Logos). It scaffolds the project, runs a
+local chain, builds and deploys your program, then runs it inside
 **basecamp** (the Logos desktop app) across multiple peer profiles so you
 can dogfood real multi-peer behavior. One tool for the full inner loop.
 
 ## What it does for you
 
-- **Start a project** — `create`/`new` scaffolds a complete LEZ
+- **Start a project:** `create`/`new` scaffolds a complete LEZ
   `program_deployment` project; `init` adopts scaffold into an existing one.
-- **Set up dependencies** — `setup` builds the pinned sequencer, wallet, and
+- **Set up dependencies:** `setup` builds the pinned sequencer, wallet, and
   `spel` toolchain locally: no global installs, portable across machines and CI.
-- **Run a local chain** — `localnet` starts, stops, inspects, and resets a
+- **Run a local chain:** `localnet` starts, stops, inspects, and resets a
   local sequencer to deploy against.
-- **Build and deploy** — `build` compiles the workspace and guest programs;
+- **Build and deploy:** `build` compiles the workspace and guest programs;
   `deploy` ships them to localnet and reports the on-chain program ID.
-- **Manage wallets** — `wallet` lists accounts, sets a project default, and
+- **Manage wallets:** `wallet` lists accounts, sets a project default, and
   tops up from the faucet.
-- **One-shot inner loop** — `run` chains build → deploy → post-deploy hooks,
+- **One-shot inner loop:** `run` chains build, deploy, and post-deploy hooks,
   with `--watch` to re-run on file changes.
-- **Peer-to-peer dogfooding** — `basecamp` runs your program inside basecamp,
-  the Logos desktop app, across pre-seeded peer profiles (alice and bob): it
+- **Peer-to-peer dogfooding:** `basecamp` runs your program inside basecamp,
+  the Logos desktop app, across pre-seeded peer profiles (alice and bob). It
   builds basecamp, packages your program as an installable module, installs it
-  per profile, and launches each with clean-slate state — so you test real
-  multi-peer behavior, not a single node in isolation.
-- **Diagnose** — `doctor` runs health checks; `report` bundles a sanitized
+  per profile, and launches each with clean-slate state, so you test real
+  multi-peer behavior instead of a single node in isolation.
+- **Diagnose:** `doctor` runs health checks; `report` bundles a sanitized
   diagnostics archive for issues.
 
 See [Command Semantics](#command-semantics) below for the full reference.
@@ -35,7 +35,7 @@ See [Command Semantics](#command-semantics) below for the full reference.
 
 - Unix-only (localnet and process/port detection use `lsof`, `ps`, `kill`).
 - Single external dependency: [LEZ](https://github.com/logos-blockchain/logos-execution-zone/); standalone sequencer flow only, no `logos-blockchain` dependency.
-- Reference docs: [FURPS+](FURPS.md) (requirements) · [ADR](ADR.md) (decisions).
+- Reference docs: [FURPS+](FURPS.md) (requirements), [ADR](ADR.md) (decisions).
 
 ## Prerequisites
 
