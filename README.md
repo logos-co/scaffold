@@ -1,6 +1,41 @@
 # logos-scaffold
 
-`logos-scaffold` is a Rust CLI for bootstrapping LEZ (Logos Execution Zone) `program_deployment` projects in standalone mode.
+`logos-scaffold` is a Rust CLI that takes a LEZ (Logos Execution Zone)
+program from an empty directory all the way to running across a network of
+peers — think Anchor for Solana, but for Logos. It is the single tool a
+developer needs for the full inner loop.
+
+## What it does for you
+
+- **Start a project from scratch.** `create`/`new` scaffolds a complete
+  LEZ `program_deployment` project (or adopt scaffold in an existing one
+  with `init`), so you write program logic instead of boilerplate.
+- **Set up every dependency for you.** `setup` fetches and builds the
+  pinned sequencer, wallet, and `spel` toolchain locally — no global
+  installs, no version drift, portable across machines and CI.
+- **Run a blockchain on your laptop.** `localnet` starts, stops, inspects,
+  and resets a local sequencer so you have a real chain to deploy against
+  in seconds.
+- **Build and deploy your program.** `build` compiles the workspace and
+  guest programs; `deploy` ships them to the running localnet and reports
+  the on-chain program ID.
+- **Manage wallets and test funds.** `wallet` lists accounts, sets a
+  project default, and tops up from the faucet so you always have a funded
+  account to transact with.
+- **Do it all in one command.** `run` chains build → IDL → localnet →
+  topup → deploy → your post-deploy hooks, with an optional `--watch` mode
+  that re-runs on every file change.
+- **Test peer-to-peer in the real app.** `basecamp` lets you run your
+  program inside basecamp, the Logos desktop application, across multiple
+  pre-seeded peer profiles (alice and bob). It fetches and builds basecamp,
+  packages your program as an installable module, installs it into each
+  peer's profile, and launches them with clean-slate, isolated state — so
+  you can dogfood actual multi-peer behavior end to end instead of testing
+  a single node in isolation.
+- **Diagnose and report.** `doctor` runs actionable health checks and
+  `report` bundles a sanitized diagnostics archive for filing issues.
+
+Everything below documents these capabilities in detail.
 
 ## Documentation
 
