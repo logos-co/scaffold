@@ -7,51 +7,33 @@ developer needs for the full inner loop.
 
 ## What it does for you
 
-- **Start a project from scratch.** `create`/`new` scaffolds a complete
-  LEZ `program_deployment` project (or adopt scaffold in an existing one
-  with `init`), so you write program logic instead of boilerplate.
-- **Set up every dependency for you.** `setup` fetches and builds the
-  pinned sequencer, wallet, and `spel` toolchain locally — no global
-  installs, no version drift, portable across machines and CI.
-- **Run a blockchain on your laptop.** `localnet` starts, stops, inspects,
-  and resets a local sequencer so you have a real chain to deploy against
-  in seconds.
-- **Build and deploy your program.** `build` compiles the workspace and
-  guest programs; `deploy` ships them to the running localnet and reports
-  the on-chain program ID.
-- **Manage wallets and test funds.** `wallet` lists accounts, sets a
-  project default, and tops up from the faucet so you always have a funded
-  account to transact with.
-- **Do it all in one command.** `run` chains build → IDL → localnet →
-  topup → deploy → your post-deploy hooks, with an optional `--watch` mode
-  that re-runs on every file change.
-- **Test peer-to-peer in the real app.** `basecamp` lets you run your
-  program inside basecamp, the Logos desktop application, across multiple
-  pre-seeded peer profiles (alice and bob). It fetches and builds basecamp,
-  packages your program as an installable module, installs it into each
-  peer's profile, and launches them with clean-slate, isolated state — so
-  you can dogfood actual multi-peer behavior end to end instead of testing
-  a single node in isolation.
-- **Diagnose and report.** `doctor` runs actionable health checks and
-  `report` bundles a sanitized diagnostics archive for filing issues.
+- **Start a project** — `create`/`new` scaffolds a complete LEZ
+  `program_deployment` project; `init` adopts scaffold into an existing one.
+- **Set up dependencies** — `setup` builds the pinned sequencer, wallet, and
+  `spel` toolchain locally: no global installs, portable across machines and CI.
+- **Run a local chain** — `localnet` starts, stops, inspects, and resets a
+  local sequencer to deploy against.
+- **Build and deploy** — `build` compiles the workspace and guest programs;
+  `deploy` ships them to localnet and reports the on-chain program ID.
+- **Manage wallets** — `wallet` lists accounts, sets a project default, and
+  tops up from the faucet.
+- **One-shot inner loop** — `run` chains build → deploy → post-deploy hooks,
+  with `--watch` to re-run on file changes.
+- **Peer-to-peer dogfooding** — `basecamp` runs your program inside basecamp,
+  the Logos desktop app, across pre-seeded peer profiles (alice and bob): it
+  builds basecamp, packages your program as an installable module, installs it
+  per profile, and launches each with clean-slate state — so you test real
+  multi-peer behavior, not a single node in isolation.
+- **Diagnose** — `doctor` runs health checks; `report` bundles a sanitized
+  diagnostics archive for issues.
 
-Everything below documents these capabilities in detail.
+See [Command Semantics](#command-semantics) below for the full reference.
 
-## Documentation
+## Scope & platform
 
-- [FURPS+](FURPS.md) — Functional and non-functional requirements
-- [ADR](ADR.md) — Architecture Decision Records
-
-## Platform
-
-The CLI is currently Unix-only.
-Localnet and process/port detection rely on Unix tools (lsof, ps, kill).
-
-## Scope
-
-- Single external dependency: [LEZ](https://github.com/logos-blockchain/logos-execution-zone/)
-- Standalone sequencer flow only
-- No `logos-blockchain` dependency
+- Unix-only (localnet and process/port detection use `lsof`, `ps`, `kill`).
+- Single external dependency: [LEZ](https://github.com/logos-blockchain/logos-execution-zone/); standalone sequencer flow only, no `logos-blockchain` dependency.
+- Reference docs: [FURPS+](FURPS.md) (requirements) · [ADR](ADR.md) (decisions).
 
 ## Prerequisites
 
