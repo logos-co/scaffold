@@ -1,11 +1,11 @@
 # logos-scaffold
 
 `logos-scaffold` is a Rust CLI that takes a LEZ (Logos Execution Zone)
-program from an empty directory all the way to a deployed, transacting app
-(think Anchor for Solana, but for Logos). It scaffolds the project, runs a
-local chain, builds and deploys your program, then runs it inside
-**basecamp** (the Logos desktop app) across multiple peer profiles so you
-can dogfood real multi-peer behavior. One tool for the full inner loop.
+program from an empty directory all the way to a deployed, transacting app.
+It scaffolds the project, runs a local chain, builds and deploys your
+program, then runs it inside **basecamp** (the Logos desktop app) across
+multiple peer profiles so you can dogfood real multi-peer behavior. One tool
+for the full inner loop.
 
 ## What it does for you
 
