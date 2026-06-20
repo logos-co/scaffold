@@ -59,10 +59,6 @@ pub(crate) fn render_command(cmd: &Command) -> String {
     out
 }
 
-pub(crate) fn run_checked(cmd: &mut Command, label: &str) -> DynResult<()> {
-    run_forwarded(cmd, label)
-}
-
 pub(crate) fn run_forwarded(cmd: &mut Command, label: &str) -> DynResult<()> {
     // Render once and reuse for both the echo line and any `CommandFailed`.
     let command = render_command(cmd);
@@ -99,8 +95,7 @@ pub(crate) fn print_output_enabled() -> bool {
     PRINT_OUTPUT.load(Ordering::Relaxed)
         || std::env::var_os("LOGOS_SCAFFOLD_PRINT_OUTPUT")
             .as_deref()
-            .map(is_truthy_env_value)
-            .unwrap_or(false)
+            .is_some_and(is_truthy_env_value)
 }
 
 /// Accept only `1` or `true` (case-insensitive). Rejects `0`, empty,
@@ -279,9 +274,7 @@ fn finish_spinner_err(bar: Option<indicatif::ProgressBar>, step: &str, duration:
 /// limit (~25). Not present for builder-stage failures, so this check gates
 /// the `--show-trace` hint to cases where it actually helps.
 fn log_indicates_truncated_trace(path: &Path) -> bool {
-    std::fs::read_to_string(path)
-        .map(|s| s.contains("stack trace truncated"))
-        .unwrap_or(false)
+    std::fs::read_to_string(path).is_ok_and(|s| s.contains("stack trace truncated"))
 }
 
 /// Given a log path of the shape
@@ -322,12 +315,7 @@ pub(crate) fn rotate_logs(project_root: &Path, command: &str, keep: usize) {
     let suffix = format!("-{command}.log");
     let mut matching: Vec<(std::time::SystemTime, PathBuf)> = entries
         .flatten()
-        .filter(|e| {
-            e.file_name()
-                .to_str()
-                .map(|n| n.ends_with(&suffix))
-                .unwrap_or(false)
-        })
+        .filter(|e| e.file_name().to_str().is_some_and(|n| n.ends_with(&suffix)))
         .filter_map(|e| {
             e.metadata()
                 .ok()
@@ -335,7 +323,7 @@ pub(crate) fn rotate_logs(project_root: &Path, command: &str, keep: usize) {
                 .map(|t| (t, e.path()))
         })
         .collect();
-    matching.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+    matching.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     for (_, path) in matching.into_iter().skip(keep) {
         let _ = fs::remove_file(path);
     }
@@ -401,6 +389,198 @@ fn unix_to_ymdhms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     let y = (y + if m <= 2 { 1 } else { 0 }) as u32;
     (y, m, d, h, mi, se)
+}
+
+pub(crate) fn run_capture(cmd: &mut Command, label: &str) -> DynResult<Captured> {
+    // Render once and reuse for both the echo line and any `CommandFailed`.
+    let command = render_command(cmd);
+    if should_echo() {
+        println!("$ {command}");
+    }
+    let Output {
+        status,
+        stdout,
+        stderr,
+    } = cmd.output()?;
+
+    let captured = Captured {
+        status,
+        stdout: String::from_utf8_lossy(&stdout).to_string(),
+        stderr: String::from_utf8_lossy(&stderr).to_string(),
+    };
+
+    if !captured.status.success() {
+        return Err(CommandFailed {
+            message: format!("{label} failed: {}", captured.stderr),
+            command,
+            label: label.to_string(),
+            exit_code: captured.status.code(),
+            stdout: captured.stdout,
+            stderr: captured.stderr,
+            log_path: None,
+        }
+        .into());
+    }
+
+    Ok(captured)
+}
+
+pub(crate) fn run_with_stdin(mut cmd: Command, input: String) -> DynResult<Captured> {
+    if should_echo() {
+        println!("$ {}", render_command(&cmd));
+    }
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        if let Err(err) = stdin.write_all(input.as_bytes()) {
+            if err.kind() != std::io::ErrorKind::BrokenPipe {
+                return Err(err.into());
+            }
+        }
+    }
+    let out = child.wait_with_output()?;
+    Ok(Captured {
+        status: out.status,
+        stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+    })
+}
+
+pub(crate) fn spawn_to_log(cmd: &mut Command, log_path: &Path) -> DynResult<u32> {
+    if should_echo() {
+        println!("$ {}", render_command(cmd));
+    }
+    let file = File::create(log_path)?;
+    let err_file = file.try_clone()?;
+    cmd.stdout(Stdio::from(file)).stderr(Stdio::from(err_file));
+    let child = cmd.spawn()?;
+    Ok(child.id())
+}
+
+#[cfg(unix)]
+pub(crate) fn pid_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn pid_alive(_pid: u32) -> bool {
+    false
+}
+
+/// Query a single `ps -o <field>=` value for `pid`, returning the first
+/// non-empty output line. `None` when `ps` can't be run, exits non-zero
+/// (pid gone), or prints nothing.
+#[cfg(unix)]
+fn ps_field(pid: u32, field: &str) -> Option<String> {
+    let output = Command::new("ps")
+        .arg("-o")
+        .arg(field)
+        .arg("-p")
+        .arg(pid.to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToString::to_string)
+}
+
+#[cfg(unix)]
+fn pid_is_zombie(pid: u32) -> bool {
+    ps_field(pid, "stat=").is_some_and(|line| line.starts_with('Z'))
+}
+
+#[cfg(not(unix))]
+fn pid_is_zombie(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(unix)]
+pub(crate) fn pid_running(pid: u32) -> bool {
+    pid_alive(pid) && !pid_is_zombie(pid)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn pid_running(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(unix)]
+pub(crate) fn pid_command(pid: u32) -> Option<String> {
+    ps_field(pid, "command=")
+}
+
+#[cfg(not(unix))]
+pub(crate) fn pid_command(_pid: u32) -> Option<String> {
+    None
+}
+
+pub(crate) fn port_open(addr: &str) -> bool {
+    let Ok(parsed) = addr.parse::<SocketAddr>() else {
+        return false;
+    };
+    TcpStream::connect_timeout(&parsed, Duration::from_millis(500)).is_ok()
+}
+
+#[cfg(unix)]
+pub(crate) fn listener_pid(port: u16) -> Option<u32> {
+    let output = Command::new("lsof")
+        .arg("-nP")
+        .arg(format!("-iTCP:{port}"))
+        .arg("-sTCP:LISTEN")
+        .arg("-t")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .find_map(|line| line.trim().parse::<u32>().ok())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn listener_pid(_port: u16) -> Option<u32> {
+    None
+}
+
+/// Render an optional pid for user-facing messages, falling back to `unknown`
+/// when the pid couldn't be determined.
+pub(crate) fn pid_text(pid: Option<u32>) -> String {
+    pid.map_or_else(|| "unknown".to_string(), |pid| pid.to_string())
+}
+
+pub(crate) fn which(binary: &str) -> Option<PathBuf> {
+    let paths = env::var_os("PATH")?;
+    for p in env::split_paths(&paths) {
+        let candidate = p.join(binary);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -519,206 +699,4 @@ mod logged_tests {
         assert!(parts[2].chars().all(|c| c.is_ascii_digit()));
         assert_eq!(parts[3], "install");
     }
-}
-
-pub(crate) fn run_capture(cmd: &mut Command, label: &str) -> DynResult<Captured> {
-    // Render once and reuse for both the echo line and any `CommandFailed`.
-    let command = render_command(cmd);
-    if should_echo() {
-        println!("$ {command}");
-    }
-    let Output {
-        status,
-        stdout,
-        stderr,
-    } = cmd.output()?;
-
-    let captured = Captured {
-        status,
-        stdout: String::from_utf8_lossy(&stdout).to_string(),
-        stderr: String::from_utf8_lossy(&stderr).to_string(),
-    };
-
-    if !captured.status.success() {
-        return Err(CommandFailed {
-            message: format!("{label} failed: {}", captured.stderr),
-            command,
-            label: label.to_string(),
-            exit_code: captured.status.code(),
-            stdout: captured.stdout,
-            stderr: captured.stderr,
-            log_path: None,
-        }
-        .into());
-    }
-
-    Ok(captured)
-}
-
-pub(crate) fn run_with_stdin(mut cmd: Command, input: String) -> DynResult<Captured> {
-    if should_echo() {
-        println!("$ {}", render_command(&cmd));
-    }
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = cmd.spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        if let Err(err) = stdin.write_all(input.as_bytes()) {
-            if err.kind() != std::io::ErrorKind::BrokenPipe {
-                return Err(err.into());
-            }
-        }
-    }
-    let out = child.wait_with_output()?;
-    Ok(Captured {
-        status: out.status,
-        stdout: String::from_utf8_lossy(&out.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&out.stderr).to_string(),
-    })
-}
-
-pub(crate) fn spawn_to_log(cmd: &mut Command, log_path: &Path) -> DynResult<u32> {
-    if should_echo() {
-        println!("$ {}", render_command(cmd));
-    }
-    let file = File::create(log_path)?;
-    let err_file = file.try_clone()?;
-    cmd.stdout(Stdio::from(file)).stderr(Stdio::from(err_file));
-    let child = cmd.spawn()?;
-    Ok(child.id())
-}
-
-#[cfg(unix)]
-pub(crate) fn pid_alive(pid: u32) -> bool {
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-pub(crate) fn pid_alive(_pid: u32) -> bool {
-    false
-}
-
-#[cfg(unix)]
-fn pid_is_zombie(pid: u32) -> bool {
-    let output = Command::new("ps")
-        .arg("-o")
-        .arg("stat=")
-        .arg("-p")
-        .arg(pid.to_string())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output();
-
-    let Ok(output) = output else {
-        return false;
-    };
-    if !output.status.success() {
-        return false;
-    }
-
-    let stat = String::from_utf8_lossy(&output.stdout);
-    stat.lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(|line| line.starts_with('Z'))
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn pid_is_zombie(_pid: u32) -> bool {
-    false
-}
-
-#[cfg(unix)]
-pub(crate) fn pid_running(pid: u32) -> bool {
-    pid_alive(pid) && !pid_is_zombie(pid)
-}
-
-#[cfg(not(unix))]
-pub(crate) fn pid_running(_pid: u32) -> bool {
-    false
-}
-
-#[cfg(unix)]
-pub(crate) fn pid_command(pid: u32) -> Option<String> {
-    let output = Command::new("ps")
-        .arg("-o")
-        .arg("command=")
-        .arg("-p")
-        .arg(pid.to_string())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(ToString::to_string)
-}
-
-#[cfg(not(unix))]
-pub(crate) fn pid_command(_pid: u32) -> Option<String> {
-    None
-}
-
-pub(crate) fn port_open(addr: &str) -> bool {
-    let parsed: SocketAddr = match addr.parse() {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    TcpStream::connect_timeout(&parsed, Duration::from_millis(500)).is_ok()
-}
-
-#[cfg(unix)]
-pub(crate) fn listener_pid(port: u16) -> Option<u32> {
-    let output = Command::new("lsof")
-        .arg("-nP")
-        .arg(format!("-iTCP:{port}"))
-        .arg("-sTCP:LISTEN")
-        .arg("-t")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout
-        .lines()
-        .find_map(|line| line.trim().parse::<u32>().ok())
-}
-
-#[cfg(not(unix))]
-pub(crate) fn listener_pid(_port: u16) -> Option<u32> {
-    None
-}
-
-pub(crate) fn which(binary: &str) -> Option<PathBuf> {
-    let paths = env::var_os("PATH")?;
-    for p in env::split_paths(&paths) {
-        let candidate = p.join(binary);
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
 }

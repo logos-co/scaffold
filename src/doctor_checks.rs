@@ -37,20 +37,18 @@ pub(crate) fn check_container_runtime() -> CheckRow {
 }
 
 fn container_runtime_row(docker: Option<PathBuf>, podman: Option<PathBuf>) -> CheckRow {
-    match (docker, podman) {
-        (Some(path), _) => CheckRow {
+    // Prefer docker over podman when both are present.
+    let found = docker
+        .map(|path| ("docker", path))
+        .or_else(|| podman.map(|path| ("podman", path)));
+    match found {
+        Some((runtime, path)) => CheckRow {
             status: CheckStatus::Pass,
             name: "container runtime".to_string(),
-            detail: format!("found docker at {}", path.display()),
+            detail: format!("found {runtime} at {}", path.display()),
             remediation: None,
         },
-        (None, Some(path)) => CheckRow {
-            status: CheckStatus::Pass,
-            name: "container runtime".to_string(),
-            detail: format!("found podman at {}", path.display()),
-            remediation: None,
-        },
-        (None, None) => CheckRow {
+        None => CheckRow {
             status: CheckStatus::Warn,
             name: "container runtime".to_string(),
             detail: "neither docker nor podman found on PATH".to_string(),
@@ -81,13 +79,11 @@ pub(crate) fn check_repo(name: &str, path: &Path, pin: &str) -> CheckRow {
             };
 
             let mut detail = format!("pin={pin}, head={head}");
-            if let Ok(clean) = git_clean(path) {
-                if !clean {
-                    if status == CheckStatus::Pass {
-                        status = CheckStatus::Warn;
-                    }
-                    detail.push_str("; working tree dirty");
+            if let Ok(false) = git_clean(path) {
+                if status == CheckStatus::Pass {
+                    status = CheckStatus::Warn;
                 }
+                detail.push_str("; working tree dirty");
             }
 
             CheckRow {
@@ -221,10 +217,7 @@ fn check_logos_blockchain_circuits_with(
 }
 
 fn is_broken_symlink(path: &Path) -> bool {
-    !path.exists()
-        && fs::symlink_metadata(path)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
+    !path.exists() && fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
 }
 
 pub(crate) fn check_standalone_support(lez_path: &Path) -> CheckRow {
@@ -278,7 +271,7 @@ pub(crate) fn print_rows(rows: &[CheckRow]) {
 }
 
 pub(crate) fn one_line(text: &str) -> String {
-    text.replace('\n', " ").replace('\r', " ")
+    text.replace(['\n', '\r'], " ")
 }
 
 #[cfg(test)]

@@ -144,34 +144,25 @@ pub(crate) fn available_templates() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
     use std::str::FromStr;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{apply_overlay, render_template_text, OverlayRenderContext};
+    use tempfile::{tempdir, TempDir};
 
-    fn mk_temp_dir(suffix: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time should be after unix epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "logos-scaffold-overlay-{suffix}-{}-{nanos}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&path).expect("failed to create temporary test directory");
-        path
+    fn mk_temp_dir() -> TempDir {
+        tempdir().expect("failed to create temporary test directory")
     }
 
     #[test]
     fn overlay_writes_expected_files() {
-        let target = mk_temp_dir("files");
+        let temp = mk_temp_dir();
+        let target = temp.path();
         let ctx = OverlayRenderContext {
             crate_name: "my-app",
             lez_pin: "abc123",
         };
 
-        apply_overlay(&target, "default", &ctx).expect("failed to apply default overlay");
+        apply_overlay(target, "default", &ctx).expect("failed to apply default overlay");
 
         let expected = [
             "Cargo.toml",
@@ -196,19 +187,18 @@ mod tests {
             !target.join("Cargo.toml.template").exists(),
             "template Cargo.toml placeholder should not leak into output"
         );
-
-        fs::remove_dir_all(&target).expect("failed to cleanup temporary test directory");
     }
 
     #[test]
     fn lez_framework_overlay_converts_template_manifests_to_cargo_toml() {
-        let target = mk_temp_dir("lez-manifests");
+        let temp = mk_temp_dir();
+        let target = temp.path();
         let ctx = OverlayRenderContext {
             crate_name: "my-app",
             lez_pin: "abc123",
         };
 
-        apply_overlay(&target, "lez-framework", &ctx).expect("failed to apply lez-framework");
+        apply_overlay(target, "lez-framework", &ctx).expect("failed to apply lez-framework");
 
         for path in [
             "Cargo.toml",
@@ -231,27 +221,24 @@ mod tests {
                 "template manifest should not leak into output: {path}"
             );
         }
-
-        fs::remove_dir_all(&target).expect("failed to cleanup temporary test directory");
     }
 
     #[test]
     fn overlay_renders_tokens_and_leaves_no_unresolved_placeholders() {
-        let target = mk_temp_dir("tokens");
+        let temp = mk_temp_dir();
+        let target = temp.path();
         let ctx = OverlayRenderContext {
             crate_name: "example-name",
             lez_pin: "deadbeef",
         };
 
-        apply_overlay(&target, "default", &ctx).expect("failed to apply default overlay");
+        apply_overlay(target, "default", &ctx).expect("failed to apply default overlay");
 
         let cargo = fs::read_to_string(target.join("Cargo.toml"))
             .expect("failed to read generated Cargo.toml");
         assert!(cargo.contains("name = \"example-name\""));
         assert!(cargo.contains("rev = \"deadbeef\""));
         assert!(!cargo.contains("{{"));
-
-        fs::remove_dir_all(&target).expect("failed to cleanup temporary test directory");
     }
 
     #[test]
@@ -266,12 +253,13 @@ mod tests {
         // `LOGOS_BLOCKCHAIN_CIRCUITS` and bypasses the version check inside
         // every `logos-blockchain` rev's circuits-utils crate).
         for variant in ["default", "lez-framework"] {
-            let target = mk_temp_dir(&format!("no-self-patch-{variant}"));
+            let temp = mk_temp_dir();
+            let target = temp.path();
             let ctx = OverlayRenderContext {
                 crate_name: "my-app",
                 lez_pin: "abc123",
             };
-            apply_overlay(&target, variant, &ctx)
+            apply_overlay(target, variant, &ctx)
                 .unwrap_or_else(|e| panic!("apply_overlay({variant}) failed: {e}"));
             let cargo = fs::read_to_string(target.join("Cargo.toml"))
                 .expect("failed to read generated Cargo.toml");
@@ -285,19 +273,19 @@ mod tests {
             toml_edit::DocumentMut::from_str(&cargo).unwrap_or_else(|e| {
                 panic!("{variant}: generated Cargo.toml is not valid TOML: {e}\n---\n{cargo}")
             });
-            fs::remove_dir_all(&target).expect("failed to cleanup temporary test directory");
         }
     }
 
     #[test]
     fn static_files_match_template_content_after_overlay() {
-        let target = mk_temp_dir("parity");
+        let temp = mk_temp_dir();
+        let target = temp.path();
         let ctx = OverlayRenderContext {
             crate_name: "my-app",
             lez_pin: "abc123",
         };
 
-        apply_overlay(&target, "default", &ctx).expect("failed to apply default overlay");
+        apply_overlay(target, "default", &ctx).expect("failed to apply default overlay");
 
         let env_text = fs::read_to_string(target.join(".env.local"))
             .expect("failed to read generated .env.local");
@@ -316,19 +304,18 @@ mod tests {
             runner_text,
             include_str!("../../templates/default/src/bin/run_hello_world.rs")
         );
-
-        fs::remove_dir_all(&target).expect("failed to cleanup temporary test directory");
     }
 
     #[test]
     fn gitignore_includes_scaffold_and_is_idempotent() {
-        let target = mk_temp_dir("gitignore");
+        let temp = mk_temp_dir();
+        let target = temp.path();
         let ctx = OverlayRenderContext {
             crate_name: "my-app",
             lez_pin: "abc123",
         };
 
-        apply_overlay(&target, "default", &ctx).expect("failed to apply default overlay");
+        apply_overlay(target, "default", &ctx).expect("failed to apply default overlay");
 
         let gitignore = fs::read_to_string(target.join(".gitignore"))
             .expect("failed to read generated .gitignore");
@@ -341,7 +328,7 @@ mod tests {
             ".gitignore should contain .env.local, got: {gitignore:?}"
         );
 
-        apply_overlay(&target, "default", &ctx).expect("second overlay should succeed");
+        apply_overlay(target, "default", &ctx).expect("second overlay should succeed");
         let gitignore_after = fs::read_to_string(target.join(".gitignore"))
             .expect("failed to read .gitignore after second overlay");
         let scaffold_count = gitignore_after
@@ -360,8 +347,6 @@ mod tests {
             env_local_count, 1,
             "idempotent overlay must not duplicate .env.local"
         );
-
-        fs::remove_dir_all(&target).expect("failed to cleanup temporary test directory");
     }
 
     #[test]

@@ -135,14 +135,8 @@ pub(crate) fn deploy_for_project(
             continue;
         };
 
-        let mut command = Command::new(&wallet.wallet_binary);
-        command
-            .env(
-                "NSSA_WALLET_HOME_DIR",
-                wallet.wallet_home.as_os_str().to_string_lossy().to_string(),
-            )
-            .arg("deploy-program")
-            .arg(&binary_path);
+        let mut command = wallet.command();
+        command.arg("deploy-program").arg(&binary_path);
 
         let output = match run_with_stdin(command, format!("{}\n", wallet_password())) {
             Ok(output) => output,
@@ -199,7 +193,7 @@ pub(crate) fn deploy_for_project(
             if let Some(tx) = &tx {
                 println!("  tx: {tx}");
             }
-            print_program_id_line(&program_id);
+            print_program_id_line(program_id.as_deref());
         }
         results.push(DeployResult {
             program,
@@ -292,7 +286,7 @@ fn preflight_sequencer_reachability(sequencer_addr: &str) -> DynResult<()> {
             )
         }
         Err(err) => {
-            println!(
+            eprintln!(
                 "warning: sequencer reachability probe failed ({err}); continuing with wallet submission mode"
             );
             Ok(())
@@ -332,20 +326,16 @@ fn resolve_selected_programs(
     requested_program: Option<String>,
     available_programs: &[String],
 ) -> DynResult<Vec<String>> {
-    if requested_program.is_none() {
+    let Some(raw) = requested_program else {
         return Ok(available_programs.to_vec());
-    }
+    };
 
-    let raw = requested_program.unwrap_or_default();
     let candidate = raw.trim().trim_end_matches(".bin").to_string();
     if candidate.is_empty() {
         bail!("program name cannot be empty");
     }
 
-    if available_programs
-        .iter()
-        .any(|program| program == &candidate)
-    {
+    if available_programs.contains(&candidate) {
         return Ok(vec![candidate]);
     }
 
@@ -365,14 +355,8 @@ fn deploy_single_program(
 ) -> DynResult<DeployResult> {
     preflight_sequencer_reachability(sequencer_addr)?;
 
-    let mut command = std::process::Command::new(&wallet.wallet_binary);
-    command
-        .env(
-            "NSSA_WALLET_HOME_DIR",
-            wallet.wallet_home.as_os_str().to_string_lossy().to_string(),
-        )
-        .arg("deploy-program")
-        .arg(binary_path);
+    let mut command = wallet.command();
+    command.arg("deploy-program").arg(binary_path);
 
     // Suppress the `$ <cmd>` echo on stdout for --json so the output is a
     // pure JSON object that pipes cleanly into `jq`. RAII guard restores echo
@@ -439,7 +423,7 @@ fn deploy_single_program(
         if let Some(tx) = &tx {
             println!("  tx: {tx}");
         }
-        print_program_id_line(&program_id);
+        print_program_id_line(program_id.as_deref());
         println!(
             "  Note: Program ID is computed locally; on-chain inclusion is not yet verifiable."
         );
@@ -517,7 +501,7 @@ pub(crate) fn extract_program_id(spel_bin: &Path, binary_path: &Path) -> Option<
     }
 }
 
-fn print_program_id_line(program_id: &Option<String>) {
+fn print_program_id_line(program_id: Option<&str>) {
     // Lowercase, snake_case key with 2-space indent so the same awk/grep
     // pattern matches in single-program and multi-program plain output and
     // mirrors the JSON key. Single canonical line per deployed program.
@@ -554,8 +538,8 @@ pub enum DeployStatus {
 impl DeployStatus {
     pub(crate) fn label(&self) -> &'static str {
         match self {
-            DeployStatus::Submitted => "submitted",
-            DeployStatus::Failed => "failed",
+            Self::Submitted => "submitted",
+            Self::Failed => "failed",
         }
     }
 }

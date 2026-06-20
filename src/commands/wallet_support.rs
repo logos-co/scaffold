@@ -7,6 +7,7 @@ use anyhow::{bail, Context};
 use serde_json::Value;
 
 use crate::constants::{DEFAULT_WALLET_PASSWORD, WALLET_BIN_REL_PATH};
+use crate::hash::hex_encode;
 use crate::model::Project;
 use crate::project::resolve_repo_path;
 use crate::state::write_text;
@@ -19,6 +20,20 @@ pub(crate) struct WalletRuntimeContext {
     pub(crate) wallet_home: PathBuf,
     pub(crate) wallet_binary: PathBuf,
     pub(crate) sequencer_addr: Option<String>,
+}
+
+impl WalletRuntimeContext {
+    /// Build a `Command` for the vendored wallet binary with
+    /// `NSSA_WALLET_HOME_DIR` pre-set so the invocation targets the project
+    /// wallet home. Callers append the subcommand and its arguments.
+    pub(crate) fn command(&self) -> std::process::Command {
+        let mut command = std::process::Command::new(&self.wallet_binary);
+        command.env(
+            "NSSA_WALLET_HOME_DIR",
+            self.wallet_home.as_os_str().to_string_lossy().to_string(),
+        );
+        command
+    }
 }
 
 /// When `wallet_config.json` omits `sequencer_addr`, RPC calls should target the same host/port
@@ -68,14 +83,14 @@ fn read_wallet_config(wallet_home: &Path) -> DynResult<(PathBuf, Value)> {
         // Legacy: older `setup` runs wrote "config.json" instead of
         // "wallet_config.json". Re-run `logos-scaffold setup` to migrate.
         eprintln!(
-            "warning: found legacy wallet config '{}';              re-run `logos-scaffold setup` to migrate to '{}'.",
+            "warning: found legacy wallet config '{}'; re-run `logos-scaffold setup` to migrate to '{}'.",
             WALLET_CONFIG_FALLBACK,
             WALLET_CONFIG_PRIMARY,
         );
         fallback
     } else {
         return Err(anyhow::anyhow!(
-            "missing wallet config at \'{}\'. Run `logos-scaffold setup`.",
+            "missing wallet config at '{}'. Run `logos-scaffold setup`.",
             wallet_home.join(WALLET_CONFIG_PRIMARY).display()
         ));
     };
@@ -269,25 +284,13 @@ pub(crate) fn is_confirmation_timeout_failure(text: &str) -> bool {
 }
 
 pub(crate) fn summarize_command_failure(stdout: &str, stderr: &str) -> String {
-    let stderr_line = stderr
+    stderr
         .lines()
+        .chain(stdout.lines())
         .map(str::trim)
         .find(|line| !line.is_empty())
-        .map(|line| line.to_string());
-    if let Some(line) = stderr_line {
-        return line;
-    }
-
-    let stdout_line = stdout
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(|line| line.to_string());
-    if let Some(line) = stdout_line {
-        return line;
-    }
-
-    "command failed without stderr output".to_string()
+        .map(str::to_string)
+        .unwrap_or_else(|| "command failed without stderr output".to_string())
 }
 
 pub(crate) fn extract_tx_identifier(stdout: &str, stderr: &str) -> Option<String> {
@@ -348,32 +351,18 @@ fn extract_tx_hash_from_hash_type_bytes(text: &str) -> Option<String> {
         };
         let inside = &after_open[..close_bracket];
 
-        let mut bytes = Vec::new();
-        let mut parse_failed = false;
-        for chunk in inside.split(|ch: char| ch == ',' || ch.is_whitespace()) {
-            if chunk.is_empty() {
-                continue;
-            }
-            match chunk.parse::<u8>() {
-                Ok(value) => bytes.push(value),
-                Err(_) => {
-                    parse_failed = true;
-                    break;
-                }
-            }
-        }
+        let bytes: Option<Vec<u8>> = inside
+            .split(|ch: char| ch == ',' || ch.is_whitespace())
+            .filter(|chunk| !chunk.is_empty())
+            .map(|chunk| chunk.parse::<u8>().ok())
+            .collect();
 
-        if parse_failed || bytes.is_empty() {
+        let Some(bytes) = bytes.filter(|bytes| !bytes.is_empty()) else {
             offset = field_start;
             continue;
-        }
+        };
 
-        let mut hex_hash = String::from("0x");
-        for byte in bytes {
-            use std::fmt::Write as _;
-            let _ = write!(&mut hex_hash, "{byte:02x}");
-        }
-        return Some(hex_hash);
+        return Some(format!("0x{}", hex_encode(&bytes)));
     }
 
     None
@@ -388,8 +377,8 @@ pub(crate) enum RpcReachabilityError {
 impl std::fmt::Display for RpcReachabilityError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RpcReachabilityError::Connectivity(msg) => write!(f, "{msg}"),
-            RpcReachabilityError::Other(msg) => write!(f, "{msg}"),
+            Self::Connectivity(msg) => write!(f, "{msg}"),
+            Self::Other(msg) => write!(f, "{msg}"),
         }
     }
 }

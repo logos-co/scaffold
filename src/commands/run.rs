@@ -24,6 +24,7 @@ use crate::constants::{
     DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, FRAMEWORK_KIND_LEZ_FRAMEWORK, SPEL_BIN_REL_PATH,
 };
 use crate::model::{LocalnetOwnership, Project, RunProfile};
+use crate::process::pid_text;
 use crate::project::{load_project, resolve_repo_path, run_in_project_dir};
 use crate::state::prepare_wallet_home;
 use crate::DynResult;
@@ -72,7 +73,7 @@ pub(crate) fn run_for_project(project: &Project, inv: RunInvocation) -> DynResul
         .unwrap_or(DEFAULT_RUN_LOCALNET_TIMEOUT_SEC);
 
     let mut params = PipelineParams {
-        resolved: resolved.clone(),
+        resolved,
         hooks,
         reset_override: inv.reset,
         localnet_timeout_sec,
@@ -83,7 +84,7 @@ pub(crate) fn run_for_project(project: &Project, inv: RunInvocation) -> DynResul
     // `build_idl_for_current_project`, etc.) would build/deploy from whichever
     // subdirectory the user invoked `lgs run` in.
     run_in_project_dir(Some(&project.root), || {
-        run_pipeline_once(&project, &params)?;
+        run_pipeline_once(project, &params)?;
 
         if inv.watch {
             // Subsequent iterations share the same hook/profile selection but
@@ -96,7 +97,7 @@ pub(crate) fn run_for_project(project: &Project, inv: RunInvocation) -> DynResul
                 .watch_debounce_ms
                 .or(project.config.run.watch.debounce_ms)
                 .unwrap_or(WATCH_DEBOUNCE_MS);
-            watch_loop(&project, &params, debounce_ms)?;
+            watch_loop(project, &params, debounce_ms)?;
         }
 
         Ok(())
@@ -109,6 +110,16 @@ struct PipelineParams {
     hooks: Vec<String>,
     reset_override: Option<bool>,
     localnet_timeout_sec: u64,
+}
+
+/// Delete a stale cache/state file, tolerating its absence (no prior run) but
+/// surfacing any other I/O error with context.
+fn clear_stale(path: &Path, what: &str) -> DynResult<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("{what} at {}", path.display())),
+    }
 }
 
 fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()> {
@@ -134,24 +145,14 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
     // file (no prior run).
     if effective_reset {
         let idl_state = project.root.join(IDL_STATE_REL);
-        match std::fs::remove_file(&idl_state) {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(e)
-                    .with_context(|| format!("clear stale IDL cache at {}", idl_state.display()));
-            }
-        }
+        clear_stale(&idl_state, "clear stale IDL cache")?;
     }
 
-    // Step 1: Build (chains setup internally)
+    // Build (chains setup internally)
     println!("[1/{total_steps}] Building...");
     cmd_build_shortcut(None, false)?;
 
-    // Step 2: Build IDL (no-op for non-lez-framework projects). `build_idl_for_current_project`
-    // deliberately bails when typed directly against a non-lez-framework project, so the
-    // pipeline must gate on framework kind here the same way `lgs build` does — otherwise
-    // `lgs run` aborts at this step for every `default`-template project.
+    // Build IDL only for framework kinds whose direct IDL command supports it.
     println!("[2/{total_steps}] Building IDL...");
     if project.config.framework.kind == FRAMEWORK_KIND_LEZ_FRAMEWORK {
         build_idl_for_current_project()?;
@@ -162,7 +163,7 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
         );
     }
 
-    // Step 3: Reset OR ensure localnet.
+    // Reset OR ensure localnet.
     if effective_reset {
         println!("[3/{total_steps}] Resetting localnet (wipes sequencer + wallet)...");
         reset_for_run(project, params.localnet_timeout_sec)?;
@@ -170,21 +171,13 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
         // the next deploy must run regardless of hash equality. Tolerate
         // NotFound (no prior run); surface anything else.
         let state_file = project.root.join(".scaffold/state/run_deploy.json");
-        match std::fs::remove_file(&state_file) {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(e).with_context(|| {
-                    format!("clear stale deploy state at {}", state_file.display())
-                });
-            }
-        }
+        clear_stale(&state_file, "clear stale deploy state")?;
     } else {
         println!("[3/{total_steps}] Ensuring localnet...");
         ensure_localnet(project, params.localnet_timeout_sec)?;
     }
 
-    // Step 4: Wallet topup
+    // Wallet topup
     println!("[4/{total_steps}] Topping up wallet...");
     let outcome = cmd_wallet_topup_inner(project, None, false, false)?;
     if let TopupOutcome::ConfirmationTimeout { message } = outcome {
@@ -195,7 +188,7 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
         );
     }
 
-    // Step 5: Deploy (idempotent: skip when guest .bin + IDL + deploy
+    // Deploy (idempotent: skip when guest .bin + IDL + deploy
     // config hashes match the prior deploy AND the sequencer is the same
     // instance that received it. A `lgs localnet stop && start` cycle
     // changes the sequencer PID and wipes on-chain state, so PID equality
@@ -231,7 +224,7 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
     // here so the per-hook loop doesn't multiply latency by hook count.
     let deployed = collect_deployed_programs(project, deploy_skipped)?;
 
-    // Step 6: Post-deploy hooks (or summary)
+    // Post-deploy hooks (or summary)
     if has_hooks {
         let n = params.hooks.len();
         println!("[6/{total_steps}] Running {n} post-deploy hook(s)...");
@@ -279,11 +272,6 @@ fn reset_for_run(project: &Project, verify_timeout_sec: u64) -> DynResult<()> {
     Ok(())
 }
 
-/// Re-seed the project's default wallet after `cmd_localnet_reset` wiped
-/// it. Reuses the same primitives `cmd_setup` calls so the resulting
-/// `wallet.state` is byte-equivalent to a fresh `lgs setup`. Extracted as
-/// its own helper so the byte-equivalence test can drive it directly
-/// without booting a real sequencer.
 fn watch_loop(project: &Project, params: &PipelineParams, debounce_ms: u64) -> DynResult<()> {
     let (tx, rx) = mpsc::channel();
     let mut watcher = notify::recommended_watcher(move |res| {
@@ -502,6 +490,11 @@ fn segment_match(pat: &[u8], seg: &[u8]) -> bool {
     p == pat.len()
 }
 
+/// Re-seed the project's default wallet after `cmd_localnet_reset` wiped
+/// it. Reuses the same primitives `cmd_setup` calls so the resulting
+/// `wallet.state` is byte-equivalent to a fresh `lgs setup`. Extracted as
+/// its own helper so the byte-equivalence test can drive it directly
+/// without booting a real sequencer.
 fn reseed_after_wipe(project: &Project) -> DynResult<()> {
     let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
     let wallet_home = project.root.join(&project.config.wallet_home_dir);
@@ -555,7 +548,9 @@ fn collect_deployed_programs(project: &Project, skipped: bool) -> DynResult<Depl
     // causes post-deploy hooks to fail in confusing ways (issue #160).
     if !spel_bin.is_file() {
         eprintln!(
-            "warning: vendored spel binary not found at {}.              SCAFFOLD_PROGRAM_ID will be unset for all programs.              Run `lgs setup` to build spel.",
+            "warning: vendored spel binary not found at {}. \
+             SCAFFOLD_PROGRAM_ID will be unset for all programs. \
+             Run `lgs setup` to build spel.",
             spel_bin.display()
         );
     }
@@ -661,18 +656,12 @@ fn ensure_localnet(project: &Project, timeout_sec: u64) -> DynResult<()> {
     let status = build_localnet_status_for_project(project);
     match status.ownership {
         LocalnetOwnership::Managed if status.ready => {
-            let pid_display = status
-                .tracked_pid
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| "unknown".to_string());
+            let pid_display = pid_text(status.tracked_pid);
             println!("      localnet already running (sequencer pid={pid_display})");
             Ok(())
         }
         LocalnetOwnership::Foreign => {
-            let pid_display = status
-                .listener_pid
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| "unknown".to_string());
+            let pid_display = pid_text(status.listener_pid);
             bail!(
                 "localnet port is in use by another process (pid={pid_display}).\n\
                  This may be a sequencer from another project.\n\
@@ -725,20 +714,14 @@ fn build_hook_command(
 ) -> Command {
     let sequencer_url =
         crate::commands::wallet_support::default_sequencer_http_url_for_project(project);
-    let wallet_home = project
-        .root
-        .join(&project.config.wallet_home_dir)
-        .canonicalize()
-        .unwrap_or_else(|_| project.root.join(&project.config.wallet_home_dir));
+    let wallet_home = project.root.join(&project.config.wallet_home_dir);
+    let wallet_home = wallet_home.canonicalize().unwrap_or(wallet_home);
     let project_root = project
         .root
         .canonicalize()
         .unwrap_or_else(|_| project.root.clone());
-    let idl_dir = project
-        .root
-        .join(&project.config.framework.idl.path)
-        .canonicalize()
-        .unwrap_or_else(|_| project.root.join(&project.config.framework.idl.path));
+    let idl_dir = project.root.join(&project.config.framework.idl.path);
+    let idl_dir = idl_dir.canonicalize().unwrap_or(idl_dir);
 
     let run_deploy_skipped = deployed.skipped;
 

@@ -15,7 +15,7 @@ use crate::model::{
     LocalnetLogsReport, LocalnetOwnership, LocalnetState, LocalnetStatusReport, Project,
 };
 use crate::process::{
-    command_echo_enabled, listener_pid, pid_alive, pid_command, pid_running, port_open,
+    command_echo_enabled, listener_pid, pid_alive, pid_command, pid_running, pid_text, port_open,
     spawn_to_log,
 };
 use crate::project::{
@@ -266,9 +266,7 @@ fn cmd_localnet_stop_outside_project() -> DynResult<()> {
     }
 
     let listener_pid = listener_pid(default_port);
-    let pid_text = listener_pid
-        .map(|pid| pid.to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    let pid_text = pid_text(listener_pid);
 
     println!("listener detected on {default_addr} (pid={pid_text})");
     println!(
@@ -326,14 +324,10 @@ fn start_localnet(
 
     let existing_listener_pid = listener_pid(localnet_port);
     if port_open(localnet_addr) {
-        let mut message = match existing_listener_pid {
-            Some(pid) => {
-                format!("cannot start localnet: port {localnet_port} is already in use (pid={pid})")
-            }
-            None => format!(
-                "cannot start localnet: port {localnet_port} is already in use (pid=unknown)"
-            ),
-        };
+        let pid_text = pid_text(existing_listener_pid);
+        let mut message = format!(
+            "cannot start localnet: port {localnet_port} is already in use (pid={pid_text})"
+        );
         message.push_str(
             "\nThis may be a sequencer started from another project and may not work with the current project.",
         );
@@ -375,7 +369,10 @@ fn start_localnet(
             sequencer_cmd.env("RISC0_SERVER_PATH", &r0vm_path);
         } else {
             eprintln!(
-                "warning: RISC0_SERVER_PATH is not set and r0vm was not found in the                  rzup extensions directory for the LEZ-pinned risc0 version.                  If transaction execution fails, set RISC0_SERVER_PATH to the r0vm                  binary installed by rzup."
+                "warning: RISC0_SERVER_PATH is not set and r0vm was not found in the \
+                 rzup extensions directory for the LEZ-pinned risc0 version. \
+                 If transaction execution fails, set RISC0_SERVER_PATH to the r0vm \
+                 binary installed by rzup."
             );
         }
     }
@@ -511,9 +508,7 @@ fn print_stop_outcome(outcome: &LocalnetStopOutcome, _localnet_addr: &str) {
             println!("localnet stopped");
         }
         LocalnetStopOutcome::ForeignListener { addr, pid } => {
-            let pid_text = pid
-                .map(|pid| pid.to_string())
-                .unwrap_or_else(|| "unknown".to_string());
+            let pid_text = pid_text(*pid);
             println!(
                 "foreign listener detected on {addr} (pid={pid_text}); not stopping unmanaged process"
             );
@@ -547,10 +542,7 @@ fn cmd_localnet_status(
 
     let sequencer_url = format!("http://{localnet_addr}");
     if report.listener_present {
-        let pid_text = report
-            .listener_pid
-            .map(|pid| pid.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+        let pid_text = pid_text(report.listener_pid);
         println!("listener {sequencer_url}: reachable (pid={pid_text})");
     } else {
         println!("listener {sequencer_url}: not reachable");
@@ -648,7 +640,7 @@ fn build_status_report(
 ) -> LocalnetStatusReport {
     let state = read_localnet_state(state_path).unwrap_or_default();
     let tracked_pid = state.sequencer_pid;
-    let tracked_running = tracked_pid.map(pid_running).unwrap_or(false);
+    let tracked_running = tracked_pid.is_some_and(pid_running);
     let listener_present = port_open(localnet_addr);
     let listener_pid = if listener_present {
         listener_pid(localnet_port)
@@ -770,6 +762,7 @@ fn read_log_tail(log_path: &Path, tail: usize) -> String {
 
 // ─── reset ───────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_localnet_reset_dry_run(
     project: &Project,
     lez: &Path,
@@ -872,6 +865,7 @@ fn cmd_localnet_reset_dry_run(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_localnet_reset(
     project: &Project,
     lez: &Path,

@@ -31,7 +31,7 @@ use crate::constants::{
     SEQUENCER_BIN_REL_PATH,
 };
 use crate::model::{CheckStatus, Project};
-use crate::process::run_checked;
+use crate::process::run_forwarded;
 use crate::project::resolve_cache_root;
 use crate::repo::{
     ensure_pin_exists, git_clean, git_head_sha, sync_repo_to_pin_at_path_with_opts, RepoSyncOptions,
@@ -307,7 +307,7 @@ pub fn prepare_test_node(
     build_cmd
         .current_dir(&pins.lez_checkout)
         .args(SEQUENCER_BUILD_ARGS);
-    run_checked(&mut build_cmd, "build sequencer_service (standalone)")?;
+    run_forwarded(&mut build_cmd, "build sequencer_service (standalone)")?;
 
     if !pins.sequencer_binary.exists() {
         bail!(

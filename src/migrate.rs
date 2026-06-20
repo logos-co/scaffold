@@ -82,18 +82,16 @@ pub(crate) fn migrate_to_v0_2_0(doc: &mut DocumentMut) -> DynResult<MigrationRep
     // stale `lssa` is dropped (lez wins) — config::detect_old_schema rejects
     // any lssa section, so leaving it behind would keep the file unparseable.
     if let Some(repos) = doc.get_mut("repos").and_then(Item::as_table_mut) {
-        if repos.contains_key("lssa") {
-            if let Some(lssa) = repos.remove("lssa") {
-                if repos.contains_key("lez") {
-                    report
-                        .changes
-                        .push("dropped stale [repos.lssa] (kept [repos.lez])".to_string());
-                } else {
-                    repos.insert("lez", lssa);
-                    report
-                        .changes
-                        .push("renamed [repos.lssa] -> [repos.lez]".to_string());
-                }
+        if let Some(lssa) = repos.remove("lssa") {
+            if repos.contains_key("lez") {
+                report
+                    .changes
+                    .push("dropped stale [repos.lssa] (kept [repos.lez])".to_string());
+            } else {
+                repos.insert("lez", lssa);
+                report
+                    .changes
+                    .push("renamed [repos.lssa] -> [repos.lez]".to_string());
             }
         }
     }
@@ -144,25 +142,20 @@ pub(crate) fn migrate_to_v0_2_0(doc: &mut DocumentMut) -> DynResult<MigrationRep
     let mut basecamp_source = None;
     let mut lgpm_flake = None;
     if let Some(bc) = doc.get_mut("basecamp").and_then(Item::as_table_mut) {
-        if let Some(s) = bc.get("pin").and_then(Item::as_str) {
-            basecamp_pin = Some(s.to_string());
-        }
-        if let Some(s) = bc.get("source").and_then(Item::as_str) {
-            basecamp_source = Some(s.to_string());
-        }
-        if let Some(s) = bc.get("lgpm_flake").and_then(Item::as_str) {
-            lgpm_flake = Some(s.to_string());
-        }
+        basecamp_pin = bc.get("pin").and_then(Item::as_str).map(str::to_string);
+        basecamp_source = bc.get("source").and_then(Item::as_str).map(str::to_string);
+        lgpm_flake = bc
+            .get("lgpm_flake")
+            .and_then(Item::as_str)
+            .map(str::to_string);
     }
 
     let need_basecamp_repo = basecamp_pin.is_some() || basecamp_source.is_some();
     if need_basecamp_repo {
         let pin = basecamp_pin
-            .clone()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| DEFAULT_BASECAMP_PIN.to_string());
         let source = basecamp_source
-            .clone()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| BASECAMP_SOURCE.to_string());
         let mut repo = crate::config::default_basecamp_repo(&pin);
@@ -213,12 +206,10 @@ pub(crate) fn migrate_to_v0_2_0(doc: &mut DocumentMut) -> DynResult<MigrationRep
     // [basecamp.modules.*] -> [modules.*]
     let mut moved_modules = Vec::new();
     if let Some(bc) = doc.get_mut("basecamp").and_then(Item::as_table_mut) {
-        if let Some(modules_item) = bc.get("modules") {
-            if let Some(modules_table) = modules_item.as_table() {
-                for (name, item) in modules_table.iter() {
-                    if let Some(t) = item.as_table() {
-                        moved_modules.push((name.to_string(), t.clone()));
-                    }
+        if let Some(modules_table) = bc.get("modules").and_then(Item::as_table) {
+            for (name, item) in modules_table.iter() {
+                if let Some(t) = item.as_table() {
+                    moved_modules.push((name.to_string(), t.clone()));
                 }
             }
         }

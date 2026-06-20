@@ -6,7 +6,7 @@ use std::process::Command;
 
 use anyhow::bail;
 
-use crate::process::{run_capture, run_checked};
+use crate::process::{run_capture, run_forwarded};
 use crate::DynResult;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -44,7 +44,7 @@ pub(crate) fn sync_repo_to_pin_at_path_with_opts(
 ) -> DynResult<()> {
     ensure_repo_present(path, source, label, opts)?;
 
-    let _ = run_checked(
+    let _ = run_forwarded(
         Command::new("git")
             .current_dir(path)
             .arg("fetch")
@@ -55,7 +55,7 @@ pub(crate) fn sync_repo_to_pin_at_path_with_opts(
 
     let resolved_pin = ensure_pin_exists(path, source, pin, label)?;
 
-    run_checked(
+    run_forwarded(
         Command::new("git")
             .current_dir(path)
             .arg("checkout")
@@ -69,10 +69,7 @@ pub(crate) fn sync_repo_to_pin_at_path_with_opts(
         // otherwise tag/branch pins (e.g. `pin = "v0.2.0"`) always trip this
         // assertion even though the checkout succeeded.
         bail!(
-            "{label} pin mismatch after checkout (expected {} resolved from {}, got {})",
-            resolved_pin,
-            pin,
-            head
+            "{label} pin mismatch after checkout (expected {resolved_pin} resolved from {pin}, got {head})"
         );
     }
 
@@ -124,14 +121,18 @@ pub(crate) fn ensure_repo_present(
         fs::create_dir_all(parent)?;
     }
 
-    run_checked(
+    clone_repo(source, path, &format!("clone {label}"))
+}
+
+fn clone_repo(source: &str, path: &Path, label: &str) -> DynResult<()> {
+    run_forwarded(
         Command::new("git")
             .arg("clone")
             .arg("--no-hardlinks")
             .arg("--")
             .arg(source)
             .arg(path),
-        &format!("clone {label}"),
+        label,
     )
 }
 
@@ -175,15 +176,7 @@ fn reconcile_repo_source(
             }
 
             fs::remove_dir_all(path)?;
-            run_checked(
-                Command::new("git")
-                    .arg("clone")
-                    .arg("--no-hardlinks")
-                    .arg("--")
-                    .arg(source)
-                    .arg(path),
-                &format!("refresh clone {label}"),
-            )?;
+            clone_repo(source, path, &format!("refresh clone {label}"))?;
         }
     }
 
@@ -289,8 +282,7 @@ fn source_is_reachable(source: &str) -> bool {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+            .is_ok_and(|s| s.success())
     } else {
         let p = Path::new(source);
         p.exists()

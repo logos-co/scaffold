@@ -5,8 +5,9 @@ use anyhow::bail;
 
 use crate::circuits::ensure_circuits_for_subprocess;
 use crate::doctor_checks::check_logos_blockchain_circuits;
+use crate::hash::sha256_hex;
 use crate::model::{CheckStatus, RepoRef};
-use crate::process::run_checked;
+use crate::process::run_forwarded;
 use crate::project::{ensure_dir_exists, load_project, resolve_cache_root, resolve_repo_path};
 use crate::repo::{sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
 use crate::state::prepare_wallet_home;
@@ -72,11 +73,11 @@ pub(crate) fn setup_for_project(project: &crate::model::Project, prebuilt: bool)
     if !built_from_prebuilt {
         let mut sequencer_cmd = Command::new("cargo");
         sequencer_cmd.current_dir(&lez).args(SEQUENCER_BUILD_ARGS);
-        run_checked(&mut sequencer_cmd, "build sequencer_service (standalone)")?;
+        run_forwarded(&mut sequencer_cmd, "build sequencer_service (standalone)")?;
     }
 
     // wallet is always built from source — prebuilt download only covers sequencer_service
-    run_checked(
+    run_forwarded(
         Command::new("cargo")
             .current_dir(&lez)
             .arg("build")
@@ -88,7 +89,7 @@ pub(crate) fn setup_for_project(project: &crate::model::Project, prebuilt: bool)
 
     sync_pinned_repo(&project.config.spel, &spel, "spel")?;
     ensure_dir_exists(&spel, "spel")?;
-    run_checked(
+    run_forwarded(
         Command::new("cargo")
             .current_dir(&spel)
             .arg("build")
@@ -181,6 +182,82 @@ pub(crate) fn ensure_default_wallet_seeded(
     }
 
     Ok(())
+}
+
+fn try_download_prebuilt(lez: &Path, pin: &str) -> DynResult<bool> {
+    let arch = if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        eprintln!(
+            "warning: --prebuilt not supported on this architecture, falling back to source build"
+        );
+        return Ok(false);
+    };
+    let os = if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        eprintln!("warning: --prebuilt not supported on this OS, falling back to source build");
+        return Ok(false);
+    };
+    let commit = &pin[..8.min(pin.len())];
+    let tag = format!("lssa-prebuilt-{commit}-{arch}-{os}");
+    println!("Checking for prebuilt binaries (tag: {tag})...");
+    let url = format!(
+        "https://github.com/logos-co/logos-scaffold/releases/download/{tag}/sequencer_service"
+    );
+    let bin_dir = lez.join("target/release");
+    std::fs::create_dir_all(&bin_dir)?;
+    let dest = bin_dir.join("sequencer_service");
+    match ureq::get(&url).call() {
+        Ok(resp) => {
+            let mut reader = resp.into_reader();
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut reader, &mut bytes)?;
+
+            // Verify SHA256 integrity if a checksum file is published alongside the binary
+            let sha_url = format!("{url}.sha256");
+            if let Ok(sha_resp) = ureq::get(&sha_url).call() {
+                let mut sha_reader = sha_resp.into_reader();
+                let mut sha_bytes = Vec::new();
+                std::io::Read::read_to_end(&mut sha_reader, &mut sha_bytes)?;
+                let expected = String::from_utf8_lossy(&sha_bytes)
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                if !expected.is_empty() {
+                    let actual = sha256_hex(&bytes);
+                    if actual != expected {
+                        anyhow::bail!(
+                            "SHA256 mismatch for prebuilt sequencer_service: expected {expected}, got {actual}"
+                        );
+                    }
+                    println!("SHA256 verified: {actual}");
+                }
+            }
+
+            std::fs::write(&dest, &bytes)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
+            }
+            println!("prebuilt sequencer_service downloaded successfully");
+            Ok(true)
+        }
+        Err(ureq::Error::Status(404, _)) => {
+            println!("no prebuilt published yet for tag {tag}, falling back to source build");
+            Ok(false)
+        }
+        Err(e) => {
+            eprintln!("warning: --prebuilt download failed ({e}), falling back to source build");
+            Ok(false)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -303,106 +380,5 @@ mod tests {
         );
         assert!(url.contains("lssa-prebuilt-35d8df0d"));
         assert!(url.contains("sequencer_service"));
-    }
-}
-
-fn try_download_prebuilt(lez: &Path, pin: &str) -> crate::DynResult<bool> {
-    let arch = if cfg!(target_arch = "x86_64") {
-        "x86_64"
-    } else if cfg!(target_arch = "aarch64") {
-        "aarch64"
-    } else {
-        eprintln!(
-            "warning: --prebuilt not supported on this architecture, falling back to source build"
-        );
-        return Ok(false);
-    };
-    let os = if cfg!(target_os = "linux") {
-        "linux"
-    } else if cfg!(target_os = "macos") {
-        "macos"
-    } else {
-        eprintln!("warning: --prebuilt not supported on this OS, falling back to source build");
-        return Ok(false);
-    };
-    let commit = &pin[..8.min(pin.len())];
-    let tag = format!("lssa-prebuilt-{commit}-{arch}-{os}");
-    println!("Checking for prebuilt binaries (tag: {tag})...");
-    let url = format!(
-        "https://github.com/logos-co/logos-scaffold/releases/download/{tag}/sequencer_service"
-    );
-    let bin_dir = lez.join("target/release");
-    std::fs::create_dir_all(&bin_dir)?;
-    let dest = bin_dir.join("sequencer_service");
-    match ureq::get(&url).call() {
-        Ok(resp) => {
-            let mut reader = resp.into_reader();
-            let mut bytes = Vec::new();
-            std::io::Read::read_to_end(&mut reader, &mut bytes)?;
-
-            // Verify SHA256 integrity if a checksum file is published alongside the binary
-            let sha_url = format!("{url}.sha256");
-            if let Ok(sha_resp) = ureq::get(&sha_url).call() {
-                let mut sha_reader = sha_resp.into_reader();
-                let mut sha_bytes = Vec::new();
-                std::io::Read::read_to_end(&mut sha_reader, &mut sha_bytes)?;
-                let expected = String::from_utf8_lossy(&sha_bytes)
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .to_string();
-                if !expected.is_empty() {
-                    let actual = sha256_hex(&bytes);
-                    if actual != expected {
-                        anyhow::bail!(
-                            "SHA256 mismatch for prebuilt sequencer_service: expected {expected}, got {actual}"
-                        );
-                    }
-                    println!("SHA256 verified: {actual}");
-                }
-            }
-
-            std::fs::write(&dest, &bytes)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
-            }
-            println!("prebuilt sequencer_service downloaded successfully");
-            Ok(true)
-        }
-        Err(ureq::Error::Status(404, _)) => {
-            println!("no prebuilt published yet for tag {tag}, falling back to source build");
-            Ok(false)
-        }
-        Err(e) => {
-            eprintln!("warning: --prebuilt download failed ({e}), falling back to source build");
-            Ok(false)
-        }
-    }
-}
-
-fn sha256_hex(data: &[u8]) -> String {
-    // Simple SHA256 using the sha2 crate via workspace dependency
-    // Falls back gracefully if not available
-    #[cfg(feature = "sha2")]
-    {
-        use sha2::{Digest, Sha256};
-        let hash = Sha256::digest(data);
-        let mut s = String::new();
-        for byte in hash {
-            write!(s, "{byte:02x}").unwrap();
-        }
-        s
-    }
-    #[cfg(not(feature = "sha2"))]
-    {
-        // Without sha2, compute a simple checksum for basic integrity
-        let mut h: u64 = 0xcbf29ce484222325;
-        for &b in data {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x100000001b3);
-        }
-        format!("{h:016x}")
     }
 }

@@ -205,7 +205,7 @@ fn collect_report_artifacts(
                 &mut skipped,
                 &mut warnings,
                 &mut redaction,
-            )?;
+            );
         }
         Err(err) => {
             warnings.push(format!("doctor diagnostics unavailable: {err}"));
@@ -227,7 +227,7 @@ fn collect_report_artifacts(
         &mut skipped,
         &mut warnings,
         &mut redaction,
-    )?;
+    );
 
     let scaffold_path = project.root.join("scaffold.toml");
     match fs::read_to_string(&scaffold_path) {
@@ -390,7 +390,7 @@ fn collect_sanitized_json_artifact<T: Serialize>(
     skipped: &mut Vec<SkippedItem>,
     warnings: &mut Vec<String>,
     redaction: &mut RedactionSummary,
-) -> DynResult<()> {
+) {
     let sanitized = match render_sanitized_json_artifact(value, sanitize_ctx) {
         Ok(sanitized) => sanitized,
         Err(err) => {
@@ -401,7 +401,7 @@ fn collect_sanitized_json_artifact<T: Serialize>(
             warnings.push(format!(
                 "could not sanitize optional artifact {rel_path}: {err}"
             ));
-            return Ok(());
+            return;
         }
     };
 
@@ -415,7 +415,7 @@ fn collect_sanitized_json_artifact<T: Serialize>(
         warnings.push(format!(
             "skipped {rel_path} because high-risk markers remained after sanitization"
         ));
-        return Ok(());
+        return;
     }
 
     if let Err(err) = write_text(&staging_dir.join(rel_path), &sanitized.text) {
@@ -426,7 +426,7 @@ fn collect_sanitized_json_artifact<T: Serialize>(
         warnings.push(format!(
             "could not write optional sanitized artifact {rel_path}: {err}"
         ));
-        return Ok(());
+        return;
     }
 
     collected.push(CollectedItem {
@@ -434,7 +434,6 @@ fn collect_sanitized_json_artifact<T: Serialize>(
         source: source.to_string(),
         notes: None,
     });
-    Ok(())
 }
 
 fn render_sanitized_json_artifact<T: Serialize>(
@@ -626,8 +625,7 @@ fn collect_log_files(
                     .to_string(),
             });
             warnings.push(format!(
-                "skipped {} because high-risk markers remained after sanitization",
-                rel
+                "skipped {rel} because high-risk markers remained after sanitization"
             ));
             continue;
         }
@@ -760,7 +758,7 @@ fn collect_tool_versions(
     ] {
         let (result, replacements) = collect_tool_command(name, program, &args, cwd, sanitize_ctx);
         redaction_replacements += replacements;
-        if result.error.is_some() || result.status.unwrap_or(1) != 0 {
+        if !result.succeeded() {
             warnings.push(format!("tool probe `{name}` did not succeed"));
         }
         results.push(result);
@@ -783,29 +781,22 @@ fn collect_tool_versions(
         sanitize_ctx,
     );
     redaction_replacements += wallet_replacements;
-    if wallet_result.error.is_some() || wallet_result.status.unwrap_or(1) != 0 {
+    if !wallet_result.succeeded() {
         warnings.push("tool probe `wallet` did not succeed".to_string());
     }
     results.push(wallet_result);
 
-    if which("docker").is_some() {
-        let (docker_result, replacements) =
-            collect_tool_command("docker", "docker", &["--version"], None, sanitize_ctx);
-        redaction_replacements += replacements;
-        if docker_result.error.is_some() || docker_result.status.unwrap_or(1) != 0 {
-            warnings.push("tool probe `docker` did not succeed".to_string());
+    for tool in ["docker", "podman"] {
+        if which(tool).is_none() {
+            continue;
         }
-        results.push(docker_result);
-    }
-
-    if which("podman").is_some() {
-        let (podman_result, replacements) =
-            collect_tool_command("podman", "podman", &["--version"], None, sanitize_ctx);
+        let (result, replacements) =
+            collect_tool_command(tool, tool, &["--version"], None, sanitize_ctx);
         redaction_replacements += replacements;
-        if podman_result.error.is_some() || podman_result.status.unwrap_or(1) != 0 {
-            warnings.push("tool probe `podman` did not succeed".to_string());
+        if !result.succeeded() {
+            warnings.push(format!("tool probe `{tool}` did not succeed"));
         }
-        results.push(podman_result);
+        results.push(result);
     }
 
     (results, redaction_replacements, warnings)
@@ -904,7 +895,6 @@ fn tail_file_lines_lossy(path: &Path, tail: usize) -> DynResult<String> {
     let mut lines: VecDeque<Vec<u8>> = VecDeque::new();
 
     loop {
-        buf.clear();
         let read = reader
             .read_until(b'\n', &mut buf)
             .with_context(|| format!("failed to read bytes from {}", path.display()))?;
@@ -915,7 +905,7 @@ fn tail_file_lines_lossy(path: &Path, tail: usize) -> DynResult<String> {
         if lines.len() == tail {
             lines.pop_front();
         }
-        lines.push_back(buf.clone());
+        lines.push_back(std::mem::take(&mut buf));
     }
 
     let mut out = Vec::new();
@@ -953,10 +943,6 @@ fn scrub_path_string(raw: &str, sanitize_ctx: &SanitizeContext) -> String {
     scrubbed
 }
 
-fn scrub_manifest_text(raw: &str, sanitize_ctx: &SanitizeContext) -> String {
-    scrub_path_string(raw, sanitize_ctx)
-}
-
 fn scrub_manifest_entries(
     collected: &mut [CollectedItem],
     skipped: &mut [SkippedItem],
@@ -964,20 +950,20 @@ fn scrub_manifest_entries(
     sanitize_ctx: &SanitizeContext,
 ) {
     for item in collected {
-        item.path = scrub_manifest_text(&item.path, sanitize_ctx);
-        item.source = scrub_manifest_text(&item.source, sanitize_ctx);
+        item.path = scrub_path_string(&item.path, sanitize_ctx);
+        item.source = scrub_path_string(&item.source, sanitize_ctx);
         if let Some(notes) = &item.notes {
-            item.notes = Some(scrub_manifest_text(notes, sanitize_ctx));
+            item.notes = Some(scrub_path_string(notes, sanitize_ctx));
         }
     }
 
     for item in skipped {
-        item.path = scrub_manifest_text(&item.path, sanitize_ctx);
-        item.reason = scrub_manifest_text(&item.reason, sanitize_ctx);
+        item.path = scrub_path_string(&item.path, sanitize_ctx);
+        item.reason = scrub_path_string(&item.reason, sanitize_ctx);
     }
 
     for warning in warnings {
-        *warning = scrub_manifest_text(warning, sanitize_ctx);
+        *warning = scrub_path_string(warning, sanitize_ctx);
     }
 }
 
@@ -1075,10 +1061,7 @@ fn sanitize_text(raw: &str, sanitize_ctx: &SanitizeContext) -> SanitizedText {
 }
 
 fn redacted_line_marker(line: &str) -> String {
-    let indentation: String = line
-        .chars()
-        .take_while(|ch| ch.is_ascii_whitespace())
-        .collect();
+    let indentation: String = line.chars().take_while(char::is_ascii_whitespace).collect();
     format!("{indentation}[REDACTED SENSITIVE LINE]")
 }
 
@@ -1204,7 +1187,7 @@ const SENSITIVE_KEYWORDS: &[&str] = &[
 fn normalize_for_keyword_match(lowered: &str) -> String {
     lowered
         .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
+        .filter(char::is_ascii_alphanumeric)
         .collect()
 }
 
@@ -1230,9 +1213,7 @@ fn redact_url_credentials(line: &str) -> (String, usize) {
             .unwrap_or(after_scheme.len());
 
         let url_slice = &after_scheme[..end];
-        let authority_end = url_slice
-            .find(|c: char| matches!(c, '/' | '?' | '#'))
-            .unwrap_or(url_slice.len());
+        let authority_end = url_slice.find(['/', '?', '#']).unwrap_or(url_slice.len());
         let authority = &url_slice[..authority_end];
         let path_and_query = &url_slice[authority_end..];
 
@@ -1386,7 +1367,7 @@ fn should_redact_high_entropy(span: &str) -> bool {
     // Pattern 1: 0x followed by 40+ hex chars.
     if bytes.len() >= 42 && (bytes[0] == b'0') && (bytes[1] == b'x' || bytes[1] == b'X') {
         let tail = &bytes[2..];
-        if tail.len() >= 40 && tail.iter().all(|b| b.is_ascii_hexdigit()) {
+        if tail.len() >= 40 && tail.iter().all(u8::is_ascii_hexdigit) {
             return true;
         }
     }
@@ -1469,9 +1450,8 @@ fn pack_staging_dir(staging_dir: &Path, output_path: &Path) -> DynResult<()> {
         if file_type.is_symlink() {
             continue;
         }
-        let rel = match path.strip_prefix(staging_dir) {
-            Ok(rel) => rel,
-            Err(_) => continue,
+        let Ok(rel) = path.strip_prefix(staging_dir) else {
+            continue;
         };
         let archive_path = Path::new("report").join(rel);
         if file_type.is_dir() {
@@ -1488,7 +1468,7 @@ fn pack_staging_dir(staging_dir: &Path, output_path: &Path) -> DynResult<()> {
     }
 
     let encoder = archive.into_inner()?;
-    let _ = encoder.finish()?;
+    encoder.finish()?;
     Ok(())
 }
 

@@ -72,29 +72,30 @@ fn cmd_doctor_inner(as_json: bool) -> DynResult<()> {
 
 pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> {
     let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
-    let spel = resolve_repo_path(&project, &project.config.spel, "spel")?;
+    let spel = resolve_repo_path(project, &project.config.spel, "spel")?;
     let wallet_home = project.root.join(&project.config.wallet_home_dir);
     let localnet_state_path = project.root.join(".scaffold/state/localnet.state");
 
-    let mut rows = Vec::new();
-
-    rows.push(check_binary("git", true));
-    rows.push(check_binary("rustc", true));
-    rows.push(check_binary("cargo", true));
-    rows.push(check_binary("lsof", true));
-    rows.push(check_binary("ps", true));
-    rows.push(check_binary("kill", true));
-    rows.push(check_container_runtime());
-    rows.push(check_binary("nix", false));
-    rows.push(check_logos_blockchain_circuits());
+    let mut rows = vec![
+        check_binary("git", true),
+        check_binary("rustc", true),
+        check_binary("cargo", true),
+        check_binary("lsof", true),
+        check_binary("ps", true),
+        check_binary("kill", true),
+        check_container_runtime(),
+        check_binary("nix", false),
+        check_logos_blockchain_circuits(),
+    ];
 
     rows.push(check_repo("lez", &lez, &project.config.lez.pin));
 
     // Drift check vs. the scaffold-shipped default — distinct from
     // `check_repo("lez", …)` above, which only validates the on-disk clone
     // is at the *configured* pin (whatever the user wrote in scaffold.toml).
+    let lez_pin_matches = project.config.lez.pin == DEFAULT_LEZ.sha;
     rows.push(CheckRow {
-        status: if project.config.lez.pin == DEFAULT_LEZ.sha {
+        status: if lez_pin_matches {
             CheckStatus::Pass
         } else {
             CheckStatus::Warn
@@ -104,7 +105,7 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
             "configured pin={} expected={}",
             project.config.lez.pin, DEFAULT_LEZ.sha
         ),
-        remediation: if project.config.lez.pin == DEFAULT_LEZ.sha {
+        remediation: if lez_pin_matches {
             None
         } else {
             Some(format!(
@@ -118,8 +119,9 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
 
     rows.push(check_repo("spel", &spel, &project.config.spel.pin));
 
+    let spel_pin_matches = project.config.spel.pin == DEFAULT_SPEL.sha;
     rows.push(CheckRow {
-        status: if project.config.spel.pin == DEFAULT_SPEL.sha {
+        status: if spel_pin_matches {
             CheckStatus::Pass
         } else {
             CheckStatus::Warn
@@ -129,7 +131,7 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
             "configured pin={} expected={} ({})",
             project.config.spel.pin, DEFAULT_SPEL.sha, DEFAULT_SPEL.tag
         ),
-        remediation: if project.config.spel.pin == DEFAULT_SPEL.sha {
+        remediation: if spel_pin_matches {
             None
         } else {
             Some(format!(
@@ -147,7 +149,7 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
 
     rows.push(check_spel_lez_alignment(&spel));
 
-    let (resolved_cache_root, cache_root_source) = resolve_cache_root(&project)?;
+    let (resolved_cache_root, cache_root_source) = resolve_cache_root(project)?;
     rows.push(CheckRow {
         status: CheckStatus::Pass,
         name: "cache root".to_string(),

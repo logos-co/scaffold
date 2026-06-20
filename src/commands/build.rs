@@ -7,7 +7,7 @@ use crate::commands::client::generate_clients_from_current_idl;
 use crate::commands::idl::build_idl_for_current_project;
 use crate::commands::setup::cmd_setup;
 use crate::constants::{FRAMEWORK_KIND_DEFAULT, FRAMEWORK_KIND_LEZ_FRAMEWORK, METHODS_DIR};
-use crate::process::run_checked;
+use crate::process::run_forwarded;
 use crate::project::{load_project, run_in_project_dir};
 use crate::DynResult;
 
@@ -25,10 +25,7 @@ pub(crate) fn cmd_build_shortcut(project_dir: Option<PathBuf>, prebuilt: bool) -
                 generate_clients_from_current_idl()?;
             }
             other => {
-                println!(
-                    "Skipping IDL/client generation for framework kind `{}`",
-                    other
-                );
+                println!("Skipping IDL/client generation for framework kind `{other}`");
             }
         }
         // Guest building is intentionally framework-agnostic: any project with
@@ -41,7 +38,7 @@ pub(crate) fn cmd_build_shortcut(project_dir: Option<PathBuf>, prebuilt: bool) -
 }
 
 fn build_workspace_for_current_project(cwd: &Path) -> DynResult<()> {
-    run_checked(
+    run_forwarded(
         Command::new("cargo")
             .current_dir(cwd)
             .arg("build")
@@ -64,7 +61,7 @@ fn build_methods_guests(cwd: &Path) -> DynResult<()> {
         // `GUEST_BIN_SEARCH_ROOTS`) only matches `.bin` files whose path
         // contains a `release/` component, so a debug build here would
         // produce artefacts the deploy step cannot find.
-        run_checked(
+        run_forwarded(
             Command::new("cargo")
                 .current_dir(cwd)
                 .arg("build")
@@ -110,7 +107,7 @@ mod tests {
             .expect_err("invalid manifest -> cargo should fail and propagate");
         let msg = format!("{err:#}");
         // Match the substring we control (the cargo flags) rather than the
-        // full label string, so this test does not break if `run_checked`'s
+        // full label string, so this test does not break if `run_forwarded`'s
         // error format is reworded.
         assert!(
             msg.contains("cargo build --release"),

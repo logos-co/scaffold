@@ -15,9 +15,8 @@ pub(crate) fn patch_simple_tail_call_program_id(project_root: &Path) -> DynResul
 
     let content = fs::read_to_string(&path)?;
     let marker = "const HELLO_WORLD_PROGRAM_ID_HEX: &str =";
-    let marker_pos = match content.find(marker) {
-        Some(pos) => pos,
-        None => return Ok(()),
+    let Some(marker_pos) = content.find(marker) else {
+        return Ok(());
     };
 
     let from_marker = &content[marker_pos..];
@@ -42,21 +41,6 @@ pub(crate) fn patch_simple_tail_call_program_id(project_root: &Path) -> DynResul
     patched.push_str(&content[close_quote..]);
 
     write_text(&path, &patched)?;
-    Ok(())
-}
-
-pub(crate) fn copy_dir_contents(src: &Path, dst: &Path) -> DynResult<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if from.is_dir() {
-            copy_dir_recursive(&from, &to)?;
-        } else {
-            fs::copy(&from, &to)?;
-        }
-    }
     Ok(())
 }
 

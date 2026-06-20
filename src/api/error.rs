@@ -59,7 +59,7 @@ pub enum Error {
     /// An external command exited non-zero. Carries the rendered command,
     /// exit code, and captured diagnostic output.
     #[error(transparent)]
-    Command(CommandFailed),
+    Command(Box<CommandFailed>),
 
     /// Uncategorized failure; the full `anyhow` chain is preserved.
     #[error(transparent)]
@@ -71,7 +71,7 @@ pub enum Error {
 /// [`Error::Other`] — no string sniffing.
 pub(crate) fn classify(err: anyhow::Error) -> Error {
     let err = match err.downcast::<CommandFailed>() {
-        Ok(failure) => return Error::Command(failure),
+        Ok(failure) => return Error::Command(Box::new(failure)),
         Err(err) => err,
     };
 

@@ -182,10 +182,9 @@ fn release_triple() -> DynResult<&'static str> {
 fn download_to_tempfile(url: &str) -> DynResult<tempfile::NamedTempFile> {
     if which("curl").is_none() {
         bail!(
-            "`curl` is required to fetch the {} release tarball but is not on PATH. \
+            "`curl` is required to fetch the logos-blockchain-circuits release tarball but is not on PATH. \
              Install curl, or set {LOGOS_BLOCKCHAIN_CIRCUITS_ENV} to a pre-extracted \
-             circuits directory to bypass the download.",
-            "logos-blockchain-circuits",
+             circuits directory to bypass the download."
         );
     }
 
@@ -240,15 +239,14 @@ fn extract_tarball(bytes: &[u8], dest: &Path) -> DynResult<()> {
         // ships without one (e.g. plain files at the root), preserve the
         // original layout — `unpack` will fall back to using `path`.
         components.next();
-        let stripped: PathBuf = components.as_path().to_path_buf();
-        let target = if stripped.as_os_str().is_empty() {
+        let stripped = components.as_path().to_path_buf();
+        if stripped.as_os_str().is_empty() {
             // Top-level directory entry itself; the strip leaves nothing to
             // create, and `entry.unpack` would otherwise try to write to
             // `dest` directly.
             continue;
-        } else {
-            dest.join(&stripped)
-        };
+        }
+        let target = dest.join(&stripped);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }

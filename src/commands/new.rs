@@ -17,7 +17,7 @@ use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, 
 use crate::project::default_cache_root;
 use crate::repo::{sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
 use crate::state::write_text;
-use crate::template::copy::{copy_dir_contents, patch_simple_tail_call_program_id};
+use crate::template::copy::{copy_dir_recursive, patch_simple_tail_call_program_id};
 use crate::template::project::{apply_overlay, OverlayRenderContext};
 use crate::template::skills::apply_skills;
 use crate::DynResult;
@@ -42,7 +42,7 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
 /// explicit parent directory).
 pub(crate) fn create_project_in(base_dir: &Path, cmd: NewCommand) -> DynResult<PathBuf> {
     let template_variant = match cmd.template.as_str() {
-        FRAMEWORK_KIND_DEFAULT | FRAMEWORK_KIND_LEZ_FRAMEWORK => cmd.template.clone(),
+        FRAMEWORK_KIND_DEFAULT | FRAMEWORK_KIND_LEZ_FRAMEWORK => cmd.template.as_str(),
         other => {
             bail!("unsupported template `{other}`. Expected `default` or `lez-framework`.")
         }
@@ -59,7 +59,7 @@ pub(crate) fn create_project_in(base_dir: &Path, cmd: NewCommand) -> DynResult<P
     // `--lez-path`) leaves a half-built project directory behind. The
     // `target.exists()` guard above guarantees we only delete a directory
     // we created ourselves in this run.
-    let result = cmd_new_inner(&cmd, &target, &template_variant);
+    let result = cmd_new_inner(&cmd, &target, template_variant);
     if result.is_err() {
         match fs::remove_dir_all(&target) {
             Ok(()) => {}
@@ -87,12 +87,9 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
     fs::create_dir_all(target.join(".scaffold/state"))?;
     fs::create_dir_all(target.join(".scaffold/logs"))?;
 
-    let (bootstrap_cache, _) = match &cmd.cache_root {
-        Some(p) => (p.clone(), ()),
-        None => {
-            let (path, _) = default_cache_root()?;
-            (path, ())
-        }
+    let bootstrap_cache = match &cmd.cache_root {
+        Some(p) => p.clone(),
+        None => default_cache_root()?.0,
     };
     fs::create_dir_all(bootstrap_cache.join("repos"))?;
     fs::create_dir_all(bootstrap_cache.join("state"))?;
@@ -119,29 +116,24 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
     );
     let lez_repo_path = {
         let _echo_guard = crate::process::EchoGuard::suppress();
-        if cmd.vendor_deps {
+        let (lez_path, sync_opts) = if cmd.vendor_deps {
             let root = target.join(".scaffold/repos");
             fs::create_dir_all(&root)?;
-            let lez_vendor = root.join("lez");
-            sync_repo_to_pin_at_path_with_opts(
-                &lez_vendor,
-                &lez_source,
-                DEFAULT_LEZ.sha,
-                "lez",
-                RepoSyncOptions::fail_on_source_mismatch(),
-            )?;
-            lez_vendor
+            (root.join("lez"), RepoSyncOptions::fail_on_source_mismatch())
         } else {
-            let lez_cached = bootstrap_cache.join("repos/lez").join(DEFAULT_LEZ.sha);
-            sync_repo_to_pin_at_path_with_opts(
-                &lez_cached,
-                &lez_source,
-                DEFAULT_LEZ.sha,
-                "lez",
+            (
+                bootstrap_cache.join("repos/lez").join(DEFAULT_LEZ.sha),
                 RepoSyncOptions::auto_reclone_cache_repo(),
-            )?;
-            lez_cached
-        }
+            )
+        };
+        sync_repo_to_pin_at_path_with_opts(
+            &lez_path,
+            &lez_source,
+            DEFAULT_LEZ.sha,
+            "lez",
+            sync_opts,
+        )?;
+        lez_path
     };
 
     // spel is recorded in scaffold.toml here but actually cloned + built by
@@ -200,7 +192,7 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
         bail!("template not found at {}", template_root.display());
     }
 
-    copy_dir_contents(&template_root, target).context("failed to copy scaffold template")?;
+    copy_dir_recursive(&template_root, target).context("failed to copy scaffold template")?;
     if template_variant == FRAMEWORK_KIND_DEFAULT {
         patch_simple_tail_call_program_id(target)?;
     }
@@ -213,7 +205,7 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
         cleanup_lez_hello_artifacts(target)?;
     }
     write_text(&target.join("scaffold.toml"), &serialize_config(&cfg)?)?;
-    apply_skills(&target)?;
+    apply_skills(target)?;
 
     let old_getting_started = target.join("GETTING_STARTED.md");
     if old_getting_started.exists() {
@@ -261,32 +253,7 @@ fn cleanup_lez_hello_artifacts(project_root: &Path) -> DynResult<()> {
 }
 
 pub(crate) fn to_cargo_crate_name(input: &str) -> String {
-    let mut out = String::new();
-    let mut prev_dash = false;
-    for ch in input.chars() {
-        let mapped = if ch.is_ascii_alphanumeric() {
-            ch.to_ascii_lowercase()
-        } else {
-            '-'
-        };
-
-        if mapped == '-' {
-            if !prev_dash {
-                out.push('-');
-                prev_dash = true;
-            }
-        } else {
-            out.push(mapped);
-            prev_dash = false;
-        }
-    }
-
-    let out = out.trim_matches('-').to_string();
-    if out.is_empty() {
-        "program_deployment".to_string()
-    } else {
-        out
-    }
+    crate::commands::sanitize_separated(input, '-', "program_deployment")
 }
 
 #[cfg(test)]

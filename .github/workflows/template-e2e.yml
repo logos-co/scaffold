@@ -42,6 +42,17 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # The rendered templates depend on `risc0-build`, which compiles guest
+      # programs with RISC Zero's custom Rust toolchain during `cargo build`.
+      # GitHub's stock Rust toolchain is not enough: without this, the rendered
+      # workspace build panics with "Risc Zero Rust toolchain not found".
+      - name: Install RISC Zero Rust toolchain
+        run: |
+          set -euo pipefail
+          curl -L https://risczero.com/install | bash
+          echo "$HOME/.risc0/bin" >> "$GITHUB_PATH"
+          "$HOME/.risc0/bin/rzup" install rust
+
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 

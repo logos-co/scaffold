@@ -39,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
         .get_pub_account_signing_key(account_id)
         .ok_or_else(|| anyhow!("input account must be a self-owned public account"))?;
 
-    let greeting: Vec<u8> = vec![72, 111, 108, 97, 32, 109, 117, 110, 100, 111, 33];
+    let greeting = b"Hola mundo!".to_vec();
     let nonces = wallet_core
         .get_accounts_nonces(vec![account_id])
         .await

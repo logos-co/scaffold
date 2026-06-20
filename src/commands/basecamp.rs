@@ -21,14 +21,13 @@ use crate::model::{
     BasecampConfig, BasecampSource, BasecampState, ModuleEntry, ModuleRole, Project, RepoBuild,
     RepoRef,
 };
-use crate::process::{derive_log_path, run_checked, run_logged, set_print_output};
+use crate::process::{derive_log_path, run_forwarded, run_logged, set_print_output};
 use crate::project::{load_project, resolve_cache_root, save_project_config};
 use crate::repo::{sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
 use crate::state::{read_basecamp_state, write_basecamp_state};
 use crate::DynResult;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields wired up in later phases
 pub(crate) enum BasecampAction {
     Setup,
     Modules {
@@ -152,36 +151,25 @@ fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
         .basecamp_repo
         .clone()
         .unwrap_or_else(|| default_basecamp_repo(DEFAULT_BASECAMP_PIN));
-    if basecamp_repo.source.is_empty() {
-        basecamp_repo.source = BASECAMP_SOURCE.to_string();
-    }
-    if basecamp_repo.pin.is_empty() {
-        basecamp_repo.pin = DEFAULT_BASECAMP_PIN.to_string();
-    }
-    if basecamp_repo.attr.is_empty() {
-        basecamp_repo.attr = BASECAMP_ATTR.to_string();
-    }
+    fill_repo_defaults(
+        &mut basecamp_repo,
+        BASECAMP_SOURCE,
+        DEFAULT_BASECAMP_PIN,
+        BASECAMP_ATTR,
+    );
 
-    // Same defaults for lgpm.
+    // Same defaults for lgpm; its attr tracks whether basecamp is portable.
     let mut lgpm_repo = project
         .config
         .lgpm_repo
         .clone()
         .unwrap_or_else(|| default_lgpm_repo(DEFAULT_LGPM_PIN));
-    if lgpm_repo.source.is_empty() {
-        lgpm_repo.source = LGPM_SOURCE.to_string();
-    }
-    if lgpm_repo.pin.is_empty() {
-        lgpm_repo.pin = DEFAULT_LGPM_PIN.to_string();
-    }
-    if lgpm_repo.attr.is_empty() {
-        lgpm_repo.attr = if is_portable_basecamp(Some(&basecamp_repo)) {
-            LGPM_ATTR_PORTABLE
-        } else {
-            LGPM_ATTR
-        }
-        .to_string();
-    }
+    let lgpm_attr = if is_portable_basecamp(Some(&basecamp_repo)) {
+        LGPM_ATTR_PORTABLE
+    } else {
+        LGPM_ATTR
+    };
+    fill_repo_defaults(&mut lgpm_repo, LGPM_SOURCE, DEFAULT_LGPM_PIN, lgpm_attr);
 
     let (cache_root, _) = resolve_cache_root(&project)?;
     let basecamp_repo_path = cache_root.join("repos/basecamp").join(&basecamp_repo.pin);
@@ -245,10 +233,22 @@ fn format_flake_ref(repo: &RepoRef) -> String {
     }
 }
 
+/// Fill empty `source`/`pin`/`attr` fields of a `[repos.*]` entry with the
+/// canonical defaults, leaving any field the user already set untouched.
+fn fill_repo_defaults(repo: &mut RepoRef, source: &str, pin: &str, attr: &str) {
+    if repo.source.is_empty() {
+        repo.source = source.to_string();
+    }
+    if repo.pin.is_empty() {
+        repo.pin = pin.to_string();
+    }
+    if repo.attr.is_empty() {
+        repo.attr = attr.to_string();
+    }
+}
+
 fn is_portable_basecamp(basecamp_repo: Option<&RepoRef>) -> bool {
-    basecamp_repo
-        .map(|r| BASECAMP_PORTABLE_ATTRS.contains(&r.attr.as_str()))
-        .unwrap_or(false)
+    basecamp_repo.is_some_and(|r| BASECAMP_PORTABLE_ATTRS.contains(&r.attr.as_str()))
 }
 
 fn basecamp_xdg_subpath(basecamp_repo: Option<&RepoRef>) -> &'static str {
@@ -331,17 +331,20 @@ fn resolve_basecamp_binary(app_link: &Path) -> DynResult<PathBuf> {
     )
 }
 
+/// Loads basecamp state and verifies both binaries are present on disk,
+/// bailing with the setup hint otherwise. Shared by `launch` and `install`.
+fn load_ready_basecamp_state(state_path: &Path) -> DynResult<BasecampState> {
+    read_basecamp_state(state_path)
+        .ok()
+        .filter(|s| Path::new(&s.basecamp_bin).exists() && Path::new(&s.lgpm_bin).exists())
+        .ok_or_else(|| anyhow!("basecamp not set up yet; run: logos-scaffold basecamp setup"))
+}
+
 // Concurrent `launch <same-profile>` is undefined: no lock; two racing
 // invocations leave partial state.
 fn cmd_basecamp_launch(project: Project, profile: String) -> DynResult<()> {
     let state_path = project.root.join(".scaffold/state/basecamp.state");
-    let state = match read_basecamp_state(&state_path).ok() {
-        Some(s) if !s.basecamp_bin.is_empty() && !s.lgpm_bin.is_empty() => s,
-        _ => bail!("basecamp not set up yet; run: logos-scaffold basecamp setup"),
-    };
-    if !Path::new(&state.basecamp_bin).exists() || !Path::new(&state.lgpm_bin).exists() {
-        bail!("basecamp not set up yet; run: logos-scaffold basecamp setup");
-    }
+    let state = load_ready_basecamp_state(&state_path)?;
 
     if profile != BASECAMP_PROFILE_ALICE && profile != BASECAMP_PROFILE_BOB {
         bail!(
@@ -399,7 +402,7 @@ fn cmd_basecamp_launch(project: Project, profile: String) -> DynResult<()> {
         &state,
         &cache_root,
         &profiles_root,
-        &[profile.clone()],
+        std::slice::from_ref(&profile),
     )?;
 
     // Variant pre-flight: warn if any installed module is missing the
@@ -553,6 +556,7 @@ fn nix_develop_target(project_root: &Path, flake: &str, dev_shell: Option<&str>)
 ///      inherited (`inherited(key)`), so basecamp's own paths aren't clobbered.
 ///   2. `[basecamp.env]` — global plain replace.
 ///   3. `[basecamp.profiles.<profile>.env]` — per-profile plain replace (wins).
+///
 /// `inherited` is injected (real caller passes `std::env::var_os`) so the
 /// append semantics are unit-testable without touching the process environment.
 fn apply_launch_env_overrides(
@@ -581,13 +585,11 @@ fn apply_launch_env_overrides(
         combined.push(paths.join(":"));
         env.insert(key.clone(), combined);
     }
-    for (key, val) in &cfg.env {
+    // Global `[basecamp.env]` first, then the launched profile's `env` so its
+    // entries win on collision.
+    let profile_env = cfg.profile_env.get(profile).into_iter().flatten();
+    for (key, val) in cfg.env.iter().chain(profile_env) {
         env.insert(key.clone(), OsString::from(val));
-    }
-    if let Some(profile_env) = cfg.profile_env.get(profile) {
-        for (key, val) in profile_env {
-            env.insert(key.clone(), OsString::from(val));
-        }
     }
 }
 
@@ -1016,8 +1018,7 @@ fn topo_order_project_modules(
 fn swap_flake_attr(flake_ref: &str, expected: &str, replacement: &str) -> String {
     match flake_ref.rsplit_once('#') {
         Some((base, attr)) if attr == expected => format!("{base}#{replacement}"),
-        Some((_, _)) => flake_ref.to_string(),
-        None => flake_ref.to_string(),
+        _ => flake_ref.to_string(),
     }
 }
 
@@ -1093,14 +1094,7 @@ fn run_build_portable_nix(
 ) -> DynResult<Vec<PathBuf>> {
     println!("building {flake_ref}");
     let mut cmd = Command::new("nix");
-    match &inv.cwd_override {
-        Some(cwd) => {
-            cmd.current_dir(cwd);
-        }
-        None => {
-            cmd.current_dir(project_root);
-        }
-    }
+    cmd.current_dir(inv.cwd_override.as_deref().unwrap_or(project_root));
     for a in &inv.args {
         cmd.arg(a);
     }
@@ -1134,7 +1128,7 @@ fn run_build_portable_nix(
     let stdout = String::from_utf8_lossy(&output.stdout);
     let store_paths: Vec<PathBuf> = stdout
         .lines()
-        .map(|s| s.trim())
+        .map(str::trim)
         .filter(|s| s.starts_with('/'))
         .map(PathBuf::from)
         .collect();
@@ -1247,8 +1241,7 @@ fn cmd_basecamp_modules(
         out
     } else {
         let cache_root_first = first_path_component(&project.config.cache_root);
-        let mut skip_subdirs: Vec<&str> =
-            BASECAMP_AUTODISCOVER_SKIP_SUBDIRS.iter().copied().collect();
+        let mut skip_subdirs: Vec<&str> = BASECAMP_AUTODISCOVER_SKIP_SUBDIRS.to_vec();
         if let Some(c) = cache_root_first.as_deref() {
             if !skip_subdirs.contains(&c) {
                 skip_subdirs.push(c);
@@ -1399,16 +1392,14 @@ pub(crate) fn derive_module_name(
         }
         BasecampSource::Path(p) => {
             let pb = PathBuf::from(p);
-            let sibling_metadata = pb.parent().map(|d| d.join("metadata.json"));
-            if let Some(metadata_path) = &sibling_metadata {
-                if let Ok(text) = fs::read_to_string(metadata_path) {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                        if let Some(raw) = json.get("name").and_then(|v| v.as_str()) {
-                            let name =
-                                normalize_and_validate_module_name(raw, &metadata_path.display())?;
-                            return Ok((name, None));
-                        }
-                    }
+            if let Some(metadata_path) = pb.parent().map(|d| d.join("metadata.json")) {
+                let name = fs::read_to_string(&metadata_path)
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                    .and_then(|json| json.get("name").and_then(|v| v.as_str()).map(str::to_owned));
+                if let Some(raw) = name {
+                    let name = normalize_and_validate_module_name(&raw, &metadata_path.display())?;
+                    return Ok((name, None));
                 }
             }
             let raw = pb.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
@@ -1504,7 +1495,7 @@ fn read_source_metadata_dependencies(src: &BasecampSource) -> Vec<String> {
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .filter_map(|v| v.as_str().map(str::to_string))
                 .collect()
         })
         .unwrap_or_default()
@@ -1615,16 +1606,7 @@ fn resolve_manifest_dependencies(
 /// installs either (KISS); install overwrites both profiles in one pass.
 fn cmd_basecamp_install(project: Project, probe: &dyn LgxFlakeProbe) -> DynResult<()> {
     let state_path = project.root.join(".scaffold/state/basecamp.state");
-    let state = read_basecamp_state(&state_path)
-        .ok()
-        .filter(|s| !s.basecamp_bin.is_empty() && !s.lgpm_bin.is_empty())
-        .ok_or_else(|| {
-            anyhow::anyhow!("basecamp not set up yet; run: logos-scaffold basecamp setup")
-        })?;
-
-    if !Path::new(&state.basecamp_bin).exists() || !Path::new(&state.lgpm_bin).exists() {
-        bail!("basecamp not set up yet; run: logos-scaffold basecamp setup");
-    }
+    let state = load_ready_basecamp_state(&state_path)?;
 
     // Nix preflight comes after the setup-state guard so a user without
     // nix who hasn't run `basecamp setup` still gets the more specific
@@ -1896,7 +1878,7 @@ fn flake_path_prefix(flake_ref: &str) -> Option<&str> {
 /// `"cache/basecamp"`. Returns `None` if the path is empty or absolute.
 fn first_path_component(rel: &str) -> Option<String> {
     Path::new(rel).components().find_map(|c| match c {
-        Component::Normal(s) => s.to_str().map(|s| s.to_string()),
+        Component::Normal(s) => s.to_str().map(str::to_string),
         _ => None,
     })
 }
@@ -1981,7 +1963,7 @@ fn run_lgpm_install(
                 println!("installing {} into {}", lgx.display(), name);
             }
             let args = lgpm_install_args(&modules_dir, &plugins_dir, lgx);
-            run_checked(
+            run_forwarded(
                 Command::new(lgpm_bin).args(&args),
                 &format!("lgpm install {} into {}", lgx.display(), name),
             )?;
@@ -2271,9 +2253,9 @@ pub(crate) struct ModuleDriftReport {
 /// source is captured, `basecamp modules` resolves its deps deterministically
 /// at capture time, so any dep drift surfaces via the modules command itself
 /// rather than via this doctor row.
-pub(crate) fn compute_module_drift(project: &Project) -> DynResult<ModuleDriftReport> {
+pub(crate) fn compute_module_drift(project: &Project) -> ModuleDriftReport {
     let cache_root_first = first_path_component(&project.config.cache_root);
-    let mut skip_subdirs: Vec<&str> = BASECAMP_AUTODISCOVER_SKIP_SUBDIRS.iter().copied().collect();
+    let mut skip_subdirs: Vec<&str> = BASECAMP_AUTODISCOVER_SKIP_SUBDIRS.to_vec();
     if let Some(c) = cache_root_first.as_deref() {
         if !skip_subdirs.contains(&c) {
             skip_subdirs.push(c);
@@ -2306,9 +2288,9 @@ pub(crate) fn compute_module_drift(project: &Project) -> DynResult<ModuleDriftRe
         .collect();
     discovered_not_captured.sort_by_key(flake_ref);
 
-    Ok(ModuleDriftReport {
+    ModuleDriftReport {
         discovered_not_captured,
-    })
+    }
 }
 
 /// `basecamp doctor` entry point. Builds a scaffold `DoctorReport` containing
@@ -2456,20 +2438,19 @@ fn push_basecamp_doctor_rows(project: &Project, rows: &mut Vec<crate::model::Che
         }
     }
 
-    if let Ok(drift) = compute_module_drift(project) {
-        for src in &drift.discovered_not_captured {
-            rows.push(CheckRow {
-                status: CheckStatus::Warn,
-                name: "basecamp drift: uncaptured".to_string(),
-                detail: format!(
-                    "discovered `{}` but not captured in basecamp.state",
-                    flake_ref(src)
-                ),
-                remediation: Some(
-                    "run `logos-scaffold basecamp modules` to refresh capture".to_string(),
-                ),
-            });
-        }
+    let drift = compute_module_drift(project);
+    for src in &drift.discovered_not_captured {
+        rows.push(CheckRow {
+            status: CheckStatus::Warn,
+            name: "basecamp drift: uncaptured".to_string(),
+            detail: format!(
+                "discovered `{}` but not captured in basecamp.state",
+                flake_ref(src)
+            ),
+            remediation: Some(
+                "run `logos-scaffold basecamp modules` to refresh capture".to_string(),
+            ),
+        });
     }
 }
 
@@ -2482,8 +2463,7 @@ fn captured_source_row(
     alice_modules: &Path,
 ) -> crate::model::CheckRow {
     use crate::model::{CheckRow, CheckStatus};
-    let ref_text = flake_ref(src);
-    let mut detail = ref_text.clone();
+    let mut detail = flake_ref(src);
 
     if let BasecampSource::Flake(flake_ref) = src {
         if let Some(label) = github_ref_part_label(flake_ref) {
@@ -2560,16 +2540,22 @@ fn collect_api_headers(alice_modules: &Path, module_name: &str) -> Vec<PathBuf> 
         module_dir.join("interfaces"),
     ];
     for dir in candidates {
-        if let Ok(entries) = fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                        if ext.eq_ignore_ascii_case("h") || ext.eq_ignore_ascii_case("hpp") {
-                            out.push(path);
-                        }
-                    }
-                }
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let is_header = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("h") || ext.eq_ignore_ascii_case("hpp")
+                });
+            if is_header {
+                out.push(path);
             }
         }
     }
@@ -2908,7 +2894,7 @@ fn seed_profiles(
 ) -> DynResult<Vec<String>> {
     let subpath = basecamp_xdg_subpath(basecamp_repo);
     let mut seeded = Vec::new();
-    for name in names {
+    for &name in names {
         let profile_dir = profiles_root.join(name);
         for xdg in ["xdg-config", "xdg-data", "xdg-cache"] {
             let path = profile_dir.join(xdg).join(subpath);
@@ -2942,7 +2928,7 @@ mod tests {
         fn new(answers: &[(&str, &[&str])]) -> Self {
             let mut map = HashMap::new();
             for (k, v) in answers {
-                map.insert(k.to_string(), v.iter().map(|s| s.to_string()).collect());
+                map.insert(k.to_string(), v.iter().map(ToString::to_string).collect());
             }
             Self {
                 answers: RefCell::new(map),
@@ -3099,7 +3085,7 @@ mod tests {
         let real = root.join("real-mod");
         fs::create_dir_all(&real).unwrap();
         fs::write(real.join("flake.nix"), b"{}").unwrap();
-        let answers_owned = vec![
+        let answers_owned = [
             (
                 format!("path:{}", root.join("target").display()),
                 vec!["lgx"],
@@ -3514,7 +3500,7 @@ mod tests {
         let mut bob_env = launch_env(Path::new("/p/bob"), "bob");
         apply_launch_env_overrides(&mut bob_env, &cfg, "bob", |_| None);
         assert!(
-            bob_env.get("PORT").is_none(),
+            !bob_env.contains_key("PORT"),
             "alice's profile env must not leak to bob"
         );
     }
@@ -3734,7 +3720,7 @@ mod tests {
         );
     }
 
-    // ---- normalize_flake_ref (I2 fix) ----
+    // ---- normalize_flake_ref ----
 
     #[test]
     fn normalize_flake_ref_rewrites_relative_path_to_path_scheme() {
@@ -3884,8 +3870,7 @@ mod tests {
         }
     }
 
-    // ---- resolve_sibling_overrides (I1 fix) — exercised via the command paths;
-    //      a focused test pins the helper's Path-source short-circuit ----
+    // ---- resolve_sibling_overrides ----
 
     #[test]
     fn resolve_sibling_overrides_returns_empty_for_isolated_flake() {

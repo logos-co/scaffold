@@ -1102,6 +1102,14 @@ struct BasecampDevelopArgs {
     dev_shell: Option<String>,
 }
 
+/// Passthrough args for `build idl` / `build client`: the `build` verb
+/// followed by an optional project path.
+fn build_args(project_path: Option<PathBuf>) -> Vec<String> {
+    let mut args = vec!["build".to_string()];
+    args.extend(project_path.map(|p| p.to_string_lossy().into_owned()));
+    args
+}
+
 pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
     apply_quiet_from_env();
     let passthrough_start = leading_global_flags_end(&args);
@@ -1123,7 +1131,7 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
         return cmd_wallet(action);
     }
     if let Some(spel_args) = spel_passthrough_args(&args, passthrough_start)? {
-        return cmd_spel(spel_args);
+        return cmd_spel(&spel_args);
     }
 
     let cli = match Cli::try_parse_from(&args) {
@@ -1138,7 +1146,7 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 // "error: error: ..." when entry_main adds its own prefix.
                 let msg = err.to_string();
                 let msg = msg.strip_prefix("error: ").unwrap_or(&msg);
-                return Err(anyhow!("{}", msg));
+                return Err(anyhow!("{msg}"));
             }
         },
     };
@@ -1148,7 +1156,7 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
     }
 
     match cli.command {
-        Some(Commands::Create(args)) | Some(Commands::New(args)) => cmd_new(NewCommand {
+        Some(Commands::Create(args) | Commands::New(args)) => cmd_new(NewCommand {
             name: args.name,
             vendor_deps: args.vendor_deps,
             lez_path: args.lez_path,
@@ -1157,16 +1165,8 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
         }),
         Some(Commands::Setup(args)) => cmd_setup(args.prebuilt),
         Some(Commands::Build(args)) => match args.subcommand {
-            Some(BuildSubcommand::Idl(sub)) => cmd_idl(
-                &sub.project_path
-                    .map(|p| vec!["build".to_string(), p.to_string_lossy().to_string()])
-                    .unwrap_or_else(|| vec!["build".to_string()]),
-            ),
-            Some(BuildSubcommand::Client(sub)) => cmd_client(
-                &sub.project_path
-                    .map(|p| vec!["build".to_string(), p.to_string_lossy().to_string()])
-                    .unwrap_or_else(|| vec!["build".to_string()]),
-            ),
+            Some(BuildSubcommand::Idl(sub)) => cmd_idl(&build_args(sub.project_path)),
+            Some(BuildSubcommand::Client(sub)) => cmd_client(&build_args(sub.project_path)),
             None => cmd_build_shortcut(args.project_path, args.prebuilt),
         },
         Some(Commands::Deploy(args)) => cmd_deploy(args.program_name, args.program_path, args.json),
@@ -1490,15 +1490,12 @@ fn is_help_token(token: &str) -> bool {
 }
 
 fn apply_quiet_from_env() {
-    if std::env::var("LOGOS_SCAFFOLD_QUIET")
-        .map(|v| {
-            v == "1"
-                || v.eq_ignore_ascii_case("true")
-                || v.eq_ignore_ascii_case("yes")
-                || v.eq_ignore_ascii_case("on")
-        })
-        .unwrap_or(false)
-    {
+    if std::env::var("LOGOS_SCAFFOLD_QUIET").is_ok_and(|v| {
+        v == "1"
+            || v.eq_ignore_ascii_case("true")
+            || v.eq_ignore_ascii_case("yes")
+            || v.eq_ignore_ascii_case("on")
+    }) {
         set_command_echo(false);
     }
 }

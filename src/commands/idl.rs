@@ -9,6 +9,7 @@ use walkdir::WalkDir;
 
 use crate::circuits::ensure_circuits_for_subprocess;
 use crate::constants::FRAMEWORK_KIND_LEZ_FRAMEWORK;
+use crate::hash::hex_encode;
 use crate::model::Project;
 use crate::process::run_capture;
 use crate::project::{load_project, resolve_cache_root, run_in_project_dir};
@@ -269,16 +270,10 @@ fn save_idl_state(project: &Project, state: &IdlBuildState) -> DynResult<()> {
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
-}
-
-fn parse_optional_project_path(args: &[String], usage_label: &str) -> DynResult<Option<PathBuf>> {
+pub(crate) fn parse_optional_project_path(
+    args: &[String],
+    usage_label: &str,
+) -> DynResult<Option<PathBuf>> {
     let mut project_dir: Option<PathBuf> = None;
 
     for arg in args {
@@ -318,33 +313,7 @@ fn canonical_json(text: &str) -> DynResult<String> {
 }
 
 pub(crate) fn sanitize_file_stem(name: &str) -> String {
-    let mut out = String::new();
-    let mut prev_sep = false;
-
-    for ch in name.chars() {
-        let mapped = if ch.is_ascii_alphanumeric() {
-            ch.to_ascii_lowercase()
-        } else {
-            '_'
-        };
-
-        if mapped == '_' {
-            if !prev_sep {
-                out.push('_');
-                prev_sep = true;
-            }
-        } else {
-            out.push(mapped);
-            prev_sep = false;
-        }
-    }
-
-    let out = out.trim_matches('_').to_string();
-    if out.is_empty() {
-        "program".to_string()
-    } else {
-        out
-    }
+    crate::commands::sanitize_separated(name, '_', "program")
 }
 
 fn parse_idl_blocks(output: &str) -> DynResult<Vec<(String, String)>> {

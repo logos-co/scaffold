@@ -517,7 +517,7 @@ pub(crate) fn cmd_test_node(action: TestNodeAction) -> DynResult<()> {
             // resource being limited, not just startup.
             let max_parallel = if serial { Some(1) } else { parallel };
             let _slot = match max_parallel {
-                Some(max) if max == 0 => anyhow::bail!("--parallel must be at least 1"),
+                Some(0) => anyhow::bail!("--parallel must be at least 1"),
                 Some(max) => {
                     let (cache_root, _) = resolve_cache_root(&project)?;
                     Some(acquire_run_slot(&cache_root, max)?)

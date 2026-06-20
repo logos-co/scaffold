@@ -38,9 +38,10 @@ pub(crate) fn write_text_atomic(path: &Path, text: &str) -> DynResult<()> {
 }
 
 pub(crate) fn write_localnet_state(path: &Path, state: &LocalnetState) -> DynResult<()> {
+    use std::fmt::Write;
     let mut content = String::new();
     if let Some(pid) = state.sequencer_pid {
-        content.push_str(&format!("sequencer_pid={pid}\n"));
+        let _ = writeln!(content, "sequencer_pid={pid}");
     }
     write_text(path, &content)
 }
@@ -66,6 +67,7 @@ pub(crate) fn read_localnet_state(path: &Path) -> DynResult<LocalnetState> {
 }
 
 pub(crate) fn write_basecamp_state(path: &Path, state: &BasecampState) -> DynResult<()> {
+    use std::fmt::Write;
     // The state file is a line-oriented key=value format. A newline or CR embedded
     // in a value would split the record and silently corrupt state on the next read.
     check_state_value("pin", &state.pin)?;
@@ -73,18 +75,16 @@ pub(crate) fn write_basecamp_state(path: &Path, state: &BasecampState) -> DynRes
     check_state_value("lgpm_bin", &state.lgpm_bin)?;
 
     // Source lines are no longer part of the state file — the captured module
-    // set lives in `[basecamp.modules.*]` in scaffold.toml (v0.4). Any
-    // residual `project_sources` / `dependencies` values on the struct are
-    // intentionally ignored here; the fields are removed in Phase 3.
+    // set lives in `[basecamp.modules.*]` in scaffold.toml.
     let mut content = String::new();
     if !state.pin.is_empty() {
-        content.push_str(&format!("pin={}\n", state.pin));
+        let _ = writeln!(content, "pin={}", state.pin);
     }
     if !state.basecamp_bin.is_empty() {
-        content.push_str(&format!("basecamp_bin={}\n", state.basecamp_bin));
+        let _ = writeln!(content, "basecamp_bin={}", state.basecamp_bin);
     }
     if !state.lgpm_bin.is_empty() {
-        content.push_str(&format!("lgpm_bin={}\n", state.lgpm_bin));
+        let _ = writeln!(content, "lgpm_bin={}", state.lgpm_bin);
     }
     write_text(path, &content)
 }

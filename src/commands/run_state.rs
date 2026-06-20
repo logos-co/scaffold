@@ -25,6 +25,7 @@ use crate::commands::wallet_support::{
     default_sequencer_http_url_for_project, load_wallet_runtime,
 };
 use crate::constants::FRAMEWORK_KIND_LEZ_FRAMEWORK;
+use crate::hash::hex_encode;
 use crate::model::Project;
 use crate::state::read_localnet_state;
 use crate::DynResult;
@@ -190,11 +191,10 @@ pub(crate) fn save_state(project: &Project, state: &RunDeployState) -> DynResult
     // between write and rename leaves the prior cache intact rather than
     // truncating it. Same parent dir so rename(2) stays atomic across the
     // same filesystem.
-    let tmp_name = match path.file_name().and_then(|n| n.to_str()) {
-        Some(n) => format!("{n}.tmp"),
-        None => return Err(anyhow::anyhow!("invalid state path: {}", path.display())),
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return Err(anyhow::anyhow!("invalid state path: {}", path.display()));
     };
-    let tmp = path.with_file_name(tmp_name);
+    let tmp = path.with_file_name(format!("{name}.tmp"));
     std::fs::write(&tmp, &bytes).with_context(|| format!("write {}", tmp.display()))?;
     std::fs::rename(&tmp, &path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
@@ -225,15 +225,6 @@ pub(crate) fn deploy_can_be_skipped(
 
 fn state_path(project_root: &Path) -> std::path::PathBuf {
     project_root.join(RUN_DEPLOY_STATE_REL)
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
 }
 
 #[cfg(test)]
@@ -303,11 +294,6 @@ mod tests {
         let prior_empty = state_with(&[], Some(42));
         assert!(!deploy_can_be_skipped(&empty, Some(42), &prior_with));
         assert!(!deploy_can_be_skipped(&nonempty, Some(42), &prior_empty));
-    }
-
-    #[test]
-    fn hex_encode_is_lowercase_padded() {
-        assert_eq!(hex_encode(&[0x0a, 0xff, 0x00]), "0aff00");
     }
 
     #[test]
@@ -412,9 +398,7 @@ mod tests {
         if bin {
             // discover_program_binaries requires a `riscv32im*` segment
             // and prefers paths containing `release`.
-            let bin_dir = root.join(format!(
-                "target/riscv-guest/riscv32im-risc0-zkvm-elf/release"
-            ));
+            let bin_dir = root.join("target/riscv-guest/riscv32im-risc0-zkvm-elf/release");
             std::fs::create_dir_all(&bin_dir).unwrap();
             std::fs::write(bin_dir.join(format!("{stem}.bin")), b"\x7fELF...").unwrap();
         }

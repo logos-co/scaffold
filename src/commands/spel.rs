@@ -11,9 +11,9 @@ use crate::DynResult;
 /// project's pinned version. Mirrors the existing `wallet --` passthrough.
 /// The vendored binary is built by `cmd_setup`; if it isn't present, point the
 /// user at `setup` rather than failing with a raw exec error.
-pub(crate) fn cmd_spel(args: Vec<String>) -> DynResult<()> {
+pub(crate) fn cmd_spel(args: &[String]) -> DynResult<()> {
     let project = load_project()?;
-    let status = spel_passthrough_for_project(&project, &args)?;
+    let status = spel_passthrough_for_project(&project, args)?;
     if !status.success() {
         std::process::exit(status.code().unwrap_or(1));
     }
