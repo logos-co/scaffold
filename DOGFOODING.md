@@ -110,6 +110,18 @@ mkdir -p "$EXT" && cp /tmp/cr/r0vm "$EXT/r0vm" && chmod +x "$EXT/r0vm"
 
 `find_r0vm_path_for_lez` looks at `~/.risc0/extensions/v<risc0-zkvm-version>-cargo-risczero-<arch>-<os>/r0vm`; placing r0vm there is what wires it into a spawned sequencer (scaffold sets `RISC0_SERVER_PATH` from it). The sequencer runs with `RISC0_DEV_MODE=1` (the test-node default), so r0vm executes guests without real proving — which is why no GPU/prover is needed.
 
+**2b. Install the risc0 Rust *guest* toolchain.** `r0vm` only *runs* guests; the scaffold `build`/`deploy`/`run` flows (D1, D3, D6, D7, L4) *cross-compile* the project's own guest methods to `riscv32im-risc0-zkvm-elf`, which needs the risc0-patched Rust toolchain. Without it, `build` panics in `risc0-build` with `Risc Zero Rust toolchain not found. Try running rzup install rust`. (The T-series alone does not need it — test nodes consume the prebuilt guest ELFs in the LEZ tree.) `rzup install rust` fails the same way as r0vm behind a TLS-intercepting proxy; fall back to `curl` and drop the toolchain into rzup's layout, where `risc0-build` (which resolves it via the `rzup` library) picks it up as the highest installed version:
+
+```bash
+RT_VER=1.94.1; TRIPLE=x86_64-unknown-linux-gnu   # match risc0/rust release tag r0.<RT_VER>
+curl -sSL -H "Authorization: Bearer $GH_TOKEN" -o /tmp/rust-toolchain.tar.gz \
+  "https://github.com/risc0/rust/releases/download/r0.$RT_VER/rust-toolchain-$TRIPLE.tar.gz"
+DEST="$HOME/.risc0/toolchains/v$RT_VER-rust-$TRIPLE"   # rzup's expected version dir (bin/, lib/ at root)
+mkdir -p "$DEST" && tar xzf /tmp/rust-toolchain.tar.gz -C "$DEST"
+"$DEST/bin/rustc" --version                            # → rustc 1.94.1-dev ...
+"$HOME/.risc0/bin/rzup" show | grep -A1 '^rust'        # → rust * 1.94.1
+```
+
 **3. Build the real sequencer.** `test-node prepare` downloads the circuits release (via `curl`, automatically) and builds `sequencer_service`. It is long (~6 min); run it, then confirm doctor is green:
 
 ```bash
