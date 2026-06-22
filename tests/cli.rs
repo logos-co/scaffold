@@ -3159,13 +3159,13 @@ if [ "${SPEL_FAIL:-0}" = "1" ]; then
   exit 7
 fi
 
-if [ "$#" -ge 2 ] && [ "$1" = "inspect" ]; then
+if [ "$#" -ge 2 ] && { [ "$1" = "program-id" ] || [ "$1" = "inspect" ]; }; then
   bin_path="$2"
   bin_name="$(basename "$bin_path")"
   if [ -n "${SPEL_PROGRAM_ID_FAIL:-}" ]; then
     case "$bin_name" in
       *"$SPEL_PROGRAM_ID_FAIL"*)
-        echo "spel stub: forced inspect failure for $bin_name" >&2
+        echo "spel stub: forced program-id failure for $bin_name" >&2
         exit 8
         ;;
     esac
