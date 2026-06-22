@@ -222,8 +222,10 @@ Use `new` for the main runnable project and `create` as the lightweight alias-pa
 - `setup` completes after syncing LEZ to the configured pin, building both `sequencer_service` and `wallet` inside the project's LEZ tree, and either seeding the default wallet or reporting that a default wallet is already configured. With `--prebuilt`: `sequencer_service` is downloaded instead of built from source (falls back to source build if no artifact is published); `wallet` is always built from source regardless of `--prebuilt`.
 - `localnet start` reports a ready localnet rather than only a spawned PID.
 - `build` exits successfully after preparing the project workspace, and — when the project has a `methods/Cargo.toml` (Risc0 guest crate excluded from the main workspace) — also prints `Building guest methods...` and produces a `methods/target/.../release` artifact.
-- `deploy` prints a submission summary with zero failures when built binaries are present.
+- `deploy` prints a submission summary with zero failures when built binaries are present, and each program line shows a resolved `program_id` (computed via the vendored `spel program-id <bin>`).
 - `wallet topup` succeeds without an explicit address because the project default wallet was seeded during setup.
+
+> **Upstream caveat (sequencer inscription limit):** deploying many large guest ELFs in close succession can pile several deploy transactions into a single block whose combined channel inscription exceeds the upstream `~896 KiB` limit, panicking the sequencer in `logos_blockchain_core::mantle::encoding::encode_channel_inscribe` (`Fatal error in 'encode_channel_inscribe' - <N> inscription data clipped to 917504`). This is an upstream `logos-blockchain` bug, not a scaffold defect. Each default-template ELF is ~358 KiB, so deploying one program per block (letting each settle, ~15 s cadence) stays under the limit. If the localnet sequencer dies mid-D-series, check `localnet logs` for this panic before assuming a scaffold fault.
 - `wallet -- check-health` succeeds against the running localnet without requiring a global `wallet` install or manual `PATH` changes.
 - Generated `scaffold.toml` stores `[wallet].home_dir` but does not carry a wallet binary override; wallet location is derived from the pinned LEZ checkout.
 
@@ -501,14 +503,17 @@ cargo run --bin run_hello_world_with_move_function -- write-public <account-id> 
 "$SCAFFOLD_BIN" wallet -- account get --account-id <account-id>
 ```
 
-The first runner (`run_hello_world`) submits a basic public transaction. The second (`run_hello_world_with_move_function write-public`) writes a custom greeting string to the account, producing an observable `data_b64` field change.
+The first runner (`run_hello_world`) submits a basic public transaction. The second (`run_hello_world_with_move_function write-public`) writes a custom greeting string to the account, producing an observable `data` field change.
+
+> **Wallet account-id prefix:** at the pinned LEZ, `wallet -- account get` requires the privacy-prefixed id (`Public/<base58>` or `Private/<base58>`); a bare base58 id fails with `Unsupported privacy kind`. The runner `verification hint:` prints the bare id — prepend `Public/` when invoking `wallet account get`. Also note the ~15 s block cadence: query `account get` only after the runner's tx has settled (a too-early read shows `Uninitialized`).
+
+> **Upstream caveat (`write-public` authorization):** `run_hello_world` signs its transaction with the account's own key (`WitnessSet::for_message(&msg, &[signing_key])`), so it claims the fresh account and writes `"Hola mundo!"` (`data = 486f6c61206d756e646f21`) — this is the reliable observable-state proof. `run_hello_world_with_move_function write-public`, however, submits **unsigned** (`for_message(&msg, &[])`) — identical to the upstream LEZ example — so the sequencer rejects it with `ClaimedUnauthorizedAccount` on a fresh account or `UnauthorizedDataModification` on an account already owned by a different program. With the current example sources this runner cannot produce a committed data change; treat `run_hello_world` as the D6 success criterion and record the `write-public` rejection rather than expecting a data mutation.
 
 ### Expected Success Signals
 
-- Both runners print `submitted transaction: status=... tx_hash=...` on success.
-- Both runners print a `verification hint:` line pointing to `wallet account get`.
-- After `run_hello_world_with_move_function write-public`, `wallet account get` shows account data containing the encoded greeting string.
-- Runner exit code is 0.
+- Both runners print `submitted transaction: ... tx_hash=...` and a `verification hint:` line on submission.
+- `run_hello_world` is the end-to-end proof: after it settles, `wallet account get --account-id Public/<id>` shows `data` containing the encoded greeting (`486f6c61206d756e646f21` = "Hola mundo!") with `program_owner` set and `nonce` advanced.
+- Runner exit code is 0 for the submission step (see the `write-public` caveat above for the on-chain outcome).
 
 ### Failure Signals / Common Pitfalls
 
@@ -627,6 +632,8 @@ The `ls` step verifies that LEZ-specific directories were scaffolded before proc
 - The generated project contains `idl/`, `crates/lez-client-gen/`, `methods/guest/src/bin/lez_counter.rs`, and `src/bin/run_lez_counter.rs`.
 - `setup`, `localnet start`, and `doctor` behave the same way they do for the default template.
 - `build` succeeds for the LEZ project workspace and also runs IDL generation and client generation automatically.
+
+> **Known issue (current pins, 2026-06):** the lez-framework template build is broken by an `nssa_core` version skew. `templates/lez-framework/Cargo.toml.template` hardcodes `lez-framework`/`lez-framework-core`/`lez-client-gen` at `github.com/jimmy-claw/lez-framework@1e146970`, whose crates depend on `github.com/logos-blockchain/lssa.git@767b5af` for `nssa_core`, while the project's `nssa`/`nssa_core` resolve to `{{lez_pin}}` = `logos-execution-zone@cf3639d` (v0.1.2). The `#[lez_program]` macro then expands to code referencing the old API (`nssa_core::program::write_nssa_outputs_with_chained_call`, an older `AccountPostState`/`AccountWithMetadata`), producing `E0282`/`E0308`/`E0425` against the cf3639d `nssa_core`. Fix requires a `lez-framework` revision pinned to the same LEZ commit as `DEFAULT_LEZ`; no such revision is currently confirmed (the `jimmy-claw/lez-framework` repo appears to have been repurposed). Until the framework pin is realigned, L1–L4 cannot reach a green `build`. The default-template (D-series) path is unaffected — it does not depend on lez-framework.
 
 ### Failure Signals / Common Pitfalls
 
