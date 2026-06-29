@@ -31,17 +31,6 @@ concurrency:
 jobs:
   render-and-build:
     runs-on: ubuntu-latest
-    # The lez-framework leg is allowed to fail (non-fatal) because its guest
-    # build is blocked UPSTREAM, not by this repo: spel-framework /
-    # spel-framework-core (the LEZ Framework SDK) declare their `nssa_core`
-    # dependency with the host-only `host` feature unconditionally, which pulls
-    # `ring`. `ring`'s C sources don't cross-compile to the risc0 zkVM guest
-    # target (cc-rs invokes the riscv32 gcc with `-m64`). No consumer-side
-    # feature flag can drop a forced transitive feature, so the guest can't
-    # build until the framework gates `host` behind an opt-in feature. The
-    # `default` leg stays strict and gating. Re-make this leg fatal once
-    # spel-framework ships a guest-compatible (no forced-host) release.
-    continue-on-error: ${{ matrix.template == 'lez-framework' }}
     strategy:
       fail-fast: false
       matrix:
@@ -159,7 +148,18 @@ jobs:
             exit 1
           fi
 
+      # For lez-framework this step is non-fatal: its guest build is blocked
+      # UPSTREAM, not by this repo. spel-framework / spel-framework-core (the
+      # LEZ Framework SDK) declare their `nssa_core` dependency with the
+      # host-only `host` feature unconditionally, which pulls `ring`; `ring`'s
+      # C sources don't cross-compile to the risc0 zkVM guest target (cc-rs
+      # runs the riscv32 gcc with `-m64`). A consumer can't drop a forced
+      # transitive feature, so this can't be fixed in-repo until the framework
+      # gates `host` behind an opt-in feature. The failure stays visible in the
+      # step log. The `default` leg remains strict and gating. Remove the
+      # continue-on-error once spel-framework ships a guest-safe release.
       - name: Build rendered project workspace
+        continue-on-error: ${{ matrix.template == 'lez-framework' }}
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/e2e-app"
