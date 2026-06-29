@@ -20,17 +20,25 @@ members = [
 unsafe_code = "warn"
 
 [workspace.dependencies]
-nssa = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "{{lez_pin}}" }
-nssa_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "{{lez_pin}}" }
-wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "{{lez_pin}}" }
-common = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "{{lez_pin}}" }
+# LEZ crates are referenced by the SAME git source spec spel-framework uses
+# (tag = "v0.1.2"). Cargo treats `tag=v0.1.2` and `rev=<sha>` as distinct
+# sources even when they resolve to the same commit, which would otherwise
+# pull two copies of nssa_core into the graph and fail to compile. This tag
+# resolves to the {{lez_pin}} commit the rest of scaffold pins.
+nssa = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.1.2" }
+nssa_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.1.2" }
+wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.1.2" }
+common = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.1.2" }
 
 risc0-zkvm = { version = "3.0.5", features = ["std"] }
 risc0-build = "3.0.5"
 
-lez-framework = { git = "https://github.com/jimmy-claw/lez-framework.git", rev = "1e146970d2bba861a32fd3a8b4e13b1e6ff4114d" }
-lez-framework-core = { git = "https://github.com/jimmy-claw/lez-framework.git", rev = "1e146970d2bba861a32fd3a8b4e13b1e6ff4114d" }
-lez-client-gen = { git = "https://github.com/jimmy-claw/lez-framework.git", rev = "1e146970d2bba861a32fd3a8b4e13b1e6ff4114d" }
+# LEZ Framework (the project's ergonomic program SDK). Upstream renamed the
+# crates lez-framework* -> spel-framework* and moved to a builder-style output
+# API; this pin is the revision compatible with the LEZ v0.1.2 pin above.
+spel-framework = { git = "https://github.com/jimmy-claw/lez-framework.git", rev = "f1d77b53e02f0a347116aa475fda9b3dbdefe290" }
+spel-framework-core = { git = "https://github.com/jimmy-claw/lez-framework.git", rev = "f1d77b53e02f0a347116aa475fda9b3dbdefe290" }
+spel-client-gen = { git = "https://github.com/jimmy-claw/lez-framework.git", rev = "f1d77b53e02f0a347116aa475fda9b3dbdefe290" }
 
 hex = "0.4.3"
 bytemuck = "1.24.0"
@@ -46,8 +54,8 @@ nssa.workspace = true
 nssa_core.workspace = true
 wallet.workspace = true
 common.workspace = true
-lez-framework.workspace = true
-lez-framework-core.workspace = true
+spel-framework.workspace = true
+spel-framework-core.workspace = true
 example_program_deployment_methods = { path = "methods" }
 
 serde.workspace = true

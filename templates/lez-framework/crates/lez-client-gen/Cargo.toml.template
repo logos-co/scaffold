@@ -5,5 +5,5 @@ edition = "2021"
 description = "Generates typed Rust client and FFI bindings from LEZ program IDL"
 
 [dependencies]
-lez-client-gen.workspace = true
+spel-client-gen.workspace = true
 serde_json.workspace = true

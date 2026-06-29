@@ -40,7 +40,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let path = entry.path();
         if path.extension().map(|e| e == "json").unwrap_or(false) {
             let json = std::fs::read_to_string(&path)?;
-            let output = lez_client_gen::generate_from_idl_json(&json)?;
+            let output = spel_client_gen::generate_from_idl_json(&json)?;
 
             let program_name: String = {
                 let idl: serde_json::Value = serde_json::from_str(&json)?;

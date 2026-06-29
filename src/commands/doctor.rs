@@ -402,7 +402,7 @@ pub(crate) fn print_report(report: &DoctorReport) {
 /// `DEFAULT_LEZ.tag`). When the two diverge, spel's sequencer-RPC client
 /// speaks a different LEZ protocol than the sequencer scaffold builds,
 /// which can break `lgs spel -- ...` subcommands that hit the sequencer
-/// (image-ID computation via `spel inspect` is unaffected — it only
+/// (image-ID computation via `spel program-id` is unaffected — it only
 /// touches the guest ELF).
 ///
 /// Reads `<spel_path>/spel-cli/Cargo.toml` and looks for either the SHA

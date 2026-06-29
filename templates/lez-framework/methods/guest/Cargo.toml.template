@@ -12,8 +12,8 @@ risc0-zkvm.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 borsh.workspace = true
-lez-framework.workspace = true
-lez-framework-core.workspace = true
+spel-framework.workspace = true
+spel-framework-core.workspace = true
 
 [[bin]]
 name = "lez_counter"

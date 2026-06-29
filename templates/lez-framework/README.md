@@ -81,8 +81,9 @@ mod my_program {
         state: AccountWithMetadata,
         #[account(signer)]
         authority: AccountWithMetadata,
-    ) -> LezResult {
-        // your logic here
+    ) -> SpelResult {
+        // your logic here, then return the post-state accounts:
+        Ok(SpelOutput::execute(vec![state, authority], vec![]))
     }
 }
 ```
