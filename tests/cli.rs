@@ -3159,13 +3159,16 @@ if [ "${SPEL_FAIL:-0}" = "1" ]; then
   exit 7
 fi
 
-if [ "$#" -ge 2 ] && [ "$1" = "inspect" ]; then
+# `program-id <ELF>` is what `extract_program_id` calls (spel v0.5.0 renamed
+# the old `inspect <ELF>`); `inspect` is still accepted so the `lgs spel --
+# inspect` passthrough-proxy tests exercise arg forwarding.
+if [ "$#" -ge 2 ] && { [ "$1" = "program-id" ] || [ "$1" = "inspect" ]; }; then
   bin_path="$2"
   bin_name="$(basename "$bin_path")"
   if [ -n "${SPEL_PROGRAM_ID_FAIL:-}" ]; then
     case "$bin_name" in
       *"$SPEL_PROGRAM_ID_FAIL"*)
-        echo "spel stub: forced inspect failure for $bin_name" >&2
+        echo "spel stub: forced program-id failure for $bin_name" >&2
         exit 8
         ;;
     esac
