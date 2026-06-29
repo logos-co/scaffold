@@ -46,18 +46,32 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       # The bootstrap cache holds the cloned lez/spel repos and their target/
-      # dirs (~/.cache/logos-scaffold) AND the extracted circuits release
-      # (~/.logos-blockchain-circuits, where the fetch step below puts it).
-      # Both must be cached, or the multi-MB circuits tarball re-downloads on
-      # every run. Keying on constants.rs means a pin or circuits-version bump
-      # invalidates it (rebuild from scratch) while same-pin re-runs stay warm.
-      - name: Cache scaffold bootstrap (repos + circuits)
+      # dirs (~/.cache/logos-scaffold), the extracted circuits release
+      # (~/.logos-blockchain-circuits, where the fetch step below puts it), and
+      # the risc0 toolchains (~/.risc0, installed below). All must be cached, or
+      # the multi-MB circuits tarball and the ~500 MB risc0 Rust toolchain
+      # re-download on every run. Keying on constants.rs means a pin or
+      # circuits-version bump invalidates it (rebuild from scratch) while
+      # same-pin re-runs stay warm.
+      - name: Cache scaffold bootstrap (repos + circuits + risc0)
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/logos-scaffold
             ~/.logos-blockchain-circuits
+            ~/.risc0
           key: scaffold-bootstrap-${{ runner.os }}-${{ hashFiles('src/constants.rs') }}
+
+      # risc0-build compiles the guest programs with the risc0 Rust toolchain;
+      # r0vm only *runs* guests, it does not compile them. Without this the
+      # guest build panics with "Risc Zero Rust toolchain not found". rzup is
+      # idempotent, so a cache hit on ~/.risc0 makes this a fast no-op.
+      - name: Install risc0 Rust toolchain (guest compiler)
+        run: |
+          set -euo pipefail
+          curl -sSL https://risczero.com/install | bash
+          echo "$HOME/.risc0/bin" >> "$GITHUB_PATH"
+          "$HOME/.risc0/bin/rzup" install rust
 
       - name: Build scaffold CLI
         run: cargo build --release --bin logos-scaffold
