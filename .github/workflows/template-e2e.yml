@@ -64,14 +64,19 @@ jobs:
 
       # risc0-build compiles the guest programs with the risc0 Rust toolchain;
       # r0vm only *runs* guests, it does not compile them. Without this the
-      # guest build panics with "Risc Zero Rust toolchain not found". rzup is
-      # idempotent, so a cache hit on ~/.risc0 makes this a fast no-op.
-      - name: Install risc0 Rust toolchain (guest compiler)
+      # guest build panics with "Risc Zero Rust toolchain not found". The C++
+      # toolchain is needed too: guests with a C/C++ dependency (e.g. `ring`,
+      # pulled in by the lez-framework template) compile it via cc-rs, which
+      # fails with "/no_risc0_cpp_toolchain_installed_run_rzup_install_cpp"
+      # when absent. rzup is idempotent, so a cache hit on ~/.risc0 makes this
+      # a fast no-op.
+      - name: Install risc0 toolchains (guest Rust + C++ compilers)
         run: |
           set -euo pipefail
           curl -sSL https://risczero.com/install | bash
           echo "$HOME/.risc0/bin" >> "$GITHUB_PATH"
           "$HOME/.risc0/bin/rzup" install rust
+          "$HOME/.risc0/bin/rzup" install cpp
 
       - name: Build scaffold CLI
         run: cargo build --release --bin logos-scaffold
