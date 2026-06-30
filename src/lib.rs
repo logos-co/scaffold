@@ -15,6 +15,7 @@ pub(crate) mod model;
 pub(crate) mod process;
 pub(crate) mod project;
 pub(crate) mod repo;
+pub(crate) mod sequencer_config;
 pub(crate) mod state;
 pub(crate) mod template;
 pub(crate) mod testnode;

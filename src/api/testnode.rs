@@ -27,6 +27,7 @@
 use std::path::Path;
 use std::time::Duration;
 
+pub use crate::error::BlockTimingValidationError;
 pub use crate::testnode::accounts::{
     AccountRead, AccountValue, BatchAccountEntry, BatchAccountRead, ProofRead, ProofValue, ReadAt,
 };
@@ -47,7 +48,8 @@ pub use crate::testnode::state::{
     StateSnapshot,
 };
 pub use crate::testnode::{
-    PortSelection, TestNodeConfig, TestNodeInfo, TestNodeStatus, DEFAULT_TEST_NODE_TIMEOUT_SEC,
+    BlockTimingOverrides, PortSelection, TestNodeConfig, TestNodeInfo, TestNodeStatus,
+    DEFAULT_TEST_NODE_TIMEOUT_SEC, MAX_BLOCK_TIMING_TIMEOUT_MS, MIN_BLOCK_TIMING_TIMEOUT_MS,
 };
 
 use super::error::{classify, Result};
@@ -69,6 +71,24 @@ impl TestNode {
     /// is healthy.
     pub fn start(project: &Project, config: &TestNodeConfig) -> Result<Self> {
         crate::testnode::TestNode::start(&project.inner, config)
+            .map(|inner| Self { inner })
+            .map_err(classify)
+    }
+
+    /// Start an isolated sequencer test node with optional block timing
+    /// overrides in milliseconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::BlockTimingValidation`](crate::api::Error::BlockTimingValidation)
+    /// before spawning anything when a provided timing override is outside
+    /// the accepted millisecond range.
+    pub fn start_with_block_timing(
+        project: &Project,
+        config: &TestNodeConfig,
+        block_timing: BlockTimingOverrides,
+    ) -> Result<Self> {
+        crate::testnode::TestNode::start_with_block_timing(&project.inner, config, block_timing)
             .map(|inner| Self { inner })
             .map_err(classify)
     }
@@ -209,4 +229,151 @@ pub fn run_with_test_node(
     command: &[String],
 ) -> Result<std::process::ExitStatus> {
     crate::testnode::run_with_test_node(&project.inner, config, command).map_err(classify)
+}
+
+/// Start a node with optional block timing overrides, run `command` with the
+/// node's connection details exported, forward the child's exit status, and
+/// stop the node when the child exits.
+///
+/// # Errors
+///
+/// Returns [`Error::BlockTimingValidation`](crate::api::Error::BlockTimingValidation)
+/// before spawning anything when a provided timing override is outside the
+/// accepted millisecond range.
+pub fn run_with_test_node_with_block_timing(
+    project: &Project,
+    config: &TestNodeConfig,
+    block_timing: BlockTimingOverrides,
+    command: &[String],
+) -> Result<std::process::ExitStatus> {
+    crate::testnode::run_with_test_node_with_block_timing(
+        &project.inner,
+        config,
+        block_timing,
+        command,
+    )
+    .map_err(classify)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    fn write_fixture_config(root: &Path) {
+        fs::write(
+            root.join("scaffold.toml"),
+            r#"[scaffold]
+version = "0.2.0"
+cache_root = "cache"
+
+[repos.lez]
+source = "https://example/lez.git"
+path = "lez"
+pin = "deadbeef"
+
+[repos.spel]
+source = "https://example/spel.git"
+path = "spel"
+pin = "deadbeef"
+
+[wallet]
+home_dir = ".scaffold/wallet"
+
+[framework]
+kind = "default"
+version = "0.1.0"
+
+[framework.idl]
+spec = "lssa-idl/0.1.0"
+path = "idl"
+
+[localnet]
+port = 3040
+risc0_dev_mode = true
+"#,
+        )
+        .expect("write scaffold.toml");
+    }
+
+    fn invalid_block_timing() -> BlockTimingOverrides {
+        BlockTimingOverrides::new().with_block_create_timeout_ms(MIN_BLOCK_TIMING_TIMEOUT_MS - 1)
+    }
+
+    #[test]
+    fn public_api_start_helpers_keep_original_function_item_signatures() {
+        let _start: fn(&Project, &TestNodeConfig) -> Result<TestNode> = TestNode::start;
+        let _start_with: fn(&Project, &TestNodeConfig, BlockTimingOverrides) -> Result<TestNode> =
+            TestNode::start_with_block_timing;
+        let _run: fn(&Project, &TestNodeConfig, &[String]) -> Result<std::process::ExitStatus> =
+            run_with_test_node;
+        let _run_with: fn(
+            &Project,
+            &TestNodeConfig,
+            BlockTimingOverrides,
+            &[String],
+        ) -> Result<std::process::ExitStatus> = run_with_test_node_with_block_timing;
+    }
+
+    #[test]
+    fn public_api_block_timing_helper_is_validated_on_start() {
+        let temp = tempdir().expect("tempdir");
+        write_fixture_config(temp.path());
+        let project = Project::open(temp.path()).expect("open project");
+
+        let err = TestNode::start_with_block_timing(
+            &project,
+            &TestNodeConfig::default(),
+            invalid_block_timing(),
+        )
+        .unwrap_err();
+        match err {
+            crate::api::Error::BlockTimingValidation { source } => {
+                assert_eq!(source.field(), "block_create_timeout_ms");
+            }
+            other => panic!("expected BlockTimingValidation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn public_api_block_timing_helper_is_validated_on_run() {
+        let temp = tempdir().expect("tempdir");
+        write_fixture_config(temp.path());
+        let project = Project::open(temp.path()).expect("open project");
+        let command = vec!["true".to_string()];
+
+        let err = run_with_test_node_with_block_timing(
+            &project,
+            &TestNodeConfig::default(),
+            invalid_block_timing(),
+            &command,
+        )
+        .unwrap_err();
+        match err {
+            crate::api::Error::BlockTimingValidation { source } => {
+                assert_eq!(source.field(), "block_create_timeout_ms");
+            }
+            other => panic!("expected BlockTimingValidation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn public_api_block_timing_range_constants_match_validation() {
+        BlockTimingOverrides::new()
+            .with_block_create_timeout_ms(MIN_BLOCK_TIMING_TIMEOUT_MS)
+            .with_retry_pending_blocks_timeout_ms(MAX_BLOCK_TIMING_TIMEOUT_MS)
+            .validate()
+            .expect("public min/max constants should be accepted");
+
+        let err = BlockTimingOverrides::new()
+            .with_retry_pending_blocks_timeout_ms(MAX_BLOCK_TIMING_TIMEOUT_MS + 1)
+            .validate()
+            .unwrap_err();
+        assert_eq!(err.field(), "retry_pending_blocks_timeout_ms");
+        assert_eq!(err.min(), MIN_BLOCK_TIMING_TIMEOUT_MS);
+        assert_eq!(err.max(), MAX_BLOCK_TIMING_TIMEOUT_MS);
+    }
 }

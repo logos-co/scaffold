@@ -15,8 +15,8 @@ use crate::testnode::pins::{
 };
 use crate::testnode::state::{export_state_snapshot, seed_state, StateSchema};
 use crate::testnode::{
-    acquire_run_slot, resolve_node_dir, run_with_test_node, stop_node_in_dir, PortSelection,
-    TestNode, TestNodeConfig,
+    acquire_run_slot, resolve_node_dir, run_with_test_node_with_block_timing, stop_node_in_dir,
+    BlockTimingOverrides, PortSelection, TestNode, TestNodeConfig,
 };
 use crate::DynResult;
 
@@ -44,6 +44,7 @@ pub(crate) enum TestNodeAction {
         work_dir: Option<PathBuf>,
         preserve_work_dir: bool,
         timeout_sec: u64,
+        block_timing: BlockTimingOverrides,
         json: bool,
     },
     Status {
@@ -62,6 +63,7 @@ pub(crate) enum TestNodeAction {
         serial: bool,
         parallel: Option<usize>,
         timeout_sec: u64,
+        block_timing: BlockTimingOverrides,
         command: Vec<String>,
     },
     TxSubmit {
@@ -418,13 +420,14 @@ pub(crate) fn cmd_test_node(action: TestNodeAction) -> DynResult<()> {
             work_dir,
             preserve_work_dir,
             timeout_sec,
+            block_timing,
             json,
         } => {
             // `--json`: suppress the `$ ./sequencer_service …` spawn echo so
             // stdout is the node's JSON connection record only.
             let _echo = json.then(EchoGuard::suppress);
             let project = load_selected_project(project.as_deref())?;
-            let config = TestNodeConfig {
+            let node_config = TestNodeConfig {
                 state,
                 port: if port == 0 {
                     PortSelection::Auto
@@ -437,7 +440,7 @@ pub(crate) fn cmd_test_node(action: TestNodeAction) -> DynResult<()> {
             };
             // Detach: the CLI exits but the node keeps running until
             // `test-node stop`.
-            let node = TestNode::start(&project, &config)?;
+            let node = TestNode::start_with_block_timing(&project, &node_config, block_timing)?;
             let info = node.detach();
             if json {
                 println!("{}", serde_json::to_string_pretty(&info)?);
@@ -508,6 +511,7 @@ pub(crate) fn cmd_test_node(action: TestNodeAction) -> DynResult<()> {
             serial,
             parallel,
             timeout_sec,
+            block_timing,
             command,
         } => {
             let project = load_selected_project(project.as_deref())?;
@@ -525,14 +529,19 @@ pub(crate) fn cmd_test_node(action: TestNodeAction) -> DynResult<()> {
                 None => None,
             };
 
-            let config = TestNodeConfig {
+            let node_config = TestNodeConfig {
                 state,
                 port: PortSelection::Auto,
                 work_dir: None,
                 preserve_work_dir: false,
                 timeout_sec,
             };
-            let status = run_with_test_node(&project, &config, &command)?;
+            let status = run_with_test_node_with_block_timing(
+                &project,
+                &node_config,
+                block_timing,
+                &command,
+            )?;
             if !status.success() {
                 std::process::exit(status.code().unwrap_or(1));
             }
