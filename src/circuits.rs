@@ -141,8 +141,19 @@ fn ensure_circuits_release_at(
     if dir.join(CIRCUITS_SENTINEL_FILE).is_file() && installed_version_matches(dir, version) {
         return Ok(dir.to_path_buf());
     }
-    // Stale or partial install: clear it so extraction lands a clean tree.
+    // Stale install: clear it so extraction lands a clean tree. Only wipe a
+    // directory that's empty or recognisably a prior circuits release —
+    // `[circuits].install_dir` is user-controlled and may be absolute, so a
+    // config typo must never make us `remove_dir_all` an unrelated directory.
     if dir.exists() {
+        if !is_empty_or_circuits_install(dir) {
+            bail!(
+                "refusing to delete {} for a fresh circuits install: it is not empty and does \
+                 not look like a circuits release (no `VERSION` or `{CIRCUITS_SENTINEL_FILE}`). \
+                 Check `[circuits].install_dir`; remove the directory manually if this is intended.",
+                dir.display()
+            );
+        }
         fs::remove_dir_all(dir)
             .map_err(|e| anyhow!("remove stale circuits dir {}: {e}", dir.display()))?;
     }
@@ -169,6 +180,21 @@ fn ensure_circuits_release_at(
     }
 
     Ok(dir.to_path_buf())
+}
+
+/// Whether `dir` is safe to `remove_dir_all` for a fresh circuits install:
+/// either empty, or recognisably a prior circuits release (has the sentinel or
+/// a `VERSION` file). Guards against a mistyped, user-controlled `install_dir`
+/// pointing at an unrelated directory.
+fn is_empty_or_circuits_install(dir: &Path) -> bool {
+    if dir.join(CIRCUITS_SENTINEL_FILE).is_file() || dir.join("VERSION").is_file() {
+        return true;
+    }
+    match fs::read_dir(dir) {
+        Ok(mut entries) => entries.next().is_none(),
+        // Can't inspect it (not a dir, permissions) → don't delete it.
+        Err(_) => false,
+    }
 }
 
 /// Whether the install at `dir` already satisfies `version`. Release tarballs
@@ -417,6 +443,25 @@ mod tests {
         // The release-root prefix must not survive — otherwise
         // `LOGOS_BLOCKCHAIN_CIRCUITS=<dest>` wouldn't point at `pol/...`.
         assert!(!tmp.path().join("release-root").exists());
+    }
+
+    #[test]
+    fn ensure_release_refuses_to_wipe_non_circuits_dir() {
+        // A mistyped `[circuits].install_dir` pointing at a non-empty,
+        // non-circuits directory must bail rather than `remove_dir_all` it.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("important");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("my-notes.txt"), "do not delete").unwrap();
+        let triple = release_triple().expect("supported test platform");
+
+        let err = ensure_circuits_release_at(&dir, "9.9.9", triple, None).unwrap_err();
+        assert!(
+            err.to_string().contains("refusing to delete"),
+            "expected refusal, got: {err}"
+        );
+        // The user's file is untouched (we bailed before deleting or downloading).
+        assert!(dir.join("my-notes.txt").is_file());
     }
 
     #[test]
