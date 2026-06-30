@@ -765,9 +765,6 @@ struct TestNodePinsArgs {
     /// Override the LEZ ref (SHA, tag, or branch).
     #[arg(long, value_name = "REF")]
     lez_ref: Option<String>,
-    /// Override the circuits release version.
-    #[arg(long, value_name = "VER")]
-    circuits_version: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -777,7 +774,7 @@ struct TestNodePrepareArgs {
     /// Project root (default: discover from the current directory).
     #[arg(long, value_name = "DIR")]
     project: Option<PathBuf>,
-    /// Override the cache root used for managed checkouts and circuits.
+    /// Override the cache root used for managed LEZ checkouts.
     #[arg(long, value_name = "DIR")]
     cache_root: Option<PathBuf>,
     /// Override the LEZ source (clone URL or local checkout directory).
@@ -787,9 +784,6 @@ struct TestNodePrepareArgs {
     /// Override the LEZ ref (SHA, tag, or branch).
     #[arg(long, value_name = "REF")]
     lez_ref: Option<String>,
-    /// Override the circuits release version.
-    #[arg(long, value_name = "VER")]
-    circuits_version: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -1306,7 +1300,6 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                     overrides: crate::testnode::pins::PinOverrides {
                         lez_source: args.lez_source,
                         lez_ref: args.lez_ref,
-                        circuits_version: args.circuits_version,
                     },
                     json: args.json,
                 },
@@ -1315,7 +1308,6 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                     overrides: crate::testnode::pins::PinOverrides {
                         lez_source: args.lez_source,
                         lez_ref: args.lez_ref,
-                        circuits_version: args.circuits_version,
                     },
                     cache_root: args.cache_root,
                     json: args.json,

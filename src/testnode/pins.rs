@@ -24,7 +24,7 @@ use std::process::Command;
 use anyhow::{bail, Context};
 use serde::Serialize;
 
-use crate::circuits::{circuits_dir_for_version, ensure_circuits_release};
+use crate::circuits::{circuits_dir_for_project, ensure_circuits_for_project, release_triple};
 use crate::commands::setup::SEQUENCER_BUILD_ARGS;
 use crate::constants::{
     DEFAULT_CIRCUITS_VERSION, DEFAULT_LEZ, LEZ_SOURCE, LOGOS_BLOCKCHAIN_CIRCUITS_ENV,
@@ -46,8 +46,6 @@ pub struct PinOverrides {
     pub lez_source: Option<String>,
     /// LEZ git ref (SHA, tag, or branch).
     pub lez_ref: Option<String>,
-    /// `logos-blockchain-circuits` release version.
-    pub circuits_version: Option<String>,
 }
 
 /// Which layer supplied a resolved pin value.
@@ -175,21 +173,22 @@ fn resolve_pins_with_cache_root(
         None => (DEFAULT_LEZ.sha.to_string(), PinOrigin::ScaffoldDefault),
     };
 
-    let (circuits_version, circuits_version_origin) = match &overrides.circuits_version {
-        Some(version) => (version.clone(), PinOrigin::CliOverride),
-        // `circuits.version` always carries a value (defaults to
-        // `DEFAULT_CIRCUITS_VERSION`), so an explicit non-default in
-        // `scaffold.toml` is the project pin — honour it here so `prepare`
-        // resolves the same version `start` provisions via the project config.
-        None if project.config.circuits.version != DEFAULT_CIRCUITS_VERSION => (
-            project.config.circuits.version.clone(),
-            PinOrigin::ProjectConfig,
-        ),
-        None => (
-            DEFAULT_CIRCUITS_VERSION.to_string(),
-            PinOrigin::ScaffoldDefault,
-        ),
-    };
+    // Circuits are a project-level dependency (`[circuits].version`), so the
+    // configured value is the single source of truth: `pins`, `prepare`, and
+    // `start` all resolve and provision it the same way. There is deliberately
+    // no CLI override — that would reintroduce prepare/start divergence.
+    let (circuits_version, circuits_version_origin) =
+        if project.config.circuits.version != DEFAULT_CIRCUITS_VERSION {
+            (
+                project.config.circuits.version.clone(),
+                PinOrigin::ProjectConfig,
+            )
+        } else {
+            (
+                DEFAULT_CIRCUITS_VERSION.to_string(),
+                PinOrigin::ScaffoldDefault,
+            )
+        };
 
     let cache_root = match cache_root_override {
         Some(root) => root.to_path_buf(),
@@ -231,7 +230,7 @@ fn resolve_pins_with_cache_root(
         None
     };
 
-    let circuits_path = circuits_dir_for_version(&cache_root, &circuits_version)?;
+    let circuits_path = circuits_dir_for_project(project);
 
     Ok(TestNodePins {
         sequencer_binary: lez_checkout.join(SEQUENCER_BIN_REL_PATH),
@@ -300,16 +299,12 @@ pub fn prepare_test_node(
         }
     };
 
-    // Build the standalone sequencer for the resolved pins. Incremental:
-    // cargo no-ops when the binary is already up to date for this checkout.
-    let cache_root_resolved = match cache_root {
-        Some(root) => root.to_path_buf(),
-        None => resolve_cache_root(project)?.0,
-    };
-    let circuits_path = ensure_circuits_release(&cache_root_resolved, &pins.circuits_version)?;
-    // Export for the sequencer build below and for any node spawned later in
-    // this process. See `ensure_circuits_for_project` for the safety note.
-    std::env::set_var(LOGOS_BLOCKCHAIN_CIRCUITS_ENV, &circuits_path);
+    // Provision circuits into the project's configured install dir and export
+    // `LOGOS_BLOCKCHAIN_CIRCUITS` — exactly what `start` does, so `prepare`
+    // warms the same tree `start` will use (not a separate cache-root copy).
+    // Needed for the sequencer build below and any node spawned in this process.
+    ensure_circuits_for_project(project)?;
+    let circuits_path = circuits_dir_for_project(project);
 
     let mut build_cmd = Command::new("cargo");
     build_cmd
@@ -384,24 +379,29 @@ pub fn doctor_test_node(project: &Project) -> DynResult<TestNodeDoctorReport> {
     let pins = resolve_test_node_pins(project, &PinOverrides::default())?;
     let mut checks = Vec::new();
 
-    // Platform support (circuits releases gate the supported set).
-    match circuits_dir_for_version(&resolve_cache_root(project)?.0, &pins.circuits_version) {
-        Ok(_) => checks.push(TestNodeCheck {
+    // Platform support: a circuits release must exist for this OS/arch — unless
+    // the user supplies their own circuits via `LOGOS_BLOCKCHAIN_CIRCUITS`,
+    // the documented escape hatch on otherwise-unsupported platforms.
+    let circuits_env_override =
+        std::env::var_os(LOGOS_BLOCKCHAIN_CIRCUITS_ENV).is_some_and(|v| !v.is_empty());
+    if release_triple().is_ok() || circuits_env_override {
+        checks.push(TestNodeCheck {
             category: TestNodeCheckCategory::UnsupportedPlatform,
             status: CheckStatus::Pass,
             name: "platform supported".to_string(),
             detail: format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
             remediation: None,
-        }),
-        Err(err) => checks.push(TestNodeCheck {
+        });
+    } else {
+        checks.push(TestNodeCheck {
             category: TestNodeCheckCategory::UnsupportedPlatform,
             status: CheckStatus::Fail,
             name: "platform supported".to_string(),
-            detail: format!("{err:#}"),
+            detail: format!("{:#}", release_triple().unwrap_err()),
             remediation: Some(format!(
                 "Set {LOGOS_BLOCKCHAIN_CIRCUITS_ENV} to a populated circuits checkout"
             )),
-        }),
+        });
     }
 
     // Pin drift vs the scaffold default — informational, not an error: the
@@ -674,40 +674,26 @@ mod tests {
             &project,
             &PinOverrides {
                 lez_ref: Some("v9.9.9".into()),
-                circuits_version: Some("0.5.0".into()),
                 ..Default::default()
             },
         )
         .unwrap();
         assert_eq!(pins.lez_ref, "v9.9.9");
         assert_eq!(pins.lez_ref_origin, PinOrigin::CliOverride);
-        assert_eq!(pins.circuits_version, "0.5.0");
-        assert_eq!(pins.circuits_version_origin, PinOrigin::CliOverride);
     }
 
     #[test]
-    fn circuits_version_prefers_project_config_over_default() {
+    fn circuits_version_uses_project_config_as_source_of_truth() {
         let temp = tempdir().unwrap();
         let mut project = fixture_project(temp.path(), RepoRef::default());
-        // A non-default `[circuits].version` is the project pin: `prepare`
-        // must resolve it (not the scaffold default) so it agrees with `start`.
+        // Circuits version is project config (there is no CLI override): a
+        // non-default `[circuits].version` is the single pin that `pins`,
+        // `prepare`, and `start` all resolve and provision.
         project.config.circuits.version = "0.9.9".into();
 
         let pins = resolve_test_node_pins(&project, &PinOverrides::default()).unwrap();
         assert_eq!(pins.circuits_version, "0.9.9");
         assert_eq!(pins.circuits_version_origin, PinOrigin::ProjectConfig);
-
-        // A CLI override still wins over the project pin.
-        let pins = resolve_test_node_pins(
-            &project,
-            &PinOverrides {
-                circuits_version: Some("0.5.0".into()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(pins.circuits_version, "0.5.0");
-        assert_eq!(pins.circuits_version_origin, PinOrigin::CliOverride);
     }
 
     #[test]
