@@ -707,6 +707,11 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
             }
         }
         for (profile, p) in &bc.profiles {
+            // The profile name is itself a serialized table header, so guard it
+            // like every other emitted name key (cf. `run.profiles.{name}`,
+            // `modules.{name}`) — a control char in the key would corrupt the
+            // line-oriented writer.
+            check_toml_value(&format!("basecamp.profiles.{profile}"), profile)?;
             for (k, v) in &p.env {
                 check_toml_value(&format!("basecamp.profiles.{profile}.env.{k}"), v)?;
             }
@@ -1378,6 +1383,20 @@ LOGOS_STORAGE_API_PORT = "8083"
         let toml2 = minimal_v0_2_0() + "[basecamp.profiles.alice.env]\n\"\" = \"1\"\n";
         let err2 = parse_config(&toml2).unwrap_err();
         assert!(err2.to_string().contains("must not be empty"), "{err2}");
+    }
+
+    #[test]
+    fn serialize_rejects_control_char_in_basecamp_profile_name() {
+        // Profile names aren't validated at parse, so a quoted key with a
+        // control char parses — but it must be rejected before it can corrupt
+        // the serializer, like every other emitted name key.
+        let toml = minimal_v0_2_0() + "[basecamp.profiles.\"bad\\nname\".env]\nFOO = \"1\"\n";
+        let cfg = parse_config(&toml).expect("parse accepts the unchecked profile name");
+        let err = serialize_config(&cfg).expect_err("serialize must reject the control-char name");
+        assert!(
+            err.to_string().contains("control character"),
+            "expected control-char rejection, got: {err}"
+        );
     }
 
     #[test]
