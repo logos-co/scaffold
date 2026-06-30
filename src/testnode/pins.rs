@@ -24,7 +24,9 @@ use std::process::Command;
 use anyhow::{bail, Context};
 use serde::Serialize;
 
-use crate::circuits::{circuits_dir_for_project, ensure_circuits_for_project, release_triple};
+use crate::circuits::{
+    circuits_dir_for_project, ensure_circuits_for_project, release_triple, version_eq,
+};
 use crate::commands::setup::SEQUENCER_BUILD_ARGS;
 use crate::constants::{
     DEFAULT_CIRCUITS_VERSION, DEFAULT_LEZ, LEZ_SOURCE, LOGOS_BLOCKCHAIN_CIRCUITS_ENV,
@@ -178,7 +180,7 @@ fn resolve_pins_with_cache_root(
     // `start` all resolve and provision it the same way. There is deliberately
     // no CLI override — that would reintroduce prepare/start divergence.
     let (circuits_version, circuits_version_origin) =
-        if project.config.circuits.version != DEFAULT_CIRCUITS_VERSION {
+        if !version_eq(&project.config.circuits.version, DEFAULT_CIRCUITS_VERSION) {
             (
                 project.config.circuits.version.clone(),
                 PinOrigin::ProjectConfig,

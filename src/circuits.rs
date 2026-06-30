@@ -53,7 +53,7 @@ use crate::DynResult;
 /// cache-hit checks and post-extract verification — picking a single circuit
 /// (rather than `VERSION`) keeps the check robust to future releases that
 /// might rename the version marker.
-const CIRCUITS_SENTINEL_FILE: &str = "pol/verification_key.json";
+pub(crate) const CIRCUITS_SENTINEL_FILE: &str = "pol/verification_key.json";
 
 /// Ensure `LOGOS_BLOCKCHAIN_CIRCUITS` is set in this process so subsequently
 /// spawned `cargo` invocations inherit it. No-op when the env var is already
@@ -163,7 +163,10 @@ fn ensure_circuits_release_at(
 
     let url = circuits_release_url(version, triple, url_template);
 
-    println!("Downloading logos-blockchain-circuits v{version} ({triple})");
+    println!(
+        "Downloading logos-blockchain-circuits v{} ({triple})",
+        version.trim_start_matches('v')
+    );
     println!("  from {url}");
     println!("  into {}", dir.display());
 
@@ -218,6 +221,11 @@ pub(crate) fn version_eq(a: &str, b: &str) -> bool {
 }
 
 fn circuits_release_url(version: &str, triple: &str, template: Option<&str>) -> String {
+    // Normalize a leading `v`: `[circuits].version` may be `v0.4.1` (treated as
+    // equal to `0.4.1` everywhere else), but the release layout carries a single
+    // `v` in the path, so substituting the raw `v`-prefixed string would yield
+    // an unreachable `vv0.4.1`.
+    let version = version.trim_start_matches('v');
     match template {
         Some(template) => template
             .replace("{version}", version)
@@ -487,6 +495,22 @@ mod tests {
             url,
             "https://example.invalid/v9.9.9/circuits-linux-x86_64.tar.gz"
         );
+    }
+
+    #[test]
+    fn release_url_normalizes_leading_v_in_version() {
+        // A `v`-prefixed `[circuits].version` must not yield a `vv0.4.1` URL.
+        let bare = circuits_release_url("0.4.1", "linux-x86_64", None);
+        let prefixed = circuits_release_url("v0.4.1", "linux-x86_64", None);
+        assert_eq!(bare, prefixed);
+        assert!(!prefixed.contains("vv0.4.1"), "{prefixed}");
+        // Same normalization applies to a custom template.
+        let tmpl = circuits_release_url(
+            "v0.4.1",
+            "linux-x86_64",
+            Some("https://example.invalid/v{version}/c-{triple}.tar.gz"),
+        );
+        assert_eq!(tmpl, "https://example.invalid/v0.4.1/c-linux-x86_64.tar.gz");
     }
 
     #[test]

@@ -148,14 +148,14 @@ pub(crate) fn check_port_warn(name: &str, addr: &str, remediation: &str) -> Chec
 }
 
 /// Probe for the `logos-blockchain-circuits` artifact required by
-/// downstream `logos-blockchain-pol` build scripts. Without this, `setup`
-/// (which compiles `sequencer_service --features standalone`) panics
-/// inside cargo with a raw build-script trace. Surfaced both as a doctor
-/// row and as a precheck in `setup` so the user sees a single
-/// scaffold-styled error before any compile work runs.
+/// downstream `logos-blockchain-pol` build scripts. Without it, builds that
+/// compile `sequencer_service --features standalone` panic inside cargo with
+/// a raw build-script trace; this surfaces a single scaffold-styled `doctor`
+/// row instead.
 ///
 /// Pass when either:
-/// - `LOGOS_BLOCKCHAIN_CIRCUITS` is set to a path that exists and is a directory, or
+/// - `LOGOS_BLOCKCHAIN_CIRCUITS` points at a populated circuits release (the
+///   sentinel `pol/verification_key.json` is present), or
 /// - the configured `[circuits].install_dir` (default `.scaffold/circuits`)
 ///   holds the release, with its `VERSION` matching `[circuits].version`.
 ///
@@ -182,7 +182,7 @@ fn check_logos_blockchain_circuits_with(
     install_dir: &Path,
     config: &CircuitsConfig,
 ) -> CheckRow {
-    let sentinel = "pol/verification_key.json";
+    let sentinel = crate::circuits::CIRCUITS_SENTINEL_FILE;
 
     if let Some(path) = env_path.filter(|p| p.join(sentinel).is_file()) {
         return CheckRow {
