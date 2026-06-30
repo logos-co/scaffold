@@ -156,12 +156,13 @@ pub(crate) fn check_port_warn(name: &str, addr: &str, remediation: &str) -> Chec
 ///
 /// Pass when either:
 /// - `LOGOS_BLOCKCHAIN_CIRCUITS` is set to a path that exists and is a directory, or
-/// - `$HOME/.logos-blockchain-circuits/` exists and is a directory.
+/// - the configured `[circuits].install_dir` (default `.scaffold/circuits`)
+///   holds the release, with its `VERSION` matching `[circuits].version`.
 ///
 /// A set-but-invalid env var (empty, nonexistent path, or non-directory)
 /// is reported distinctly from "unset" in the failure detail — the user
 /// otherwise sees "unset" when their typo'd env var is the actual cause.
-/// In either case, the home-dir probe still runs as a fallback.
+/// In either case, the configured install dir is checked as the fallback.
 pub(crate) fn check_logos_blockchain_circuits(
     project_root: &Path,
     config: &CircuitsConfig,
@@ -244,13 +245,13 @@ fn check_logos_blockchain_circuits_with(
             status: CheckStatus::Warn,
             name: "logos-blockchain-circuits".to_string(),
             detail: format!(
-                "installed version={} at {}; LEZ pin expects {}",
+                "installed version={} at {}; scaffold's default circuits pin is {}",
                 installed_version,
                 install_dir.display(),
                 DEFAULT_CIRCUITS_VERSION
             ),
             remediation: Some(format!(
-                "Set [circuits].version to {DEFAULT_CIRCUITS_VERSION} unless this project intentionally overrides the LEZ circuits pin"
+                "Set [circuits].version to {DEFAULT_CIRCUITS_VERSION} unless this project intentionally overrides scaffold's default circuits pin"
             )),
         };
     }
@@ -534,7 +535,10 @@ mod tests {
         };
         let row = check_logos_blockchain_circuits_with(None, &install, &cfg);
         assert_eq!(row.status, CheckStatus::Warn);
-        assert!(row.detail.contains("LEZ pin expects"), "{row:?}");
+        assert!(
+            row.detail.contains("scaffold's default circuits pin is"),
+            "{row:?}"
+        );
         assert!(row.remediation.is_some());
     }
 }
