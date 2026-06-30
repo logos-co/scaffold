@@ -91,17 +91,6 @@ pub(crate) fn circuits_dir_for_project(project: &Project) -> PathBuf {
     circuits_install_dir(&project.root, &project.config.circuits)
 }
 
-/// Resolve the legacy cache-root directory for an explicit release version.
-pub(crate) fn circuits_dir_for_version(cache_root: &Path, version: &str) -> DynResult<PathBuf> {
-    if let Some(path) = circuits_path_from_env() {
-        return Ok(path);
-    }
-    let triple = release_triple()?;
-    Ok(cache_root
-        .join("circuits")
-        .join(format!("v{version}-{triple}")))
-}
-
 pub(crate) fn circuits_install_dir(project_root: &Path, config: &CircuitsConfig) -> PathBuf {
     let path = PathBuf::from(&config.install_dir);
     if path.is_absolute() {
@@ -122,17 +111,6 @@ fn circuits_path_from_env() -> Option<PathBuf> {
     } else {
         None
     }
-}
-
-/// Materialise (or hit the cache for) the circuits release at `version`,
-/// returning the directory that contains `pol/`, `poc/`, ... — the layout
-/// `LOGOS_BLOCKCHAIN_CIRCUITS` consumers expect.
-pub(crate) fn ensure_circuits_release(cache_root: &Path, version: &str) -> DynResult<PathBuf> {
-    let triple = release_triple()?;
-    let dir = cache_root
-        .join("circuits")
-        .join(format!("v{version}-{triple}"));
-    ensure_circuits_release_at(&dir, version, triple, None)
 }
 
 fn ensure_circuits_release_for_config(
@@ -230,7 +208,7 @@ fn circuits_release_url(version: &str, triple: &str, template: Option<&str>) -> 
 /// Only the platforms scaffold itself supports today are listed. macOS aarch64
 /// works upstream and is the dev-machine baseline; x86_64 macOS isn't shipped
 /// by upstream's flake either, so we surface the same constraint here.
-fn release_triple() -> DynResult<&'static str> {
+pub(crate) fn release_triple() -> DynResult<&'static str> {
     let triple = match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => "linux-x86_64",
         ("linux", "aarch64") => "linux-aarch64",
@@ -439,18 +417,6 @@ mod tests {
         // The release-root prefix must not survive — otherwise
         // `LOGOS_BLOCKCHAIN_CIRCUITS=<dest>` wouldn't point at `pol/...`.
         assert!(!tmp.path().join("release-root").exists());
-    }
-
-    #[test]
-    fn ensure_circuits_release_short_circuits_when_sentinel_present() {
-        let tmp = tempfile::tempdir().unwrap();
-        let triple = release_triple().expect("supported test platform");
-        let preinstalled = tmp.path().join("circuits").join(format!("v9.9.9-{triple}"));
-        fs::create_dir_all(preinstalled.join("pol")).unwrap();
-        fs::write(preinstalled.join(CIRCUITS_SENTINEL_FILE), "{}").unwrap();
-
-        let resolved = ensure_circuits_release(tmp.path(), "9.9.9").expect("cache hit");
-        assert_eq!(resolved, preinstalled);
     }
 
     #[test]
