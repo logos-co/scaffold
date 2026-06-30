@@ -1,13 +1,10 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::bail;
-
-use crate::circuits::ensure_circuits_for_subprocess;
-use crate::doctor_checks::check_logos_blockchain_circuits;
-use crate::model::{CheckStatus, RepoRef};
+use crate::circuits::ensure_circuits_for_project;
+use crate::model::RepoRef;
 use crate::process::run_checked;
-use crate::project::{ensure_dir_exists, load_project, resolve_cache_root, resolve_repo_path};
+use crate::project::{ensure_dir_exists, load_project, resolve_repo_path};
 use crate::repo::{sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
 use crate::state::prepare_wallet_home;
 use crate::DynResult;
@@ -48,7 +45,6 @@ pub(crate) fn cmd_setup(prebuilt: bool) -> DynResult<()> {
 /// spel) for `project`. Streams build progress to stdout; failures surface as
 /// typed `CommandFailed` errors where an external command is at fault.
 pub(crate) fn setup_for_project(project: &crate::model::Project, prebuilt: bool) -> DynResult<()> {
-    ensure_logos_blockchain_circuits_present()?;
     let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
     let spel = resolve_repo_path(project, &project.config.spel, "spel")?;
 
@@ -57,8 +53,7 @@ pub(crate) fn setup_for_project(project: &crate::model::Project, prebuilt: bool)
     // build scripts, which panic when their circuits release isn't visible.
     // Materialise it once before any cargo invocation; the export propagates
     // to every subprocess for the rest of the process.
-    let (cache_root, _) = resolve_cache_root(project)?;
-    ensure_circuits_for_subprocess(&cache_root)?;
+    ensure_circuits_for_project(project)?;
 
     sync_pinned_repo(&project.config.lez, &lez, "lez")?;
     ensure_dir_exists(&lez, "lez")?;
@@ -104,24 +99,6 @@ pub(crate) fn setup_for_project(project: &crate::model::Project, prebuilt: bool)
 
     println!("setup complete");
 
-    Ok(())
-}
-
-/// Bail before any cargo work if the `logos-blockchain-circuits` artifact
-/// the LEZ build chain depends on isn't reachable. Without this the build
-/// fails deep inside `logos-blockchain-pol`'s build script with a raw
-/// panic backtrace; the user has no signal that the missing piece is a
-/// scaffold prerequisite.
-fn ensure_logos_blockchain_circuits_present() -> DynResult<()> {
-    let row = check_logos_blockchain_circuits();
-    if matches!(row.status, CheckStatus::Fail) {
-        let remediation = row.remediation.as_deref().unwrap_or("");
-        bail!(
-            "{}. {} Run `logos-scaffold doctor` for the full prerequisite list.",
-            row.detail,
-            remediation
-        );
-    }
     Ok(())
 }
 

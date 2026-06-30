@@ -86,7 +86,10 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
     rows.push(check_binary("kill", true));
     rows.push(check_container_runtime());
     rows.push(check_binary("nix", false));
-    rows.push(check_logos_blockchain_circuits());
+    rows.push(check_logos_blockchain_circuits(
+        &project.root,
+        &project.config.circuits,
+    ));
 
     rows.push(check_repo("lez", &lez, &project.config.lez.pin));
 

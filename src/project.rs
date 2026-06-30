@@ -251,6 +251,7 @@ mod tests {
                 basecamp_repo: None,
                 lgpm_repo: None,
                 wallet_home_dir: ".scaffold/wallet".into(),
+                circuits: crate::model::CircuitsConfig::default(),
                 framework: FrameworkConfig {
                     kind: String::new(),
                     version: String::new(),
