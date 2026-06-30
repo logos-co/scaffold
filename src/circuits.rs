@@ -59,10 +59,10 @@ const CIRCUITS_SENTINEL_FILE: &str = "pol/verification_key.json";
 /// spawned `cargo` invocations inherit it. No-op when the env var is already
 /// exported and points at a populated circuits dir (user override).
 ///
-/// Otherwise: download the matching tagged release into
-/// `<cache_root>/circuits/v<ver>-<os>-<arch>` (idempotent) and export the
-/// env var pointing there. We deliberately do NOT fall back to
-/// `~/.logos-blockchain-circuits/` — see the module docs for why.
+/// Otherwise: download the matching tagged release into the project's
+/// configured `[circuits].install_dir` (default `.scaffold/circuits`,
+/// idempotent) and export the env var pointing there. We deliberately do NOT
+/// fall back to `~/.logos-blockchain-circuits/` — see the module docs for why.
 pub(crate) fn ensure_circuits_for_project(project: &Project) -> DynResult<()> {
     if circuits_path_from_env().is_some() {
         return Ok(());
@@ -201,9 +201,16 @@ fn ensure_circuits_release_at(
 /// preserving the prior behaviour.
 fn installed_version_matches(dir: &Path, version: &str) -> bool {
     match fs::read_to_string(dir.join("VERSION")) {
-        Ok(text) => text.trim().trim_start_matches('v') == version.trim().trim_start_matches('v'),
+        Ok(text) => version_eq(text.trim(), version),
         Err(_) => true,
     }
+}
+
+/// Compare two circuits version strings, normalising a leading `v` on either
+/// side so `v0.4.1` and `0.4.1` are treated as equal. Used by both the install
+/// cache-hit check and `doctor`, which must not flag spurious version drift.
+pub(crate) fn version_eq(a: &str, b: &str) -> bool {
+    a.trim().trim_start_matches('v') == b.trim().trim_start_matches('v')
 }
 
 fn circuits_release_url(version: &str, triple: &str, template: Option<&str>) -> String {
