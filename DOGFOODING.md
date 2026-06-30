@@ -74,7 +74,7 @@ Scaffold is also consumable as a Rust library (`logos_scaffold::api`): the same 
 
 - Unix-like environment with `git`, `rustc`, `cargo`, `lsof`, `ps`, and `kill`.
 - Docker or Podman available for guest builds.
-- `logos-blockchain-circuits` release on disk: `LOGOS_BLOCKCHAIN_CIRCUITS=<path>` or `~/.logos-blockchain-circuits/`. Required by the LEZ standalone build chain that `setup` invokes; absence causes a scaffold-side precheck error before any cargo work.
+- `logos-blockchain-circuits` release on disk when validating older projects without `[circuits]`: `LOGOS_BLOCKCHAIN_CIRCUITS=<path>` or `~/.logos-blockchain-circuits/`. New projects should carry a `[circuits]` table in `scaffold.toml`; `setup`, `build`, `build idl`, `localnet`, and test-node startup should resolve and materialize the configured release instead of relying on ambient shell state.
 - No conflicting listener on the scaffold localnet port before `localnet start`.
 - Network access available for setup/build flows that fetch dependencies.
 - No preinstalled `wallet` binary is required. If one exists on `PATH`, do not treat it as the runtime under test for scaffold wallet scenarios.
@@ -207,9 +207,10 @@ Use `new` for the main runnable project and `create` as the lightweight alias-pa
 ### Expected Success Signals
 
 - Project creation succeeds and prints the destination path, pinned LEZ commit, and cache root.
+- Generated `scaffold.toml` includes a `[circuits]` table. The default install dir is project-local (`.scaffold/circuits`), and the configured version/download template/install dir become the single source of truth for commands that need `logos-blockchain-circuits`.
 - `setup` completes after syncing LEZ to the configured pin, building both `sequencer_service` and `wallet` inside the project's LEZ tree, and either seeding the default wallet or reporting that a default wallet is already configured. With `--prebuilt`: `sequencer_service` is downloaded instead of built from source (falls back to source build if no artifact is published); `wallet` is always built from source regardless of `--prebuilt`.
 - `localnet start` reports a ready localnet rather than only a spawned PID.
-- `build` exits successfully after preparing the project workspace, and — when the project has a `methods/Cargo.toml` (Risc0 guest crate excluded from the main workspace) — also prints `Building guest methods...` and produces a `methods/target/.../release` artifact.
+- `build` exits successfully after preparing the project workspace, resolving the configured circuits release, and — when the project has a `methods/Cargo.toml` (Risc0 guest crate excluded from the main workspace) — also prints `Building guest methods...` and produces a `methods/target/.../release` artifact.
 - `deploy` prints a submission summary with zero failures when built binaries are present.
 - `wallet topup` succeeds without an explicit address because the project default wallet was seeded during setup.
 - `wallet -- check-health` succeeds against the running localnet without requiring a global `wallet` install or manual `PATH` changes.
@@ -228,6 +229,7 @@ Use `new` for the main runnable project and `create` as the lightweight alias-pa
 - Scaffold creation output for both `new` and `create`.
 - `setup`, `localnet start`, `build`, `deploy`, and wallet command excerpts.
 - The generated project path and the exact binary path used for the run.
+- `scaffold.toml` excerpt showing `[circuits]`, plus `ls .scaffold/circuits` or the configured install dir after `setup`/`build`.
 
 ### Execution Notes
 
@@ -266,6 +268,7 @@ If the scenario begins with localnet stopped, run `"$SCAFFOLD_BIN" localnet star
 - Human-readable `localnet status` clearly reports tracked PID, listener state, ownership, and readiness.
 - `localnet status --json` returns parseable JSON with at least `tracked_pid`, `listener_present`, `ownership`, and `ready`.
 - `doctor` returns actionable next steps rather than only raw failures.
+- `doctor` validates the configured circuits install path, checks the top-level `VERSION` file against `[circuits].version`, and warns when project config drifts from the LEZ pin's expected circuits release.
 - `doctor --json` returns parseable JSON with at least `status`, `summary`, `checks`, and `next_steps`.
 - `localnet logs --tail 200` returns useful recent log lines when logs exist.
 - `localnet stop` succeeds cleanly and subsequent status reflects the stopped state.
@@ -279,6 +282,7 @@ If the scenario begins with localnet stopped, run `"$SCAFFOLD_BIN" localnet star
 ### Evidence to Capture
 
 - Human-readable and JSON output for both `localnet status` and `doctor`.
+- If `[circuits]` is edited for the run, capture the matching `doctor` warning/error and the configured install dir.
 - A short `localnet logs` excerpt.
 - Stop behavior and the post-stop status output.
 
@@ -1331,7 +1335,7 @@ The pin/prepare/doctor commands also accept `--project <root>` so they can be dr
 
 ### Expected Success Signals
 
-- `test-node pins` reports the LEZ source/ref, resolved commit, checkout path and ownership (`managed_cache` vs `caller_provided`), sequencer binary path, and circuits version/path — each annotated with its origin (`cli_override` → `project_config` → `scaffold_default`).
+- `test-node pins` reports the LEZ source/ref, resolved commit, checkout path and ownership (`managed_cache` vs `caller_provided`), sequencer binary path, and circuits version/path — each annotated with its origin (`cli_override` -> `project_config` -> `scaffold_default`). For projects with `[circuits]`, the reported circuits version matches the project config; startup should still materialize the configured circuits install before launching the node.
 - `test-node doctor` reports pin drift, checkout presence/commit/cleanliness, sequencer binary, circuits release, and platform support as separate categorized checks; exits non-zero only when a real prerequisite is missing.
 - `test-node prepare` resolves the project's pins, ensures the checkout + circuits, builds the standalone sequencer, and (with `--json`) reports the checkout, resolved commit, binary path, and circuits path.
 - `test-node start --json` prints at least `rpc_url`, `pid`, `state_dir`, `config_path`, `log_path`, `genesis_block_id`, and current `block_height`; the node runs on its own port under `.scaffold/test-nodes/<id>/` and does not touch the vendored LEZ checkout or the developer localnet.
@@ -1350,6 +1354,7 @@ The pin/prepare/doctor commands also accept `--project <root>` so they can be dr
 ### Evidence to Capture
 
 - `test-node pins --json` and `test-node doctor` output.
+- The circuits version from `test-node pins --json`, and the configured install dir after `test-node start` or another command that materializes project circuits.
 - `test-node start --json` output (the full connection record) and the `.scaffold/test-nodes/<id>/` listing.
 - `test-node status --json` for the running and stopped states.
 - `test-node run` output showing the exported `LGS_TEST_NODE_*` env reaching the child.
@@ -1562,6 +1567,7 @@ HEAD0=$("$SCAFFOLD_BIN" test-node blocks head --url "$URL" --json | jq -r .block
 - Changes to the `test-node` RPC client (transaction outcomes, block/clock parsing, account/proof reads, or their JSON shapes): rerun `T2`.
 - Changes to `test-node` state seeding (snapshot formats, validation classes, genesis-config injection, or database seeding): rerun `T3`.
 - Changes to the transaction-bearing block path (`sendTransaction`/`getBlock` handling, the committed-block scan, user-vs-clock classification, or the r0vm/sequencer spawn env): rerun `T4` (the only check that proves the path against a real executed transaction).
+- Changes to `[circuits]` config parsing/serialization, circuits install-dir resolution, circuits materialization/export, or `doctor` circuits checks: rerun `D1`, `D2`, `D6`, `T1`, `T4`, and `A1`.
 - Changes to circuits/r0vm provisioning, the LEZ/circuits pins, or the sequencer/wallet build invocation (`SEQUENCER_BUILD_ARGS`, `setup`): re-verify "Provisioning the Real LEZ Sequencer Toolchain", then rerun `T1` and `T4`.
 
 The `T`-series must be run against a real sequencer (see the Agent Execution Directives and the provisioning section). When in doubt, rerun more scenarios rather than fewer — and never substitute a stub for the real node in a `T` scenario.
