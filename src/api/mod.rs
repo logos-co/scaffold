@@ -672,8 +672,9 @@ pub enum BasecampCommand {
     /// Attr-swap replay producing portable module builds (alias for
     /// `Build { variants: ["lgx-portable"], module: None }`).
     BuildPortable,
-    /// Run a captured module via `nix run`. `host` is `standalone`/`basecamp`;
-    /// `None` derives it from the module's `metadata.json` `type`.
+    /// Run a captured module via `nix run`. `host` accepts `standalone` (the
+    /// only host today, and the default when `None`); running a module as a
+    /// configured Basecamp peer is tracked as separate follow-up work.
     Run {
         module: String,
         host: Option<String>,

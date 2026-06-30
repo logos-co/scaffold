@@ -63,9 +63,9 @@ pub(crate) enum BasecampAction {
         variants: Vec<String>,
         module: Option<String>,
     },
-    /// Run a captured module via `nix run`. `host` selects the module's
-    /// standalone app vs the basecamp-hosted app; `None` derives it from the
-    /// module's `metadata.json` `type` (`ui_qml` → standalone, else basecamp).
+    /// Run a captured module via `nix run`. `host` accepts `standalone` (the
+    /// module's own app — the only host today, and the default when `None`).
+    /// Running a module as a configured Basecamp peer is follow-up work.
     Run {
         module: String,
         host: Option<String>,
@@ -561,17 +561,16 @@ fn nix_flake_target(project_root: &Path, flake: &str, attr: Option<&str>) -> Str
     }
 }
 
-/// `lgs basecamp run <module> [--host standalone|basecamp]` — run a captured
-/// module via `nix run`, mirroring `develop`'s exec model (resolve the flake
-/// from `[modules.<module>]`, then exec from the project root).
+/// `lgs basecamp run <module> [--host standalone]` — run a captured module via
+/// `nix run`, mirroring `develop`'s exec model (resolve the flake from
+/// `[modules.<module>]`, then exec from the project root).
 ///
-/// Host resolution (explicit `--host` always wins; otherwise derived from the
-/// module's `metadata.json` `type`: `ui_qml` → standalone, else basecamp):
-///   - `standalone` — run the module's own app: `nix run <flake>` (the flake's
-///     `apps.<system>.default`), or `#<standalone_app>` when
-///     `[modules.<name>].standalone_app` is set.
-///   - `basecamp`   — launch a profile with this module preinstalled (not yet
-///     wired; see the bail hint).
+/// `standalone` is the only host today (and the default): run the module's own
+/// app — `nix run <flake>` (the flake's `apps.<system>.default`), or
+/// `#<standalone_app>` when `[modules.<name>].standalone_app` is set. Running a
+/// module as a configured Basecamp peer (build + install + launch a profile in
+/// one shot) is tracked as separate follow-up work; until then, use
+/// `basecamp install` then `basecamp launch <profile>`.
 ///
 /// The module lookup runs before the `nix` presence check so an unknown module
 /// name fails fast with the known-module list even on a host without Nix.
@@ -605,7 +604,10 @@ fn cmd_basecamp_run(project: Project, module: String, host: Option<String>) -> D
 
     ensure_nix_present()?;
 
-    let host = host.unwrap_or_else(|| default_run_host(&project.root, entry));
+    // `standalone` is the only host today; default to it when `--host` is
+    // omitted. The `other` arm still catches a stray host string passed via
+    // the public Rust API (e.g. a not-yet-wired `basecamp`).
+    let host = host.unwrap_or_else(|| "standalone".to_string());
     match host.as_str() {
         "standalone" => {
             // `apps.<system>.default` by default (bare `nix run <flake>`); an
@@ -619,37 +621,8 @@ fn cmd_basecamp_run(project: Project, module: String, host: Option<String>) -> D
             // exec() only returns on failure.
             bail!("failed to exec `nix run {target}`: {err}");
         }
-        "basecamp" => bail!(
-            "`basecamp run {module} --host basecamp` (launch a profile with `{module}` \
-             preinstalled) is not yet wired. Build + install it with \
-             `logos-scaffold basecamp install`, then `logos-scaffold basecamp launch <profile>`."
-        ),
-        other => bail!("unknown --host `{other}`; expected `standalone` or `basecamp`"),
+        other => bail!("unknown --host `{other}`; expected `standalone`"),
     }
-}
-
-/// Default `run` host for a module: `standalone` when its `metadata.json`
-/// `type` is `ui_qml` (a module shipping its own QML app), else `basecamp`.
-/// Falls back to `basecamp` when the manifest can't be read (remote flake or
-/// missing file) — the basecamp host doesn't need a local standalone attr.
-fn default_run_host(project_root: &Path, entry: &ModuleEntry) -> String {
-    let src = module_entry_to_source(project_root, entry);
-    match read_source_metadata_type(&src).as_deref() {
-        Some("ui_qml") => "standalone".to_string(),
-        _ => "basecamp".to_string(),
-    }
-}
-
-/// Read the `type` string from a local source's `metadata.json`. `None` for
-/// remote flakes, `.lgx` path sources, or an absent/unparseable manifest.
-fn read_source_metadata_type(src: &BasecampSource) -> Option<String> {
-    let BasecampSource::Flake(flake_ref) = src else {
-        return None;
-    };
-    let local_path = flake_path_prefix(flake_ref)?;
-    let text = fs::read_to_string(Path::new(local_path).join("metadata.json")).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
-    json.get("type")?.as_str().map(|s| s.to_string())
 }
 
 /// Layer scaffold.toml-declared launch env (#163) onto the scaffold-owned
@@ -4106,42 +4079,6 @@ mod tests {
                 .unwrap(),
             vec!["lgx".to_string(), "lgx-portable".to_string()]
         );
-    }
-
-    #[test]
-    fn default_run_host_is_standalone_only_for_ui_qml_modules() {
-        let tmp = tempdir().expect("tempdir");
-        let entry = |sub: &str| ModuleEntry {
-            flake: format!("path:./{sub}#lgx"),
-            role: ModuleRole::Project,
-            standalone_app: None,
-        };
-        let with_metadata = |sub: &str, ty: &str| {
-            let dir = tmp.path().join(sub);
-            fs::create_dir_all(&dir).unwrap();
-            fs::write(dir.join("metadata.json"), format!(r#"{{"type":"{ty}"}}"#)).unwrap();
-        };
-
-        // `ui_qml` → standalone (the module ships its own QML app).
-        with_metadata("ui", "ui_qml");
-        assert_eq!(default_run_host(tmp.path(), &entry("ui")), "standalone");
-
-        // Any other declared type → basecamp.
-        with_metadata("svc", "swap");
-        assert_eq!(default_run_host(tmp.path(), &entry("svc")), "basecamp");
-
-        // Missing/unreadable manifest (local dir, no metadata.json) → basecamp:
-        // we can't prove `ui_qml`, and the basecamp host needs no local attr.
-        fs::create_dir_all(tmp.path().join("bare")).unwrap();
-        assert_eq!(default_run_host(tmp.path(), &entry("bare")), "basecamp");
-
-        // Remote flake (no local metadata) → basecamp.
-        let remote = ModuleEntry {
-            flake: "github:logos-co/swap-ui#lgx".to_string(),
-            role: ModuleRole::Project,
-            standalone_app: None,
-        };
-        assert_eq!(default_run_host(tmp.path(), &remote), "basecamp");
     }
 
     // ---- resolve_sibling_overrides (I1 fix) — exercised via the command paths;

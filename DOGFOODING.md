@@ -158,7 +158,7 @@ If any of these is missing, do not "skip the real run" — go back and fix the s
 | B3 | external module project | Core | Two-instance p2p dogfooding | `basecamp launch alice`, `basecamp launch bob` (parallel) |
 | B4 | external module project | Advanced | Clean-slate scrub semantics on relaunch | `basecamp launch alice` (×2) |
 | B5 | external module project | Advanced | Module artefact builds by variant | `basecamp build`, `basecamp build-portable`, `--variant`, `--module` |
-| B6 | external module project | Advanced | Captured module run loop | `basecamp run <module>`, `--host standalone|basecamp` |
+| B6 | external module project | Advanced | Captured module run loop | `basecamp run <module>`, `--host standalone` |
 | A1 | N/A | Advanced | Public Rust API surface for embedding scaffold in tests/tooling | `logos_scaffold::api::Project`, `cargo doc`, doctests |
 | T1 | `default` | Advanced | Isolated test-node lifecycle and caller-project pins | `test-node pins`, `test-node prepare`, `test-node doctor`, `test-node start`, `test-node status`, `test-node stop`, `test-node run` |
 | T2 | `default` | Advanced | Typed RPC reads against a running test node | `test-node tx submit-and-wait`, `test-node blocks head/range/wait`, `test-node clock read/wait-stable`, `test-node account get/batch-get`, `test-node proof get`, `test-node snapshot accounts` |
@@ -1255,7 +1255,6 @@ From the module project root:
 ```bash
 "$SCAFFOLD_BIN" basecamp run <module-name> --host standalone
 "$SCAFFOLD_BIN" basecamp run <module-name>
-"$SCAFFOLD_BIN" basecamp run <module-name> --host basecamp
 ```
 
 For one negative-path check, capture or hand-edit a module entry that points at a prebuilt `.lgx` path and run:
@@ -1267,9 +1266,9 @@ For one negative-path check, capture or hand-edit a module entry that points at 
 ### Expected Success Signals
 
 - `--host standalone` invokes `nix run` for the module flake's default app, or `#<standalone_app>` when that config key is set.
-- With no `--host`, `ui_qml` module metadata defaults to `standalone`; other or missing metadata defaults to `basecamp`.
+- With no `--host`, the run defaults to `standalone` (the only host today).
 - A module captured as a prebuilt `.lgx` path is rejected with guidance to edit/remove the entry and capture a flake source; `nix run` is not attempted.
-- `--host basecamp` returns the current guidance for launching through a profile until launch-with-preinstall wiring exists.
+- Running a module as a configured Basecamp peer (one-shot build + install + launch) is not yet available; use `basecamp install` then `basecamp launch <profile>`. Tracked as follow-up work.
 
 ### Failure Signals / Common Pitfalls
 

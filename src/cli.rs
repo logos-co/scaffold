@@ -1068,7 +1068,7 @@ enum BasecampSubcommand {
     )]
     BuildPortable(BasecampBuildPortableArgs),
     #[command(
-        about = "Run a captured module via `nix run` — its standalone app or the basecamp-hosted app. See `basecamp docs` for project requirements."
+        about = "Run a captured module via `nix run` — its standalone app. See `basecamp docs` for project requirements."
     )]
     Run(BasecampRunArgs),
     #[command(
@@ -1173,14 +1173,14 @@ struct BasecampDevelopArgs {
     dev_shell: Option<String>,
 }
 
-/// How `basecamp run` runs a module.
+/// How `basecamp run` runs a module. `standalone` (the module's own app) is
+/// the only host today; running a module as a configured Basecamp peer is
+/// tracked as separate follow-up work, so this stays an enum for that future.
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 enum RunHost {
     /// The module's own app: `nix run <flake>` (the flake's
     /// `apps.<system>.default`), or `#<standalone_app>` when configured.
     Standalone,
-    /// Run inside basecamp — launch a profile with this module preinstalled.
-    Basecamp,
 }
 
 #[derive(Debug, clap::Args)]
@@ -1188,8 +1188,8 @@ struct BasecampRunArgs {
     /// Name of the module to run, keyed in `[modules.<name>]`.
     #[arg(value_name = "MODULE")]
     module: String,
-    /// How to run the module. Defaults from the module's metadata.json `type`
-    /// (`ui_qml` → standalone, else basecamp).
+    /// How to run the module. `standalone` (the module's own app) is the only
+    /// host today and the default when omitted.
     #[arg(long, value_enum)]
     host: Option<RunHost>,
 }
@@ -1520,7 +1520,6 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                     module: args.module,
                     host: args.host.map(|h| match h {
                         RunHost::Standalone => "standalone".to_string(),
-                        RunHost::Basecamp => "basecamp".to_string(),
                     }),
                 },
                 BasecampSubcommand::Doctor(args) => BasecampAction::Doctor { json: args.json },
