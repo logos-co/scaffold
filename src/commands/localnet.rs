@@ -6,10 +6,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context};
-use serde_json::Value;
 
 use crate::circuits::ensure_circuits_for_subprocess;
-use crate::constants::{SEQUENCER_BIN_REL_PATH, SEQUENCER_CONFIG_REL_PATH};
+use crate::constants::SEQUENCER_BIN_REL_PATH;
 use crate::error::{LocalnetError, ResetError};
 use crate::model::{
     LocalnetLogsReport, LocalnetOwnership, LocalnetState, LocalnetStatusReport, Project,
@@ -21,6 +20,7 @@ use crate::process::{
 use crate::project::{
     ensure_dir_exists, find_project_root, load_project, resolve_cache_root, resolve_repo_path,
 };
+use crate::sequencer_config::{apply_common_runtime_overrides, patch_runtime_sequencer_config};
 use crate::state::{read_localnet_state, write_localnet_state};
 use crate::DynResult;
 
@@ -727,30 +727,10 @@ fn build_status_report(
 /// deferral, scaffold widens the limit so the documented first-success path
 /// fits in a single block.
 fn prepare_sequencer_config(lez: &Path, dest_dir: &Path, port: u16) -> DynResult<PathBuf> {
-    let src_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
-    let text = fs::read_to_string(&src_path)
-        .with_context(|| format!("failed to read {}", src_path.display()))?;
-    let mut doc: Value =
-        serde_json::from_str(&text).context("failed to parse sequencer_config.json")?;
-
-    let Some(obj) = doc.as_object_mut() else {
-        bail!(
-            "sequencer_config.json is not a JSON object: {}",
-            src_path.display()
-        );
-    };
-    obj.insert("port".to_string(), Value::Number(port.into()));
-    obj.insert(
-        "max_block_size".to_string(),
-        Value::String("8 MiB".to_string()),
-    );
-
-    fs::create_dir_all(dest_dir)
-        .with_context(|| format!("failed to create {}", dest_dir.display()))?;
-    let dest_path = dest_dir.join("sequencer_config.json");
-    let updated = serde_json::to_string_pretty(&doc).context("failed to serialize config")?;
-    fs::write(&dest_path, format!("{updated}\n"))
-        .with_context(|| format!("failed to write {}", dest_path.display()))?;
+    let (dest_path, _) = patch_runtime_sequencer_config(lez, dest_dir, |obj| {
+        apply_common_runtime_overrides(obj, port);
+        Ok(())
+    })?;
     Ok(dest_path)
 }
 

@@ -41,9 +41,11 @@ use crate::circuits::ensure_circuits_for_subprocess;
 use crate::commands::localnet::find_r0vm_path_for_lez;
 use crate::commands::wallet_support::{rpc_get_last_block_id, RpcReachabilityError};
 use crate::constants::{SEQUENCER_BIN_REL_PATH, SEQUENCER_CONFIG_REL_PATH};
+use crate::error::BlockTimingValidationError;
 use crate::model::Project;
 use crate::process::{pid_running, port_open, spawn_to_log};
 use crate::project::{resolve_cache_root, resolve_repo_path};
+use crate::sequencer_config::{apply_common_runtime_overrides, patch_runtime_sequencer_config};
 use crate::DynResult;
 
 /// Project-relative directory holding test-node runtime directories.
@@ -54,6 +56,12 @@ const NODE_META_FILE: &str = "node.json";
 
 /// Default seconds to wait for a test node to become healthy.
 pub const DEFAULT_TEST_NODE_TIMEOUT_SEC: u64 = 60;
+
+/// Minimum accepted block timing override, in milliseconds.
+pub const MIN_BLOCK_TIMING_TIMEOUT_MS: u64 = 1;
+
+/// Maximum accepted block timing override, in milliseconds.
+pub const MAX_BLOCK_TIMING_TIMEOUT_MS: u64 = 3_600_000;
 
 /// How the RPC port for a test node is chosen.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -83,6 +91,74 @@ pub struct TestNodeConfig {
     /// Seconds to wait for the node to become healthy during start
     /// (0 → default of [`DEFAULT_TEST_NODE_TIMEOUT_SEC`]).
     pub timeout_sec: u64,
+}
+
+/// Optional sequencer block timing overrides for a test node.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BlockTimingOverrides {
+    /// Optional `block_create_timeout` override, in milliseconds.
+    /// Must be between [`MIN_BLOCK_TIMING_TIMEOUT_MS`] and
+    /// [`MAX_BLOCK_TIMING_TIMEOUT_MS`] when present.
+    pub block_create_timeout_ms: Option<u64>,
+    /// Optional `retry_pending_blocks_timeout` override, in milliseconds.
+    /// Must be between [`MIN_BLOCK_TIMING_TIMEOUT_MS`] and
+    /// [`MAX_BLOCK_TIMING_TIMEOUT_MS`] when present.
+    pub retry_pending_blocks_timeout_ms: Option<u64>,
+}
+
+impl BlockTimingOverrides {
+    /// Create an empty override set that preserves all pinned config timing
+    /// values.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set `block_create_timeout`, in milliseconds.
+    #[must_use]
+    pub fn with_block_create_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.block_create_timeout_ms = Some(timeout_ms);
+        self
+    }
+
+    /// Set `retry_pending_blocks_timeout`, in milliseconds.
+    #[must_use]
+    pub fn with_retry_pending_blocks_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.retry_pending_blocks_timeout_ms = Some(timeout_ms);
+        self
+    }
+
+    /// Validate all present override values against the accepted millisecond range.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BlockTimingValidationError`] when any present value is outside
+    /// [`MIN_BLOCK_TIMING_TIMEOUT_MS`]..=[`MAX_BLOCK_TIMING_TIMEOUT_MS`].
+    pub fn validate(self) -> Result<(), BlockTimingValidationError> {
+        validate_block_timing_timeout_ms("block_create_timeout_ms", self.block_create_timeout_ms)?;
+        validate_block_timing_timeout_ms(
+            "retry_pending_blocks_timeout_ms",
+            self.retry_pending_blocks_timeout_ms,
+        )?;
+        Ok(())
+    }
+}
+
+fn validate_block_timing_timeout_ms(
+    name: &'static str,
+    timeout_ms: Option<u64>,
+) -> Result<(), BlockTimingValidationError> {
+    if let Some(timeout_ms) = timeout_ms {
+        if !(MIN_BLOCK_TIMING_TIMEOUT_MS..=MAX_BLOCK_TIMING_TIMEOUT_MS).contains(&timeout_ms) {
+            return Err(BlockTimingValidationError::new(
+                name,
+                MIN_BLOCK_TIMING_TIMEOUT_MS,
+                MAX_BLOCK_TIMING_TIMEOUT_MS,
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Static facts about a running (or started) test node.
@@ -153,6 +229,17 @@ pub struct TestNode {
 impl TestNode {
     /// Start an isolated sequencer test node for `project`.
     pub fn start(project: &Project, config: &TestNodeConfig) -> DynResult<Self> {
+        Self::start_with_block_timing(project, config, BlockTimingOverrides::default())
+    }
+
+    /// Start an isolated sequencer test node with optional block timing
+    /// overrides in milliseconds.
+    pub fn start_with_block_timing(
+        project: &Project,
+        config: &TestNodeConfig,
+        block_timing: BlockTimingOverrides,
+    ) -> DynResult<Self> {
+        block_timing.validate()?;
         let prepared = verify_prepared(project)?;
         let timeout_sec = if config.timeout_sec == 0 {
             DEFAULT_TEST_NODE_TIMEOUT_SEC
@@ -191,7 +278,8 @@ impl TestNode {
             }
         };
 
-        let (config_path, genesis_block_id) = write_node_config(&prepared.lez, &work_dir, port)?;
+        let (config_path, genesis_block_id) =
+            write_node_config(&prepared.lez, &work_dir, port, block_timing)?;
         let log_path = work_dir.join("sequencer.log");
         let rpc_url = format!("http://127.0.0.1:{port}");
 
@@ -388,11 +476,23 @@ pub fn run_with_test_node(
     config: &TestNodeConfig,
     command: &[String],
 ) -> DynResult<std::process::ExitStatus> {
+    run_with_test_node_with_block_timing(project, config, BlockTimingOverrides::default(), command)
+}
+
+/// Start a node with optional block timing overrides, export its connection
+/// details to `command`'s environment, forward the child's exit status, and
+/// stop the node when the child exits.
+pub fn run_with_test_node_with_block_timing(
+    project: &Project,
+    config: &TestNodeConfig,
+    block_timing: BlockTimingOverrides,
+    command: &[String],
+) -> DynResult<std::process::ExitStatus> {
     let Some((program, args)) = command.split_first() else {
         bail!("test-node run requires a command after `--`");
     };
 
-    let node = TestNode::start(project, config)?;
+    let node = TestNode::start_with_block_timing(project, config, block_timing)?;
     let info = node.info();
 
     let status = Command::new(program)
@@ -604,54 +704,53 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> DynResult<()> {
 /// `home` pointed at the node's runtime directory, the port recorded, and
 /// `max_block_size` widened (same rationale as localnet). Returns the config
 /// path and the genesis block id.
-fn write_node_config(lez: &Path, work_dir: &Path, port: u16) -> DynResult<(PathBuf, u64)> {
+fn write_node_config(
+    lez: &Path,
+    work_dir: &Path,
+    port: u16,
+    block_timing: BlockTimingOverrides,
+) -> DynResult<(PathBuf, u64)> {
     let src_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
-    let text = fs::read_to_string(&src_path)
-        .with_context(|| format!("failed to read {}", src_path.display()))?;
-    let mut doc: Value =
-        serde_json::from_str(&text).context("failed to parse sequencer_config.json")?;
-    let Some(obj) = doc.as_object_mut() else {
-        bail!(
-            "sequencer_config.json is not a JSON object: {}",
-            src_path.display()
+    let (dest_path, genesis_block_id) = patch_runtime_sequencer_config(lez, work_dir, |obj| {
+        obj.insert(
+            "home".to_string(),
+            Value::String(work_dir.display().to_string()),
         );
-    };
+        // Recorded for tooling; the pinned sequencer takes the port via --port.
+        apply_common_runtime_overrides(obj, port);
+        if let Some(timeout_ms) = block_timing.block_create_timeout_ms {
+            obj.insert(
+                "block_create_timeout".to_string(),
+                Value::String(format!("{timeout_ms}ms")),
+            );
+        }
+        if let Some(timeout_ms) = block_timing.retry_pending_blocks_timeout_ms {
+            obj.insert(
+                "retry_pending_blocks_timeout".to_string(),
+                Value::String(format!("{timeout_ms}ms")),
+            );
+        }
 
-    obj.insert(
-        "home".to_string(),
-        Value::String(work_dir.display().to_string()),
-    );
-    // Recorded for tooling; the pinned sequencer takes the port via --port.
-    obj.insert("port".to_string(), Value::Number(port.into()));
-    obj.insert(
-        "max_block_size".to_string(),
-        Value::String("8 MiB".to_string()),
-    );
+        // Genesis-config seeding: a seed.json placed in the work dir (by
+        // `--state <seeded dir>`) becomes the node's initial accounts. The
+        // sequencer builds its genesis state from exactly these values when no
+        // database exists — no testnet default accounts are added.
+        if let Some(snapshot) = state::load_seed_from_state_dir(work_dir)? {
+            let (public, private) = snapshot.to_config_values();
+            obj.insert("initial_public_accounts".to_string(), public);
+            obj.insert("initial_private_accounts".to_string(), private);
+        }
 
-    // Genesis-config seeding: a seed.json placed in the work dir (by
-    // `--state <seeded dir>`) becomes the node's initial accounts. The
-    // sequencer builds its genesis state from exactly these values when no
-    // database exists — no testnet default accounts are added.
-    if let Some(snapshot) = state::load_seed_from_state_dir(work_dir)? {
-        let (public, private) = snapshot.to_config_values();
-        obj.insert("initial_public_accounts".to_string(), public);
-        obj.insert("initial_private_accounts".to_string(), private);
-    }
+        obj.get("genesis_id")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                anyhow!(
+                    "sequencer config at {} has no numeric `genesis_id`",
+                    src_path.display()
+                )
+            })
+    })?;
 
-    let genesis_block_id = obj
-        .get("genesis_id")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| {
-            anyhow!(
-                "sequencer config at {} has no numeric `genesis_id`",
-                src_path.display()
-            )
-        })?;
-
-    let dest_path = work_dir.join("sequencer_config.json");
-    let updated = serde_json::to_string_pretty(&doc).context("failed to serialize config")?;
-    fs::write(&dest_path, format!("{updated}\n"))
-        .with_context(|| format!("failed to write {}", dest_path.display()))?;
     Ok((dest_path, genesis_block_id))
 }
 
@@ -785,6 +884,10 @@ mod tests {
 
     use super::*;
 
+    fn runtime_config_path(work: &Path) -> PathBuf {
+        work.join(crate::sequencer_config::RUNTIME_SEQUENCER_CONFIG_FILE)
+    }
+
     #[test]
     fn write_node_config_patches_home_port_and_block_size() {
         let temp = tempdir().unwrap();
@@ -795,11 +898,12 @@ mod tests {
         fs::create_dir_all(config_path.parent().unwrap()).unwrap();
         fs::write(
             &config_path,
-            r#"{ "home": ".", "genesis_id": 1, "port": 3040 }"#,
+            r#"{ "home": ".", "genesis_id": 1, "port": 3040, "block_create_timeout": "2s", "retry_pending_blocks_timeout": "3s" }"#,
         )
         .unwrap();
 
-        let (dest, genesis) = write_node_config(&lez, &work, 41234).unwrap();
+        let (dest, genesis) =
+            write_node_config(&lez, &work, 41234, BlockTimingOverrides::default()).unwrap();
         assert_eq!(genesis, 1);
         assert_eq!(dest, work.join("sequencer_config.json"));
 
@@ -808,12 +912,145 @@ mod tests {
         assert_eq!(doc["home"], serde_json::json!(work.display().to_string()));
         assert_eq!(doc["port"], serde_json::json!(41234));
         assert_eq!(doc["max_block_size"], serde_json::json!("8 MiB"));
+        assert_eq!(doc["block_create_timeout"], serde_json::json!("2s"));
+        assert_eq!(doc["retry_pending_blocks_timeout"], serde_json::json!("3s"));
 
         // The vendored config must be untouched.
         let src: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
         assert_eq!(src["home"], serde_json::json!("."));
         assert_eq!(src["port"], serde_json::json!(3040));
+    }
+
+    #[test]
+    fn write_node_config_leaves_absent_block_timing_keys_absent_by_default() {
+        let temp = tempdir().unwrap();
+        let lez = temp.path().join("lez");
+        let work = temp.path().join("node");
+        fs::create_dir_all(&work).unwrap();
+        let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(&config_path, r#"{ "home": ".", "genesis_id": 1 }"#).unwrap();
+
+        let (dest, genesis) =
+            write_node_config(&lez, &work, 41234, BlockTimingOverrides::default()).unwrap();
+        assert_eq!(genesis, 1);
+
+        let doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
+        assert!(doc.get("block_create_timeout").is_none());
+        assert!(doc.get("retry_pending_blocks_timeout").is_none());
+    }
+
+    #[test]
+    fn write_node_config_patches_block_timing_overrides_as_milliseconds() {
+        let temp = tempdir().unwrap();
+        let lez = temp.path().join("lez");
+        let work = temp.path().join("node");
+        fs::create_dir_all(&work).unwrap();
+        let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(
+            &config_path,
+            r#"{ "home": ".", "genesis_id": 1, "block_create_timeout": "2s", "retry_pending_blocks_timeout": "3s" }"#,
+        )
+        .unwrap();
+
+        let block_timing = BlockTimingOverrides {
+            block_create_timeout_ms: Some(100),
+            retry_pending_blocks_timeout_ms: Some(250),
+        };
+
+        let (dest, genesis) = write_node_config(&lez, &work, 41234, block_timing).unwrap();
+        assert_eq!(genesis, 1);
+
+        let doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
+        assert_eq!(doc["block_create_timeout"], serde_json::json!("100ms"));
+        assert_eq!(
+            doc["retry_pending_blocks_timeout"],
+            serde_json::json!("250ms")
+        );
+
+        let src: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(src["block_create_timeout"], serde_json::json!("2s"));
+        assert_eq!(src["retry_pending_blocks_timeout"], serde_json::json!("3s"));
+    }
+
+    #[test]
+    fn write_node_config_patches_block_timing_min_max_values_as_milliseconds() {
+        let temp = tempdir().unwrap();
+        let lez = temp.path().join("lez");
+        let work = temp.path().join("node");
+        fs::create_dir_all(&work).unwrap();
+        let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(&config_path, r#"{ "home": ".", "genesis_id": 1 }"#).unwrap();
+
+        let block_timing = BlockTimingOverrides {
+            block_create_timeout_ms: Some(MIN_BLOCK_TIMING_TIMEOUT_MS),
+            retry_pending_blocks_timeout_ms: Some(MAX_BLOCK_TIMING_TIMEOUT_MS),
+        };
+
+        let (dest, genesis) = write_node_config(&lez, &work, 41234, block_timing).unwrap();
+        assert_eq!(genesis, 1);
+
+        let doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
+        assert_eq!(doc["block_create_timeout"], serde_json::json!("1ms"));
+        assert_eq!(
+            doc["retry_pending_blocks_timeout"],
+            serde_json::json!("3600000ms")
+        );
+    }
+
+    #[test]
+    fn write_node_config_replaces_existing_runtime_config_after_success() {
+        let temp = tempdir().unwrap();
+        let lez = temp.path().join("lez");
+        let work = temp.path().join("node");
+        fs::create_dir_all(&work).unwrap();
+        let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(&config_path, r#"{ "home": ".", "genesis_id": 7 }"#).unwrap();
+        fs::write(runtime_config_path(&work), "old config").unwrap();
+
+        let (dest, genesis) =
+            write_node_config(&lez, &work, 41234, BlockTimingOverrides::default()).unwrap();
+        assert_eq!(genesis, 7);
+        assert_eq!(dest, runtime_config_path(&work));
+
+        let doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
+        assert_eq!(doc["genesis_id"], serde_json::json!(7));
+    }
+
+    #[test]
+    fn block_timing_overrides_reject_out_of_range_values() {
+        let zero_err = BlockTimingOverrides {
+            block_create_timeout_ms: Some(0),
+            retry_pending_blocks_timeout_ms: None,
+        }
+        .validate()
+        .unwrap_err();
+        assert!(
+            zero_err.to_string().contains("block_create_timeout_ms"),
+            "{zero_err}"
+        );
+
+        let too_large_err = BlockTimingOverrides {
+            block_create_timeout_ms: None,
+            retry_pending_blocks_timeout_ms: Some(MAX_BLOCK_TIMING_TIMEOUT_MS + 1),
+        }
+        .validate()
+        .unwrap_err();
+        assert!(
+            too_large_err
+                .to_string()
+                .contains("retry_pending_blocks_timeout_ms"),
+            "{too_large_err}"
+        );
     }
 
     #[test]
@@ -840,7 +1077,8 @@ mod tests {
         )
         .unwrap();
 
-        let (dest, _) = write_node_config(&lez, &work, 41234).unwrap();
+        let (dest, _) =
+            write_node_config(&lez, &work, 41234, BlockTimingOverrides::default()).unwrap();
         let doc: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
         assert_eq!(
@@ -869,8 +1107,95 @@ mod tests {
         fs::create_dir_all(config_path.parent().unwrap()).unwrap();
         fs::write(&config_path, r#"{ "home": "." }"#).unwrap();
 
-        let err = write_node_config(&lez, &work, 41234).unwrap_err();
+        let err =
+            write_node_config(&lez, &work, 41234, BlockTimingOverrides::default()).unwrap_err();
         assert!(err.to_string().contains("genesis_id"), "{err}");
+        assert!(
+            !runtime_config_path(&work).exists(),
+            "runtime config must not be written when genesis_id is invalid"
+        );
+    }
+
+    #[test]
+    fn write_node_config_preserves_existing_runtime_config_on_validation_failure() {
+        let temp = tempdir().unwrap();
+        let lez = temp.path().join("lez");
+        let work = temp.path().join("node");
+        fs::create_dir_all(&work).unwrap();
+        let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(&config_path, r#"{ "home": "." }"#).unwrap();
+        let existing = r#"{"existing":true}"#;
+        fs::write(runtime_config_path(&work), existing).unwrap();
+
+        let err =
+            write_node_config(&lez, &work, 41234, BlockTimingOverrides::default()).unwrap_err();
+        assert!(err.to_string().contains("genesis_id"), "{err}");
+        assert_eq!(
+            fs::read_to_string(runtime_config_path(&work)).unwrap(),
+            existing
+        );
+    }
+
+    #[test]
+    fn write_node_config_rejects_non_numeric_genesis_id_without_writing_runtime_config() {
+        let temp = tempdir().unwrap();
+        let lez = temp.path().join("lez");
+        let work = temp.path().join("node");
+        fs::create_dir_all(&work).unwrap();
+        let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(&config_path, r#"{ "home": ".", "genesis_id": "1" }"#).unwrap();
+
+        let err =
+            write_node_config(&lez, &work, 41234, BlockTimingOverrides::default()).unwrap_err();
+        assert!(err.to_string().contains("genesis_id"), "{err}");
+        assert!(
+            !runtime_config_path(&work).exists(),
+            "runtime config must not be written when genesis_id is invalid"
+        );
+    }
+
+    #[test]
+    fn write_node_config_rejects_malformed_json() {
+        let temp = tempdir().unwrap();
+        let lez = temp.path().join("lez");
+        let work = temp.path().join("node");
+        fs::create_dir_all(&work).unwrap();
+        let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(&config_path, "{ not json").unwrap();
+
+        let err =
+            write_node_config(&lez, &work, 41234, BlockTimingOverrides::default()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("failed to parse sequencer_config.json"),
+            "{err}"
+        );
+        assert!(
+            !runtime_config_path(&work).exists(),
+            "runtime config must not be written when source JSON is malformed"
+        );
+    }
+
+    #[test]
+    fn write_node_config_rejects_non_object_json() {
+        let temp = tempdir().unwrap();
+        let lez = temp.path().join("lez");
+        let work = temp.path().join("node");
+        fs::create_dir_all(&work).unwrap();
+        let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(&config_path, "[]").unwrap();
+
+        let err =
+            write_node_config(&lez, &work, 41234, BlockTimingOverrides::default()).unwrap_err();
+        assert!(err.to_string().contains("is not a JSON object"), "{err}");
+        assert!(
+            !runtime_config_path(&work).exists(),
+            "runtime config must not be written when source JSON is not an object"
+        );
     }
 
     #[test]

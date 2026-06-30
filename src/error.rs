@@ -29,6 +29,36 @@ pub struct CommandFailed {
     pub(crate) message: String,
 }
 
+/// Invalid test-node block timing override.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[error("{field} must be between {min} and {max} milliseconds")]
+pub struct BlockTimingValidationError {
+    field: &'static str,
+    min: u64,
+    max: u64,
+}
+
+impl BlockTimingValidationError {
+    pub(crate) fn new(field: &'static str, min: u64, max: u64) -> Self {
+        Self { field, min, max }
+    }
+
+    /// Name of the invalid override field.
+    pub fn field(&self) -> &'static str {
+        self.field
+    }
+
+    /// Minimum accepted value, in milliseconds.
+    pub fn min(&self) -> u64 {
+        self.min
+    }
+
+    /// Maximum accepted value, in milliseconds.
+    pub fn max(&self) -> u64 {
+        self.max
+    }
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum LocalnetError {
     #[error("missing sequencer binary at {path}; run `logos-scaffold setup`")]

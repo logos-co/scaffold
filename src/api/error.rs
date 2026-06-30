@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-pub use crate::error::CommandFailed;
+pub use crate::error::{BlockTimingValidationError, CommandFailed};
 use crate::error::{LocalnetError, ResetError};
 
 /// Result alias used by every API entry point.
@@ -23,6 +23,14 @@ pub enum Error {
     /// version, or an option value is invalid.
     #[error("configuration error: {message}")]
     Config { message: String },
+
+    /// A test-node block timing override is outside the accepted millisecond
+    /// range.
+    #[error("configuration error: {source}")]
+    BlockTimingValidation {
+        #[source]
+        source: BlockTimingValidationError,
+    },
 
     /// A required binary or artifact is missing (sequencer, wallet, spel,
     /// circuits release, …). `path` is the location that was probed, when
@@ -97,6 +105,15 @@ pub(crate) fn classify(err: anyhow::Error) -> Error {
                     log_tail: None,
                 },
             };
+        }
+        Err(err) => err,
+    };
+
+    let err = match err.downcast::<BlockTimingValidationError>() {
+        Ok(block_timing) => {
+            return Error::BlockTimingValidation {
+                source: block_timing,
+            }
         }
         Err(err) => err,
     };
@@ -187,6 +204,20 @@ mod tests {
         match classify(err) {
             Error::Timeout { timeout_sec, .. } => assert_eq!(timeout_sec, 20),
             other => panic!("expected Timeout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_maps_block_timing_validation_to_config() {
+        let err: anyhow::Error =
+            BlockTimingValidationError::new("block_create_timeout_ms", 1, 3_600_000).into();
+        match classify(err) {
+            Error::BlockTimingValidation { source } => {
+                assert_eq!(source.field(), "block_create_timeout_ms");
+                assert_eq!(source.min(), 1);
+                assert_eq!(source.max(), 3_600_000);
+            }
+            other => panic!("expected BlockTimingValidation, got {other:?}"),
         }
     }
 
