@@ -1042,6 +1042,10 @@ enum BasecampSubcommand {
     )]
     Doctor(BasecampDoctorArgs),
     #[command(
+        about = "Print the resolved per-profile path manifest (xdg dirs, runtime dir, module/plugin dirs, log file)."
+    )]
+    Paths(BasecampPathsArgs),
+    #[command(
         about = "Print the canonical project-compatibility rules (embedded copy of docs/basecamp-module-requirements.md)"
     )]
     Docs,
@@ -1089,6 +1093,19 @@ struct BasecampInstallArgs {
 struct BasecampLaunchArgs {
     #[arg(value_name = "PROFILE")]
     profile: String,
+    /// Tee basecamp's stdout/stderr to a log file. Bare `--log-file` uses
+    /// `.scaffold/basecamp/profiles/<profile>/basecamp.log`; `--log-file=PATH`
+    /// picks a path. Overrides `[basecamp.profiles.<profile>].log_file`.
+    #[arg(long, value_name = "PATH", num_args = 0..=1, require_equals = true)]
+    log_file: Option<Option<PathBuf>>,
+}
+
+#[derive(Debug, clap::Args)]
+struct BasecampPathsArgs {
+    #[arg(value_name = "PROFILE")]
+    profile: String,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -1399,6 +1416,7 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 },
                 BasecampSubcommand::Launch(args) => BasecampAction::Launch {
                     profile: args.profile,
+                    log_file: args.log_file,
                 },
                 BasecampSubcommand::Develop(args) => BasecampAction::Develop {
                     module: args.module,
@@ -1406,6 +1424,10 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 },
                 BasecampSubcommand::BuildPortable(_) => BasecampAction::BuildPortable,
                 BasecampSubcommand::Doctor(args) => BasecampAction::Doctor { json: args.json },
+                BasecampSubcommand::Paths(args) => BasecampAction::Paths {
+                    profile: args.profile,
+                    json: args.json,
+                },
                 BasecampSubcommand::Docs => BasecampAction::Docs,
             };
             cmd_basecamp(action)

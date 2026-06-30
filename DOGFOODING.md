@@ -154,9 +154,9 @@ If any of these is missing, do not "skip the real run" — go back and fix the s
 | E2 | N/A | Advanced | Project creation with advanced flags and invalid inputs | `new --template`, `new --vendor-deps`, `new --cache-root` |
 | E3 | N/A | Core | AI skills materialized into generated and adopted projects | `new`, `new --template lez-framework`, `init`, `init` re-run |
 | B1 | external module project | Core | Basecamp + lgpm setup and idempotent re-run | `init`, `basecamp setup`, `basecamp doctor`, `basecamp docs` |
-| B2 | external module project | Core | Module capture, install, and single-instance launch | `basecamp modules`, `basecamp modules --show`, `basecamp install`, `basecamp launch alice` |
-| B3 | external module project | Core | Two-instance p2p dogfooding | `basecamp launch alice`, `basecamp launch bob` (parallel) |
-| B4 | external module project | Advanced | Clean-slate scrub semantics on relaunch | `basecamp launch alice` (×2) |
+| B2 | external module project | Core | Module capture, install, paths, and single-instance launch | `basecamp modules`, `basecamp install`, `basecamp paths`, `basecamp launch` |
+| B3 | external module project | Core | Two-instance p2p dogfooding | `basecamp launch <profile>` (parallel) |
+| B4 | external module project | Advanced | Clean-slate and profile safety on relaunch | `basecamp launch <profile>` (×2), custom profile names |
 | B5 | external module project | Advanced | Portable artefact build for AppImage hand-loading | `basecamp build-portable` |
 | A1 | N/A | Advanced | Public Rust API surface for embedding scaffold in tests/tooling | `logos_scaffold::api::Project`, `cargo doc`, doctests |
 | T1 | `default` | Advanced | Isolated test-node lifecycle and caller-project pins | `test-node pins`, `test-node prepare`, `test-node doctor`, `test-node start`, `test-node status`, `test-node stop`, `test-node run` |
@@ -965,7 +965,7 @@ ls dogfood-skills-default/AGENTS.md dogfood-skills-lez/AGENTS.md dogfood-skills-
 
 ### Goal
 
-Validate that a module project can fetch the pinned basecamp + `lgpm` binaries, seed the `alice` and `bob` profiles, and that re-running `setup` is idempotent.
+Validate that a module project can fetch the pinned basecamp + `lgpm` binaries, seed the default profiles, preserve configurable profile schema, and re-run `setup` idempotently.
 
 ### Preconditions
 
@@ -983,6 +983,7 @@ cd "$MODULE_PROJECT"
 test -f scaffold.toml || "$SCAFFOLD_BIN" init
 "$SCAFFOLD_BIN" basecamp --help
 "$SCAFFOLD_BIN" basecamp docs | head
+grep -n '^\[repos.basecamp.attr\]\|^\[basecamp.profiles' scaffold.toml || true
 "$SCAFFOLD_BIN" basecamp setup
 ls .scaffold/basecamp/profiles
 "$SCAFFOLD_BIN" basecamp doctor
@@ -992,9 +993,10 @@ ls .scaffold/basecamp/profiles
 
 ### Expected Success Signals
 
-- `basecamp --help` lists `setup`, `modules`, `install`, `launch`, `build-portable`, `doctor`, and `docs`.
-- `basecamp docs` prints the canonical project-compatibility rules (mirrors `docs/basecamp-module-requirements.md`).
+- `basecamp --help` lists `setup`, `modules`, `install`, `launch`, `paths`, `build-portable`, `doctor`, and `docs`.
+- `basecamp docs` prints the canonical project-compatibility rules, including per-profile `env_file`, `runtime_dir`, `log_file`, custom profile names, and per-platform `[repos.basecamp.attr]`.
 - First `basecamp setup` clones the pinned basecamp repo into a pin-isolated cache path, builds `basecamp` and `lgpm` via Nix, seeds `.scaffold/basecamp/profiles/alice/` and `.scaffold/basecamp/profiles/bob/`, and reports completion.
+- If `[repos.basecamp.attr]` is a per-platform map, setup uses the current host's attr and preserves the map plus scalar fallback on serialize.
 - `basecamp doctor` reports the basecamp + lgpm binaries as present and both profiles as seeded; `--json` returns parseable JSON with the same checks.
 - Second `basecamp setup` is idempotent: pin unchanged → no rebuild reported, exit 0.
 - All commands run only inside the project; running them from outside the project must fail with the existing scaffold "not a logos-scaffold project" message.
@@ -1013,6 +1015,7 @@ ls .scaffold/basecamp/profiles
 - First and second `basecamp setup` output (to compare rebuild vs. no-rebuild).
 - `basecamp doctor` and `basecamp doctor --json` output.
 - Listing of `.scaffold/basecamp/profiles/`.
+- Relevant `scaffold.toml` excerpt for `[repos.basecamp.attr]` and `[basecamp.profiles.*]` when present.
 
 ### Execution Notes
 
@@ -1023,7 +1026,7 @@ ls .scaffold/basecamp/profiles
 
 ### Goal
 
-Validate the per-project source of truth for module identity (`[modules]` in `scaffold.toml`), the install pipeline that builds `.lgx` artefacts and loads them via `lgpm`, and a single-profile launch.
+Validate the per-project source of truth for module identity (`[modules]` in `scaffold.toml`), the install pipeline that builds `.lgx` artefacts and loads them via `lgpm`, resolved profile paths, and a single-profile launch.
 
 ### Preconditions
 
@@ -1042,7 +1045,27 @@ grep -n '^\[modules\.' scaffold.toml
 "$SCAFFOLD_BIN" basecamp install
 "$SCAFFOLD_BIN" basecamp install --print-output
 "$SCAFFOLD_BIN" basecamp doctor
+"$SCAFFOLD_BIN" basecamp paths alice
+"$SCAFFOLD_BIN" basecamp paths alice --json
 "$SCAFFOLD_BIN" basecamp launch alice
+```
+
+To validate custom profile schema, add one profile and inspect it before launch:
+
+```toml
+[basecamp.profiles.maker]
+env_file = ".scaffold/basecamp/maker.env"
+runtime_dir = "/tmp/lgs-maker"
+log_file = ".scaffold/basecamp/profiles/maker/basecamp.log"
+
+[basecamp.profiles.maker.env]
+LOGOS_PROFILE_ROLE = "maker"
+```
+
+```bash
+printf 'MAKER_ONLY=1\nLOGOS_PROFILE_ROLE=env-file\n' > .scaffold/basecamp/maker.env
+"$SCAFFOLD_BIN" basecamp paths maker --json
+"$SCAFFOLD_BIN" basecamp launch maker --log-file
 ```
 
 If your project does not auto-discover correctly, capture explicit sources:
@@ -1060,6 +1083,8 @@ If your project does not auto-discover correctly, capture explicit sources:
 - `basecamp modules --show` prints the captured set without mutating state.
 - `basecamp install` builds each project source (sibling `--override-input` rewrites apply for `path:../<sibling>` inputs in multi-flake projects) and shells out to `lgpm` to install into both `alice` and `bob`. By default it logs to `.scaffold/logs/<ts>-install.log` and prints a one-line status; `--print-output` (or `LOGOS_SCAFFOLD_PRINT_OUTPUT=1`) streams nix output directly.
 - `basecamp doctor` reports each profile's installed modules matching the captured set; drift between `[modules]` and on-disk profile state is flagged, not hidden.
+- `basecamp paths <profile> --json` is pure path resolution: it emits parseable JSON for XDG config/data/cache, runtime dir, module/plugin dirs, launch state, log file, and env file without building or mutating anything.
+- Custom profile names launch like default profiles when they are a single safe path component; `env_file` is sourced before global/profile inline env, `runtime_dir` is exported as both `TMPDIR` and `XDG_RUNTIME_DIR`, and `--log-file` overrides the configured `log_file`.
 - `basecamp launch alice` kills any prior `logos_host` / `logos-basecamp` descendants for that profile, scrubs the profile's XDG dirs under `.scaffold/basecamp/profiles/alice/`, reinstalls each captured source for that profile, sets `XDG_{CONFIG,DATA,CACHE}_HOME` plus `LOGOS_PROFILE=alice`, and `exec`s basecamp.
 
 ### Failure Signals / Common Pitfalls
@@ -1069,6 +1094,8 @@ If your project does not auto-discover correctly, capture explicit sources:
 - An unresolved transitive `logos-module-builder` input that fails without naming the missing `follows` is a regression.
 - `install` succeeding when a build or `lgpm install` step actually failed is a fail; exit codes must be non-zero on any source failure.
 - `launch alice` with an empty `[modules]` must bail (rather than scrubbing the profile and leaving it empty).
+- Custom profile names that are empty, absolute, `.`, `..`, separator-containing, or contain control characters must be rejected before any filesystem work.
+- An env file key containing control characters must fail before spawning basecamp.
 - Sibling `--override-input` not being applied at probe time would surface as a build that resolves the wrong sibling pin during `basecamp modules` auto-discovery; record any such mismatch with the exact derived module names.
 
 ### Evidence to Capture
@@ -1077,7 +1104,9 @@ If your project does not auto-discover correctly, capture explicit sources:
 - `basecamp modules --show` output.
 - `basecamp install` log path under `.scaffold/logs/` plus the printed one-line status, or the `--print-output` stream.
 - `basecamp doctor` output post-install.
+- `basecamp paths <profile> --json` output for both a default profile and one configured profile.
 - The first lines of `basecamp launch alice` showing the kill → scrub → reinstall → exec sequence.
+- For log checks, the log path and first lines proving stdout/stderr were tee'd to file and terminal.
 
 ### Execution Notes
 
@@ -1112,11 +1141,14 @@ Terminal 2:
 "$SCAFFOLD_BIN" basecamp launch bob
 ```
 
+If the project defines custom profiles such as `maker` and `taker`, repeat the same two-terminal check with those names.
+
 Within the running UIs, exercise whatever p2p surface the module exposes (chat exchange, delivery between peers, storage round-trip). Capture screenshots or short transcripts.
 
 ### Expected Success Signals
 
 - Both basecamp windows open against their own profile dirs under `.scaffold/basecamp/profiles/{alice,bob}/`.
+- Custom profile pairs open against their own profile dirs under `.scaffold/basecamp/profiles/<profile>/` and their configured runtime/log/env paths.
 - Each window shows the project's `.lgx` modules installed and ready.
 - `LOGOS_PROFILE=alice` and `LOGOS_PROFILE=bob` are visible in each respective process environment (helpful for debugging).
 - The two instances do not collide on Qt remote-objects or any non-module port; per-profile port-override env vars (per the spec) are set on each `launch`.
@@ -1136,6 +1168,7 @@ Within the running UIs, exercise whatever p2p surface the module exposes (chat e
 - A short transcript or screenshot pair showing a p2p interaction propagating from one instance to the other.
 - The env block of each running process (e.g., `tr '\0' '\n' < /proc/<pid>/environ | grep -E 'XDG_|LOGOS_'`).
 - Any port-collision error text verbatim, with the module that owns the colliding port.
+- If custom profiles are used, `basecamp paths <profile> --json` for each profile and the resolved log/runtime dirs.
 
 ### Execution Notes
 
@@ -1146,7 +1179,7 @@ Within the running UIs, exercise whatever p2p surface the module exposes (chat e
 
 ### Goal
 
-Validate that `basecamp launch <profile>` scrubs profile state on every invocation — clean-slate is the v1 contract.
+Validate that `basecamp launch <profile>` scrubs profile state on every invocation and that profile/path safety guards bound all filesystem work to the project.
 
 ### Preconditions
 
@@ -1158,11 +1191,13 @@ From the module project root:
 
 ```bash
 "$SCAFFOLD_BIN" basecamp launch alice    # let it come up, then close it
+"$SCAFFOLD_BIN" basecamp paths alice --json
 ls .scaffold/basecamp/profiles/alice
 mkdir -p .scaffold/basecamp/profiles/alice/.scaffold-xdg-data/scratch
 echo "marker-$(date -u +%s)" > .scaffold/basecamp/profiles/alice/.scaffold-xdg-data/scratch/marker.txt
 "$SCAFFOLD_BIN" basecamp launch alice    # scrub-and-reinstall
 test -e .scaffold/basecamp/profiles/alice/.scaffold-xdg-data/scratch/marker.txt && echo "REGRESSION: marker survived clean launch" || echo "OK: marker scrubbed"
+"$SCAFFOLD_BIN" basecamp paths ../escape
 ```
 
 ### Expected Success Signals
@@ -1170,18 +1205,21 @@ test -e .scaffold/basecamp/profiles/alice/.scaffold-xdg-data/scratch/marker.txt 
 - `launch alice` removes any user-introduced files under the alice profile XDG dirs and reinstalls each captured source before `exec`ing basecamp.
 - `rm -rf` on `launch` is bounded to `<project>/.scaffold/basecamp/profiles/<profile>/`. Never any path outside that root.
 - A `launch` that finds no modules in `[modules]` bails before scrubbing (the empty-install + scrubbed profile combination is the regression we're guarding against).
+- `basecamp paths` rejects the same unsafe profile names as `launch` and remains non-mutating for valid profiles.
 
 ### Failure Signals / Common Pitfalls
 
 - The `marker.txt` file surviving `launch alice` is a regression: clean-slate is the v1 contract.
 - A `launch` scrubbing a path outside the profile's XDG dirs is a severe safety regression — capture the offending path and stop.
 - An empty `[modules]` plus a `launch` that wipes the profile and leaves it empty is a real regression; the empty-modules bail must fire first.
+- A custom `runtime_dir` on macOS that makes `<runtime_dir>/logos_token_<module>_<pid>` exceed the 104-byte Unix socket path budget is a dogfooding finding; keep custom values short, preferably under `/tmp`.
 
 ### Evidence to Capture
 
 - The marker write and the post-launch listing showing it was scrubbed.
 - The exact path under which the marker was placed and the path basecamp scrubbed (verify they match the profile root).
 - Any unexpected paths touched by `launch` outside `.scaffold/basecamp/profiles/<profile>/`.
+- The unsafe-profile rejection output from `basecamp paths ../escape`.
 
 ### Execution Notes
 
@@ -1552,10 +1590,11 @@ HEAD0=$("$SCAFFOLD_BIN" test-node blocks head --url "$URL" --json | jq -r .block
 - Changes to CLI argument parsing, help text, or error messages: rerun `E1`.
 - Changes to `create`/`new` flags or template selection logic: rerun `E2`.
 - Changes to AI skill materialization (`apply_skills`, the canonical `skills/` source, frontmatter rewrite, `AGENTS.md` template, or `init` re-run semantics): rerun `E3`.
-- Changes to `basecamp setup` (pin sync, lgpm build, profile seeding, idempotency) or `basecamp doctor`: rerun `B1`.
+- Changes to `basecamp setup` (pin sync, lgpm build, profile seeding, idempotency), per-platform `[repos.basecamp.attr]`, or `basecamp doctor`: rerun `B1`.
 - Changes to `[modules]` derivation, dependency resolution, sibling `--override-input` handling, or `basecamp install` invocation of `lgpm`: rerun `B2`.
-- Changes to `basecamp launch` (kill-and-scrub semantics, XDG isolation, port-override env vars, p2p surface): rerun `B3`.
-- Changes to clean-slate scrub semantics or the empty `[modules]` guard on `launch`: rerun `B4`.
+- Changes to `basecamp paths`, `[basecamp.profiles.*]`, `env_file`, `runtime_dir`, `log_file`, `launch --log-file`, or single-profile launch path resolution: rerun `B2`.
+- Changes to `basecamp launch` (kill-and-scrub semantics, XDG isolation, runtime/log/env export, port-override env vars, p2p surface): rerun `B3`.
+- Changes to clean-slate scrub semantics, profile-name validation, path-root bounds, or the empty `[modules]` guard on `launch`: rerun `B4`.
 - Changes to `basecamp build-portable` (project/dependency role split, ordering, attr selection): rerun `B5`.
 - Changes to the public `logos_scaffold::api` surface (entry points, typed result models, categorized errors, `CommandFailed`, or the documented examples/doctests): rerun `A1`, and rerun the matching CLI scenario for any command whose `*_for_project` core changed.
 - Changes to `test-node` lifecycle, pin resolution, prepare/doctor, run-slot concurrency, or caller-checkout validation: rerun `T1` (and `A1` if the `api::testnode` lifecycle types changed).
