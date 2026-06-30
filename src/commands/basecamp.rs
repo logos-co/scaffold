@@ -53,10 +53,23 @@ pub(crate) enum BasecampAction {
         module: String,
         dev_shell: Option<String>,
     },
-    /// Attr-swap replay on `state.project_sources` only (`#lgx` →
-    /// `#lgx-portable`). `state.dependencies` is ignored — the target AppImage
-    /// provides those. No CLI source flags.
-    BuildPortable,
+    /// Build project-module `.lgx` artefacts for one or more flake variants
+    /// (`lgx`, `lgx-portable`) and symlink them into `.scaffold/basecamp/<dir>`
+    /// in load order. Idempotent, no install side-effect. `role = Dependency`
+    /// modules are ignored — the target host provides those. `module` narrows
+    /// the build to a single project module. `build-portable` is the
+    /// back-compat alias for `variants = ["lgx-portable"]`.
+    Build {
+        variants: Vec<String>,
+        module: Option<String>,
+    },
+    /// Run a captured module via `nix run`. `host` accepts `standalone` (the
+    /// module's own app — the only host today, and the default when `None`).
+    /// Running a module as a configured Basecamp peer is follow-up work.
+    Run {
+        module: String,
+        host: Option<String>,
+    },
     /// Basecamp-specific doctor: captured modules summary, manifest variant
     /// check per seeded profile, and uncaptured-module drift against
     /// auto-discovery.
@@ -104,7 +117,8 @@ pub(crate) fn basecamp_for_project(project: Project, action: BasecampAction) -> 
         BasecampAction::Develop { module, dev_shell } => {
             cmd_basecamp_develop(project, module, dev_shell)
         }
-        BasecampAction::BuildPortable => cmd_basecamp_build_portable(project),
+        BasecampAction::Build { variants, module } => cmd_basecamp_build(project, variants, module),
+        BasecampAction::Run { module, host } => cmd_basecamp_run(project, module, host),
         BasecampAction::Doctor { json } => cmd_basecamp_doctor(project, json),
         // Handled above via early return (project-context-free).
         BasecampAction::Docs => unreachable!("handled before load_project"),
@@ -513,7 +527,7 @@ fn cmd_basecamp_develop(
 
     ensure_nix_present()?;
 
-    let target = nix_develop_target(&project.root, &entry.flake, dev_shell.as_deref());
+    let target = nix_flake_target(&project.root, &entry.flake, dev_shell.as_deref());
     println!("entering dev shell for module `{module}` ({target})");
 
     let mut cmd = Command::new("nix");
@@ -534,16 +548,80 @@ fn cmd_basecamp_develop(
     bail!("failed to exec `nix develop {target}`: {err}");
 }
 
-/// Build the `nix develop` target from a module's stored flake ref. Strips any
-/// output fragment after `#` (e.g. `#lgx`), absolutizes path-style refs the
-/// same way `launch`/`install` do, then re-attaches the requested dev-shell
-/// attr (if any). `None` selects the flake's default dev shell.
-fn nix_develop_target(project_root: &Path, flake: &str, dev_shell: Option<&str>) -> String {
+/// Build a `nix develop`/`nix run` target from a module's stored flake ref.
+/// Strips any output fragment after `#` (e.g. `#lgx`), absolutizes path-style
+/// refs the same way `launch`/`install` do, then re-attaches the requested
+/// attr (if any). `None` selects the flake's default output.
+fn nix_flake_target(project_root: &Path, flake: &str, attr: Option<&str>) -> String {
     let bare = flake.split_once('#').map_or(flake, |(b, _)| b);
     let normalized = normalize_flake_ref(project_root, bare);
-    match dev_shell {
+    match attr {
         Some(attr) => format!("{normalized}#{attr}"),
         None => normalized,
+    }
+}
+
+/// `lgs basecamp run <module> [--host standalone]` — run a captured module via
+/// `nix run`, mirroring `develop`'s exec model (resolve the flake from
+/// `[modules.<module>]`, then exec from the project root).
+///
+/// `standalone` is the only host today (and the default): run the module's own
+/// app — `nix run <flake>` (the flake's `apps.<system>.default`), or
+/// `#<standalone_app>` when `[modules.<name>].standalone_app` is set. Running a
+/// module as a configured Basecamp peer (build + install + launch a profile in
+/// one shot) is tracked as separate follow-up work; until then, use
+/// `basecamp install` then `basecamp launch <profile>`.
+///
+/// The module lookup runs before the `nix` presence check so an unknown module
+/// name fails fast with the known-module list even on a host without Nix.
+fn cmd_basecamp_run(project: Project, module: String, host: Option<String>) -> DynResult<()> {
+    let entry = project.config.modules.get(&module).ok_or_else(|| {
+        let known: Vec<&str> = project.config.modules.keys().map(String::as_str).collect();
+        let known = if known.is_empty() {
+            "none captured yet".to_string()
+        } else {
+            known.join(", ")
+        };
+        anyhow!(
+            "no module `{module}` in scaffold.toml [modules] (known: {known}). \
+             Capture project sources with `logos-scaffold basecamp modules`."
+        )
+    })?;
+
+    // `nix run` needs a flake. A module captured via `--path <file.lgx>` is a
+    // prebuilt artefact with no runnable app — reject it with a fix-it hint
+    // rather than letting `nix run path:/…/file.lgx` fail opaquely.
+    if let BasecampSource::Path(p) = module_entry_to_source(&project.root, entry) {
+        bail!(
+            "module `{module}` was captured as a prebuilt `.lgx` path (`{p}`), which \
+             `basecamp run` cannot launch. Point `[modules.{module}]` at a flake \
+             source instead: edit its entry in scaffold.toml, or remove it and \
+             re-capture with `basecamp modules --flake <ref>#lgx` (re-running \
+             `basecamp modules` keeps existing entries, so it won't replace a path \
+             capture on its own)."
+        );
+    }
+
+    ensure_nix_present()?;
+
+    // `standalone` is the only host today; default to it when `--host` is
+    // omitted. The `other` arm still catches a stray host string passed via
+    // the public Rust API (e.g. a not-yet-wired `basecamp`).
+    let host = host.unwrap_or_else(|| "standalone".to_string());
+    match host.as_str() {
+        "standalone" => {
+            // `apps.<system>.default` by default (bare `nix run <flake>`); an
+            // explicit `standalone_app` overrides the app attr.
+            let target =
+                nix_flake_target(&project.root, &entry.flake, entry.standalone_app.as_deref());
+            println!("running module `{module}` (standalone host: {target})");
+            let mut cmd = Command::new("nix");
+            cmd.current_dir(&project.root).arg("run").arg(&target);
+            let err = cmd.exec();
+            // exec() only returns on failure.
+            bail!("failed to exec `nix run {target}`: {err}");
+        }
+        other => bail!("unknown --host `{other}`; expected `standalone`"),
     }
 }
 
@@ -833,19 +911,50 @@ fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
     false
 }
 
-/// Build portable `.lgx` artefacts for hand-loading into a basecamp AppImage.
+/// `lgs basecamp build [--variant lgx|lgx-portable|all] [--module NAME]` —
+/// build the project's `.lgx` artefacts and symlink them into
+/// `.scaffold/basecamp/<variant-dir>/` in load order, without installing them
+/// into any profile (idempotent: no writes to `basecamp.state` or profiles).
 ///
-/// Operates on `state.project_sources` only, with each flake entry's `#lgx`
-/// attribute swapped to `#lgx-portable`. `state.dependencies` is intentionally
-/// ignored — the target AppImage provides its own (release/portable) copies
-/// of companion modules via its in-app Package Manager catalog.
+/// Operates on `role = Project` modules only — `role = Dependency` companions
+/// are skipped (the target basecamp/AppImage provides its own). Each variant
+/// is a flake output attr: `lgx` (dev) builds the captured `#lgx` refs as-is;
+/// `lgx-portable` attr-swaps `#lgx` → `#lgx-portable` first. `module` restricts
+/// the build to a single captured project module.
 ///
-/// No CLI source flags: the source set lives in `state`, managed by
-/// `basecamp modules`. If you want to produce a portable variant of something
-/// that isn't a project source, `basecamp modules --flake <ref>#lgx` it first,
-/// run `build-portable`, then revert with another `modules` call.
-fn cmd_basecamp_build_portable(project: Project) -> DynResult<()> {
-    let project_modules: std::collections::BTreeMap<String, ModuleEntry> = project
+/// `build-portable` is the back-compat alias for `build --variant lgx-portable`.
+/// Validate, reject-empty, and de-duplicate the requested build variants. The
+/// CLI constrains these to a `ValueEnum`, but the public Rust API takes a
+/// free-form `Vec<String>`, so an unexpected value (empty list, unknown attr,
+/// or one with path separators — each becomes a `.scaffold/basecamp/<dir>`
+/// component wiped via `remove_dir_all`) must be rejected here. Duplicates are
+/// dropped (first-seen order preserved) so the same output dir isn't wiped and
+/// rebuilt twice.
+fn normalize_build_variants(variants: Vec<String>) -> DynResult<Vec<String>> {
+    if variants.is_empty() {
+        bail!("no build variant requested; expected at least one of `lgx`, `lgx-portable`");
+    }
+    for variant in &variants {
+        if variant != "lgx" && variant != "lgx-portable" {
+            bail!("unknown build variant `{variant}`; expected `lgx` or `lgx-portable`");
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut out = variants;
+    out.retain(|v| seen.insert(v.clone()));
+    Ok(out)
+}
+
+fn cmd_basecamp_build(
+    project: Project,
+    variants: Vec<String>,
+    module: Option<String>,
+) -> DynResult<()> {
+    // Reject empty/unknown input and drop duplicates before anything touches
+    // the filesystem (see `normalize_build_variants`).
+    let variants = normalize_build_variants(variants)?;
+
+    let mut project_modules: std::collections::BTreeMap<String, ModuleEntry> = project
         .config
         .modules
         .iter()
@@ -853,12 +962,29 @@ fn cmd_basecamp_build_portable(project: Project) -> DynResult<()> {
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
+    if let Some(name) = &module {
+        if !project_modules.contains_key(name) {
+            let known: Vec<&str> = project_modules.keys().map(String::as_str).collect();
+            let known = if known.is_empty() {
+                "none captured".to_string()
+            } else {
+                known.join(", ")
+            };
+            bail!(
+                "no project module `{name}` in scaffold.toml [modules] \
+                 (project modules: {known})"
+            );
+        }
+        project_modules.retain(|k, _| k == name);
+    }
+
     if project_modules.is_empty() {
         bail!(
             "no project modules captured in scaffold.toml; run `basecamp modules` \
-             first (auto-discover) or `basecamp modules --flake <ref>#lgx \
-             --path <file.lgx>` to capture explicitly. `build-portable` \
-             operates on captured project sources only — it never discovers."
+             first (auto-discover), or capture explicitly with \
+             `basecamp modules --flake <ref>#lgx` or `basecamp modules --path \
+             <file.lgx>`. `build` operates on captured project sources only — it \
+             never discovers."
         );
     }
 
@@ -873,49 +999,62 @@ fn cmd_basecamp_build_portable(project: Project) -> DynResult<()> {
     // already resolved by the time basecamp tries to resolve its symbols.
     let ordered_names = topo_order_project_modules(&project.root, &project_modules);
 
-    // Rewrite each project source: attr-swap `#lgx` → `#lgx-portable` on
-    // flake refs; pass Path sources through unchanged (they're pre-built).
-    let portable_sources: Vec<BasecampSource> = ordered_names
+    for variant in &variants {
+        build_modules_for_variant(&project, &project_modules, &ordered_names, variant)?;
+    }
+    Ok(())
+}
+
+/// Build every (topo-ordered) project module for a single flake `variant` and
+/// symlink the outputs into `.scaffold/basecamp/<variant-dir>/` with
+/// load-ordered, human-readable `<NN>-<module>.lgx` names. The directory is
+/// wiped and recreated so a re-run never leaves stale symlinks from modules
+/// that have since been removed.
+fn build_modules_for_variant(
+    project: &Project,
+    project_modules: &std::collections::BTreeMap<String, ModuleEntry>,
+    ordered_names: &[String],
+    variant: &str,
+) -> DynResult<()> {
+    // Rewrite each project source for this variant: attr-swap `#lgx` →
+    // `#<variant>` on flake refs; pass Path sources through unchanged (they're
+    // pre-built). The swap is a no-op when variant == "lgx".
+    let sources: Vec<BasecampSource> = ordered_names
         .iter()
-        .map(|name| {
-            let entry = &project_modules[name];
-            let src = module_entry_to_source(&project.root, entry);
-            match src {
+        .map(
+            |name| match module_entry_to_source(&project.root, &project_modules[name]) {
                 BasecampSource::Path(p) => BasecampSource::Path(p),
                 BasecampSource::Flake(f) => {
-                    BasecampSource::Flake(swap_flake_attr(&f, "lgx", "lgx-portable"))
+                    BasecampSource::Flake(swap_flake_attr(&f, "lgx", variant))
                 }
-            }
-        })
+            },
+        )
         .collect();
 
     // Local symlink dir: basecamp's AppImage "install lgx" button opens a
     // file picker starting in the project, and /nix/store/…-source paths
-    // are painful to navigate by hand. Wipe + recreate so a re-run doesn't
-    // leave stale symlinks from modules that have since been removed.
-    let portable_dir = project.root.join(".scaffold/basecamp/portable");
-    let _ = fs::remove_dir_all(&portable_dir);
-    fs::create_dir_all(&portable_dir)
-        .with_context(|| format!("create {}", portable_dir.display()))?;
+    // are painful to navigate by hand.
+    let out_dir = project
+        .root
+        .join(".scaffold/basecamp")
+        .join(variant_output_subdir(variant));
+    let _ = fs::remove_dir_all(&out_dir);
+    fs::create_dir_all(&out_dir).with_context(|| format!("create {}", out_dir.display()))?;
 
     let mut outputs: Vec<PathBuf> = Vec::new();
-    for (index, (name, src)) in ordered_names
-        .iter()
-        .zip(portable_sources.iter())
-        .enumerate()
-    {
+    for (index, (name, src)) in ordered_names.iter().zip(sources.iter()).enumerate() {
         let store_paths: Vec<PathBuf> = match src {
             BasecampSource::Path(p) => vec![build_portable_resolve_path(Path::new(p))?],
             BasecampSource::Flake(flake_ref) => {
-                // Sibling overrides still computed against the post-swap set
-                // so path-sibling inputs resolve locally like they do at install.
-                let overrides = resolve_sibling_overrides(src, &portable_sources, flake_ref);
-                let inv = build_portable_nix_invocation(flake_ref, &overrides);
-                run_build_portable_nix(&project.root, flake_ref, &inv)?
+                // Sibling overrides computed against the post-swap set so
+                // path-sibling inputs resolve locally like they do at install.
+                let overrides = resolve_sibling_overrides(src, &sources, flake_ref);
+                let inv = build_portable_nix_invocation(flake_ref, &overrides, variant);
+                run_build_portable_nix(&project.root, flake_ref, &inv, variant)?
             }
         };
 
-        // Symlink each store path into `portable_dir` with a load-ordered,
+        // Symlink each store path into `out_dir` with a load-ordered,
         // human-readable name. Two-digit index so a file-browser sorts the
         // list the same way the user should load them in basecamp.
         let load_order = format!("{:02}", index + 1);
@@ -930,7 +1069,7 @@ fn cmd_basecamp_build_portable(project: Project) -> DynResult<()> {
             } else {
                 format!("{load_order}-{name}.lgx")
             };
-            let link_path = portable_dir.join(&link_name);
+            let link_path = out_dir.join(&link_name);
             std::os::unix::fs::symlink(store_path, &link_path).with_context(|| {
                 format!(
                     "symlink {} -> {}",
@@ -943,13 +1082,23 @@ fn cmd_basecamp_build_portable(project: Project) -> DynResult<()> {
     }
 
     println!(
-        "Portable .lgx artefacts (in load order, symlinked into {}):",
-        portable_dir.display()
+        "{variant} .lgx artefacts (in load order, symlinked into {}):",
+        out_dir.display()
     );
     for out in &outputs {
         println!("  {}", out.display());
     }
     Ok(())
+}
+
+/// Subdir under `.scaffold/basecamp/` for a build variant. `lgx-portable`
+/// keeps the historical `portable` name (the docs and the AppImage hand-load
+/// workflow reference it); other variants use their bare attr name.
+fn variant_output_subdir(variant: &str) -> &str {
+    match variant {
+        "lgx-portable" => "portable",
+        other => other,
+    }
 }
 
 /// Order `project_modules` so each module appears AFTER every
@@ -1055,16 +1204,21 @@ struct NixBuildInvocation {
 fn build_portable_nix_invocation(
     flake_ref: &str,
     overrides: &[(String, String)],
+    default_attr: &str,
 ) -> NixBuildInvocation {
     let (cwd_override, ref_arg) = match flake_path_prefix(flake_ref) {
         Some(abs) => {
             let attr = flake_ref
                 .split_once('#')
                 .map(|(_, a)| a)
-                .unwrap_or("lgx-portable");
+                .unwrap_or(default_attr);
             (Some(PathBuf::from(abs)), format!(".#{attr}"))
         }
-        None => (None, flake_ref.to_string()),
+        // Remote ref (github:, git+, …). Pin the requested variant attr when
+        // the captured ref omits a `#<attr>` fragment — otherwise nix would
+        // build the flake's default package, ignoring `--variant`.
+        None if flake_ref.contains('#') => (None, flake_ref.to_string()),
+        None => (None, format!("{flake_ref}#{default_attr}")),
     };
 
     let mut args = vec!["build".to_string(), ref_arg];
@@ -1090,6 +1244,7 @@ fn run_build_portable_nix(
     project_root: &Path,
     flake_ref: &str,
     inv: &NixBuildInvocation,
+    variant: &str,
 ) -> DynResult<Vec<PathBuf>> {
     println!("building {flake_ref}");
     let mut cmd = Command::new("nix");
@@ -1110,14 +1265,12 @@ fn run_build_portable_nix(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if (stderr.contains("does not provide attribute") || stderr.contains("missing attribute"))
-            && stderr.contains("lgx-portable")
+            && stderr.contains(variant)
         {
             bail!(
-                "flake `{flake_ref}` does not expose `lgx-portable`. Either:\n\
-                 (a) add a `packages.<system>.lgx-portable` output to your module's flake.nix, or\n\
-                 (b) if you don't need a portable build, skip `basecamp build-portable` — \
-                 `basecamp install` uses `.#lgx` and works without it.\n\
-                 {COMPAT_DOCS_BREADCRUMB}"
+                "flake `{flake_ref}` does not expose `{variant}`. Add a \
+                 `packages.<system>.{variant}` output to your module's flake.nix, \
+                 or build a different `--variant`.\n{COMPAT_DOCS_BREADCRUMB}"
             );
         }
         bail!(
@@ -1276,6 +1429,7 @@ fn cmd_basecamp_modules(
         new_modules.entry(name).or_insert_with(|| ModuleEntry {
             flake: relativize_flake_ref(&project.root, &flake_ref(src)),
             role: ModuleRole::Project,
+            standalone_app: None,
         });
     }
 
@@ -1563,6 +1717,7 @@ fn resolve_manifest_dependencies(
                     ModuleEntry {
                         flake: resolved,
                         role: ModuleRole::Dependency,
+                        standalone_app: None,
                     },
                 );
                 continue;
@@ -1574,6 +1729,7 @@ fn resolve_manifest_dependencies(
                 ModuleEntry {
                     flake: (*flake_ref).to_string(),
                     role: ModuleRole::Dependency,
+                    standalone_app: None,
                 },
             );
             continue;
@@ -3658,7 +3814,8 @@ mod tests {
 
     #[test]
     fn build_portable_nix_invocation_path_ref_cds_into_flake_dir() {
-        let inv = build_portable_nix_invocation("path:/abs/to/foo#lgx-portable", &[]);
+        let inv =
+            build_portable_nix_invocation("path:/abs/to/foo#lgx-portable", &[], "lgx-portable");
         assert_eq!(inv.cwd_override.as_deref(), Some(Path::new("/abs/to/foo")));
         assert_eq!(
             inv.args,
@@ -3668,7 +3825,7 @@ mod tests {
 
     #[test]
     fn build_portable_nix_invocation_remote_ref_stays_in_project_root() {
-        let inv = build_portable_nix_invocation("github:foo/bar#lgx-portable", &[]);
+        let inv = build_portable_nix_invocation("github:foo/bar#lgx-portable", &[], "lgx-portable");
         assert!(
             inv.cwd_override.is_none(),
             "remote refs must not override cwd"
@@ -3680,10 +3837,22 @@ mod tests {
     }
 
     #[test]
+    fn build_portable_nix_invocation_remote_ref_without_fragment_pins_variant() {
+        // A captured remote ref that omits `#<attr>` must still build the
+        // requested variant — otherwise nix builds the flake's default package.
+        let inv = build_portable_nix_invocation("github:foo/bar", &[], "lgx");
+        assert!(inv.cwd_override.is_none());
+        assert_eq!(
+            inv.args,
+            vec!["build", "github:foo/bar#lgx", "--print-out-paths"]
+        );
+    }
+
+    #[test]
     fn build_portable_nix_invocation_does_not_use_out_link() {
         // Spec: `nix build` without `-o`, so the default `./result-<attr>` symlink
         // lands next to the flake. No `--out-link`, no `--no-link`.
-        let inv = build_portable_nix_invocation("path:/abs/a#lgx-portable", &[]);
+        let inv = build_portable_nix_invocation("path:/abs/a#lgx-portable", &[], "lgx-portable");
         for forbidden in ["-o", "--out-link", "--no-link"] {
             assert!(
                 !inv.args.iter().any(|a| a == forbidden),
@@ -3698,6 +3867,7 @@ mod tests {
         let inv = build_portable_nix_invocation(
             "path:/abs/ui#lgx-portable",
             &[("core".to_string(), "path:/abs/core".to_string())],
+            "lgx-portable",
         );
         assert_eq!(
             inv.args,
@@ -3873,6 +4043,7 @@ mod tests {
         let entry = ModuleEntry {
             flake: "path:./sub#lgx".to_string(),
             role: ModuleRole::Project,
+            standalone_app: None,
         };
         match module_entry_to_source(tmp.path(), &entry) {
             BasecampSource::Flake(f) => {
@@ -3882,6 +4053,32 @@ mod tests {
             }
             other => panic!("expected Flake source, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn variant_output_subdir_keeps_portable_name_for_backcompat() {
+        // `lgx-portable` must keep the historical `portable/` dir (docs + the
+        // AppImage hand-load workflow reference it); other variants use the
+        // bare attr name.
+        assert_eq!(variant_output_subdir("lgx-portable"), "portable");
+        assert_eq!(variant_output_subdir("lgx"), "lgx");
+    }
+
+    #[test]
+    fn normalize_build_variants_rejects_empty_unknown_and_dedupes() {
+        // Empty (public-API misuse) is rejected rather than silently building
+        // nothing.
+        assert!(normalize_build_variants(vec![]).is_err());
+        // Unknown attrs — including path-separator values that would escape
+        // `.scaffold/basecamp/` via `remove_dir_all` — are rejected.
+        assert!(normalize_build_variants(vec!["bogus".into()]).is_err());
+        assert!(normalize_build_variants(vec!["../escape".into()]).is_err());
+        // Duplicates collapse, first-seen order preserved.
+        assert_eq!(
+            normalize_build_variants(vec!["lgx".into(), "lgx".into(), "lgx-portable".into(),])
+                .unwrap(),
+            vec!["lgx".to_string(), "lgx-portable".to_string()]
+        );
     }
 
     // ---- resolve_sibling_overrides (I1 fix) — exercised via the command paths;
@@ -4010,6 +4207,7 @@ mod tests {
         ModuleEntry {
             flake: flake.to_string(),
             role: ModuleRole::Project,
+            standalone_app: None,
         }
     }
 
@@ -4386,6 +4584,7 @@ mod tests {
             ModuleEntry {
                 flake: "github:logos-co/logos-storage-module/abc123#lgx".to_string(),
                 role: ModuleRole::Project,
+                standalone_app: None,
             },
         );
 
@@ -4442,6 +4641,7 @@ mod tests {
             ModuleEntry {
                 flake: format!("path:{}#lgx", tmp_a.path().display()),
                 role: ModuleRole::Project,
+                standalone_app: None,
             },
         );
         captured.insert(
@@ -4449,6 +4649,7 @@ mod tests {
             ModuleEntry {
                 flake: format!("path:{}#lgx", tmp_b.path().display()),
                 role: ModuleRole::Project,
+                standalone_app: None,
             },
         );
 
@@ -4850,7 +5051,7 @@ role = "dependency"
         // develop` wants the bare flake (default dev shell).
         let root = Path::new("/proj");
         assert_eq!(
-            nix_develop_target(root, "github:logos-co/swap-module/1.0.0#lgx", None),
+            nix_flake_target(root, "github:logos-co/swap-module/1.0.0#lgx", None),
             "github:logos-co/swap-module/1.0.0"
         );
     }
@@ -4859,7 +5060,7 @@ role = "dependency"
     fn nix_develop_target_appends_requested_dev_shell_attr() {
         let root = Path::new("/proj");
         assert_eq!(
-            nix_develop_target(root, "github:logos-co/swap-module#lgx", Some("dev")),
+            nix_flake_target(root, "github:logos-co/swap-module#lgx", Some("dev")),
             "github:logos-co/swap-module#dev"
         );
     }
@@ -4872,11 +5073,11 @@ role = "dependency"
         let tmp = tempfile::tempdir().expect("tempdir");
         let sub = tmp.path().join("swap-module");
         std::fs::create_dir_all(&sub).unwrap();
-        let target = nix_develop_target(tmp.path(), "path:./swap-module#lgx", None);
+        let target = nix_flake_target(tmp.path(), "path:./swap-module#lgx", None);
         let expected = format!("path:{}", sub.canonicalize().unwrap().display());
         assert_eq!(target, expected);
         // Dev-shell attr is re-attached after absolutization.
-        let with_attr = nix_develop_target(tmp.path(), "path:./swap-module#lgx", Some("dev"));
+        let with_attr = nix_flake_target(tmp.path(), "path:./swap-module#lgx", Some("dev"));
         assert_eq!(with_attr, format!("{expected}#dev"));
     }
 

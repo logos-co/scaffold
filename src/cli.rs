@@ -1033,10 +1033,18 @@ enum BasecampSubcommand {
     )]
     Develop(BasecampDevelopArgs),
     #[command(
+        about = "Build the project's .lgx artefacts for a flake variant (lgx/lgx-portable/all) without installing them. See `basecamp docs` for project requirements."
+    )]
+    Build(BasecampBuildArgs),
+    #[command(
         name = "build-portable",
-        about = "Build the project's .#lgx-portable artefacts for hand-loading into a basecamp AppImage. See `basecamp docs` for project requirements."
+        about = "Build the project's .#lgx-portable artefacts for hand-loading into a basecamp AppImage (alias for `build --variant lgx-portable`). See `basecamp docs` for project requirements."
     )]
     BuildPortable(BasecampBuildPortableArgs),
+    #[command(
+        about = "Run a captured module via `nix run` — its standalone app. See `basecamp docs` for project requirements."
+    )]
+    Run(BasecampRunArgs),
     #[command(
         about = "Basecamp-specific doctor: captured modules, manifest variants, and state drift. See `basecamp docs` for project requirements."
     )]
@@ -1066,11 +1074,48 @@ struct BasecampModulesArgs {
     show: bool,
 }
 
+/// Flake output variant(s) `basecamp build` resolves against per module.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum BuildVariant {
+    /// `#lgx` — the dev artefact (same output `install` builds).
+    Lgx,
+    /// `#lgx-portable` — for hand-loading into a basecamp AppImage.
+    #[value(name = "lgx-portable")]
+    LgxPortable,
+    /// Both `lgx` and `lgx-portable`.
+    All,
+}
+
+impl BuildVariant {
+    /// Flake attr names this selection expands to (build order).
+    fn attrs(self) -> Vec<String> {
+        match self {
+            Self::Lgx => vec!["lgx".to_string()],
+            Self::LgxPortable => vec!["lgx-portable".to_string()],
+            Self::All => vec!["lgx".to_string(), "lgx-portable".to_string()],
+        }
+    }
+}
+
+#[derive(Debug, clap::Args)]
+struct BasecampBuildArgs {
+    /// Flake variant(s) to build. Defaults to `all` (both `lgx` and
+    /// `lgx-portable`), per #174.
+    #[arg(long, value_enum, default_value_t = BuildVariant::All)]
+    variant: BuildVariant,
+    /// Restrict the build to a single captured project module.
+    #[arg(long, value_name = "NAME")]
+    module: Option<String>,
+}
+
 #[derive(Debug, clap::Args)]
 struct BasecampBuildPortableArgs {
-    // `build-portable` takes no CLI source flags: it attr-swaps
-    // `state.project_sources` (`#lgx` → `#lgx-portable`) and builds that.
-    // `state.dependencies` are ignored — the target AppImage provides them.
+    // `build-portable` is the alias for `build --variant lgx-portable`. It
+    // attr-swaps `#lgx` → `#lgx-portable` and builds that; `role = dependency`
+    // modules are ignored — the target AppImage provides them.
+    /// Restrict the build to a single captured project module.
+    #[arg(long, value_name = "NAME")]
+    module: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -1100,6 +1145,27 @@ struct BasecampDevelopArgs {
     /// to the flake's default dev shell.
     #[arg(long, value_name = "ATTR")]
     dev_shell: Option<String>,
+}
+
+/// How `basecamp run` runs a module. `standalone` (the module's own app) is
+/// the only host today; running a module as a configured Basecamp peer is
+/// tracked as separate follow-up work, so this stays an enum for that future.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum RunHost {
+    /// The module's own app: `nix run <flake>` (the flake's
+    /// `apps.<system>.default`), or `#<standalone_app>` when configured.
+    Standalone,
+}
+
+#[derive(Debug, clap::Args)]
+struct BasecampRunArgs {
+    /// Name of the module to run, keyed in `[modules.<name>]`.
+    #[arg(value_name = "MODULE")]
+    module: String,
+    /// How to run the module. `standalone` (the module's own app) is the only
+    /// host today and the default when omitted.
+    #[arg(long, value_enum)]
+    host: Option<RunHost>,
 }
 
 pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
@@ -1404,7 +1470,20 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                     module: args.module,
                     dev_shell: args.dev_shell,
                 },
-                BasecampSubcommand::BuildPortable(_) => BasecampAction::BuildPortable,
+                BasecampSubcommand::Build(args) => BasecampAction::Build {
+                    variants: args.variant.attrs(),
+                    module: args.module,
+                },
+                BasecampSubcommand::BuildPortable(args) => BasecampAction::Build {
+                    variants: vec!["lgx-portable".to_string()],
+                    module: args.module,
+                },
+                BasecampSubcommand::Run(args) => BasecampAction::Run {
+                    module: args.module,
+                    host: args.host.map(|h| match h {
+                        RunHost::Standalone => "standalone".to_string(),
+                    }),
+                },
                 BasecampSubcommand::Doctor(args) => BasecampAction::Doctor { json: args.json },
                 BasecampSubcommand::Docs => BasecampAction::Docs,
             };
@@ -1620,4 +1699,25 @@ fn require_address(
             "{context} requires an address. Examples: `logos-scaffold wallet default set <address>` or `logos-scaffold wallet default set --address <address>`."
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BuildVariant;
+
+    #[test]
+    fn build_variant_all_expands_to_both_variants_in_build_order() {
+        // `--variant all` must build BOTH `#lgx` and `#lgx-portable`, in that
+        // order (lgx first), so `cmd_basecamp_build`'s per-variant loop runs
+        // each pass. The single-variant forms select exactly one attr.
+        assert_eq!(BuildVariant::Lgx.attrs(), vec!["lgx".to_string()]);
+        assert_eq!(
+            BuildVariant::LgxPortable.attrs(),
+            vec!["lgx-portable".to_string()]
+        );
+        assert_eq!(
+            BuildVariant::All.attrs(),
+            vec!["lgx".to_string(), "lgx-portable".to_string()]
+        );
+    }
 }

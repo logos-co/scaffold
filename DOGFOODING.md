@@ -157,7 +157,8 @@ If any of these is missing, do not "skip the real run" — go back and fix the s
 | B2 | external module project | Core | Module capture, install, and single-instance launch | `basecamp modules`, `basecamp modules --show`, `basecamp install`, `basecamp launch alice` |
 | B3 | external module project | Core | Two-instance p2p dogfooding | `basecamp launch alice`, `basecamp launch bob` (parallel) |
 | B4 | external module project | Advanced | Clean-slate scrub semantics on relaunch | `basecamp launch alice` (×2) |
-| B5 | external module project | Advanced | Portable artefact build for AppImage hand-loading | `basecamp build-portable` |
+| B5 | external module project | Advanced | Module artefact builds by variant | `basecamp build`, `basecamp build-portable`, `--variant`, `--module` |
+| B6 | external module project | Advanced | Captured module run loop | `basecamp run <module>`, `--host standalone` |
 | A1 | N/A | Advanced | Public Rust API surface for embedding scaffold in tests/tooling | `logos_scaffold::api::Project`, `cargo doc`, doctests |
 | T1 | `default` | Advanced | Isolated test-node lifecycle and caller-project pins | `test-node pins`, `test-node prepare`, `test-node doctor`, `test-node start`, `test-node status`, `test-node stop`, `test-node run` |
 | T2 | `default` | Advanced | Typed RPC reads against a running test node | `test-node tx submit-and-wait`, `test-node blocks head/range/wait`, `test-node clock read/wait-stable`, `test-node account get/batch-get`, `test-node proof get`, `test-node snapshot accounts` |
@@ -1188,47 +1189,98 @@ test -e .scaffold/basecamp/profiles/alice/.scaffold-xdg-data/scratch/marker.txt 
 - Use a marker filename and timestamp you can search for after the fact; do not rely on visual inspection alone.
 - Clean-slate state is project-local; never test scrub behavior against the user's global Logos directories.
 
-## B5. Build-Portable Artefacts for AppImage Hand-Loading
+## B5. Module Artefact Builds by Variant
 
 ### Goal
 
-Validate that project sources captured under `[modules]` with `role = "project"` can be built against their `#lgx-portable` flake output for hand-loading into a basecamp AppImage, and that runtime `role = "dependency"` entries are skipped.
+Validate that project sources captured under `[modules]` with `role = "project"` can be built against their `#lgx` and `#lgx-portable` flake outputs, that `--module` narrows the build, and that the old `build-portable` command remains a compatibility alias for the portable variant.
 
 ### Preconditions
 
 - B2 completed (project sources are captured and `basecamp install` has succeeded against `.#lgx`).
-- The same flakes also expose `packages.<system>.lgx-portable`.
+- The same flakes expose `packages.<system>.lgx` and, for portable checks, `packages.<system>.lgx-portable`.
 
 ### Commands / Actions
 
 From the module project root:
 
 ```bash
+"$SCAFFOLD_BIN" basecamp build --variant all
+"$SCAFFOLD_BIN" basecamp build --variant lgx --module <module-name>
+"$SCAFFOLD_BIN" basecamp build --variant lgx-portable --module <module-name>
 "$SCAFFOLD_BIN" basecamp build-portable
-ls .scaffold/basecamp/portable 2>/dev/null || find .scaffold -maxdepth 4 -name '*lgx-portable*' -o -name '*.tgz' | sort
+find .scaffold/basecamp -maxdepth 3 -type f -o -type l | sort
 ```
 
 ### Expected Success Signals
 
-- `build-portable` builds `.#lgx-portable` for each `role = "project"` entry in `[modules]`, in dependency order, and writes / symlinks the resulting artefacts under `.scaffold/`.
-- `role = "dependency"` entries are skipped — the target AppImage provides its own copies.
-- A flake that does not expose `.#lgx-portable` fails with a targeted error naming the missing attribute, not a raw nix trace.
+- `basecamp build --variant all` builds both `.#lgx` and `.#lgx-portable` for each `role = "project"` entry in dependency order, then writes/symlinks outputs under `.scaffold/basecamp/<variant-dir>/`.
+- `--module <module-name>` builds only that captured project module and fails clearly for an unknown module.
+- `build-portable` behaves like `basecamp build --variant lgx-portable` and keeps the historical `.scaffold/basecamp/portable/` output directory.
+- `role = "dependency"` entries are skipped by build commands; dependencies are runtime inputs provided by install/basecamp.
+- A flake that does not expose the requested variant fails with a targeted error naming the missing attribute, not a raw nix trace or silent fallback.
 
 ### Failure Signals / Common Pitfalls
 
-- A `build-portable` that silently falls back from `.#lgx-portable` to `.#lgx` is a contract violation — the variant choice is the user's.
+- Any requested variant that silently falls back to another variant is a contract violation.
+- An empty, duplicated, unknown, or path-like variant value through the Rust API must be rejected or normalized before filesystem work.
 - Building dependency entries (those with `role = "dependency"`) is wasted work and a behavior regression.
 - Out-of-order builds that ignore the dependency graph between project sources are a regression introduced by changes to ordering logic.
 
 ### Evidence to Capture
 
-- `basecamp build-portable` output excerpt including the per-source build lines.
+- `basecamp build` and `basecamp build-portable` output excerpts including the per-source build lines.
 - The directory listing of the produced artefacts under `.scaffold/`.
 - For any failure, the exact missing flake attribute and the offending project source.
 
 ### Execution Notes
 
-- This scenario does not exercise the AppImage itself — it stops at producing artefacts. Hand-loading into a basecamp AppImage is owned by the AppImage release, not by scaffold.
+- This scenario does not exercise the AppImage itself. Hand-loading into a basecamp AppImage is owned by the AppImage release, not by scaffold.
+
+## B6. Captured Module Run Loop
+
+### Goal
+
+Validate that `basecamp run` launches a captured module from its flake for the local development loop, and that host selection is predictable.
+
+### Preconditions
+
+- B2 completed and `[modules.<name>]` contains at least one `role = "project"` module captured from a flake, not from a prebuilt `.lgx` file.
+- For standalone UI checks, the module flake exposes `apps.<system>.default` or the attr named by `[modules.<name>].standalone_app`.
+
+### Commands / Actions
+
+From the module project root:
+
+```bash
+"$SCAFFOLD_BIN" basecamp run <module-name> --host standalone
+"$SCAFFOLD_BIN" basecamp run <module-name>
+```
+
+For one negative-path check, capture or hand-edit a module entry that points at a prebuilt `.lgx` path and run:
+
+```bash
+"$SCAFFOLD_BIN" basecamp run <path-captured-module>
+```
+
+### Expected Success Signals
+
+- `--host standalone` invokes `nix run` for the module flake's default app, or `#<standalone_app>` when that config key is set.
+- With no `--host`, the run defaults to `standalone` (the only host today).
+- A module captured as a prebuilt `.lgx` path is rejected with guidance to edit/remove the entry and capture a flake source; `nix run` is not attempted.
+- Running a module as a configured Basecamp peer (one-shot build + install + launch) is not yet available; use `basecamp install` then `basecamp launch <profile>`. Tracked as follow-up work.
+
+### Failure Signals / Common Pitfalls
+
+- Running a `.lgx` path source through `nix run` is a regression; path captures are installable artefacts, not flake apps.
+- A remote flake ref without an explicit fragment must still receive the requested app/build attr when scaffold constructs the Nix command.
+- An omitted `standalone_app` must not serialize back as `standalone_app = ""`.
+
+### Evidence to Capture
+
+- Command output for standalone/default-host/basecamp-host paths.
+- The `[modules.<name>]` excerpt showing `flake`, `role`, optional `standalone_app`, and whether the source is a flake or `.lgx` path.
+- Any rejected `.lgx` path-source error verbatim.
 
 ## A1. Public Rust API Surface
 
@@ -1556,7 +1608,8 @@ HEAD0=$("$SCAFFOLD_BIN" test-node blocks head --url "$URL" --json | jq -r .block
 - Changes to `[modules]` derivation, dependency resolution, sibling `--override-input` handling, or `basecamp install` invocation of `lgpm`: rerun `B2`.
 - Changes to `basecamp launch` (kill-and-scrub semantics, XDG isolation, port-override env vars, p2p surface): rerun `B3`.
 - Changes to clean-slate scrub semantics or the empty `[modules]` guard on `launch`: rerun `B4`.
-- Changes to `basecamp build-portable` (project/dependency role split, ordering, attr selection): rerun `B5`.
+- Changes to `basecamp build`, `basecamp build-portable`, variant normalization, `--module` filtering, or build attr selection: rerun `B5`.
+- Changes to `basecamp run`, `standalone_app`, run host defaulting, or module source validation for run: rerun `B6`.
 - Changes to the public `logos_scaffold::api` surface (entry points, typed result models, categorized errors, `CommandFailed`, or the documented examples/doctests): rerun `A1`, and rerun the matching CLI scenario for any command whose `*_for_project` core changed.
 - Changes to `test-node` lifecycle, pin resolution, prepare/doctor, run-slot concurrency, or caller-checkout validation: rerun `T1` (and `A1` if the `api::testnode` lifecycle types changed).
 - Changes to the `test-node` RPC client (transaction outcomes, block/clock parsing, account/proof reads, or their JSON shapes): rerun `T2`.
