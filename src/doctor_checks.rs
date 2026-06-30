@@ -213,32 +213,35 @@ fn check_logos_blockchain_circuits_with(
         };
     }
 
+    // Mirror `circuits::installed_version_matches`: a missing/unreadable VERSION
+    // file is an older/renamed layout the installer treats as acceptable (it
+    // won't re-download), so `doctor` must not hard-fail on it — it just can't
+    // verify the installed version.
     let version_path = install_dir.join("VERSION");
-    let installed_version = match fs::read_to_string(&version_path) {
-        Ok(text) => text.trim().to_string(),
-        Err(err) => {
+    let installed_version = fs::read_to_string(&version_path)
+        .ok()
+        .map(|text| text.trim().to_string());
+
+    // Drift is only a failure when we can actually read the installed version.
+    if let Some(installed) = &installed_version {
+        if !version_eq(installed, &config.version) {
             return CheckRow {
                 status: CheckStatus::Fail,
                 name: "logos-blockchain-circuits".to_string(),
-                detail: format!("could not read {}: {err}", version_path.display()),
+                detail: format!(
+                    "installed version={} at {}; configured [circuits].version={}",
+                    installed,
+                    install_dir.display(),
+                    config.version
+                ),
                 remediation: Some("Run `logos-scaffold setup`".to_string()),
             };
         }
-    };
-
-    if !version_eq(&installed_version, &config.version) {
-        return CheckRow {
-            status: CheckStatus::Fail,
-            name: "logos-blockchain-circuits".to_string(),
-            detail: format!(
-                "installed version={} at {}; configured [circuits].version={}",
-                installed_version,
-                install_dir.display(),
-                config.version
-            ),
-            remediation: Some("Run `logos-scaffold setup`".to_string()),
-        };
     }
+
+    let version_label = installed_version
+        .as_deref()
+        .unwrap_or("unknown (no VERSION file)");
 
     if !version_eq(&config.version, DEFAULT_CIRCUITS_VERSION) {
         return CheckRow {
@@ -246,7 +249,7 @@ fn check_logos_blockchain_circuits_with(
             name: "logos-blockchain-circuits".to_string(),
             detail: format!(
                 "installed version={} at {}; scaffold's default circuits pin is {}",
-                installed_version,
+                version_label,
                 install_dir.display(),
                 DEFAULT_CIRCUITS_VERSION
             ),
@@ -261,7 +264,7 @@ fn check_logos_blockchain_circuits_with(
         name: "logos-blockchain-circuits".to_string(),
         detail: format!(
             "installed version={} at {}",
-            installed_version,
+            version_label,
             install_dir.display()
         ),
         remediation: None,
@@ -505,6 +508,20 @@ mod tests {
         assert_eq!(row.status, CheckStatus::Fail);
         assert!(row.detail.contains("installed version=9.9.9"), "{row:?}");
         assert!(row.detail.contains(DEFAULT_CIRCUITS_VERSION), "{row:?}");
+    }
+
+    #[test]
+    fn circuits_check_passes_when_version_file_is_absent() {
+        // An install with the sentinel but no VERSION file is an older/renamed
+        // layout the installer accepts (`installed_version_matches` returns
+        // true), so doctor must not hard-fail on it.
+        let tmp = tempdir().expect("tempdir");
+        let install = tmp.path().join(".scaffold/circuits");
+        fs::create_dir_all(install.join("pol")).expect("mkdir pol");
+        fs::write(install.join("pol/verification_key.json"), "{}").expect("write sentinel");
+        // deliberately no VERSION file
+        let row = check_logos_blockchain_circuits_with(None, &install, &default_circuits_config());
+        assert_eq!(row.status, CheckStatus::Pass, "{row:?}");
     }
 
     #[test]

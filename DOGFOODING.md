@@ -74,7 +74,7 @@ Scaffold is also consumable as a Rust library (`logos_scaffold::api`): the same 
 
 - Unix-like environment with `git`, `rustc`, `cargo`, `lsof`, `ps`, and `kill`.
 - Docker or Podman available for guest builds.
-- `logos-blockchain-circuits` release on disk when validating older projects without `[circuits]`: `LOGOS_BLOCKCHAIN_CIRCUITS=<path>` or `~/.logos-blockchain-circuits/`. New projects should carry a `[circuits]` table in `scaffold.toml`; `setup`, `build`, `build idl`, `localnet`, and test-node startup should resolve and materialize the configured release instead of relying on ambient shell state.
+- `logos-blockchain-circuits` release on disk when validating older projects without `[circuits]`: set `LOGOS_BLOCKCHAIN_CIRCUITS=<path>` (scaffold no longer consults `~/.logos-blockchain-circuits/`). New projects should carry a `[circuits]` table in `scaffold.toml`; `setup`, `build`, `build idl`, `localnet`, and test-node startup resolve and materialize the configured release instead of relying on ambient shell state.
 - No conflicting listener on the scaffold localnet port before `localnet start`.
 - Network access available for setup/build flows that fetch dependencies.
 - No preinstalled `wallet` binary is required. If one exists on `PATH`, do not treat it as the runtime under test for scaffold wallet scenarios.
