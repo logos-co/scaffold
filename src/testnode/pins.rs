@@ -177,6 +177,14 @@ fn resolve_pins_with_cache_root(
 
     let (circuits_version, circuits_version_origin) = match &overrides.circuits_version {
         Some(version) => (version.clone(), PinOrigin::CliOverride),
+        // `circuits.version` always carries a value (defaults to
+        // `DEFAULT_CIRCUITS_VERSION`), so an explicit non-default in
+        // `scaffold.toml` is the project pin — honour it here so `prepare`
+        // resolves the same version `start` provisions via the project config.
+        None if project.config.circuits.version != DEFAULT_CIRCUITS_VERSION => (
+            project.config.circuits.version.clone(),
+            PinOrigin::ProjectConfig,
+        ),
         None => (
             DEFAULT_CIRCUITS_VERSION.to_string(),
             PinOrigin::ScaffoldDefault,
@@ -673,6 +681,31 @@ mod tests {
         .unwrap();
         assert_eq!(pins.lez_ref, "v9.9.9");
         assert_eq!(pins.lez_ref_origin, PinOrigin::CliOverride);
+        assert_eq!(pins.circuits_version, "0.5.0");
+        assert_eq!(pins.circuits_version_origin, PinOrigin::CliOverride);
+    }
+
+    #[test]
+    fn circuits_version_prefers_project_config_over_default() {
+        let temp = tempdir().unwrap();
+        let mut project = fixture_project(temp.path(), RepoRef::default());
+        // A non-default `[circuits].version` is the project pin: `prepare`
+        // must resolve it (not the scaffold default) so it agrees with `start`.
+        project.config.circuits.version = "0.9.9".into();
+
+        let pins = resolve_test_node_pins(&project, &PinOverrides::default()).unwrap();
+        assert_eq!(pins.circuits_version, "0.9.9");
+        assert_eq!(pins.circuits_version_origin, PinOrigin::ProjectConfig);
+
+        // A CLI override still wins over the project pin.
+        let pins = resolve_test_node_pins(
+            &project,
+            &PinOverrides {
+                circuits_version: Some("0.5.0".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(pins.circuits_version, "0.5.0");
         assert_eq!(pins.circuits_version_origin, PinOrigin::CliOverride);
     }

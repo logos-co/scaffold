@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
-use crate::circuits::circuits_install_dir;
+use crate::circuits::{circuits_install_dir, version_eq};
 use crate::constants::{DEFAULT_CIRCUITS_VERSION, DEFAULT_LEZ, LOGOS_BLOCKCHAIN_CIRCUITS_ENV};
 use crate::model::{CheckRow, CheckStatus, CircuitsConfig};
 use crate::process::{port_open, which};
@@ -225,7 +225,7 @@ fn check_logos_blockchain_circuits_with(
         }
     };
 
-    if installed_version != config.version {
+    if !version_eq(&installed_version, &config.version) {
         return CheckRow {
             status: CheckStatus::Fail,
             name: "logos-blockchain-circuits".to_string(),
@@ -239,7 +239,7 @@ fn check_logos_blockchain_circuits_with(
         };
     }
 
-    if config.version != DEFAULT_CIRCUITS_VERSION {
+    if !version_eq(&config.version, DEFAULT_CIRCUITS_VERSION) {
         return CheckRow {
             status: CheckStatus::Warn,
             name: "logos-blockchain-circuits".to_string(),
@@ -504,6 +504,23 @@ mod tests {
         assert_eq!(row.status, CheckStatus::Fail);
         assert!(row.detail.contains("installed version=9.9.9"), "{row:?}");
         assert!(row.detail.contains(DEFAULT_CIRCUITS_VERSION), "{row:?}");
+    }
+
+    #[test]
+    fn circuits_check_passes_when_version_differs_only_by_v_prefix() {
+        // A `v`-prefixed `[circuits].version` against an unprefixed installed
+        // VERSION (or vice versa) is NOT drift — the install path already
+        // normalises the leading `v`, so `doctor` must not cry false drift or
+        // a spurious LEZ-pin warning.
+        let tmp = tempdir().expect("tempdir");
+        let install = tmp.path().join(".scaffold/circuits");
+        write_circuits_dir(&install, DEFAULT_CIRCUITS_VERSION);
+        let cfg = CircuitsConfig {
+            version: format!("v{DEFAULT_CIRCUITS_VERSION}"),
+            ..CircuitsConfig::default()
+        };
+        let row = check_logos_blockchain_circuits_with(None, &install, &cfg);
+        assert_eq!(row.status, CheckStatus::Pass, "{row:?}");
     }
 
     #[test]
