@@ -9,8 +9,9 @@ use anyhow::{anyhow, bail, Context};
 use serde_json::Value;
 
 use crate::circuits::ensure_circuits_for_subprocess;
-use crate::constants::{SEQUENCER_BIN_REL_PATH, SEQUENCER_CONFIG_REL_PATH};
+use crate::constants::{SEQUENCER_BIN_REL_PATH, SEQUENCER_CONFIG_REL_PATHS};
 use crate::error::{LocalnetError, ResetError};
+use crate::lez_layout::first_existing_lez_path;
 use crate::model::{
     LocalnetLogsReport, LocalnetOwnership, LocalnetState, LocalnetStatusReport, Project,
 };
@@ -727,7 +728,8 @@ fn build_status_report(
 /// deferral, scaffold widens the limit so the documented first-success path
 /// fits in a single block.
 fn prepare_sequencer_config(lez: &Path, dest_dir: &Path, port: u16) -> DynResult<PathBuf> {
-    let src_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
+    let src_path =
+        first_existing_lez_path(lez, SEQUENCER_CONFIG_REL_PATHS, "sequencer debug config")?;
     let text = fs::read_to_string(&src_path)
         .with_context(|| format!("failed to read {}", src_path.display()))?;
     let mut doc: Value =
@@ -1362,6 +1364,27 @@ mod tests {
             git_clean(&lez).unwrap(),
             "lez tree must remain clean after prepare_sequencer_config"
         );
+    }
+
+    #[test]
+    fn prepare_sequencer_config_accepts_nested_lez_layout() {
+        let temp = tempdir().unwrap();
+        let lez = temp.path().join("lez");
+        let state_dir = temp.path().join(".scaffold/state");
+
+        // Newer LEZ pins moved the repository payload under a `lez/` prefix.
+        // `localnet start` must find that config instead of only probing the
+        // pre-reorg flat path.
+        let config_path = lez.join("lez/sequencer/service/configs/debug/sequencer_config.json");
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(&config_path, "{\n  \"port\": 3040\n}\n").unwrap();
+
+        let dest = prepare_sequencer_config(&lez, &state_dir, 4050).unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
+
+        assert_eq!(doc["port"], serde_json::json!(4050));
+        assert_eq!(doc["max_block_size"], serde_json::json!("8 MiB"));
     }
 
     #[test]
