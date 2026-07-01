@@ -5,6 +5,8 @@ use std::path::Path;
 use anyhow::{anyhow, bail};
 
 use crate::commands::wallet_support::WALLET_CONFIG_PRIMARY;
+use crate::constants::WALLET_CONFIG_REL_PATHS;
+use crate::lez_layout::first_existing_lez_path;
 use crate::model::{BasecampState, LocalnetState};
 use crate::DynResult;
 
@@ -129,10 +131,8 @@ pub(crate) fn prepare_wallet_home(lez_repo: &Path, wallet_home: &Path) -> DynRes
     fs::create_dir_all(wallet_home)?;
     let cfg_dst = wallet_home.join(WALLET_CONFIG_PRIMARY);
     if !cfg_dst.exists() {
-        let cfg_src = lez_repo.join("wallet/configs/debug/wallet_config.json");
-        if !cfg_src.exists() {
-            bail!("missing wallet debug config in lez repo");
-        }
+        let cfg_src =
+            first_existing_lez_path(lez_repo, WALLET_CONFIG_REL_PATHS, "wallet debug config")?;
         fs::copy(cfg_src, cfg_dst)?;
     }
     Ok(())
@@ -196,5 +196,25 @@ mod tests {
         .unwrap();
         let loaded = read_basecamp_state(&path).expect("read legacy");
         assert_eq!(loaded.pin, "abc");
+    }
+
+    #[test]
+    fn prepare_wallet_home_accepts_nested_lez_layout() {
+        let tmp = tempdir().expect("tempdir");
+        let lez = tmp.path().join("lez");
+        let wallet_home = tmp.path().join("wallet-home");
+
+        // Newer LEZ pins moved the repository payload under a `lez/` prefix.
+        // Setup/reset reseeding should copy the wallet debug config from that
+        // layout when the old flat path is absent.
+        let cfg_src = lez.join("lez/wallet/configs/debug/wallet_config.json");
+        fs::create_dir_all(cfg_src.parent().unwrap()).expect("create nested wallet config dir");
+        fs::write(&cfg_src, "{ \"network\": \"debug\" }\n").expect("write wallet config");
+
+        prepare_wallet_home(&lez, &wallet_home).expect("prepare wallet home");
+
+        let copied = fs::read_to_string(wallet_home.join(WALLET_CONFIG_PRIMARY))
+            .expect("read copied wallet config");
+        assert_eq!(copied, "{ \"network\": \"debug\" }\n");
     }
 }
