@@ -40,7 +40,8 @@ use serde_json::Value;
 use crate::circuits::ensure_circuits_for_subprocess;
 use crate::commands::localnet::find_r0vm_path_for_lez;
 use crate::commands::wallet_support::{rpc_get_last_block_id, RpcReachabilityError};
-use crate::constants::{SEQUENCER_BIN_REL_PATH, SEQUENCER_CONFIG_REL_PATH};
+use crate::constants::{SEQUENCER_BIN_REL_PATH, SEQUENCER_CONFIG_REL_PATHS};
+use crate::lez_layout::first_existing_lez_path;
 use crate::model::Project;
 use crate::process::{pid_running, port_open, spawn_to_log};
 use crate::project::{resolve_cache_root, resolve_repo_path};
@@ -605,7 +606,8 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> DynResult<()> {
 /// `max_block_size` widened (same rationale as localnet). Returns the config
 /// path and the genesis block id.
 fn write_node_config(lez: &Path, work_dir: &Path, port: u16) -> DynResult<(PathBuf, u64)> {
-    let src_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
+    let src_path =
+        first_existing_lez_path(lez, SEQUENCER_CONFIG_REL_PATHS, "sequencer debug config")?;
     let text = fs::read_to_string(&src_path)
         .with_context(|| format!("failed to read {}", src_path.display()))?;
     let mut doc: Value =
@@ -781,6 +783,7 @@ pub fn acquire_run_slot(cache_root: &Path, max_parallel: usize) -> DynResult<Run
 mod tests {
     use std::fs;
 
+    use crate::constants::SEQUENCER_CONFIG_REL_PATH;
     use tempfile::tempdir;
 
     use super::*;
@@ -814,6 +817,33 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
         assert_eq!(src["home"], serde_json::json!("."));
         assert_eq!(src["port"], serde_json::json!(3040));
+    }
+
+    #[test]
+    fn write_node_config_accepts_nested_lez_layout() {
+        let temp = tempdir().unwrap();
+        let lez = temp.path().join("lez");
+        let work = temp.path().join("node");
+        fs::create_dir_all(&work).unwrap();
+
+        // Newer LEZ pins moved the repository payload under a `lez/` prefix.
+        // Test-node startup should use the same config probing as localnet.
+        let config_path = lez.join("lez/sequencer/service/configs/debug/sequencer_config.json");
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(
+            &config_path,
+            r#"{ "home": ".", "genesis_id": 7, "port": 3040 }"#,
+        )
+        .unwrap();
+
+        let (dest, genesis) = write_node_config(&lez, &work, 41235).unwrap();
+        assert_eq!(genesis, 7);
+
+        let doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
+        assert_eq!(doc["home"], serde_json::json!(work.display().to_string()));
+        assert_eq!(doc["port"], serde_json::json!(41235));
+        assert_eq!(doc["max_block_size"], serde_json::json!("8 MiB"));
     }
 
     #[test]
