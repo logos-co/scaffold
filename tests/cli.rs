@@ -1372,7 +1372,7 @@ fn test_node_timing_flags_reject_duration_suffixes() {
                     .arg(flag)
                     .arg(value);
                 if subcommand == "run" {
-                    command.arg("--").arg("true");
+                    command.arg("--").arg("not-executed");
                 }
                 command
                     .assert()
@@ -1400,7 +1400,7 @@ fn test_node_timing_flags_reject_out_of_range_milliseconds() {
         .arg("--retry-pending-blocks-timeout-ms")
         .arg("3600001")
         .arg("--")
-        .arg("true")
+        .arg("not-executed")
         .assert()
         .failure()
         .stderr(predicate::str::contains(

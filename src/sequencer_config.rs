@@ -90,8 +90,7 @@ mod tests {
         let config_path = lez.join(SEQUENCER_CONFIG_NESTED_REL_PATH);
         let dest_dir = temp.path().join("runtime");
         fs::create_dir_all(config_path.parent().expect("parent")).expect("create config dir");
-        fs::write(&config_path, r#"{"home": ".", "genesis_id": 7}"#)
-            .expect("write source config");
+        fs::write(&config_path, r#"{"home": ".", "genesis_id": 7}"#).expect("write source config");
 
         let (dest_path, genesis_id) = patch_runtime_sequencer_config(&lez, &dest_dir, |obj| {
             obj.insert("port".to_string(), Value::Number(30_400.into()));
