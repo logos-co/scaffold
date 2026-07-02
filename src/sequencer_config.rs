@@ -108,10 +108,12 @@ mod tests {
     }
 
     #[test]
-    fn patch_runtime_sequencer_config_allows_same_process_parallel_writes() {
+    fn patch_runtime_sequencer_config_produces_valid_json_under_concurrent_writes() {
         let temp = tempdir().expect("tempdir");
         let lez = write_source_config(temp.path());
         let dest_dir = temp.path().join("runtime");
+        // Concurrent node starts must target distinct --work-dir values; this only
+        // verifies atomic replacement leaves a valid final config.
         let barrier = Arc::new(Barrier::new(8));
 
         let handles: Vec<_> = (0..8)
