@@ -3373,12 +3373,12 @@ fn run_test_node_and_observe_config(
         .arg("-c")
         .arg(
             "import json, os, sys\n\
-             cfg = json.load(open(os.environ['LGS_TEST_NODE_CONFIG_PATH']))\n\
+             cfg = json.load(open(os.environ['LGS_TEST_NODE_CONFIG_PATH'], encoding='utf-8'))\n\
              json.dump({\n\
                  'config_path': os.environ['LGS_TEST_NODE_CONFIG_PATH'],\n\
                  'block_create_timeout': cfg.get('block_create_timeout'),\n\
                  'retry_pending_blocks_timeout': cfg.get('retry_pending_blocks_timeout'),\n\
-             }, open(sys.argv[1], 'w'))\n",
+             }, open(sys.argv[1], 'w', encoding='utf-8'))\n",
         )
         .arg(&observed_path)
         .assert()
