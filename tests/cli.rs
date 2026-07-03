@@ -15,6 +15,15 @@ use predicates::prelude::*;
 use tar::Archive;
 use tempfile::tempdir;
 
+#[cfg(unix)]
+mod common;
+
+#[cfg(unix)]
+use common::test_node::{
+    assert_test_node_launched_with_config, setup_test_node_project, test_node_observed_config_path,
+    TestNodeFixtures,
+};
+
 const TEST_PIN: &str = "767b5afd388c7981bcdf6f5b5c80159607e07e5b";
 const VALID_ACCOUNT_ID: &str = "6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV";
 const VALID_PUBLIC_ADDRESS: &str = "Public/6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV";
@@ -1185,6 +1194,218 @@ fn localnet_start_patches_config_and_uses_configured_port() {
 
     let env = fs::read_to_string(&env_log).expect("read env log");
     assert_eq!(env, "0", "expected risc0 dev mode override to be passed");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_node_start_patches_block_timing_flags() {
+    let temp = tempdir().expect("tempdir");
+    let fixtures = setup_test_node_project(temp.path());
+    let work_dir = temp.path().join("node-work");
+
+    let runtime_json = start_test_node_and_read_runtime_config(
+        temp.path(),
+        &fixtures,
+        &work_dir,
+        &[
+            "--block-create-timeout-ms",
+            "100",
+            "--retry-pending-blocks-timeout-ms",
+            "250",
+        ],
+    );
+    assert_eq!(
+        runtime_json["block_create_timeout"],
+        serde_json::json!("100ms")
+    );
+    assert_eq!(
+        runtime_json["retry_pending_blocks_timeout"],
+        serde_json::json!("250ms")
+    );
+
+    assert_vendored_test_node_timing_preserved(&fixtures);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_node_start_preserves_block_timing_without_flags() {
+    let temp = tempdir().expect("tempdir");
+    let fixtures = setup_test_node_project(temp.path());
+    let work_dir = temp.path().join("node-work");
+
+    let runtime_json =
+        start_test_node_and_read_runtime_config(temp.path(), &fixtures, &work_dir, &[]);
+    assert_eq!(
+        runtime_json["block_create_timeout"],
+        serde_json::json!("2s")
+    );
+    assert_eq!(
+        runtime_json["retry_pending_blocks_timeout"],
+        serde_json::json!("3s")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_node_start_preserves_unset_block_timing_field() {
+    let temp = tempdir().expect("tempdir");
+    let fixtures = setup_test_node_project(temp.path());
+    let work_dir = temp.path().join("node-work");
+
+    let runtime_json = start_test_node_and_read_runtime_config(
+        temp.path(),
+        &fixtures,
+        &work_dir,
+        &["--block-create-timeout-ms", "100"],
+    );
+    assert_eq!(
+        runtime_json["block_create_timeout"],
+        serde_json::json!("100ms")
+    );
+    assert_eq!(
+        runtime_json["retry_pending_blocks_timeout"],
+        serde_json::json!("3s")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_node_run_patches_block_timing_flags_for_child_command() {
+    let temp = tempdir().expect("tempdir");
+    let fixtures = setup_test_node_project(temp.path());
+
+    let observed_json = run_test_node_and_observe_config(
+        temp.path(),
+        &fixtures,
+        &[
+            "--block-create-timeout-ms",
+            "101",
+            "--retry-pending-blocks-timeout-ms",
+            "251",
+        ],
+    );
+    assert_eq!(
+        observed_json["block_create_timeout"],
+        serde_json::json!("101ms")
+    );
+    assert_eq!(
+        observed_json["retry_pending_blocks_timeout"],
+        serde_json::json!("251ms")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_node_run_preserves_block_timing_without_flags_for_child_command() {
+    let temp = tempdir().expect("tempdir");
+    let fixtures = setup_test_node_project(temp.path());
+
+    let observed_json = run_test_node_and_observe_config(temp.path(), &fixtures, &[]);
+    assert_eq!(
+        observed_json["block_create_timeout"],
+        serde_json::json!("2s")
+    );
+    assert_eq!(
+        observed_json["retry_pending_blocks_timeout"],
+        serde_json::json!("3s")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_node_run_preserves_unset_block_timing_field_for_child_command() {
+    let temp = tempdir().expect("tempdir");
+    let fixtures = setup_test_node_project(temp.path());
+
+    let observed_json = run_test_node_and_observe_config(
+        temp.path(),
+        &fixtures,
+        &["--retry-pending-blocks-timeout-ms", "251"],
+    );
+    assert_eq!(
+        observed_json["block_create_timeout"],
+        serde_json::json!("2s")
+    );
+    assert_eq!(
+        observed_json["retry_pending_blocks_timeout"],
+        serde_json::json!("251ms")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_node_run_forwards_child_exit_status_with_block_timing_flags() {
+    let temp = tempdir().expect("tempdir");
+    let fixtures = setup_test_node_project(temp.path());
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .env("LOGOS_BLOCKCHAIN_CIRCUITS", &fixtures.circuits_path)
+        .arg("test-node")
+        .arg("run")
+        .arg("--block-create-timeout-ms")
+        .arg("100")
+        .arg("--retry-pending-blocks-timeout-ms")
+        .arg("100")
+        .arg("--timeout-sec")
+        .arg("5")
+        .arg("--")
+        .arg(&fixtures.python_path)
+        .arg("-c")
+        .arg("import sys; sys.exit(7)")
+        .assert()
+        .code(7);
+}
+
+#[test]
+fn test_node_timing_flags_reject_duration_suffixes() {
+    for subcommand in ["start", "run"] {
+        for flag in [
+            "--block-create-timeout-ms",
+            "--retry-pending-blocks-timeout-ms",
+        ] {
+            for value in ["100ms", "1s", "1m", "1h"] {
+                let mut command = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"));
+                command
+                    .arg("test-node")
+                    .arg(subcommand)
+                    .arg(flag)
+                    .arg(value);
+                if subcommand == "run" {
+                    command.arg("--").arg("not-executed");
+                }
+                command
+                    .assert()
+                    .failure()
+                    .stderr(predicate::str::contains(flag));
+            }
+        }
+    }
+}
+
+#[test]
+fn test_node_timing_flags_reject_out_of_range_milliseconds() {
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .arg("test-node")
+        .arg("start")
+        .arg("--block-create-timeout-ms")
+        .arg("0")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--block-create-timeout-ms"));
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .arg("test-node")
+        .arg("run")
+        .arg("--retry-pending-blocks-timeout-ms")
+        .arg("3600001")
+        .arg("--")
+        .arg("not-executed")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--retry-pending-blocks-timeout-ms",
+        ));
 }
 
 #[test]
@@ -3092,6 +3313,177 @@ fn archive_entry_content<'a>(entries: &'a [(String, String)], suffix: &str) -> &
 
 fn write_scaffold_toml(project_root: &Path, lez_path: &Path) {
     write_scaffold_toml_with_localnet(project_root, lez_path, None, None);
+}
+
+#[cfg(unix)]
+fn start_test_node_and_read_runtime_config(
+    project_root: &Path,
+    fixtures: &TestNodeFixtures,
+    work_dir: &Path,
+    extra_args: &[&str],
+) -> serde_json::Value {
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"));
+    command
+        .current_dir(project_root)
+        .env("LOGOS_BLOCKCHAIN_CIRCUITS", &fixtures.circuits_path)
+        .arg("test-node")
+        .arg("start")
+        .arg("--work-dir")
+        .arg(work_dir)
+        .arg("--preserve-work-dir");
+    command.args(extra_args);
+    command
+        .arg("--timeout-sec")
+        .arg("5")
+        .arg("--json")
+        .assert()
+        .success();
+
+    TestNodeStopGuard::new(project_root, work_dir, true).stop();
+
+    let runtime_config_path = work_dir.join("sequencer_config.json");
+    assert_test_node_launched_with_config(
+        &fixtures.sequencer_observation_path,
+        &runtime_config_path,
+    );
+    let runtime_config =
+        fs::read_to_string(&runtime_config_path).expect("read runtime sequencer config");
+    serde_json::from_str(&runtime_config).expect("parse runtime sequencer config")
+}
+
+#[cfg(unix)]
+fn run_test_node_and_observe_config(
+    project_root: &Path,
+    fixtures: &TestNodeFixtures,
+    extra_args: &[&str],
+) -> serde_json::Value {
+    let observed_path = project_root.join("observed-config.json");
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"));
+    command
+        .current_dir(project_root)
+        .env("LOGOS_BLOCKCHAIN_CIRCUITS", &fixtures.circuits_path)
+        .arg("test-node")
+        .arg("run");
+    command.args(extra_args);
+    command
+        .arg("--timeout-sec")
+        .arg("5")
+        .arg("--")
+        .arg(&fixtures.python_path)
+        .arg("-c")
+        .arg(
+            "import json, os, sys\n\
+             cfg = json.load(open(os.environ['LGS_TEST_NODE_CONFIG_PATH'], encoding='utf-8'))\n\
+             json.dump({\n\
+                 'config_path': os.environ['LGS_TEST_NODE_CONFIG_PATH'],\n\
+                 'block_create_timeout': cfg.get('block_create_timeout'),\n\
+                 'retry_pending_blocks_timeout': cfg.get('retry_pending_blocks_timeout'),\n\
+             }, open(sys.argv[1], 'w', encoding='utf-8'))\n",
+        )
+        .arg(&observed_path)
+        .assert()
+        .success();
+
+    let observed = fs::read_to_string(&observed_path).expect("read observed config");
+    let observed_json: serde_json::Value =
+        serde_json::from_str(&observed).expect("parse observed config");
+    let sequencer_config_path =
+        test_node_observed_config_path(&fixtures.sequencer_observation_path);
+    assert_eq!(
+        observed_json["config_path"],
+        serde_json::json!(sequencer_config_path.display().to_string())
+    );
+    observed_json
+}
+
+#[cfg(unix)]
+fn assert_vendored_test_node_timing_preserved(fixtures: &TestNodeFixtures) {
+    let vendored_config =
+        fs::read_to_string(&fixtures.config_path).expect("read vendored sequencer config");
+    let vendored_json: serde_json::Value =
+        serde_json::from_str(&vendored_config).expect("parse vendored sequencer config");
+    assert_eq!(
+        vendored_json["block_create_timeout"],
+        serde_json::json!("2s")
+    );
+    assert_eq!(
+        vendored_json["retry_pending_blocks_timeout"],
+        serde_json::json!("3s")
+    );
+}
+
+#[cfg(unix)]
+struct TestNodeStopGuard {
+    project_root: PathBuf,
+    work_dir: PathBuf,
+    preserve_work_dir: bool,
+    active: bool,
+}
+
+#[cfg(unix)]
+impl TestNodeStopGuard {
+    fn new(project_root: &Path, work_dir: &Path, preserve_work_dir: bool) -> Self {
+        Self {
+            project_root: project_root.to_path_buf(),
+            work_dir: work_dir.to_path_buf(),
+            preserve_work_dir,
+            active: true,
+        }
+    }
+
+    fn stop(mut self) {
+        test_node_stop_command(&self.project_root, &self.work_dir, self.preserve_work_dir)
+            .assert()
+            .success();
+        self.active = false;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for TestNodeStopGuard {
+    fn drop(&mut self) {
+        if self.active {
+            match test_node_stop_command(&self.project_root, &self.work_dir, self.preserve_work_dir)
+                .output()
+            {
+                Ok(output) if output.status.success() => {}
+                Ok(output) => {
+                    eprintln!(
+                        "test-node cleanup failed for {}: status={}\nstdout:\n{}\nstderr:\n{}",
+                        self.work_dir.display(),
+                        output.status,
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                Err(err) => {
+                    eprintln!(
+                        "test-node cleanup failed for {}: {err}",
+                        self.work_dir.display()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn test_node_stop_command(
+    project_root: &Path,
+    work_dir: &Path,
+    preserve_work_dir: bool,
+) -> Command {
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"));
+    command
+        .current_dir(project_root)
+        .arg("test-node")
+        .arg("stop")
+        .arg("--node")
+        .arg(work_dir);
+    if preserve_work_dir {
+        command.arg("--preserve-work-dir");
+    }
+    command
 }
 
 fn write_scaffold_toml_with_localnet(

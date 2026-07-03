@@ -823,8 +823,32 @@ struct TestNodeStartArgs {
     /// Seconds to wait for the node to become healthy.
     #[arg(long, default_value_t = crate::testnode::DEFAULT_TEST_NODE_TIMEOUT_SEC)]
     timeout_sec: u64,
+    #[command(flatten)]
+    block_timing: BlockTimingArgs,
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct BlockTimingArgs {
+    /// Override sequencer block_create_timeout in milliseconds.
+    #[arg(
+        long,
+        value_name = "MS",
+        value_parser = clap::value_parser!(u64).range(
+            crate::testnode::MIN_BLOCK_TIMING_TIMEOUT_MS..=crate::testnode::MAX_BLOCK_TIMING_TIMEOUT_MS
+        )
+    )]
+    block_create_timeout_ms: Option<u64>,
+    /// Override sequencer retry_pending_blocks_timeout in milliseconds.
+    #[arg(
+        long,
+        value_name = "MS",
+        value_parser = clap::value_parser!(u64).range(
+            crate::testnode::MIN_BLOCK_TIMING_TIMEOUT_MS..=crate::testnode::MAX_BLOCK_TIMING_TIMEOUT_MS
+        )
+    )]
+    retry_pending_blocks_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -869,6 +893,8 @@ struct TestNodeRunArgs {
     /// Seconds to wait for the node to become healthy before running the command.
     #[arg(long, default_value_t = crate::testnode::DEFAULT_TEST_NODE_TIMEOUT_SEC)]
     timeout_sec: u64,
+    #[command(flatten)]
+    block_timing: BlockTimingArgs,
     /// Command (after `--`) to run with the node's connection exported.
     #[arg(last = true, required = true)]
     command: Vec<String>,
@@ -1222,6 +1248,12 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                     work_dir: args.work_dir,
                     preserve_work_dir: args.preserve_work_dir,
                     timeout_sec: args.timeout_sec,
+                    block_timing: crate::testnode::BlockTimingOverrides {
+                        block_create_timeout_ms: args.block_timing.block_create_timeout_ms,
+                        retry_pending_blocks_timeout_ms: args
+                            .block_timing
+                            .retry_pending_blocks_timeout_ms,
+                    },
                     json: args.json,
                 },
                 TestNodeSubcommand::Status(args) => TestNodeAction::Status {
@@ -1240,6 +1272,12 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                     serial: args.serial,
                     parallel: args.parallel,
                     timeout_sec: args.timeout_sec,
+                    block_timing: crate::testnode::BlockTimingOverrides {
+                        block_create_timeout_ms: args.block_timing.block_create_timeout_ms,
+                        retry_pending_blocks_timeout_ms: args
+                            .block_timing
+                            .retry_pending_blocks_timeout_ms,
+                    },
                     command: args.command,
                 },
                 TestNodeSubcommand::Tx(tx) => match tx.command {

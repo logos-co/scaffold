@@ -1324,7 +1324,7 @@ From the generated project root:
 # capture the node id (state_dir basename) and rpc_url from the JSON
 "$SCAFFOLD_BIN" test-node status --node <node-id> --json
 "$SCAFFOLD_BIN" test-node stop --node <node-id>
-"$SCAFFOLD_BIN" test-node run --serial -- sh -c 'echo "rpc=$LGS_TEST_NODE_RPC_URL port=$LGS_TEST_NODE_PORT"'
+"$SCAFFOLD_BIN" test-node run --serial --block-create-timeout-ms 500 --retry-pending-blocks-timeout-ms 500 -- sh -c 'echo "rpc=$LGS_TEST_NODE_RPC_URL port=$LGS_TEST_NODE_PORT"'
 ```
 
 The pin/prepare/doctor commands also accept `--project <root>` so they can be driven from outside the project directory.
@@ -1336,6 +1336,7 @@ The pin/prepare/doctor commands also accept `--project <root>` so they can be dr
 - `test-node prepare` resolves the project's pins, ensures the checkout + circuits, builds the standalone sequencer, and (with `--json`) reports the checkout, resolved commit, binary path, and circuits path.
 - `test-node start --json` prints at least `rpc_url`, `pid`, `state_dir`, `config_path`, `log_path`, `genesis_block_id`, and current `block_height`; the node runs on its own port under `.scaffold/test-nodes/<id>/` and does not touch the vendored LEZ checkout or the developer localnet.
 - `test-node start --port 0` (the default) selects an unused localhost port; `test-node status --node <id> --json` reports `healthy` and the served `rpc_url`, exiting non-zero when unhealthy.
+- `test-node start` / `test-node run` with `--block-create-timeout-ms` and `--retry-pending-blocks-timeout-ms` patch those sequencer config values as millisecond strings (for example, `500ms` for faster local tests) in the runtime `sequencer_config.json`; accepted values are 1 to 3,600,000 ms, and omitting them preserves the pinned debug config values. Values near or below the stable-read sample cadence can keep `clock wait-stable` and account-boundary reads from converging.
 - `test-node stop --node <id>` terminates only that node and removes its runtime state (unless `--preserve-work-dir`).
 - `test-node run -- <cmd>` starts a node, waits for health, exports `LGS_TEST_NODE_RPC_URL` / `LGS_TEST_NODE_PORT` / `LGS_TEST_NODE_STATE_DIR` (and friends) to the child, forwards the child's exit status, and stops the node afterward; `--serial` caps concurrent node creation at one and `--parallel N` at N.
 
