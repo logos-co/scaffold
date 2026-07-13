@@ -26,8 +26,8 @@ use super::wallet_support::{
 /// compiles via `crate::constants::METHODS_DIR`; keep them in sync.
 const GUEST_BIN_SEARCH_ROOTS: &[&str] = &["target/riscv-guest", "methods/target"];
 
-/// `spel inspect` line prefix that carries the risc0 image ID — the value the
-/// sequencer uses as the on-chain program ID. Format is whitespace-tolerant:
+/// `spel -- program-id` line prefix that carries the risc0 image ID — the value
+/// the sequencer uses as the on-chain program ID. Format is whitespace-tolerant:
 /// `   ImageID (hex bytes): <64 hex chars>`.
 const SPEL_IMAGE_ID_PREFIX: &str = "ImageID (hex bytes):";
 
@@ -476,7 +476,8 @@ pub(crate) fn extract_program_id(spel_bin: &Path, binary_path: &Path) -> Option<
         .unwrap_or(SPEL_INSPECT_TIMEOUT);
 
     let mut child = Command::new(spel_bin)
-        .arg("inspect")
+        .arg("--")
+        .arg("program-id")
         .arg(binary_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
