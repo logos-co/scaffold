@@ -148,6 +148,12 @@ jobs:
           bash "$RUNNER_TEMP/rzup-install.sh"
           echo "$HOME/.risc0/bin" >> "$GITHUB_PATH"
           "$HOME/.risc0/bin/rzup" install rust
+          # Guest deps that compile C sources (e.g. `ring` in the lez-framework
+          # guest) additionally need risc0's C++ cross-toolchain. When it is
+          # missing, risc0-build points CC at a sentinel path
+          # (/no_risc0_cpp_toolchain_installed_run_rzup_install_cpp) and the
+          # guest build dies in cc-rs compiler detection.
+          "$HOME/.risc0/bin/rzup" install cpp
 
       - name: Build rendered project workspace
         run: |
