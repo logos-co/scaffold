@@ -402,7 +402,18 @@ fn parse_modules(doc: &DocumentMut) -> DynResult<std::collections::BTreeMap<Stri
             ),
         };
         check_toml_value(&format!("modules.{name}.flake"), &flake)?;
-        out.insert(name.to_string(), ModuleEntry { flake, role });
+        let standalone_app = read_string(table, "standalone_app").filter(|s| !s.is_empty());
+        if let Some(app) = &standalone_app {
+            check_toml_value(&format!("modules.{name}.standalone_app"), app)?;
+        }
+        out.insert(
+            name.to_string(),
+            ModuleEntry {
+                flake,
+                role,
+                standalone_app,
+            },
+        );
     }
     Ok(out)
 }
@@ -615,6 +626,10 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
         let table = ensure_subtable(&mut doc, "modules", name);
         table["flake"] = value(&entry.flake);
         table["role"] = value(role_str);
+        if let Some(app) = &entry.standalone_app {
+            check_toml_value(&format!("modules.{name}.standalone_app"), app)?;
+            table["standalone_app"] = value(app);
+        }
         // Defensive: the function's check above already covered both fields.
         let _ = path;
     }
@@ -1208,6 +1223,50 @@ role = "dependency"
         assert_eq!(tic.role, ModuleRole::Project);
         let dm = cfg.modules.get("delivery_module").expect("dm");
         assert_eq!(dm.role, ModuleRole::Dependency);
+    }
+
+    #[test]
+    fn module_standalone_app_parses_and_round_trips() {
+        let toml = minimal_v0_2_0()
+            + r#"
+[modules.swap_ui]
+flake = "path:./swap-ui#lgx"
+role = "project"
+standalone_app = "swap-ui-standalone"
+
+[modules.swap]
+flake = "path:./swap#lgx"
+role = "project"
+"#;
+        let cfg = parse_config(toml.as_str()).expect("parse");
+        assert_eq!(
+            cfg.modules
+                .get("swap_ui")
+                .expect("swap_ui")
+                .standalone_app
+                .as_deref(),
+            Some("swap-ui-standalone")
+        );
+        // A module that omits the field must stay `None` (not `Some("")`).
+        assert_eq!(cfg.modules.get("swap").expect("swap").standalone_app, None);
+
+        let serialized = serialize_config(&cfg).expect("serialize");
+        let cfg2 = parse_config(&serialized).expect("re-parse");
+        assert_eq!(
+            cfg2.modules
+                .get("swap_ui")
+                .expect("swap_ui")
+                .standalone_app
+                .as_deref(),
+            Some("swap-ui-standalone"),
+            "standalone_app must survive serialize→parse so setup never clobbers it"
+        );
+        assert_eq!(cfg2.modules.get("swap").expect("swap").standalone_app, None);
+        // An omitted/empty value must not be persisted as `standalone_app = ""`.
+        assert!(
+            !serialized.contains("standalone_app = \"\""),
+            "empty standalone_app should be omitted: {serialized}"
+        );
     }
 
     #[test]

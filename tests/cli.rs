@@ -2860,6 +2860,65 @@ fn basecamp_develop_unknown_module_errors_with_known_list() {
         );
 }
 
+#[test]
+fn basecamp_build_without_captured_modules_errors_before_nix() {
+    // The empty-modules guard runs before the `nix` presence check, so this is
+    // deterministic in CI: `build` never discovers, it only builds captured
+    // project sources.
+    let temp = tempdir().expect("tempdir");
+    fs::write(temp.path().join("scaffold.toml"), MINIMAL_SCAFFOLD_TOML)
+        .expect("write scaffold.toml");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["basecamp", "build"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no project modules captured"));
+}
+
+#[test]
+fn basecamp_build_unknown_module_errors_with_project_list() {
+    // The `--module` filter is validated before the `nix` presence check, so
+    // an unknown name fails fast and lists the captured project modules.
+    let temp = tempdir().expect("tempdir");
+    let toml = format!(
+        "{MINIMAL_SCAFFOLD_TOML}\n[modules.swap_module]\nflake = \"github:logos-co/swap-module#lgx\"\nrole = \"project\"\n"
+    );
+    fs::write(temp.path().join("scaffold.toml"), toml).expect("write scaffold.toml");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["basecamp", "build", "--module", "nonexistent"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("no project module `nonexistent`")
+                .and(predicate::str::contains("swap_module")),
+        );
+}
+
+#[test]
+fn basecamp_run_unknown_module_errors_with_known_list() {
+    // `run`'s module lookup runs before the `nix` presence check (mirrors
+    // `develop`), so an unknown module name is deterministic in CI.
+    let temp = tempdir().expect("tempdir");
+    let toml = format!(
+        "{MINIMAL_SCAFFOLD_TOML}\n[modules.swap_module]\nflake = \"github:logos-co/swap-module#lgx\"\nrole = \"project\"\n"
+    );
+    fs::write(temp.path().join("scaffold.toml"), toml).expect("write scaffold.toml");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["basecamp", "run", "nonexistent"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("no module `nonexistent`")
+                .and(predicate::str::contains("swap_module")),
+        );
+}
+
 #[cfg(unix)]
 #[test]
 fn self_test_run_logged_success_shape() {

@@ -662,8 +662,23 @@ pub enum BasecampCommand {
         module: String,
         dev_shell: Option<String>,
     },
-    /// Attr-swap replay producing portable module builds.
+    /// Build project-module `.lgx` artefacts for one or more flake variants
+    /// (`lgx`, `lgx-portable`) without installing them. `module` narrows the
+    /// build to a single captured project module.
+    Build {
+        variants: Vec<String>,
+        module: Option<String>,
+    },
+    /// Attr-swap replay producing portable module builds (alias for
+    /// `Build { variants: ["lgx-portable"], module: None }`).
     BuildPortable,
+    /// Run a captured module via `nix run`. `host` accepts `standalone` (the
+    /// only host today, and the default when `None`); running a module as a
+    /// configured Basecamp peer is tracked as separate follow-up work.
+    Run {
+        module: String,
+        host: Option<String>,
+    },
     /// Basecamp-specific health checks.
     Doctor,
 }
@@ -686,7 +701,12 @@ impl BasecampCommand {
             },
             Self::Launch { profile } => BasecampAction::Launch { profile },
             Self::Develop { module, dev_shell } => BasecampAction::Develop { module, dev_shell },
-            Self::BuildPortable => BasecampAction::BuildPortable,
+            Self::Build { variants, module } => BasecampAction::Build { variants, module },
+            Self::BuildPortable => BasecampAction::Build {
+                variants: vec!["lgx-portable".to_string()],
+                module: None,
+            },
+            Self::Run { module, host } => BasecampAction::Run { module, host },
             Self::Doctor => BasecampAction::Doctor { json: false },
         }
     }
