@@ -27,10 +27,7 @@ pub mod runner_support {
 
 // Host-side program definition for IDL extraction and testing.
 // The guest binary (methods/guest) handles zkvm execution.
-use lez_framework::prelude::*;
-use lez_framework::error::{LezError, LezResult};
-use lez_framework_core::types::LezOutput;
-use nssa_core::program::AccountPostState;
+use spel_framework::prelude::*;
 use nssa_core::account::AccountWithMetadata;
 
 #[lez_program]
@@ -44,28 +41,21 @@ mod lez_counter {
         counter: AccountWithMetadata,
         #[account(signer)]
         authority: AccountWithMetadata,
-    ) -> LezResult {
-        Ok(LezOutput::states_only(vec![
-            AccountPostState::new_claimed(counter.account.clone()),
-            AccountPostState::new(authority.account.clone()),
-        ]))
+    ) -> SpelResult {
+        Ok(SpelOutput::execute(vec![counter, authority], vec![]))
     }
 
     #[instruction]
     pub fn increment(
         #[account(mut, pda = literal("counter"))]
-        counter: AccountWithMetadata,
+        mut counter: AccountWithMetadata,
         #[account(signer)]
         authority: AccountWithMetadata,
         amount: u64,
-    ) -> LezResult {
-        let mut counter_post = counter.account.clone();
-        counter_post.balance += amount as u128;
+    ) -> SpelResult {
+        counter.account.balance += amount as u128;
 
-        Ok(LezOutput::states_only(vec![
-            AccountPostState::new(counter_post),
-            AccountPostState::new(authority.account.clone()),
-        ]))
+        Ok(SpelOutput::execute(vec![counter, authority], vec![]))
     }
 }
 

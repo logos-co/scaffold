@@ -31,12 +31,6 @@ concurrency:
 jobs:
   render-and-build:
     runs-on: ubuntu-latest
-    # The lez-framework template currently can't build: the spel-generated
-    # `#[lez_program]` macro calls an `nssa_core::program` function the pinned
-    # DEFAULT_LEZ removed (a DEFAULT_SPEL <-> DEFAULT_LEZ pin mismatch, not a
-    # template bug). Let that leg fail without blocking, while the `default`
-    # leg gates merges. Tracked in #225 — drop this once the pins realign.
-    continue-on-error: ${{ matrix.template == 'lez-framework' }}
     strategy:
       fail-fast: false
       matrix:
