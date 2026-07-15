@@ -298,7 +298,10 @@ fn download_to_tempfile(url: &str) -> DynResult<tempfile::NamedTempFile> {
         .map_err(|e| anyhow!("spawn curl for {url}: {e}"))?;
 
     if !status.success() {
-        bail!("curl failed to download {url} ({status})");
+        bail!(
+            "curl failed to download {url} ({status}). Run `logos-scaffold doctor` for \
+             diagnostics, then retry `logos-scaffold setup`."
+        );
     }
 
     let len = tmp

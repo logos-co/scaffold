@@ -30,8 +30,8 @@ use crate::constants::{
 };
 use crate::model::{
     BasecampConfig, BasecampProfile, CircuitsConfig, Config, FrameworkConfig, FrameworkIdlConfig,
-    LocalnetConfig,
-    ModuleEntry, ModuleRole, RepoBuild, RepoRef, RunConfig, RunProfile, WatchConfig,
+    LocalnetConfig, ModuleEntry, ModuleRole, RepoBuild, RepoRef, RunConfig, RunProfile,
+    WatchConfig,
 };
 use crate::DynResult;
 
@@ -647,6 +647,7 @@ fn parse_circuits(doc: &DocumentMut) -> DynResult<CircuitsConfig> {
     check_toml_value("circuits.version", &version)?;
     if let Some(template) = &url_template {
         check_toml_value("circuits.url_template", template)?;
+        check_circuits_url_template(template)?;
     }
     check_toml_value("circuits.install_dir", &install_dir)?;
     // A relative `install_dir` is joined onto the project root (an absolute one
@@ -668,6 +669,20 @@ fn parse_circuits(doc: &DocumentMut) -> DynResult<CircuitsConfig> {
         url_template,
         install_dir,
     })
+}
+
+fn check_circuits_url_template(template: &str) -> DynResult<()> {
+    let scheme = template
+        .split_once("://")
+        .map(|(scheme, _)| scheme)
+        .unwrap_or_default();
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        bail!(
+            "invalid scaffold.toml: [circuits].url_template must use http:// or https://: \
+             {template:?}"
+        );
+    }
+    Ok(())
 }
 
 fn read_string(table: &Table, key: &str) -> Option<String> {
@@ -755,6 +770,7 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
     check_toml_value("circuits.version", &cfg.circuits.version)?;
     if let Some(template) = &cfg.circuits.url_template {
         check_toml_value("circuits.url_template", template)?;
+        check_circuits_url_template(template)?;
     }
     check_toml_value("circuits.install_dir", &cfg.circuits.install_dir)?;
     let circuits = doc.entry("circuits").or_insert(Item::Table(Table::new()));
@@ -1204,6 +1220,34 @@ install_dir = "../../etc/evil"
         let msg = err.to_string();
         assert!(msg.contains("install_dir"), "{msg}");
         assert!(msg.contains(".."), "{msg}");
+    }
+
+    #[test]
+    fn circuits_url_template_rejects_non_http_schemes() {
+        for template in [
+            "file:///tmp/circuits-{version}-{triple}.tar.gz",
+            "ftp://example.invalid/circuits-{version}-{triple}.tar.gz",
+            "example.invalid/circuits-{version}-{triple}.tar.gz",
+        ] {
+            let toml = minimal_v0_2_0()
+                + &format!("[circuits]\nversion = \"9.9.9\"\nurl_template = {template:?}\n");
+            let err = parse_config(&toml).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("url_template"), "{msg}");
+            assert!(msg.contains("http:// or https://"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn circuits_url_template_accepts_http_and_https_case_insensitively() {
+        for template in [
+            "http://example.invalid/circuits-{version}-{triple}.tar.gz",
+            "HTTPS://example.invalid/circuits-{version}-{triple}.tar.gz",
+        ] {
+            let toml = minimal_v0_2_0()
+                + &format!("[circuits]\nversion = \"9.9.9\"\nurl_template = {template:?}\n");
+            parse_config(&toml).expect("http(s) template should parse");
+        }
     }
 
     #[test]
