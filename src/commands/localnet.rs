@@ -1142,6 +1142,7 @@ mod tests {
                 pin: String::new(),
                 build: crate::model::RepoBuild::Cargo,
                 attr: String::new(),
+                attr_platform: std::collections::BTreeMap::new(),
                 path: lez_dir.display().to_string(),
             },
             spel: RepoRef::default(),
