@@ -1,4 +1,4 @@
-//! Client/FFI code generator for LEZ programs.
+//! Client/FFI code generator for Spel programs.
 //! Wraps spel-client-gen to support --idl-dir for batch generation.
 
 use std::path::PathBuf;

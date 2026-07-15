@@ -1,4 +1,4 @@
-# LEZ Framework Template
+# Spel Framework Template
 
 This project was generated with:
 
