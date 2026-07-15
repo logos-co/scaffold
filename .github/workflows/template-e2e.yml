@@ -156,6 +156,16 @@ jobs:
           "$HOME/.risc0/bin/rzup" install cpp
 
       - name: Build rendered project workspace
+        env:
+          # risc0-build exports an *unqualified* CC pointing at its riscv32
+          # cross-gcc for the whole guest cargo invocation. Host-side compiles
+          # inside that invocation (proc-macro deps: spel-framework-macros ->
+          # nssa_core -> risc0-zkvm[client] -> bonsai-sdk -> reqwest -> ring)
+          # then pair host x86_64 cflags (-m64) with the riscv compiler and
+          # die. cc-rs consults HOST_CC before CC when target == host, so this
+          # keeps host compiles on the system compiler while guest-target
+          # compiles still fall through to risc0's CC.
+          HOST_CC: cc
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/e2e-app"
