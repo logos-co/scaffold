@@ -101,7 +101,10 @@ pub(crate) fn circuits_install_dir(project_root: &Path, config: &CircuitsConfig)
 }
 
 fn circuits_path_from_env() -> Option<PathBuf> {
-    let raw = std::env::var(LOGOS_BLOCKCHAIN_CIRCUITS_ENV).ok()?;
+    // `var_os`, not `var`: the value is a filesystem path, which on Unix may be
+    // non-UTF-8. Using `var` would silently drop such an override here while
+    // `doctor` (which reads it via `var_os`) still reports the env var as set.
+    let raw = std::env::var_os(LOGOS_BLOCKCHAIN_CIRCUITS_ENV)?;
     let path = PathBuf::from(raw);
     // Defensively ignore obviously-stale env values rather than panic-by-proxy
     // inside a downstream build script. If the dir is missing we fall through
@@ -161,6 +164,30 @@ fn ensure_circuits_release_at(
     fs::create_dir_all(dir)
         .map_err(|e| anyhow!("create circuits cache dir {}: {e}", dir.display()))?;
 
+    // From here `dir` is ours to manage: we either created it fresh or wiped a
+    // prior circuits install above. If provisioning fails partway (download,
+    // extraction, or a missing sentinel) we must clear the partial tree — else
+    // the next run finds a non-empty dir with neither `VERSION` nor the sentinel
+    // and refuses to delete it, forcing a manual `rm -rf` to recover.
+    match provision_circuits_release(dir, version, triple, url_template) {
+        Ok(()) => Ok(dir.to_path_buf()),
+        Err(e) => {
+            let _ = fs::remove_dir_all(dir);
+            Err(e)
+        }
+    }
+}
+
+/// Download and extract the circuits release into `dir`, which the caller has
+/// already established is safe to manage. Split out from
+/// `ensure_circuits_release_at` so a partially-populated `dir` can be cleaned up
+/// on any failure here.
+fn provision_circuits_release(
+    dir: &Path,
+    version: &str,
+    triple: &str,
+    url_template: Option<&str>,
+) -> DynResult<()> {
     let url = circuits_release_url(version, triple, url_template);
 
     println!(
@@ -173,7 +200,7 @@ fn ensure_circuits_release_at(
     let tarball = download_to_tempfile(&url)?;
     let bytes = fs::read(tarball.path())
         .map_err(|e| anyhow!("read downloaded tarball {}: {e}", tarball.path().display()))?;
-    extract_tarball(&bytes, &dir)?;
+    extract_tarball(&bytes, dir)?;
 
     if !dir.join(CIRCUITS_SENTINEL_FILE).is_file() {
         bail!(
@@ -182,7 +209,7 @@ fn ensure_circuits_release_at(
         );
     }
 
-    Ok(dir.to_path_buf())
+    Ok(())
 }
 
 /// Whether `dir` is safe to `remove_dir_all` for a fresh circuits install:
@@ -473,6 +500,28 @@ mod tests {
         );
         // The user's file is untouched (we bailed before deleting or downloading).
         assert!(dir.join("my-notes.txt").is_file());
+    }
+
+    #[test]
+    fn ensure_release_cleans_up_partial_dir_on_provisioning_failure() {
+        // A download/extract failure must not leave a partially-populated
+        // install dir behind: on the next run that dir would be non-empty with
+        // neither `VERSION` nor the sentinel, tripping the refusal-to-delete
+        // guard and forcing a manual `rm -rf`. The malformed `http://` template
+        // makes curl reject the URL immediately (or, if curl is absent, the
+        // download bails) — either way provisioning fails after the dir exists.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".scaffold/circuits");
+        let triple = release_triple().expect("supported test platform");
+
+        let err = ensure_circuits_release_at(&dir, "9.9.9", triple, Some("http://"))
+            .expect_err("provisioning should fail with a malformed download URL");
+        assert!(
+            !err.to_string().contains("refusing to delete"),
+            "should fail on the download, not the delete guard, got: {err}"
+        );
+        // The partial dir is gone, so the next run starts from a clean slate.
+        assert!(!dir.exists(), "partial install dir should be cleaned up");
     }
 
     #[test]
