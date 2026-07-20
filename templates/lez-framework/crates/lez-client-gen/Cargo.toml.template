@@ -2,8 +2,8 @@
 name = "lez-client-gen"
 version = "0.1.0"
 edition = "2021"
-description = "Generates typed Rust client and FFI bindings from LEZ program IDL"
+description = "Generates typed Rust client and FFI bindings from Spel program IDL"
 
 [dependencies]
-lez-client-gen.workspace = true
+spel-client-gen.workspace = true
 serde_json.workspace = true

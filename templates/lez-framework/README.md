@@ -1,4 +1,4 @@
-# LEZ Framework Template
+# Spel Framework Template
 
 This project was generated with:
 
@@ -6,7 +6,7 @@ This project was generated with:
 logos-scaffold new <name> --template lez-framework
 ```
 
-It uses the [LEZ Framework](https://github.com/jimmy-claw/lez-framework) for an
+It uses the [Spel Framework](https://github.com/logos-co/spel) for an
 ergonomic developer experience similar to Anchor on Solana:
 
 - `#[lez_program]` macro eliminates boilerplate
@@ -81,7 +81,7 @@ mod my_program {
         state: AccountWithMetadata,
         #[account(signer)]
         authority: AccountWithMetadata,
-    ) -> LezResult {
+    ) -> SpelResult {
         // your logic here
     }
 }

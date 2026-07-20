@@ -129,7 +129,43 @@ jobs:
             exit 1
           fi
 
+      # The rendered project ships a risc0 guest crate (methods/), whose build
+      # script cross-compiles to riscv32im-risc0-zkvm-elf and needs the Risc Zero
+      # Rust toolchain. Without it the `logos-scaffold build` step below panics
+      # with "Risc Zero Rust toolchain not found. Try running `rzup install rust`".
+      # rzup is risc0's toolchain manager; it registers a `risc0` rustup
+      # toolchain that risc0-build then discovers.
+      - name: Install Risc Zero toolchain
+        run: |
+          set -euo pipefail
+          # Download the official rzup installer to disk first rather than
+          # piping it straight into bash: a failed/partial fetch is caught
+          # before anything executes, and the script is on disk if a run needs
+          # debugging. -fsSL fails on an HTTP 4xx/5xx error page; --retry rides
+          # out flaky networking (matches the circuits-fetch curl above).
+          curl -fsSL --retry 3 --retry-delay 2 \
+            https://risczero.com/install -o "$RUNNER_TEMP/rzup-install.sh"
+          bash "$RUNNER_TEMP/rzup-install.sh"
+          echo "$HOME/.risc0/bin" >> "$GITHUB_PATH"
+          "$HOME/.risc0/bin/rzup" install rust
+          # Guest deps that compile C sources (e.g. `ring` in the lez-framework
+          # guest) additionally need risc0's C++ cross-toolchain. When it is
+          # missing, risc0-build points CC at a sentinel path
+          # (/no_risc0_cpp_toolchain_installed_run_rzup_install_cpp) and the
+          # guest build dies in cc-rs compiler detection.
+          "$HOME/.risc0/bin/rzup" install cpp
+
       - name: Build rendered project workspace
+        env:
+          # risc0-build exports an *unqualified* CC pointing at its riscv32
+          # cross-gcc for the whole guest cargo invocation. Host-side compiles
+          # inside that invocation (proc-macro deps: spel-framework-macros ->
+          # nssa_core -> risc0-zkvm[client] -> bonsai-sdk -> reqwest -> ring)
+          # then pair host x86_64 cflags (-m64) with the riscv compiler and
+          # die. cc-rs consults HOST_CC before CC when target == host, so this
+          # keeps host compiles on the system compiler while guest-target
+          # compiles still fall through to risc0's CC.
+          HOST_CC: cc
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/e2e-app"

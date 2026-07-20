@@ -208,6 +208,8 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
     let overlay_ctx = OverlayRenderContext {
         crate_name: &crate_name,
         lez_pin: &cfg.lez.pin,
+        lez_tag: DEFAULT_LEZ.tag,
+        spel_pin: &cfg.spel.pin,
     };
     apply_overlay(target, template_variant, &overlay_ctx)?;
     if template_variant == FRAMEWORK_KIND_LEZ_FRAMEWORK {

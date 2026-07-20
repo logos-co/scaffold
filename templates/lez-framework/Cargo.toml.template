@@ -20,17 +20,19 @@ members = [
 unsafe_code = "warn"
 
 [workspace.dependencies]
-nssa = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "{{lez_pin}}" }
-nssa_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "{{lez_pin}}" }
-wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "{{lez_pin}}" }
-common = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "{{lez_pin}}" }
+# Spel pins LEZ by tag. Match that source form so Cargo resolves a single
+# nssa_core instead of treating equivalent tag and rev sources as distinct.
+nssa = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "{{lez_tag}}" }
+nssa_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "{{lez_tag}}" }
+wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "{{lez_tag}}" }
+common = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "{{lez_tag}}" }
 
 risc0-zkvm = { version = "3.0.5", features = ["std"] }
 risc0-build = "3.0.5"
 
-lez-framework = { git = "https://github.com/jimmy-claw/lez-framework.git", rev = "1e146970d2bba861a32fd3a8b4e13b1e6ff4114d" }
-lez-framework-core = { git = "https://github.com/jimmy-claw/lez-framework.git", rev = "1e146970d2bba861a32fd3a8b4e13b1e6ff4114d" }
-lez-client-gen = { git = "https://github.com/jimmy-claw/lez-framework.git", rev = "1e146970d2bba861a32fd3a8b4e13b1e6ff4114d" }
+spel-framework = { git = "https://github.com/logos-co/spel.git", rev = "{{spel_pin}}" }
+spel-framework-core = { git = "https://github.com/logos-co/spel.git", rev = "{{spel_pin}}" }
+spel-client-gen = { git = "https://github.com/logos-co/spel.git", rev = "{{spel_pin}}" }
 
 hex = "0.4.3"
 bytemuck = "1.24.0"
@@ -46,8 +48,8 @@ nssa.workspace = true
 nssa_core.workspace = true
 wallet.workspace = true
 common.workspace = true
-lez-framework.workspace = true
-lez-framework-core.workspace = true
+spel-framework.workspace = true
+spel-framework-core.workspace = true
 example_program_deployment_methods = { path = "methods" }
 
 serde.workspace = true
