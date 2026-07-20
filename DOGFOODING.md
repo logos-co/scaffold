@@ -114,6 +114,7 @@ mkdir -p "$EXT" && cp /tmp/cr/r0vm "$EXT/r0vm" && chmod +x "$EXT/r0vm"
 
 ```bash
 RVER=1.94.1   # match the toolchain the risc0 release line ships; `rzup install rust` would pick the latest r0.* tag
+TRIPLE=${TRIPLE:-x86_64-unknown-linux-gnu}   # aarch64-apple-darwin on macOS; matches step 2
 curl -sSL -H "Authorization: Bearer $GH_TOKEN" -o /tmp/rust-toolchain.tgz \
   "https://github.com/risc0/rust/releases/download/r0.$RVER/rust-toolchain-$TRIPLE.tar.gz"
 VDIR="$HOME/.risc0/toolchains/v$RVER-rust-$TRIPLE"

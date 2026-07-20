@@ -456,8 +456,10 @@ fn deploy_single_program(
 
 /// Wall-clock cap for `spel program-id`. The CLI typically returns in
 /// milliseconds; a hung binary should not block the deploy summary.
-/// Override with `LOGOS_SCAFFOLD_SPEL_INSPECT_TIMEOUT_MS` if needed.
-const SPEL_INSPECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// Override with `LOGOS_SCAFFOLD_SPEL_PROGRAM_ID_TIMEOUT_MS` if needed;
+/// `LOGOS_SCAFFOLD_SPEL_INSPECT_TIMEOUT_MS` is honored as a legacy alias
+/// from when extraction ran `spel inspect`.
+const SPEL_PROGRAM_ID_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Run the project-vendored `spel program-id <binary>` and return the risc0
 /// image ID parsed from its output. Returns `None` on any failure (binary
@@ -469,11 +471,12 @@ pub(crate) fn extract_program_id(spel_bin: &Path, binary_path: &Path) -> Option<
     use std::process::Stdio;
     use std::time::Instant;
 
-    let timeout = std::env::var("LOGOS_SCAFFOLD_SPEL_INSPECT_TIMEOUT_MS")
+    let timeout = std::env::var("LOGOS_SCAFFOLD_SPEL_PROGRAM_ID_TIMEOUT_MS")
+        .or_else(|_| std::env::var("LOGOS_SCAFFOLD_SPEL_INSPECT_TIMEOUT_MS"))
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .map(std::time::Duration::from_millis)
-        .unwrap_or(SPEL_INSPECT_TIMEOUT);
+        .unwrap_or(SPEL_PROGRAM_ID_TIMEOUT);
 
     let mut child = Command::new(spel_bin)
         .arg("program-id")

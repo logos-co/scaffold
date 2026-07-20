@@ -3624,7 +3624,7 @@ if [ "$#" -ge 2 ] && { [ "$1" = "program-id" ] || [ "$1" = "inspect" ]; }; then
   if [ -n "${SPEL_PROGRAM_ID_FAIL:-}" ]; then
     case "$bin_name" in
       *"$SPEL_PROGRAM_ID_FAIL"*)
-        echo "spel stub: forced program-id failure for $bin_name" >&2
+        echo "spel stub: forced $1 failure for $bin_name" >&2
         exit 8
         ;;
     esac
