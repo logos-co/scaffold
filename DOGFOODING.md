@@ -110,6 +110,21 @@ mkdir -p "$EXT" && cp /tmp/cr/r0vm "$EXT/r0vm" && chmod +x "$EXT/r0vm"
 
 `find_r0vm_path_for_lez` looks at `~/.risc0/extensions/v<risc0-zkvm-version>-cargo-risczero-<arch>-<os>/r0vm`; placing r0vm there is what wires it into a spawned sequencer (scaffold sets `RISC0_SERVER_PATH` from it). The sequencer runs with `RISC0_DEV_MODE=1` (the test-node default), so r0vm executes guests without real proving — which is why no GPU/prover is needed.
 
+**2b. Install the risc0 Rust toolchain (needed for `build`/`deploy`, not for the T-series).** `r0vm` alone runs guests; it does *not* compile them. `logos-scaffold build` (and therefore `deploy`/`run`/`D`/`L` scenarios) shells out through `risc0-build`, which asks the `rzup` library for a default-installed Rust toolchain and panics with `Risc Zero Rust toolchain not found. Try running 'rzup install rust'` if none exists. `rzup install rust` fails the same way behind a TLS-intercepting proxy, so install it by hand from the `risc0/rust` release and register it where the `rzup` library looks (`~/.risc0/toolchains/` + `~/.risc0/settings.toml`):
+
+```bash
+RVER=1.94.1   # match the toolchain the risc0 release line ships; `rzup install rust` would pick the latest r0.* tag
+curl -sSL -H "Authorization: Bearer $GH_TOKEN" -o /tmp/rust-toolchain.tgz \
+  "https://github.com/risc0/rust/releases/download/r0.$RVER/rust-toolchain-$TRIPLE.tar.gz"
+VDIR="$HOME/.risc0/toolchains/v$RVER-rust-$TRIPLE"
+mkdir -p "$VDIR" && tar xzf /tmp/rust-toolchain.tgz -C "$VDIR"
+printf '[default_versions]\nrust = "%s"\n' "$RVER" > "$HOME/.risc0/settings.toml"
+ln -sfn "$VDIR" "$HOME/.rustup/toolchains/risc0"
+ls "$VDIR/lib/rustlib" | grep riscv32im   # → riscv32im-risc0-zkvm-elf (guest target present)
+```
+
+Circuits need no equivalent hand-provisioning for generated projects: `build`/`setup` resolve the `[circuits]` table in `scaffold.toml`, materialise the configured release into `[circuits].install_dir` (default `.scaffold/circuits`), and export `LOGOS_BLOCKCHAIN_CIRCUITS` for the rest of the process. A pre-set `LOGOS_BLOCKCHAIN_CIRCUITS` pointing at a populated release short-circuits the download; only older projects without `[circuits]` still require it.
+
 **3. Build the real sequencer.** `test-node prepare` downloads the circuits release (via `curl`, automatically) and builds `sequencer_service`. It is long (~6 min); run it, then confirm doctor is green:
 
 ```bash
@@ -117,9 +132,10 @@ mkdir -p "$EXT" && cp /tmp/cr/r0vm "$EXT/r0vm" && chmod +x "$EXT/r0vm"
 "$SCAFFOLD_BIN" test-node doctor  --project "$P" --json | jq .ok   # → true (all checks pass)
 ```
 
-**4. (Only for real transactions — T4) build the wallet via `setup`.** Two gotchas distinguish `setup` from `test-node prepare`: its circuits precheck does **not** consult the scaffold cache (it only accepts `LOGOS_BLOCKCHAIN_CIRCUITS` or `$HOME/.logos-blockchain-circuits/`), so ensure one of those is present before running it; and it uses cwd discovery, so it must run **inside** the project (no `--project` flag):
+**4. (Only for real transactions — T4) build the wallet via `setup`.** One gotcha distinguishes `setup` from `test-node prepare`: it uses cwd discovery, so it must run **inside** the project (no `--project` flag). Projects with a `[circuits]` table materialise their configured release during `setup` itself; only for older projects without `[circuits]` must `LOGOS_BLOCKCHAIN_CIRCUITS` be exported first:
 
 ```bash
+# Only needed for older projects without [circuits] in scaffold.toml:
 export LOGOS_BLOCKCHAIN_CIRCUITS="$("$SCAFFOLD_BIN" test-node pins --project "$P" --json | jq -r .circuits_path)"
 ( cd "$P" && "$SCAFFOLD_BIN" setup )   # builds wallet + spel, seeds the default wallet (~3 min) → "setup complete"
 ```
