@@ -15,10 +15,12 @@
 //! user-project build, since the patch table redirects the same crates)
 //! fails on a fresh machine.
 //!
-//! `ensure_circuits_for_subprocess` materialises the matching release tarball
-//! into the scaffold cache and exports `LOGOS_BLOCKCHAIN_CIRCUITS` for the
-//! rest of the process. It's idempotent: a populated cache dir or a pre-set
-//! env var both short-circuit the download.
+//! `ensure_circuits_for_project` materialises the matching release tarball
+//! into the project's configured `[circuits].install_dir` (default
+//! `.scaffold/circuits`) and exports `LOGOS_BLOCKCHAIN_CIRCUITS` for the rest
+//! of the process. It's idempotent: a pre-set env var, or an install dir whose
+//! `VERSION` already matches `[circuits].version`, short-circuits the download;
+//! a stale install (an older version) is replaced.
 //!
 //! Why we always export the env var rather than relying on
 //! `~/.logos-blockchain-circuits/`: every `logos-blockchain` rev we depend on
@@ -41,9 +43,8 @@ use anyhow::{anyhow, bail};
 use flate2::read::GzDecoder;
 use tar::Archive;
 
-use crate::constants::{
-    CIRCUITS_RELEASE_BASE_URL, DEFAULT_CIRCUITS_VERSION, LOGOS_BLOCKCHAIN_CIRCUITS_ENV,
-};
+use crate::constants::{CIRCUITS_RELEASE_BASE_URL, LOGOS_BLOCKCHAIN_CIRCUITS_ENV};
+use crate::model::{CircuitsConfig, Project};
 use crate::process::which;
 use crate::DynResult;
 
@@ -52,22 +53,22 @@ use crate::DynResult;
 /// cache-hit checks and post-extract verification — picking a single circuit
 /// (rather than `VERSION`) keeps the check robust to future releases that
 /// might rename the version marker.
-const CIRCUITS_SENTINEL_FILE: &str = "pol/verification_key.json";
+pub(crate) const CIRCUITS_SENTINEL_FILE: &str = "pol/verification_key.json";
 
 /// Ensure `LOGOS_BLOCKCHAIN_CIRCUITS` is set in this process so subsequently
 /// spawned `cargo` invocations inherit it. No-op when the env var is already
 /// exported and points at a populated circuits dir (user override).
 ///
-/// Otherwise: download the matching tagged release into
-/// `<cache_root>/circuits/v<ver>-<os>-<arch>` (idempotent) and export the
-/// env var pointing there. We deliberately do NOT fall back to
-/// `~/.logos-blockchain-circuits/` — see the module docs for why.
-pub(crate) fn ensure_circuits_for_subprocess(cache_root: &Path) -> DynResult<()> {
+/// Otherwise: download the matching tagged release into the project's
+/// configured `[circuits].install_dir` (default `.scaffold/circuits`,
+/// idempotent) and export the env var pointing there. We deliberately do NOT
+/// fall back to `~/.logos-blockchain-circuits/` — see the module docs for why.
+pub(crate) fn ensure_circuits_for_project(project: &Project) -> DynResult<()> {
     if circuits_path_from_env().is_some() {
         return Ok(());
     }
 
-    let path = ensure_circuits_release(cache_root, DEFAULT_CIRCUITS_VERSION)?;
+    let path = ensure_circuits_release_for_config(&project.root, &project.config.circuits)?;
     // SAFETY: `set_var` is `unsafe` from Rust 2024 because it is racy when
     // other threads call `env::var`. Scaffold is a single-threaded CLI by the
     // time this runs (only the main thread has touched env vars; subprocesses
@@ -80,26 +81,30 @@ pub(crate) fn ensure_circuits_for_subprocess(cache_root: &Path) -> DynResult<()>
 }
 
 /// Resolve the directory the circuits release lives at (or would be
-/// materialised at) for `cache_root`, without downloading anything. The
+/// materialised at) for `project`, without downloading anything. The
 /// `LOGOS_BLOCKCHAIN_CIRCUITS` env override wins when it points at a
-/// populated checkout — mirroring `ensure_circuits_for_subprocess`.
-pub(crate) fn circuits_dir_for_cache_root(cache_root: &Path) -> DynResult<PathBuf> {
-    circuits_dir_for_version(cache_root, DEFAULT_CIRCUITS_VERSION)
+/// populated checkout — mirroring `ensure_circuits_for_project`.
+pub(crate) fn circuits_dir_for_project(project: &Project) -> PathBuf {
+    if let Some(path) = circuits_path_from_env() {
+        return path;
+    }
+    circuits_install_dir(&project.root, &project.config.circuits)
 }
 
-/// Like `circuits_dir_for_cache_root`, for an explicit release version.
-pub(crate) fn circuits_dir_for_version(cache_root: &Path, version: &str) -> DynResult<PathBuf> {
-    if let Some(path) = circuits_path_from_env() {
-        return Ok(path);
+pub(crate) fn circuits_install_dir(project_root: &Path, config: &CircuitsConfig) -> PathBuf {
+    let path = PathBuf::from(&config.install_dir);
+    if path.is_absolute() {
+        path
+    } else {
+        project_root.join(path)
     }
-    let triple = release_triple()?;
-    Ok(cache_root
-        .join("circuits")
-        .join(format!("v{version}-{triple}")))
 }
 
 fn circuits_path_from_env() -> Option<PathBuf> {
-    let raw = std::env::var(LOGOS_BLOCKCHAIN_CIRCUITS_ENV).ok()?;
+    // `var_os`, not `var`: the value is a filesystem path, which on Unix may be
+    // non-UTF-8. Using `var` would silently drop such an override here while
+    // `doctor` (which reads it via `var_os`) still reports the env var as set.
+    let raw = std::env::var_os(LOGOS_BLOCKCHAIN_CIRCUITS_ENV)?;
     let path = PathBuf::from(raw);
     // Defensively ignore obviously-stale env values rather than panic-by-proxy
     // inside a downstream build script. If the dir is missing we fall through
@@ -111,34 +116,91 @@ fn circuits_path_from_env() -> Option<PathBuf> {
     }
 }
 
-/// Materialise (or hit the cache for) the circuits release at `version`,
-/// returning the directory that contains `pol/`, `poc/`, ... — the layout
-/// `LOGOS_BLOCKCHAIN_CIRCUITS` consumers expect.
-pub(crate) fn ensure_circuits_release(cache_root: &Path, version: &str) -> DynResult<PathBuf> {
+fn ensure_circuits_release_for_config(
+    project_root: &Path,
+    config: &CircuitsConfig,
+) -> DynResult<PathBuf> {
     let triple = release_triple()?;
-    let dir = cache_root
-        .join("circuits")
-        .join(format!("v{version}-{triple}"));
+    let dir = circuits_install_dir(project_root, config);
+    ensure_circuits_release_at(
+        &dir,
+        &config.version,
+        triple,
+        config.url_template.as_deref(),
+    )
+}
 
-    if dir.join(CIRCUITS_SENTINEL_FILE).is_file() {
-        return Ok(dir);
+fn ensure_circuits_release_at(
+    dir: &Path,
+    version: &str,
+    triple: &str,
+    url_template: Option<&str>,
+) -> DynResult<PathBuf> {
+    // Cache hit only when the sentinel is present AND, if the release ships a
+    // top-level VERSION marker, it matches the requested version. The install
+    // dir is no longer version-namespaced (it can be a fixed
+    // `[circuits].install_dir`), so a stale tree would otherwise survive a
+    // `[circuits].version` bump forever — `setup` hits this same short-circuit.
+    if dir.join(CIRCUITS_SENTINEL_FILE).is_file() && installed_version_matches(dir, version) {
+        return Ok(dir.to_path_buf());
+    }
+    // Stale install: clear it so extraction lands a clean tree. Only wipe a
+    // directory that's empty or recognisably a prior circuits release —
+    // `[circuits].install_dir` is user-controlled and may be absolute, so a
+    // config typo must never make us `remove_dir_all` an unrelated directory.
+    if dir.exists() {
+        if !is_empty_or_circuits_install(dir) {
+            bail!(
+                "refusing to delete {} for a fresh circuits install: it is not empty and does \
+                 not look like a circuits release (no `VERSION` or `{CIRCUITS_SENTINEL_FILE}`). \
+                 Check `[circuits].install_dir`; remove the directory manually if this is intended.",
+                dir.display()
+            );
+        }
+        fs::remove_dir_all(dir)
+            .map_err(|e| anyhow!("remove stale circuits dir {}: {e}", dir.display()))?;
     }
 
-    fs::create_dir_all(&dir)
+    fs::create_dir_all(dir)
         .map_err(|e| anyhow!("create circuits cache dir {}: {e}", dir.display()))?;
 
-    let url = format!(
-        "{CIRCUITS_RELEASE_BASE_URL}/v{version}/logos-blockchain-circuits-v{version}-{triple}.tar.gz",
-    );
+    // From here `dir` is ours to manage: we either created it fresh or wiped a
+    // prior circuits install above. If provisioning fails partway (download,
+    // extraction, or a missing sentinel) we must clear the partial tree — else
+    // the next run finds a non-empty dir with neither `VERSION` nor the sentinel
+    // and refuses to delete it, forcing a manual `rm -rf` to recover.
+    match provision_circuits_release(dir, version, triple, url_template) {
+        Ok(()) => Ok(dir.to_path_buf()),
+        Err(e) => {
+            let _ = fs::remove_dir_all(dir);
+            Err(e)
+        }
+    }
+}
 
-    println!("Downloading logos-blockchain-circuits v{version} ({triple})");
+/// Download and extract the circuits release into `dir`, which the caller has
+/// already established is safe to manage. Split out from
+/// `ensure_circuits_release_at` so a partially-populated `dir` can be cleaned up
+/// on any failure here.
+fn provision_circuits_release(
+    dir: &Path,
+    version: &str,
+    triple: &str,
+    url_template: Option<&str>,
+) -> DynResult<()> {
+    let url = circuits_release_url(version, triple, url_template);
+
+    println!(
+        "Downloading logos-blockchain-circuits v{} ({triple})",
+        version.trim_start_matches('v')
+    );
     println!("  from {url}");
     println!("  into {}", dir.display());
 
     let tarball = download_to_tempfile(&url)?;
     let bytes = fs::read(tarball.path())
         .map_err(|e| anyhow!("read downloaded tarball {}: {e}", tarball.path().display()))?;
-    extract_tarball(&bytes, &dir)?;
+    extract_tarball(&bytes, dir)?;
 
     if !dir.join(CIRCUITS_SENTINEL_FILE).is_file() {
         bail!(
@@ -147,7 +209,58 @@ pub(crate) fn ensure_circuits_release(cache_root: &Path, version: &str) -> DynRe
         );
     }
 
-    Ok(dir)
+    Ok(())
+}
+
+/// Whether `dir` is safe to `remove_dir_all` for a fresh circuits install:
+/// either empty, or recognisably a prior circuits release (has the sentinel or
+/// a `VERSION` file). Guards against a mistyped, user-controlled `install_dir`
+/// pointing at an unrelated directory.
+fn is_empty_or_circuits_install(dir: &Path) -> bool {
+    if dir.join(CIRCUITS_SENTINEL_FILE).is_file() || dir.join("VERSION").is_file() {
+        return true;
+    }
+    match fs::read_dir(dir) {
+        Ok(mut entries) => entries.next().is_none(),
+        // Can't inspect it (not a dir, permissions) → don't delete it.
+        Err(_) => false,
+    }
+}
+
+/// Whether the install at `dir` already satisfies `version`. Release tarballs
+/// ship a top-level `VERSION` file; when present we require it to match
+/// (normalising a leading `v` on either side, so `v0.4.1` vs `0.4.1` is a hit
+/// rather than an endless re-download). When absent — an older or renamed
+/// layout — we don't force a re-download and treat the sentinel as enough,
+/// preserving the prior behaviour.
+fn installed_version_matches(dir: &Path, version: &str) -> bool {
+    match fs::read_to_string(dir.join("VERSION")) {
+        Ok(text) => version_eq(text.trim(), version),
+        Err(_) => true,
+    }
+}
+
+/// Compare two circuits version strings, normalising a leading `v` on either
+/// side so `v0.4.1` and `0.4.1` are treated as equal. Used by both the install
+/// cache-hit check and `doctor`, which must not flag spurious version drift.
+pub(crate) fn version_eq(a: &str, b: &str) -> bool {
+    a.trim().trim_start_matches('v') == b.trim().trim_start_matches('v')
+}
+
+fn circuits_release_url(version: &str, triple: &str, template: Option<&str>) -> String {
+    // Normalize a leading `v`: `[circuits].version` may be `v0.4.1` (treated as
+    // equal to `0.4.1` everywhere else), but the release layout carries a single
+    // `v` in the path, so substituting the raw `v`-prefixed string would yield
+    // an unreachable `vv0.4.1`.
+    let version = version.trim_start_matches('v');
+    match template {
+        Some(template) => template
+            .replace("{version}", version)
+            .replace("{triple}", triple),
+        None => format!(
+            "{CIRCUITS_RELEASE_BASE_URL}/v{version}/logos-blockchain-circuits-v{version}-{triple}.tar.gz",
+        ),
+    }
 }
 
 /// Map (`std::env::consts::OS`, `ARCH`) onto the suffix the
@@ -156,7 +269,7 @@ pub(crate) fn ensure_circuits_release(cache_root: &Path, version: &str) -> DynRe
 /// Only the platforms scaffold itself supports today are listed. macOS aarch64
 /// works upstream and is the dev-machine baseline; x86_64 macOS isn't shipped
 /// by upstream's flake either, so we surface the same constraint here.
-fn release_triple() -> DynResult<&'static str> {
+pub(crate) fn release_triple() -> DynResult<&'static str> {
     let triple = match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => "linux-x86_64",
         ("linux", "aarch64") => "linux-aarch64",
@@ -212,7 +325,10 @@ fn download_to_tempfile(url: &str) -> DynResult<tempfile::NamedTempFile> {
         .map_err(|e| anyhow!("spawn curl for {url}: {e}"))?;
 
     if !status.success() {
-        bail!("curl failed to download {url} ({status})");
+        bail!(
+            "curl failed to download {url} ({status}). Run `logos-scaffold doctor` for \
+             diagnostics, then retry `logos-scaffold setup`."
+        );
     }
 
     let len = tmp
@@ -235,20 +351,23 @@ fn extract_tarball(bytes: &[u8], dest: &Path) -> DynResult<()> {
     for entry in archive.entries()? {
         let mut entry = entry?;
         let path = entry.path()?.to_path_buf();
-        let mut components = path.components();
-        // Drop the single top-level dir from every entry. If a tarball ever
-        // ships without one (e.g. plain files at the root), preserve the
-        // original layout — `unpack` will fall back to using `path`.
-        components.next();
-        let stripped: PathBuf = components.as_path().to_path_buf();
-        let target = if stripped.as_os_str().is_empty() {
+        let Some(stripped) = safe_stripped_entry_path(&path)? else {
             // Top-level directory entry itself; the strip leaves nothing to
-            // create, and `entry.unpack` would otherwise try to write to
-            // `dest` directly.
+            // create, and `entry.unpack` would otherwise write to `dest`.
             continue;
-        } else {
-            dest.join(&stripped)
         };
+        // The download source is user-influenced ([circuits].url_template), so
+        // tar entries are untrusted. A symlink/hardlink could redirect a later
+        // write outside `dest` even when its own path is in-bounds.
+        let etype = entry.header().entry_type();
+        if etype.is_symlink() || etype.is_hard_link() {
+            bail!(
+                "refusing to extract circuits tar entry `{}` of type {etype:?} \
+                 (symlinks and hardlinks are not allowed)",
+                stripped.display()
+            );
+        }
+        let target = dest.join(&stripped);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -257,10 +376,65 @@ fn extract_tarball(bytes: &[u8], dest: &Path) -> DynResult<()> {
     Ok(())
 }
 
+/// Strip the single top-level dir from a tar entry path and reject anything
+/// that would escape the destination. Returns the safe relative path, or
+/// `None` for the top-level dir entry itself (nothing to write). Because the
+/// download source is user-influenced via `[circuits].url_template`, an entry
+/// like `root/../../etc/x` (which strips to `../../etc/x`) must not be joined
+/// onto `dest`.
+fn safe_stripped_entry_path(path: &Path) -> DynResult<Option<PathBuf>> {
+    let mut components = path.components();
+    components.next();
+    let stripped: PathBuf = components.as_path().to_path_buf();
+    if stripped.as_os_str().is_empty() {
+        return Ok(None);
+    }
+    if stripped.is_absolute()
+        || stripped
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        bail!(
+            "refusing to extract circuits tar entry with unsafe path `{}`",
+            stripped.display()
+        );
+    }
+    Ok(Some(stripped))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn installed_version_matches_normalizes_v_prefix_and_detects_bumps() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No VERSION marker → don't force a re-download.
+        assert!(installed_version_matches(tmp.path(), "0.4.1"));
+        // A leading `v` on either side must not trigger a re-download loop.
+        fs::write(tmp.path().join("VERSION"), "v0.4.1\n").unwrap();
+        assert!(installed_version_matches(tmp.path(), "0.4.1"));
+        fs::write(tmp.path().join("VERSION"), "0.4.1").unwrap();
+        assert!(installed_version_matches(tmp.path(), "v0.4.1"));
+        // A genuine version bump is detected so the stale tree is replaced.
+        assert!(!installed_version_matches(tmp.path(), "0.4.2"));
+    }
+
+    #[test]
+    fn safe_stripped_entry_path_strips_top_dir_and_rejects_traversal() {
+        assert_eq!(
+            safe_stripped_entry_path(Path::new("release-root/pol/vk.json")).unwrap(),
+            Some(PathBuf::from("pol/vk.json"))
+        );
+        // Top-level dir entry → nothing to write.
+        assert_eq!(
+            safe_stripped_entry_path(Path::new("release-root")).unwrap(),
+            None
+        );
+        // A `..` that escapes `dest` after stripping is rejected.
+        assert!(safe_stripped_entry_path(Path::new("release-root/../../escape")).is_err());
+    }
 
     fn make_tarball() -> Vec<u8> {
         let mut header = tar::Header::new_gnu();
@@ -310,15 +484,85 @@ mod tests {
     }
 
     #[test]
-    fn ensure_circuits_release_short_circuits_when_sentinel_present() {
+    fn ensure_release_refuses_to_wipe_non_circuits_dir() {
+        // A mistyped `[circuits].install_dir` pointing at a non-empty,
+        // non-circuits directory must bail rather than `remove_dir_all` it.
         let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("important");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("my-notes.txt"), "do not delete").unwrap();
         let triple = release_triple().expect("supported test platform");
-        let preinstalled = tmp.path().join("circuits").join(format!("v9.9.9-{triple}"));
-        fs::create_dir_all(preinstalled.join("pol")).unwrap();
-        fs::write(preinstalled.join(CIRCUITS_SENTINEL_FILE), "{}").unwrap();
 
-        let resolved = ensure_circuits_release(tmp.path(), "9.9.9").expect("cache hit");
-        assert_eq!(resolved, preinstalled);
+        let err = ensure_circuits_release_at(&dir, "9.9.9", triple, None).unwrap_err();
+        assert!(
+            err.to_string().contains("refusing to delete"),
+            "expected refusal, got: {err}"
+        );
+        // The user's file is untouched (we bailed before deleting or downloading).
+        assert!(dir.join("my-notes.txt").is_file());
+    }
+
+    #[test]
+    fn ensure_release_cleans_up_partial_dir_on_provisioning_failure() {
+        // A download/extract failure must not leave a partially-populated
+        // install dir behind: on the next run that dir would be non-empty with
+        // neither `VERSION` nor the sentinel, tripping the refusal-to-delete
+        // guard and forcing a manual `rm -rf`. The malformed `http://` template
+        // makes curl reject the URL immediately (or, if curl is absent, the
+        // download bails) — either way provisioning fails after the dir exists.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".scaffold/circuits");
+        let triple = release_triple().expect("supported test platform");
+
+        let err = ensure_circuits_release_at(&dir, "9.9.9", triple, Some("http://"))
+            .expect_err("provisioning should fail with a malformed download URL");
+        assert!(
+            !err.to_string().contains("refusing to delete"),
+            "should fail on the download, not the delete guard, got: {err}"
+        );
+        // The partial dir is gone, so the next run starts from a clean slate.
+        assert!(!dir.exists(), "partial install dir should be cleaned up");
+    }
+
+    #[test]
+    fn circuits_install_dir_joins_relative_path_to_project_root() {
+        let cfg = CircuitsConfig {
+            install_dir: "vendor/circuits".to_string(),
+            ..CircuitsConfig::default()
+        };
+        assert_eq!(
+            circuits_install_dir(Path::new("/project"), &cfg),
+            PathBuf::from("/project/vendor/circuits")
+        );
+    }
+
+    #[test]
+    fn custom_url_template_replaces_version_and_triple() {
+        let url = circuits_release_url(
+            "9.9.9",
+            "linux-x86_64",
+            Some("https://example.invalid/v{version}/circuits-{triple}.tar.gz"),
+        );
+        assert_eq!(
+            url,
+            "https://example.invalid/v9.9.9/circuits-linux-x86_64.tar.gz"
+        );
+    }
+
+    #[test]
+    fn release_url_normalizes_leading_v_in_version() {
+        // A `v`-prefixed `[circuits].version` must not yield a `vv0.4.1` URL.
+        let bare = circuits_release_url("0.4.1", "linux-x86_64", None);
+        let prefixed = circuits_release_url("v0.4.1", "linux-x86_64", None);
+        assert_eq!(bare, prefixed);
+        assert!(!prefixed.contains("vv0.4.1"), "{prefixed}");
+        // Same normalization applies to a custom template.
+        let tmpl = circuits_release_url(
+            "v0.4.1",
+            "linux-x86_64",
+            Some("https://example.invalid/v{version}/c-{triple}.tar.gz"),
+        );
+        assert_eq!(tmpl, "https://example.invalid/v0.4.1/c-linux-x86_64.tar.gz");
     }
 
     #[test]

@@ -2,8 +2,9 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
-use crate::constants::DEFAULT_LEZ;
-use crate::model::{CheckRow, CheckStatus};
+use crate::circuits::{circuits_install_dir, version_eq};
+use crate::constants::{DEFAULT_CIRCUITS_VERSION, DEFAULT_LEZ, LOGOS_BLOCKCHAIN_CIRCUITS_ENV};
+use crate::model::{CheckRow, CheckStatus, CircuitsConfig};
 use crate::process::{port_open, which};
 use crate::repo::{git_clean, git_head_sha};
 
@@ -147,76 +148,138 @@ pub(crate) fn check_port_warn(name: &str, addr: &str, remediation: &str) -> Chec
 }
 
 /// Probe for the `logos-blockchain-circuits` artifact required by
-/// downstream `logos-blockchain-pol` build scripts. Without this, `setup`
-/// (which compiles `sequencer_service --features standalone`) panics
-/// inside cargo with a raw build-script trace. Surfaced both as a doctor
-/// row and as a precheck in `setup` so the user sees a single
-/// scaffold-styled error before any compile work runs.
+/// downstream `logos-blockchain-pol` build scripts. Without it, builds that
+/// compile `sequencer_service --features standalone` panic inside cargo with
+/// a raw build-script trace; this surfaces a single scaffold-styled `doctor`
+/// row instead.
 ///
 /// Pass when either:
-/// - `LOGOS_BLOCKCHAIN_CIRCUITS` is set to a path that exists and is a directory, or
-/// - `$HOME/.logos-blockchain-circuits/` exists and is a directory.
+/// - `LOGOS_BLOCKCHAIN_CIRCUITS` points at a populated circuits release (the
+///   sentinel `pol/verification_key.json` is present), or
+/// - the configured `[circuits].install_dir` (default `.scaffold/circuits`)
+///   holds the release, with its `VERSION` matching `[circuits].version`.
 ///
 /// A set-but-invalid env var (empty, nonexistent path, or non-directory)
 /// is reported distinctly from "unset" in the failure detail — the user
 /// otherwise sees "unset" when their typo'd env var is the actual cause.
-/// In either case, the home-dir probe still runs as a fallback.
-pub(crate) fn check_logos_blockchain_circuits() -> CheckRow {
-    let env_raw = std::env::var_os("LOGOS_BLOCKCHAIN_CIRCUITS")
+/// In either case, the configured install dir is checked as the fallback.
+pub(crate) fn check_logos_blockchain_circuits(
+    project_root: &Path,
+    config: &CircuitsConfig,
+) -> CheckRow {
+    let env_raw = std::env::var_os(LOGOS_BLOCKCHAIN_CIRCUITS_ENV)
         .filter(|v| !v.is_empty())
         .map(PathBuf::from);
-    let home_dir = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|h| h.join(".logos-blockchain-circuits"));
-    check_logos_blockchain_circuits_with(env_raw.as_deref(), home_dir.as_deref())
+    let install_dir = circuits_install_dir(project_root, config);
+    check_logos_blockchain_circuits_with(env_raw.as_deref(), &install_dir, config)
 }
 
 /// Pure helper: takes the resolved env-var path (or `None` when unset/empty)
-/// and the resolved `~/.logos-blockchain-circuits` path (or `None` when
-/// `$HOME` is missing), returns the `CheckRow`. Split out so the row
-/// shaping is testable without process-global env mutation.
+/// and configured install dir, then returns the `CheckRow`. Split out so the
+/// row shaping is testable without process-global env mutation.
 fn check_logos_blockchain_circuits_with(
     env_path: Option<&Path>,
-    home_dir: Option<&Path>,
+    install_dir: &Path,
+    config: &CircuitsConfig,
 ) -> CheckRow {
-    if let Some(path) = env_path.filter(|p| p.is_dir()) {
+    let sentinel = crate::circuits::CIRCUITS_SENTINEL_FILE;
+
+    if let Some(path) = env_path.filter(|p| p.join(sentinel).is_file()) {
         return CheckRow {
             status: CheckStatus::Pass,
             name: "logos-blockchain-circuits".to_string(),
-            detail: format!("found via $LOGOS_BLOCKCHAIN_CIRCUITS at {}", path.display()),
+            detail: format!(
+                "found via ${LOGOS_BLOCKCHAIN_CIRCUITS_ENV} at {}",
+                path.display()
+            ),
             remediation: None,
         };
     }
 
-    if let Some(path) = home_dir.filter(|p| p.is_dir()) {
+    let env_status = env_path.map(invalid_env_status);
+
+    if !install_dir.join(sentinel).is_file() {
+        let env_detail = env_status
+            .map(|s| format!("; ${LOGOS_BLOCKCHAIN_CIRCUITS_ENV} {s}"))
+            .unwrap_or_default();
         return CheckRow {
-            status: CheckStatus::Pass,
+            status: CheckStatus::Fail,
             name: "logos-blockchain-circuits".to_string(),
-            detail: format!("found at {}", path.display()),
-            remediation: None,
+            detail: format!(
+                "missing configured circuits release at {}{env_detail}",
+                install_dir.display()
+            ),
+            remediation: Some("Run `logos-scaffold setup`".to_string()),
         };
     }
 
-    let home_hint = home_dir
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "~/.logos-blockchain-circuits".to_string());
+    // Mirror `circuits::installed_version_matches`: a missing/unreadable VERSION
+    // file is an older/renamed layout the installer treats as acceptable (it
+    // won't re-download), so `doctor` must not hard-fail on it — it just can't
+    // verify the installed version.
+    let version_path = install_dir.join("VERSION");
+    let installed_version = fs::read_to_string(&version_path)
+        .ok()
+        .map(|text| text.trim().to_string());
 
-    let env_status = match env_path {
-        None => "unset".to_string(),
-        Some(p) if is_broken_symlink(p) => format!("set to broken symlink `{}`", p.display()),
-        Some(p) if !p.exists() => format!("set to nonexistent path `{}`", p.display()),
-        Some(p) => format!("set to non-directory `{}`", p.display()),
-    };
+    // Drift is only a failure when we can actually read the installed version.
+    if let Some(installed) = &installed_version {
+        if !version_eq(installed, &config.version) {
+            return CheckRow {
+                status: CheckStatus::Fail,
+                name: "logos-blockchain-circuits".to_string(),
+                detail: format!(
+                    "installed version={} at {}; configured [circuits].version={}",
+                    installed,
+                    install_dir.display(),
+                    config.version
+                ),
+                remediation: Some("Run `logos-scaffold setup`".to_string()),
+            };
+        }
+    }
+
+    let version_label = installed_version
+        .as_deref()
+        .unwrap_or("unknown (no VERSION file)");
+
+    if !version_eq(&config.version, DEFAULT_CIRCUITS_VERSION) {
+        return CheckRow {
+            status: CheckStatus::Warn,
+            name: "logos-blockchain-circuits".to_string(),
+            detail: format!(
+                "installed version={} at {}; scaffold's default circuits pin is {}",
+                version_label,
+                install_dir.display(),
+                DEFAULT_CIRCUITS_VERSION
+            ),
+            remediation: Some(format!(
+                "Set [circuits].version to {DEFAULT_CIRCUITS_VERSION} unless this project intentionally overrides scaffold's default circuits pin"
+            )),
+        };
+    }
 
     CheckRow {
-        status: CheckStatus::Fail,
+        status: CheckStatus::Pass,
         name: "logos-blockchain-circuits".to_string(),
         detail: format!(
-            "not found: $LOGOS_BLOCKCHAIN_CIRCUITS {env_status} and {home_hint} is missing"
+            "installed version={} at {}",
+            version_label,
+            install_dir.display()
         ),
-        remediation: Some(format!(
-            "Obtain the logos-blockchain-circuits release and either set LOGOS_BLOCKCHAIN_CIRCUITS=<path> or place it at {home_hint}"
-        )),
+        remediation: None,
+    }
+}
+
+fn invalid_env_status(path: &Path) -> String {
+    if is_broken_symlink(path) {
+        format!("set to broken symlink `{}`", path.display())
+    } else if !path.exists() {
+        format!("set to nonexistent path `{}`", path.display())
+    } else if path.is_dir() {
+        format!("set to unpopulated directory `{}`", path.display())
+    } else {
+        format!("set to non-directory `{}`", path.display())
     }
 }
 
@@ -285,7 +348,8 @@ pub(crate) fn one_line(text: &str) -> String {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::model::CheckStatus;
+    use crate::constants::DEFAULT_CIRCUITS_VERSION;
+    use crate::model::{CheckStatus, CircuitsConfig};
     use std::fs;
     use tempfile::tempdir;
 
@@ -316,10 +380,26 @@ mod tests {
         assert!(row.remediation.is_some());
     }
 
+    fn default_circuits_config() -> CircuitsConfig {
+        CircuitsConfig::default()
+    }
+
+    fn write_circuits_dir(path: &std::path::Path, version: &str) {
+        fs::create_dir_all(path.join("pol")).expect("mkdir circuits pol");
+        fs::write(path.join("pol/verification_key.json"), "{}").expect("write sentinel");
+        fs::write(path.join("VERSION"), version).expect("write VERSION");
+    }
+
     #[test]
     fn circuits_check_passes_via_env_var() {
         let tmp = tempdir().expect("tempdir");
-        let row = check_logos_blockchain_circuits_with(Some(tmp.path()), None);
+        write_circuits_dir(tmp.path(), DEFAULT_CIRCUITS_VERSION);
+        let install = tmp.path().join("missing-configured-install");
+        let row = check_logos_blockchain_circuits_with(
+            Some(tmp.path()),
+            &install,
+            &default_circuits_config(),
+        );
         assert_eq!(row.status, CheckStatus::Pass);
         assert!(
             row.detail.contains("$LOGOS_BLOCKCHAIN_CIRCUITS"),
@@ -329,24 +409,24 @@ mod tests {
     }
 
     #[test]
-    fn circuits_check_passes_via_home_dir_when_env_var_unset() {
+    fn circuits_check_passes_via_configured_install_dir() {
         let tmp = tempdir().expect("tempdir");
-        let home_path = tmp.path().join(".logos-blockchain-circuits");
-        fs::create_dir(&home_path).expect("mkdir home circuits");
-        let row = check_logos_blockchain_circuits_with(None, Some(&home_path));
+        let install = tmp.path().join(".scaffold/circuits");
+        write_circuits_dir(&install, DEFAULT_CIRCUITS_VERSION);
+        let row = check_logos_blockchain_circuits_with(None, &install, &default_circuits_config());
         assert_eq!(row.status, CheckStatus::Pass);
-        assert!(row.detail.contains(home_path.to_str().unwrap()));
+        assert!(row.detail.contains(install.to_str().unwrap()));
     }
 
     #[test]
-    fn circuits_check_fails_with_unset_marker_when_env_unset_and_home_missing() {
+    fn circuits_check_fails_when_configured_install_missing() {
         let tmp = tempdir().expect("tempdir");
-        let missing_home = tmp.path().join(".logos-blockchain-circuits"); // not created
-        let row = check_logos_blockchain_circuits_with(None, Some(&missing_home));
+        let missing = tmp.path().join(".scaffold/circuits");
+        let row = check_logos_blockchain_circuits_with(None, &missing, &default_circuits_config());
         assert_eq!(row.status, CheckStatus::Fail);
         assert!(
-            row.detail.contains("unset"),
-            "unset case must say 'unset', got: {}",
+            row.detail.contains("missing configured circuits release"),
+            "missing case must name configured install, got: {}",
             row.detail
         );
         assert!(row.remediation.is_some());
@@ -359,8 +439,12 @@ mod tests {
         // a user with a typo'd LOGOS_BLOCKCHAIN_CIRCUITS.
         let tmp = tempdir().expect("tempdir");
         let bogus = tmp.path().join("nonexistent");
-        let missing_home = tmp.path().join(".logos-blockchain-circuits");
-        let row = check_logos_blockchain_circuits_with(Some(&bogus), Some(&missing_home));
+        let missing = tmp.path().join(".scaffold/circuits");
+        let row = check_logos_blockchain_circuits_with(
+            Some(&bogus),
+            &missing,
+            &default_circuits_config(),
+        );
         assert_eq!(row.status, CheckStatus::Fail);
         assert!(
             row.detail.contains("set to nonexistent path"),
@@ -378,8 +462,12 @@ mod tests {
         let broken = tmp.path().join("broken-circuits-link");
         std::os::unix::fs::symlink(tmp.path().join("missing-target"), &broken)
             .expect("create broken symlink");
-        let missing_home = tmp.path().join(".logos-blockchain-circuits");
-        let row = check_logos_blockchain_circuits_with(Some(&broken), Some(&missing_home));
+        let missing = tmp.path().join(".scaffold/circuits");
+        let row = check_logos_blockchain_circuits_with(
+            Some(&broken),
+            &missing,
+            &default_circuits_config(),
+        );
         assert_eq!(row.status, CheckStatus::Fail);
         assert!(
             row.detail.contains("set to broken symlink"),
@@ -396,8 +484,12 @@ mod tests {
         let tmp = tempdir().expect("tempdir");
         let file_path = tmp.path().join("a-file");
         fs::write(&file_path, "not a directory").expect("write file");
-        let missing_home = tmp.path().join(".logos-blockchain-circuits");
-        let row = check_logos_blockchain_circuits_with(Some(&file_path), Some(&missing_home));
+        let missing = tmp.path().join(".scaffold/circuits");
+        let row = check_logos_blockchain_circuits_with(
+            Some(&file_path),
+            &missing,
+            &default_circuits_config(),
+        );
         assert_eq!(row.status, CheckStatus::Fail);
         assert!(
             row.detail.contains("set to non-directory"),
@@ -405,5 +497,65 @@ mod tests {
             row.detail
         );
         assert!(!row.detail.contains("unset"));
+    }
+
+    #[test]
+    fn circuits_check_fails_on_installed_version_drift() {
+        let tmp = tempdir().expect("tempdir");
+        let install = tmp.path().join(".scaffold/circuits");
+        write_circuits_dir(&install, "9.9.9");
+        let row = check_logos_blockchain_circuits_with(None, &install, &default_circuits_config());
+        assert_eq!(row.status, CheckStatus::Fail);
+        assert!(row.detail.contains("installed version=9.9.9"), "{row:?}");
+        assert!(row.detail.contains(DEFAULT_CIRCUITS_VERSION), "{row:?}");
+    }
+
+    #[test]
+    fn circuits_check_passes_when_version_file_is_absent() {
+        // An install with the sentinel but no VERSION file is an older/renamed
+        // layout the installer accepts (`installed_version_matches` returns
+        // true), so doctor must not hard-fail on it.
+        let tmp = tempdir().expect("tempdir");
+        let install = tmp.path().join(".scaffold/circuits");
+        fs::create_dir_all(install.join("pol")).expect("mkdir pol");
+        fs::write(install.join("pol/verification_key.json"), "{}").expect("write sentinel");
+        // deliberately no VERSION file
+        let row = check_logos_blockchain_circuits_with(None, &install, &default_circuits_config());
+        assert_eq!(row.status, CheckStatus::Pass, "{row:?}");
+    }
+
+    #[test]
+    fn circuits_check_passes_when_version_differs_only_by_v_prefix() {
+        // A `v`-prefixed `[circuits].version` against an unprefixed installed
+        // VERSION (or vice versa) is NOT drift — the install path already
+        // normalises the leading `v`, so `doctor` must not cry false drift or
+        // a spurious LEZ-pin warning.
+        let tmp = tempdir().expect("tempdir");
+        let install = tmp.path().join(".scaffold/circuits");
+        write_circuits_dir(&install, DEFAULT_CIRCUITS_VERSION);
+        let cfg = CircuitsConfig {
+            version: format!("v{DEFAULT_CIRCUITS_VERSION}"),
+            ..CircuitsConfig::default()
+        };
+        let row = check_logos_blockchain_circuits_with(None, &install, &cfg);
+        assert_eq!(row.status, CheckStatus::Pass, "{row:?}");
+    }
+
+    #[test]
+    fn circuits_check_warns_when_configured_version_drifts_from_lez_pin() {
+        let tmp = tempdir().expect("tempdir");
+        let install = tmp.path().join(".scaffold/circuits");
+        write_circuits_dir(&install, "9.9.9");
+        let cfg = CircuitsConfig {
+            version: "9.9.9".to_string(),
+            ..CircuitsConfig::default()
+        };
+        let row = check_logos_blockchain_circuits_with(None, &install, &cfg);
+        assert_eq!(row.status, CheckStatus::Warn);
+        assert!(
+            row.detail.contains("scaffold's default circuits pin is"),
+            "{row:?}"
+        );
+        assert!(row.remediation.is_some());
     }
 }

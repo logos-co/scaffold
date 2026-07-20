@@ -81,6 +81,23 @@ impl Default for LocalnetConfig {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct CircuitsConfig {
+    pub(crate) version: String,
+    pub(crate) url_template: Option<String>,
+    pub(crate) install_dir: String,
+}
+
+impl Default for CircuitsConfig {
+    fn default() -> Self {
+        Self {
+            version: crate::constants::DEFAULT_CIRCUITS_VERSION.to_string(),
+            url_template: None,
+            install_dir: ".scaffold/circuits".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct Config {
     pub(crate) version: String,
     pub(crate) cache_root: String,
@@ -93,6 +110,7 @@ pub(crate) struct Config {
     /// `[repos.lgpm]`. Optional, same reasoning as `basecamp_repo`.
     pub(crate) lgpm_repo: Option<RepoRef>,
     pub(crate) wallet_home_dir: String,
+    pub(crate) circuits: CircuitsConfig,
     pub(crate) framework: FrameworkConfig,
     pub(crate) localnet: LocalnetConfig,
     /// `[modules.<name>]` — top-level Logos module catalog (was

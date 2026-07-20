@@ -183,8 +183,7 @@ impl Project {
             .map_err(error::classify)?;
         let spel_repo = resolve_repo_path(&self.inner, &self.inner.config.spel, "spel")
             .map_err(error::classify)?;
-        let circuits_dir =
-            crate::circuits::circuits_dir_for_cache_root(&cache_root).map_err(error::classify)?;
+        let circuits_dir = crate::circuits::circuits_dir_for_project(&self.inner);
         Ok(ProjectPaths {
             root: self.inner.root.clone(),
             scaffold_toml: self.inner.root.join("scaffold.toml"),
