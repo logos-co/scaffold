@@ -46,17 +46,21 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       # The bootstrap cache holds the cloned lez/spel repos and their target/
-      # dirs (~/.cache/logos-scaffold) AND the extracted circuits release
-      # (~/.logos-blockchain-circuits, where the fetch step below puts it).
-      # Both must be cached, or the multi-MB circuits tarball re-downloads on
-      # every run. Keying on constants.rs means a pin or circuits-version bump
+      # dirs (~/.cache/logos-scaffold), the extracted circuits release
+      # (~/.logos-blockchain-circuits, where the fetch step below puts it),
+      # and the risc0 toolchains (~/.risc0, installed further below). All
+      # must be cached, or the multi-MB circuits tarball and the ~500 MB
+      # risc0 Rust toolchain re-download on every run. rzup is idempotent,
+      # so a cache hit on ~/.risc0 turns the install step into a fast no-op.
+      # Keying on constants.rs means a pin or circuits-version bump
       # invalidates it (rebuild from scratch) while same-pin re-runs stay warm.
-      - name: Cache scaffold bootstrap (repos + circuits)
+      - name: Cache scaffold bootstrap (repos + circuits + risc0)
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/logos-scaffold
             ~/.logos-blockchain-circuits
+            ~/.risc0
           key: scaffold-bootstrap-${{ runner.os }}-${{ hashFiles('src/constants.rs') }}
 
       - name: Build scaffold CLI
