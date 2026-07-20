@@ -20,8 +20,8 @@ members = [
 unsafe_code = "warn"
 
 [workspace.dependencies]
-# Spel v0.5.0 pins LEZ by tag. Match that source form so Cargo uses one
-# nssa_core instance instead of treating equivalent tag and rev sources as distinct.
+# Spel pins LEZ by tag. Match that source form so Cargo resolves a single
+# nssa_core instead of treating equivalent tag and rev sources as distinct.
 nssa = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "{{lez_tag}}" }
 nssa_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "{{lez_tag}}" }
 wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "{{lez_tag}}" }
