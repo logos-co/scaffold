@@ -26,7 +26,7 @@ use super::wallet_support::{
 /// compiles via `crate::constants::METHODS_DIR`; keep them in sync.
 const GUEST_BIN_SEARCH_ROOTS: &[&str] = &["target/riscv-guest", "methods/target"];
 
-/// `spel inspect` line prefix that carries the risc0 image ID — the value the
+/// `spel program-id` line prefix that carries the risc0 image ID — the value the
 /// sequencer uses as the on-chain program ID. Format is whitespace-tolerant:
 /// `   ImageID (hex bytes): <64 hex chars>`.
 const SPEL_IMAGE_ID_PREFIX: &str = "ImageID (hex bytes):";
@@ -454,12 +454,12 @@ fn deploy_single_program(
     })
 }
 
-/// Wall-clock cap for `spel inspect`. The CLI typically returns in
+/// Wall-clock cap for `spel program-id`. The CLI typically returns in
 /// milliseconds; a hung binary should not block the deploy summary.
 /// Override with `LOGOS_SCAFFOLD_SPEL_INSPECT_TIMEOUT_MS` if needed.
 const SPEL_INSPECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// Run the project-vendored `spel inspect <binary>` and return the risc0
+/// Run the project-vendored `spel program-id <binary>` and return the risc0
 /// image ID parsed from its output. Returns `None` on any failure (binary
 /// missing, non-zero exit, output unparseable, timeout). Callers print an
 /// "unavailable" hint instead of failing the deploy — the deploy itself has
@@ -476,7 +476,7 @@ pub(crate) fn extract_program_id(spel_bin: &Path, binary_path: &Path) -> Option<
         .unwrap_or(SPEL_INSPECT_TIMEOUT);
 
     let mut child = Command::new(spel_bin)
-        .arg("inspect")
+        .arg("program-id")
         .arg(binary_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
