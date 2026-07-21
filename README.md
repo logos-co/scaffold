@@ -260,6 +260,23 @@ environment variables pre-set:
 multi-program projects so hooks fail loudly rather than silently
 picking up the wrong program.
 
+#### Self-deploying projects (`deploy = false`)
+
+`run` deploys programs it finds under `methods/guest/src/bin`. A project
+that owns deployment itself — it deploys from a `post_deploy` hook, or keeps
+its guest program outside that default directory — can set `deploy = false`
+to skip scaffold's deploy step (step 5). The pipeline then runs
+build → IDL → localnet → topup → `post_deploy`, without requiring the default
+program directory to exist. It works inline under `[run]` or per profile:
+
+```toml
+[run.profiles.demo]
+deploy = false
+post_deploy = ["scripts/deploy-and-demo.sh"]
+```
+
+`deploy` defaults to `true`; omit it for the normal deploy loop.
+
 #### One-off override / skip
 
 To run a different hook without editing `scaffold.toml`:

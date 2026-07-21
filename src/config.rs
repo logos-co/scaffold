@@ -108,6 +108,11 @@ fn parse_run(doc: &DocumentMut) -> DynResult<RunConfig> {
         .and_then(Item::as_value)
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let inline_deploy = run_table
+        .get("deploy")
+        .and_then(Item::as_value)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     let inline_post_deploy = parse_post_deploy(run_table.get("post_deploy"))?;
 
     let mut profiles: std::collections::BTreeMap<String, RunProfile> =
@@ -122,8 +127,20 @@ fn parse_run(doc: &DocumentMut) -> DynResult<RunConfig> {
                 .and_then(Item::as_value)
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let deploy = table
+                .get("deploy")
+                .and_then(Item::as_value)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
             let post_deploy = parse_post_deploy(table.get("post_deploy"))?;
-            profiles.insert(name.to_string(), RunProfile { reset, post_deploy });
+            profiles.insert(
+                name.to_string(),
+                RunProfile {
+                    reset,
+                    post_deploy,
+                    deploy,
+                },
+            );
         }
     }
 
@@ -142,6 +159,7 @@ fn parse_run(doc: &DocumentMut) -> DynResult<RunConfig> {
         inline: RunProfile {
             reset: inline_reset,
             post_deploy: inline_post_deploy,
+            deploy: inline_deploy,
         },
         profiles,
         watch,
@@ -897,7 +915,7 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
 }
 
 fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
-    let has_inline = run.inline.reset || !run.inline.post_deploy.is_empty();
+    let has_inline = run.inline.reset || !run.inline.post_deploy.is_empty() || !run.inline.deploy;
     let has_default_profile = run.default_profile.is_some();
     let has_profiles = !run.profiles.is_empty();
     let has_watch = run.watch != WatchConfig::default();
@@ -913,6 +931,11 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
     }
     if run.inline.reset {
         run_table["reset"] = value(true);
+    }
+    // Only emit `deploy` when it deviates from the `true` default, to keep a
+    // fresh scaffold.toml minimal.
+    if !run.inline.deploy {
+        run_table["deploy"] = value(false);
     }
     if !run.inline.post_deploy.is_empty() {
         for hook in &run.inline.post_deploy {
@@ -938,6 +961,9 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
                 .expect("profile table");
             if profile.reset {
                 profile_table["reset"] = value(true);
+            }
+            if !profile.deploy {
+                profile_table["deploy"] = value(false);
             }
             if !profile.post_deploy.is_empty() {
                 profile_table["post_deploy"] = post_deploy_value(&profile.post_deploy);
@@ -1984,6 +2010,61 @@ role = "project"
     }
 
     #[test]
+    fn run_profile_deploy_defaults_to_true() {
+        // Absent `deploy` key → deploy runs, preserving historical behavior.
+        let toml = minimal_v0_2_0() + "[run.profiles.demo]\npost_deploy = \"echo demo\"\n";
+        let cfg = parse_config(&toml).expect("parse");
+        assert!(cfg.run.profiles.get("demo").expect("demo present").deploy);
+        // The inline/default profile also defaults deploy to true.
+        assert!(RunProfile::default().deploy);
+        assert!(cfg.run.inline.deploy);
+    }
+
+    #[test]
+    fn parse_config_run_profile_deploy_false() {
+        let toml = minimal_v0_2_0()
+            + "[run.profiles.demo]\ndeploy = false\npost_deploy = [\"scripts/self-deploy.sh\"]\n";
+        let cfg = parse_config(&toml).expect("parse");
+        let demo = cfg.run.profiles.get("demo").expect("demo present");
+        assert!(!demo.deploy);
+        assert_eq!(demo.post_deploy, vec!["scripts/self-deploy.sh".to_string()]);
+    }
+
+    #[test]
+    fn parse_config_inline_run_deploy_false() {
+        let toml = minimal_v0_2_0() + "[run]\ndeploy = false\n";
+        let cfg = parse_config(&toml).expect("parse");
+        assert!(!cfg.run.inline.deploy);
+        let resolved = cfg.run.resolve_profile(None).expect("resolve");
+        assert!(!resolved.deploy);
+    }
+
+    #[test]
+    fn run_profile_deploy_round_trips_through_parse_serialize() {
+        let toml = minimal_v0_2_0()
+            + "[run]\ndeploy = false\n[run.profiles.demo]\ndeploy = false\npost_deploy = [\"echo demo\"]\n";
+        let cfg1 = parse_config(&toml).expect("parse");
+        let serialized = serialize_config(&cfg1).expect("serialize");
+        let cfg2 = parse_config(&serialized).expect("re-parse");
+        assert!(!cfg2.run.inline.deploy);
+        let demo = cfg2.run.profiles.get("demo").expect("demo present");
+        assert!(!demo.deploy);
+        assert_eq!(demo.post_deploy, vec!["echo demo".to_string()]);
+    }
+
+    #[test]
+    fn run_profile_deploy_true_is_not_serialized() {
+        // The `true` default must not be emitted, to keep scaffold.toml minimal.
+        let toml = minimal_v0_2_0() + "[run.profiles.demo]\npost_deploy = [\"echo demo\"]\n";
+        let cfg = parse_config(&toml).expect("parse");
+        let serialized = serialize_config(&cfg).expect("serialize");
+        assert!(
+            !serialized.contains("deploy = true"),
+            "default deploy=true should not be serialized:\n{serialized}"
+        );
+    }
+
+    #[test]
     fn serialize_rejects_newline_in_profile_post_deploy() {
         let mut cfg = base_config();
         let mut profiles = std::collections::BTreeMap::new();
@@ -1992,6 +2073,7 @@ role = "project"
             RunProfile {
                 reset: false,
                 post_deploy: vec!["echo a\n[run.profiles.evil]".to_string()],
+                deploy: true,
             },
         );
         cfg.run = RunConfig {
