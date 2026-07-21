@@ -275,6 +275,14 @@ deploy = false
 post_deploy = ["scripts/deploy-and-demo.sh"]
 ```
 
+It is equally valid inline under `[run]` (applies to the default, profile-less run):
+
+```toml
+[run]
+deploy = false
+post_deploy = ["scripts/deploy-and-demo.sh"]
+```
+
 `deploy` defaults to `true`; omit it for the normal deploy loop.
 
 #### One-off override / skip
