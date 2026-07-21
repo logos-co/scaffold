@@ -784,7 +784,9 @@ fn launch_env(
 ///     `.../Logos/LogosBasecamp` for the portable stack) when unset, and
 ///   * rewrites any caller-supplied relative `LOGOS_DATA_DIR` (from
 ///     `[basecamp.env]` / `[basecamp.profiles.<name>.env]`) to absolute against
-///     the project root, so a relative value can't silently break the UI.
+///     the project root, so a relative value can't silently break the UI, and
+///   * treats an empty (or whitespace-only) caller value as unset — absolutizing
+///     `""` would collapse to the project root, which is not a module root.
 ///
 /// The caller gates this to the macOS portable stack; the transform itself is
 /// platform-independent so it stays unit-testable on any host.
@@ -795,7 +797,10 @@ fn set_absolute_logos_data_dir(
     basecamp_repo: Option<&RepoRef>,
 ) {
     const KEY: &str = "LOGOS_DATA_DIR";
-    match env.get(KEY) {
+    match env
+        .get(KEY)
+        .filter(|v| !v.to_string_lossy().trim().is_empty())
+    {
         Some(existing) => {
             let path = PathBuf::from(existing);
             if path.is_relative() {
@@ -816,13 +821,19 @@ fn set_absolute_logos_data_dir(
 
 /// Resolve `path` to an absolute path. Absolute inputs pass through unchanged; a
 /// relative input is joined onto `base` (the project root, itself absolute for
-/// the normal `load_project` discovery path).
+/// the normal `load_project` discovery path). A relative `base` (possible via
+/// `load_project_at`, which accepts any root) is best-effort canonicalized
+/// first so the result is absolute whenever `base` exists on disk.
 fn absolutize(base: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        base.join(path)
+        return path.to_path_buf();
     }
+    if base.is_relative() {
+        if let Ok(abs_base) = base.canonicalize() {
+            return abs_base.join(path);
+        }
+    }
+    base.join(path)
 }
 
 /// Resolve the per-profile runtime dir (`TMPDIR` / `XDG_RUNTIME_DIR` root).
@@ -3813,6 +3824,41 @@ mod tests {
         assert_eq!(
             env.get("LOGOS_DATA_DIR").map(PathBuf::from),
             Some(PathBuf::from("/somewhere/else"))
+        );
+    }
+
+    #[test]
+    fn set_absolute_logos_data_dir_treats_empty_caller_value_as_unset() {
+        let portable = repo_with_attr("bin-macos-app");
+        let project_root = Path::new("/abs/project");
+        let profile_dir = project_root.join("profiles/alice");
+        let mut env: BTreeMap<String, OsString> = BTreeMap::new();
+        // An empty value (e.g. `LOGOS_DATA_DIR = ""` in [basecamp.env]) would
+        // absolutize to the project root itself, which is not a module root;
+        // it must fall back to the profile default instead.
+        env.insert("LOGOS_DATA_DIR".into(), OsString::new());
+        set_absolute_logos_data_dir(&mut env, project_root, &profile_dir, Some(&portable));
+        assert_eq!(
+            env.get("LOGOS_DATA_DIR").map(PathBuf::from),
+            Some(
+                profile_dir
+                    .join("xdg-data")
+                    .join(BASECAMP_XDG_APP_SUBPATH_PORTABLE)
+            )
+        );
+    }
+
+    #[test]
+    fn absolutize_canonicalizes_relative_base() {
+        // `.` always exists, so canonicalize resolves it against the test cwd
+        // without the test itself having to change directories.
+        let resolved = absolutize(Path::new("."), Path::new("custom/data"));
+        assert!(resolved.is_absolute(), "got: {}", resolved.display());
+        assert_eq!(
+            resolved,
+            std::env::current_dir()
+                .expect("test cwd")
+                .join("custom/data")
         );
     }
 
