@@ -1156,6 +1156,7 @@ Within the running UIs, exercise whatever p2p surface the module exposes (chat e
 - Custom profile pairs open against their own profile dirs under `.scaffold/basecamp/profiles/<profile>/` and their configured runtime/log/env paths.
 - Each window shows the project's `.lgx` modules installed and ready.
 - `LOGOS_PROFILE=alice` and `LOGOS_PROFILE=bob` are visible in each respective process environment (helpful for debugging).
+- On the macOS portable stack, each process environment carries an absolute `LOGOS_DATA_DIR` pointing at its own profile's module root — set automatically by `launch`, no manual export needed.
 - The two instances do not collide on Qt remote-objects or any non-module port; per-profile port-override env vars (per the spec) are set on each `launch`.
 - A p2p interaction triggered from `alice` is observable in `bob` (and vice versa) within the module's expected latency window.
 
