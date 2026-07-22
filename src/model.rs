@@ -343,7 +343,7 @@ pub(crate) struct FrameworkIdlConfig {
     pub(crate) path: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RunProfile {
     /// Wipe rocksdb + wallet, restart sequencer, re-seed default wallet.
     /// Broader than `lgs localnet reset`: re-establishes the documented
@@ -352,6 +352,28 @@ pub(crate) struct RunProfile {
     /// deterministic test suites where PDA-key collisions force a wipe.
     pub(crate) reset: bool,
     pub(crate) post_deploy: Vec<String>,
+    /// Whether `lgs run` performs its own deploy step. Defaults to `true`.
+    /// Set `deploy = false` for a project that owns program deployment
+    /// itself (e.g. deploys from a `post_deploy` hook, or keeps its guest
+    /// program outside the scaffold-default `methods/guest/src/bin`): the
+    /// pipeline then skips step 5's hash/deploy/save-state and goes straight
+    /// to the post-deploy hooks, instead of bailing on the missing default
+    /// program directory.
+    pub(crate) deploy: bool,
+}
+
+impl Default for RunProfile {
+    fn default() -> Self {
+        // `deploy` defaults to `true` so a project with no `[run]` config (or a
+        // profile that omits the key) keeps the historical behavior of running
+        // scaffold's deploy step. `derive(Default)` would give `false`, which
+        // would silently disable deploy for every existing project.
+        Self {
+            reset: false,
+            post_deploy: Vec::new(),
+            deploy: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]

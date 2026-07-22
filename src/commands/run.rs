@@ -195,33 +195,48 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
         );
     }
 
-    // Step 5: Deploy (idempotent: skip when guest .bin + IDL + deploy
-    // config hashes match the prior deploy AND the sequencer is the same
-    // instance that received it. A `lgs localnet stop && start` cycle
-    // changes the sequencer PID and wipes on-chain state, so PID equality
-    // is the gate that prevents stale-deploy false positives. To force a
-    // re-deploy without restarting localnet, use `--reset` (which also
-    // clears the cache) or delete `.scaffold/state/run_deploy.json`
-    // manually.
-    let current_hashes = compute_program_hashes(project)?;
-    let current_pid = current_localnet_pid(project);
-    let prior = load_state(project);
-    let deploy_skipped = if deploy_can_be_skipped(&current_hashes, current_pid, &prior) {
+    // Step 5: Deploy. Skipped entirely when the run profile sets
+    // `deploy = false` (project owns deployment); otherwise idempotent —
+    // see the branches below.
+    let deploy_skipped = if !params.resolved.deploy {
+        // `deploy = false`: the project owns program deployment itself (e.g.
+        // from a post_deploy hook, or with its guest program outside the
+        // scaffold-default `methods/guest/src/bin`). Skip scaffold's deploy —
+        // including the program-hash computation, which otherwise bails when
+        // the default program directory is absent — and go straight to hooks.
         println!(
-            "[5/{total_steps}] Deploy skipped (guest binaries + IDL + config + sequencer unchanged; pass `--reset` to wipe and re-deploy, or delete `.scaffold/state/run_deploy.json` to force a re-deploy without a wipe)"
+            "[5/{total_steps}] Deploy skipped (`deploy = false` in the run profile; this project owns program deployment — e.g. via a post_deploy hook)"
         );
         true
     } else {
-        println!("[5/{total_steps}] Deploying programs...");
-        cmd_deploy(None, None, false)?;
-        save_state(
-            project,
-            &RunDeployState {
-                program_hashes: current_hashes,
-                localnet_pid: current_pid,
-            },
-        )?;
-        false
+        // Step 5 deploy is idempotent: skip when guest .bin + IDL + deploy
+        // config hashes match the prior deploy AND the sequencer is the same
+        // instance that received it. A `lgs localnet stop && start` cycle
+        // changes the sequencer PID and wipes on-chain state, so PID equality
+        // is the gate that prevents stale-deploy false positives. To force a
+        // re-deploy without restarting localnet, use `--reset` (which also
+        // clears the cache) or delete `.scaffold/state/run_deploy.json`
+        // manually.
+        let current_hashes = compute_program_hashes(project)?;
+        let current_pid = current_localnet_pid(project);
+        let prior = load_state(project);
+        if deploy_can_be_skipped(&current_hashes, current_pid, &prior) {
+            println!(
+                "[5/{total_steps}] Deploy skipped (guest binaries + IDL + config + sequencer unchanged; pass `--reset` to wipe and re-deploy, or delete `.scaffold/state/run_deploy.json` to force a re-deploy without a wipe)"
+            );
+            true
+        } else {
+            println!("[5/{total_steps}] Deploying programs...");
+            cmd_deploy(None, None, false)?;
+            save_state(
+                project,
+                &RunDeployState {
+                    program_hashes: current_hashes,
+                    localnet_pid: current_pid,
+                },
+            )?;
+            false
+        }
     };
 
     // Collect deployed-program metadata for hook env injection regardless
