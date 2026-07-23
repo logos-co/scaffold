@@ -712,6 +712,7 @@ dependencies = [
  "flate2",
  "include_dir",
  "indicatif",
+ "libc",
  "notify",
  "predicates",
  "serde",
