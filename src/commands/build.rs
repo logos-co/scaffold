@@ -8,7 +8,7 @@ use crate::commands::client::generate_clients_from_current_idl;
 use crate::commands::idl::build_idl_for_current_project;
 use crate::commands::setup::cmd_setup;
 use crate::constants::{FRAMEWORK_KIND_DEFAULT, FRAMEWORK_KIND_LEZ_FRAMEWORK, METHODS_DIR};
-use crate::process::run_checked;
+use crate::process::{apply_host_cc_overrides, run_checked};
 use crate::project::{load_project, run_in_project_dir};
 use crate::DynResult;
 
@@ -43,13 +43,10 @@ pub(crate) fn cmd_build_shortcut(project_dir: Option<PathBuf>, prebuilt: bool) -
 }
 
 fn build_workspace_for_current_project(cwd: &Path) -> DynResult<()> {
-    run_checked(
-        Command::new("cargo")
-            .current_dir(cwd)
-            .arg("build")
-            .arg("--workspace"),
-        "cargo build --workspace (project)",
-    )
+    let mut cmd = Command::new("cargo");
+    cmd.current_dir(cwd).arg("build").arg("--workspace");
+    apply_host_cc_overrides(&mut cmd);
+    run_checked(&mut cmd, "cargo build --workspace (project)")
 }
 
 /// Detect and build Risc0 guest binaries in the `methods/` directory.
@@ -66,13 +63,15 @@ fn build_methods_guests(cwd: &Path) -> DynResult<()> {
         // `GUEST_BIN_SEARCH_ROOTS`) only matches `.bin` files whose path
         // contains a `release/` component, so a debug build here would
         // produce artefacts the deploy step cannot find.
+        let mut cmd = Command::new("cargo");
+        cmd.current_dir(cwd)
+            .arg("build")
+            .arg("--release")
+            .arg("--manifest-path")
+            .arg(&methods_manifest);
+        apply_host_cc_overrides(&mut cmd);
         run_checked(
-            Command::new("cargo")
-                .current_dir(cwd)
-                .arg("build")
-                .arg("--release")
-                .arg("--manifest-path")
-                .arg(&methods_manifest),
+            &mut cmd,
             "cargo build --release --manifest-path methods/Cargo.toml",
         )?;
     }
@@ -83,6 +82,7 @@ fn build_methods_guests(cwd: &Path) -> DynResult<()> {
 mod tests {
     use super::build_methods_guests;
     use std::fs;
+    use std::process::Command;
     use tempfile::tempdir;
 
     #[test]
