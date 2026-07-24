@@ -242,7 +242,7 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
     // Collect deployed-program metadata for hook env injection regardless
     // of whether deploy ran or was skipped — hooks address programs by
     // name and shouldn't have to care about cache state.
-    // `extract_program_id` shells out to `spel inspect` once per program
+    // `extract_program_id` shells out to `spel program-id` once per program
     // here so the per-hook loop doesn't multiply latency by hook count.
     let deployed = collect_deployed_programs(project, deploy_skipped)?;
 
@@ -525,7 +525,7 @@ fn reseed_after_wipe(project: &Project) -> DynResult<()> {
 }
 
 /// Per-program metadata exposed to post-deploy hooks via env vars.
-/// `program_id` may be `None` when `spel inspect` fails (missing vendored
+/// `program_id` may be `None` when `spel program-id` fails (missing vendored
 /// binary, unreadable ELF).
 #[derive(Clone, Debug)]
 pub(crate) struct DeployedProgram {
