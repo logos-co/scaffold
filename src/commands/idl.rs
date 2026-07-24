@@ -10,7 +10,7 @@ use walkdir::WalkDir;
 use crate::circuits::ensure_circuits_for_project;
 use crate::constants::FRAMEWORK_KIND_LEZ_FRAMEWORK;
 use crate::model::Project;
-use crate::process::run_capture;
+use crate::process::{apply_host_cc_overrides, run_capture};
 use crate::project::{load_project, run_in_project_dir};
 use crate::state::write_text;
 use crate::DynResult;
@@ -100,17 +100,21 @@ fn build_idl_inner(force: bool) -> DynResult<()> {
     // logos-blockchain crates that need a populated circuits release.
     ensure_circuits_for_project(&project)?;
 
-    let out = run_capture(
-        Command::new("cargo")
-            .current_dir(&project.root)
+    let out = {
+        let mut cmd = Command::new("cargo");
+        cmd.current_dir(&project.root)
             .arg("test")
             .arg("--workspace")
             .arg("__lssa_idl_print")
             .arg("--")
             .arg("--show-output")
-            .arg("--quiet"),
-        "cargo test __lssa_idl_print",
-    )?;
+            .arg("--quiet");
+        // The workspace test build embeds the `methods/` guests; without the
+        // host-compiler pin the nested guest build breaks host-target C deps
+        // (see `apply_host_cc_overrides`).
+        apply_host_cc_overrides(&mut cmd);
+        run_capture(&mut cmd, "cargo test __lssa_idl_print")?
+    };
 
     let mut blocks = parse_idl_blocks(&out.stdout)?;
     if blocks.is_empty() {

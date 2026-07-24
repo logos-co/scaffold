@@ -7,7 +7,7 @@ use anyhow::{anyhow, bail};
 use crate::commands::idl::build_idl_for_current_project;
 use crate::constants::FRAMEWORK_KIND_LEZ_FRAMEWORK;
 use crate::model::Project;
-use crate::process::run_checked;
+use crate::process::{apply_host_cc_overrides, run_checked};
 use crate::project::{load_project, run_in_project_dir};
 use crate::DynResult;
 
@@ -73,19 +73,21 @@ fn generate_clients_from_project_idl(project: &Project) -> DynResult<()> {
         );
     }
 
-    run_checked(
-        Command::new("cargo")
-            .current_dir(&project.root)
-            .arg("run")
-            .arg("--manifest-path")
-            .arg(&generator_manifest)
-            .arg("--")
-            .arg("--idl-dir")
-            .arg(&idl_dir)
-            .arg("--out-dir")
-            .arg(&out_dir),
-        "run lez client generator",
-    )?;
+    let mut cmd = Command::new("cargo");
+    cmd.current_dir(&project.root)
+        .arg("run")
+        .arg("--manifest-path")
+        .arg(&generator_manifest)
+        .arg("--")
+        .arg("--idl-dir")
+        .arg(&idl_dir)
+        .arg("--out-dir")
+        .arg(&out_dir);
+    // The generator shares the project workspace target dir; keep its build
+    // env consistent with `build`/IDL so the guest embed is not refingerprinted
+    // and host-target C deps stay on the system compiler.
+    apply_host_cc_overrides(&mut cmd);
+    run_checked(&mut cmd, "run lez client generator")?;
 
     Ok(())
 }

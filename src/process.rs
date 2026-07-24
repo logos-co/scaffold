@@ -63,6 +63,33 @@ pub(crate) fn run_checked(cmd: &mut Command, label: &str) -> DynResult<()> {
     run_forwarded(cmd, label)
 }
 
+/// Keep host-target C compiles working inside risc0 guest builds.
+///
+/// When the risc0 C++ toolchain is installed, risc0-build exports plain
+/// `CC`/`CXX` pointing at `riscv32-unknown-elf-gcc` for the nested guest
+/// cargo build (and a bogus placeholder path when it is missing). cc-rs
+/// resolves compilers for host-target artifacts — build scripts and
+/// proc-macro dependencies compiled for the build machine inside the guest
+/// graph (e.g. `ring` pulled in via `spel-framework-macros` in the
+/// lez-framework template) — in the order `CC_<host-triple>` → `HOST_CC` →
+/// `CC`, so the riscv compiler leaks into host compiles and fails on
+/// host-only flags (`unrecognized command-line option '-m64'`). Pinning the
+/// `HOST_*` slots to the system defaults restores the pre-risc0 behavior for
+/// host artifacts while leaving guest-target compiles on the risc0 toolchain
+/// (those resolve `CC_<guest-triple>` → `TARGET_CC` → `CC` and never consult
+/// `HOST_CC`). Values the caller already exported always win. Must be applied
+/// to every project-workspace cargo invocation that can trigger the
+/// `methods/` guest embed: `build`, IDL generation, and client generation.
+/// CI's template-e2e workflow sets the same variable at the job level for
+/// its direct cargo calls.
+pub(crate) fn apply_host_cc_overrides(cmd: &mut Command) {
+    for (var, default) in [("HOST_CC", "cc"), ("HOST_CXX", "c++")] {
+        if std::env::var_os(var).is_none() {
+            cmd.env(var, default);
+        }
+    }
+}
+
 pub(crate) fn run_forwarded(cmd: &mut Command, label: &str) -> DynResult<()> {
     // Render once and reuse for both the echo line and any `CommandFailed`.
     let command = render_command(cmd);
@@ -721,4 +748,34 @@ pub(crate) fn which(binary: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    #[test]
+    fn host_cc_overrides_fill_unset_slots_without_clobbering() {
+        // With HOST_CC absent from the process env, the override must be
+        // applied to the child command; a caller-exported value must win.
+        // (Reading the process env is inherently shared state — assert the
+        // matching branch instead of mutating the env under parallel tests.)
+        let mut cmd = Command::new("true");
+        super::apply_host_cc_overrides(&mut cmd);
+        let envs: Vec<_> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
+            .collect();
+        if std::env::var_os("HOST_CC").is_none() {
+            assert!(
+                envs.contains(&("HOST_CC".to_string(), "cc".to_string())),
+                "HOST_CC must default to the system compiler; got: {envs:?}"
+            );
+        } else {
+            assert!(
+                !envs.iter().any(|(k, _)| k == "HOST_CC"),
+                "caller-exported HOST_CC must not be overridden"
+            );
+        }
+    }
 }
