@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 use walkdir::WalkDir;
@@ -26,10 +27,38 @@ use super::wallet_support::{
 /// compiles via `crate::constants::METHODS_DIR`; keep them in sync.
 const GUEST_BIN_SEARCH_ROOTS: &[&str] = &["target/riscv-guest", "methods/target"];
 
-/// `spel inspect` line prefix that carries the risc0 image ID — the value the
-/// sequencer uses as the on-chain program ID. Format is whitespace-tolerant:
+/// `spel program-id` line prefix that carries the risc0 image ID — the value
+/// the sequencer uses as the on-chain program ID. Format is whitespace-tolerant:
 /// `   ImageID (hex bytes): <64 hex chars>`.
 const SPEL_IMAGE_ID_PREFIX: &str = "ImageID (hex bytes):";
+
+/// Multi-program deploys are paced to one program per sequencer block.
+///
+/// The pinned LEZ sequencer settles every produced block to bedrock as a
+/// single channel inscription with a hard payload cap (917_504 bytes at the
+/// current pin). A block that batches several deployment transactions — each
+/// carrying a full guest ELF, ~370 KiB per template program — exceeds that
+/// cap and the sequencer panics fatally in `encode_channel_inscribe`, taking
+/// the localnet down mid-deploy. Until LEZ splits or rejects oversized
+/// inscriptions gracefully, wait after each successful submission for the
+/// head block id to advance (block production drains the mempool) before
+/// submitting the next program, so each deployment lands in its own block.
+const DEPLOY_PACING_POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// Generous ceiling: covers the 15s localnet default `block_create_timeout`
+/// with margin; degraded to a warning (never a hard failure) on expiry
+/// because pacing is a crash-avoidance heuristic, not a correctness gate.
+const DEPLOY_PACING_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// `LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS` overrides the pacing ceiling —
+/// integration tests and fast-block test-node setups (500ms blocks) have no
+/// reason to sit out the full localnet-sized wait when a head never advances.
+fn deploy_pacing_timeout() -> Duration {
+    std::env::var("LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(DEPLOY_PACING_TIMEOUT)
+}
 
 pub(crate) fn cmd_deploy(
     program_name: Option<String>,
@@ -112,8 +141,30 @@ pub(crate) fn deploy_for_project(
     // state on scope exit even if a `?` or panic interrupts the loop.
     let _echo_guard = json.then(EchoGuard::suppress);
 
+    // One program per block (see DEPLOY_PACING_* docs). Single-program
+    // deploys never pace; the head read after each successful submission is
+    // what the next iteration waits on.
+    let pace_deploys = selected_programs.len() > 1;
+    let mut prev_submission_head: Option<u64> = None;
+
     let mut results = Vec::new();
     for program in selected_programs {
+        if let Some(prev_head) = prev_submission_head.take() {
+            if !json {
+                println!(
+                    "Waiting for a new block past {prev_head} before the next deployment \
+                     (one program per block; bedrock inscription size cap)..."
+                );
+            }
+            wait_for_block_past(
+                &sequencer_addr,
+                prev_head,
+                deploy_pacing_timeout(),
+                DEPLOY_PACING_POLL_INTERVAL,
+                json,
+            );
+        }
+
         let Some(binary_path) = discovered.get(&program).cloned() else {
             if !json {
                 let searched = GUEST_BIN_SEARCH_ROOTS
@@ -208,6 +259,16 @@ pub(crate) fn deploy_for_project(
             tx,
             program_id,
         });
+
+        if pace_deploys {
+            // Head is read AFTER the wallet reported mempool admission: the
+            // next iteration then waits for a strictly newer block, which is
+            // guaranteed to have drained this submission from the mempool.
+            // (Racing a just-sealed block costs one extra wait interval, never
+            // a lost pacing guarantee.) A failed read degrades to unpaced —
+            // the preflight above already proved the RPC reachable once.
+            prev_submission_head = rpc_get_last_block_id(&sequencer_addr).ok();
+        }
     }
 
     let success_count = results
@@ -280,6 +341,39 @@ pub(crate) fn render_deploy_result_json(result: &DeployResult) -> serde_json::Va
         }
     }
     serde_json::Value::Object(obj)
+}
+
+/// Poll the sequencer until its last block id exceeds `submitted_at_head`,
+/// i.e. at least one block was produced after the caller's submission was
+/// admitted. Returns `true` when the head advanced, `false` on timeout
+/// (with a stdout warning unless `json`); RPC hiccups are retried until the
+/// deadline rather than treated as fatal.
+fn wait_for_block_past(
+    sequencer_addr: &str,
+    submitted_at_head: u64,
+    timeout: Duration,
+    poll_interval: Duration,
+    json: bool,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(head) = rpc_get_last_block_id(sequencer_addr) {
+            if head > submitted_at_head {
+                return true;
+            }
+        }
+        if Instant::now() >= deadline {
+            if !json {
+                println!(
+                    "warning: sequencer block id did not advance past {submitted_at_head} within {}s; \
+                     continuing without deploy pacing",
+                    timeout.as_secs()
+                );
+            }
+            return false;
+        }
+        std::thread::sleep(poll_interval);
+    }
 }
 
 fn preflight_sequencer_reachability(sequencer_addr: &str) -> DynResult<()> {
@@ -454,13 +548,18 @@ fn deploy_single_program(
     })
 }
 
-/// Wall-clock cap for `spel inspect`. The CLI typically returns in
+/// Wall-clock cap for `spel program-id`. The CLI typically returns in
 /// milliseconds; a hung binary should not block the deploy summary.
-/// Override with `LOGOS_SCAFFOLD_SPEL_INSPECT_TIMEOUT_MS` if needed.
+/// Override with `LOGOS_SCAFFOLD_SPEL_INSPECT_TIMEOUT_MS` if needed (name
+/// kept from the pre-v0.5.0 `spel inspect` era for compatibility).
 const SPEL_INSPECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// Run the project-vendored `spel inspect <binary>` and return the risc0
-/// image ID parsed from its output. Returns `None` on any failure (binary
+/// Run the project-vendored `spel program-id <binary>` and return the risc0
+/// image ID parsed from its output. (spel v0.5.0 renamed ELF image-ID
+/// extraction from `inspect <file>` to `program-id <file>`; `inspect` now
+/// decodes account data and requires `--idl`, so the old invocation fails
+/// against the pinned spel and every deploy reported
+/// `program_id: unavailable`.) Returns `None` on any failure (binary
 /// missing, non-zero exit, output unparseable, timeout). Callers print an
 /// "unavailable" hint instead of failing the deploy — the deploy itself has
 /// already succeeded by the time this runs.
@@ -476,7 +575,7 @@ pub(crate) fn extract_program_id(spel_bin: &Path, binary_path: &Path) -> Option<
         .unwrap_or(SPEL_INSPECT_TIMEOUT);
 
     let mut child = Command::new(spel_bin)
-        .arg("inspect")
+        .arg("program-id")
         .arg(binary_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -659,6 +758,66 @@ mod tests {
 
     fn lookup(root: &Path, program: &str) -> Option<PathBuf> {
         discover_program_binaries(root, &[program.to_string()]).remove(program)
+    }
+
+    /// Serve one scripted `getLastBlockId` JSON-RPC response per incoming
+    /// connection, then stop accepting. Mirrors the single-shot helper in
+    /// `wallet_support::tests`, extended to a response sequence so pacing
+    /// can observe a head that advances between polls.
+    fn spawn_scripted_block_id_server(
+        block_ids: Vec<u64>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub server");
+        let url = format!("http://{}", listener.local_addr().expect("local addr"));
+        let handle = std::thread::spawn(move || {
+            for block_id in block_ids {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf = [0_u8; 4096];
+                let _ = stream.read(&mut buf);
+                let body = format!(r#"{{"jsonrpc":"2.0","result":{block_id},"id":1}}"#);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        (url, handle)
+    }
+
+    #[test]
+    fn wait_for_block_past_returns_true_once_head_advances() {
+        let (url, handle) = spawn_scripted_block_id_server(vec![5, 5, 6]);
+        let advanced = wait_for_block_past(
+            &url,
+            5,
+            Duration::from_secs(10),
+            Duration::from_millis(10),
+            true,
+        );
+        assert!(advanced, "head reached 6 > 5, pacing wait must succeed");
+        handle.join().expect("server thread");
+    }
+
+    #[test]
+    fn wait_for_block_past_times_out_when_head_stalls() {
+        let (url, handle) = spawn_scripted_block_id_server(vec![5; 64]);
+        let advanced = wait_for_block_past(
+            &url,
+            5,
+            Duration::from_millis(200),
+            Duration::from_millis(10),
+            true,
+        );
+        assert!(
+            !advanced,
+            "stalled head must report timeout, not spin forever"
+        );
+        drop(handle); // server thread parks in accept(); do not join.
     }
 
     #[test]
