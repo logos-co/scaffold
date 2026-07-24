@@ -110,6 +110,29 @@ mkdir -p "$EXT" && cp /tmp/cr/r0vm "$EXT/r0vm" && chmod +x "$EXT/r0vm"
 
 `find_r0vm_path_for_lez` looks at `~/.risc0/extensions/v<risc0-zkvm-version>-cargo-risczero-<arch>-<os>/r0vm`; placing r0vm there is what wires it into a spawned sequencer (scaffold sets `RISC0_SERVER_PATH` from it). The sequencer runs with `RISC0_DEV_MODE=1` (the test-node default), so r0vm executes guests without real proving — which is why no GPU/prover is needed.
 
+**2b. (Only for guest compilation — `build`, D-series/L-series.) Install the risc0 Rust toolchain.** `risc0-build` resolves the guest toolchain through rzup's directory layout; without one installed, `build` fails with `Risc Zero Rust toolchain not found. Try running rzup install rust`. When rzup itself is unusable (same TLS issue as above), install it from the `risc0/rust` release assets — the directory name must follow the `v<version>-rust-<triple>` pattern for discovery, and no `settings.toml` is needed (the highest installed version wins). Pick the newest available tag: guest dependency floats (e.g. `ruint`) carry MSRVs that outrun older toolchains — 1.88.0 already fails with `rustc 1.88.0-dev is not supported by the following packages` on a fresh default-template project.
+
+```bash
+TCVER=1.91.1   # tag r0.1.91.1 — newest published as of 2026-07
+curl -sSL -H "Authorization: Bearer $GH_TOKEN" -o /tmp/rust-tc.tar.gz \
+  "https://github.com/risc0/rust/releases/download/r0.$TCVER/rust-toolchain-$TRIPLE.tar.gz"
+DEST="$HOME/.risc0/toolchains/v$TCVER-rust-$TRIPLE"
+mkdir -p "$DEST" && tar xzf /tmp/rust-tc.tar.gz -C "$DEST"
+"$DEST/bin/rustc" --version                        # → rustc 1.91.1-dev
+```
+
+The `lez-framework` template's guest additionally compiles C (the default template's guests do not), so the L-series `build` also needs the risc0 **C++** toolchain; without it the guest build dies in cc-rs with `failed to find tool "/no_risc0_cpp_toolchain_installed_run_rzup_install_cpp"`. Same rzup layout, date-based version (dir uses the semver form of the tag, e.g. tag `2024.01.05` → dir `v2024.1.5`):
+
+```bash
+curl -sSL -H "Authorization: Bearer $GH_TOKEN" -o /tmp/cpp-tc.tar.xz \
+  "https://github.com/risc0/toolchain/releases/download/2024.01.05/riscv32im-linux-x86_64.tar.xz"
+CPPDEST="$HOME/.risc0/toolchains/v2024.1.5-cpp-$TRIPLE"
+mkdir -p /tmp/cpp-tc && tar xJf /tmp/cpp-tc.tar.xz -C /tmp/cpp-tc
+mkdir -p "$CPPDEST" && mv /tmp/cpp-tc/riscv32im-linux-x86_64/* "$CPPDEST/"
+ln -sfn "$CPPDEST" "$HOME/.risc0/cpp"
+"$CPPDEST/bin/riscv32-unknown-elf-gcc" --version   # → gcc 13.2.0
+```
+
 **3. Build the real sequencer.** `test-node prepare` downloads the circuits release (via `curl`, automatically) and builds `sequencer_service`. It is long (~6 min); run it, then confirm doctor is green:
 
 ```bash
@@ -212,7 +235,7 @@ Use `new` for the main runnable project and `create` as the lightweight alias-pa
 - `setup` completes after syncing LEZ to the configured pin, building both `sequencer_service` and `wallet` inside the project's LEZ tree, and either seeding the default wallet or reporting that a default wallet is already configured. With `--prebuilt`: `sequencer_service` is downloaded instead of built from source (falls back to source build if no artifact is published); `wallet` is always built from source regardless of `--prebuilt`.
 - `localnet start` reports a ready localnet rather than only a spawned PID.
 - `build` exits successfully after preparing the project workspace, resolving the configured circuits release, and — when the project has a `methods/Cargo.toml` (Risc0 guest crate excluded from the main workspace) — also prints `Building guest methods...` and produces a `methods/target/.../release` artifact.
-- `deploy` prints a submission summary with zero failures when built binaries are present.
+- `deploy` prints a submission summary with zero failures when built binaries are present. Multi-program deploys are paced one program per sequencer block (`Waiting for a new block past N before the next deployment ...` between submissions): the pinned LEZ settles each block as a single bedrock inscription with a ~896 KiB payload cap and panics fatally when a block exceeds it, so batching several ~370 KiB deployment ELFs into one block kills the sequencer. Expect roughly one `block_create_timeout` (15s) of wait per additional program. A deploy that skips pacing and crashes localnet mid-flow is a regression; equally, record it if the upstream cap is lifted and pacing becomes dead weight.
 - `wallet topup` succeeds without an explicit address because the project default wallet was seeded during setup.
 - `wallet -- check-health` succeeds against the running localnet without requiring a global `wallet` install or manual `PATH` changes.
 - Generated `scaffold.toml` stores `[wallet].home_dir` but does not carry a wallet binary override; wallet location is derived from the pinned LEZ checkout.
@@ -474,13 +497,14 @@ D1 validates the scaffold pipeline up to deploy and wallet health. This scenario
 
 - Default-template project exists with D1 completed (setup, build, deploy done).
 - Localnet is running and `wallet -- check-health` succeeds.
-- Create a fresh public account for this scenario:
+- Create **two** fresh public accounts for this scenario — one per runner. The first program to write an account becomes its `program_owner`, and the pinned LEZ rejects any later write to it by a different program with `UnauthorizedDataModification` (execution-check rejection visible only in the sequencer log; the runner still exits 0 because submission succeeded).
 
 ```bash
-"$SCAFFOLD_BIN" wallet -- account new public
+"$SCAFFOLD_BIN" wallet -- account new public   # <account-id-a> for run_hello_world
+"$SCAFFOLD_BIN" wallet -- account new public   # <account-id-b> for run_hello_world_with_move_function
 ```
 
-Capture the account ID from the output (format: `Public/<base58>`). Use the base58 portion as `<account-id>` below.
+Capture each account ID from the output (format: `Public/<base58>`). The runners take the bare base58 portion; `wallet account get` requires the full `Public/<base58>` form (the bare id fails with `Unsupported privacy kind`).
 
 ### Commands / Actions
 
@@ -488,24 +512,26 @@ From the generated project root:
 
 ```bash
 export NSSA_WALLET_HOME_DIR="$PWD/.scaffold/wallet"
-cargo run --bin run_hello_world -- <account-id>
-"$SCAFFOLD_BIN" wallet -- account get --account-id <account-id>
-cargo run --bin run_hello_world_with_move_function -- write-public <account-id> "dogfood-test-message"
-"$SCAFFOLD_BIN" wallet -- account get --account-id <account-id>
+cargo run --bin run_hello_world -- <account-id-a>
+"$SCAFFOLD_BIN" wallet -- account get --account-id Public/<account-id-a>
+cargo run --bin run_hello_world_with_move_function -- write-public <account-id-b> "dogfood-test-message"
+"$SCAFFOLD_BIN" wallet -- account get --account-id Public/<account-id-b>
 ```
 
-The first runner (`run_hello_world`) submits a basic public transaction. The second (`run_hello_world_with_move_function write-public`) writes a custom greeting string to the account, producing an observable `data_b64` field change.
+The first runner (`run_hello_world`) submits a basic public transaction; once committed, account A's data decodes to `Hola mundo!` and its `program_owner` is the hello_world program. The second (`run_hello_world_with_move_function write-public`) writes a custom greeting string to account B, producing an observable `data` field change. Reads are eventually consistent with block production (default localnet block interval 15s) — poll `account get` until the write lands.
 
 ### Expected Success Signals
 
-- Both runners print `submitted transaction: status=... tx_hash=...` on success.
+- Both runners print `submitted transaction: tx_hash=...` on success.
 - Both runners print a `verification hint:` line pointing to `wallet account get`.
-- After `run_hello_world_with_move_function write-public`, `wallet account get` shows account data containing the encoded greeting string.
+- After `run_hello_world`, account A shows `data` = hex(`Hola mundo!`) and a non-null `program_owner`.
+- After `run_hello_world_with_move_function write-public`, account B's `data` contains the hex-encoded greeting string.
 - Runner exit code is 0.
 
 ### Failure Signals / Common Pitfalls
 
-- If a runner exits 0 but the account remains `Uninitialized`, the transaction may have been submitted without effect. Record both the runner output and the account state.
+- If a runner exits 0 but the account remains `Uninitialized`, the transaction may have been submitted without effect. Record both the runner output and the account state — and check the sequencer log for `failed execution check` lines: submission-level success does not imply execution-level success.
+- Pointing both runners at the same account is the known execution-rejection case (`UnauthorizedDataModification` — see Preconditions), not a scaffold regression.
 - Panic output from a runner (e.g., `unwrap()` on wallet/sequencer errors) instead of a structured error is worth recording.
 - Invalid account ID format (not base58) should produce a clear parse error from the runner, not a panic.
 - If localnet is down, runners should fail with a connection-refused error. Capture the exact error text.
@@ -578,7 +604,7 @@ post_deploy = ["echo 'deploy skipped:' $SCAFFOLD_DEPLOY_SKIPPED"]
 ### Expected Success Signals
 
 - The first `run` (no hooks configured) prints a numbered step header for each phase (`[1/5] Building...` through `[5/5] Deploying...`) and ends with a deployed-programs summary.
-- A second `run` reuses the running localnet (`localnet already running (sequencer pid=...)`) instead of starting a new sequencer.
+- A second `run` reuses the running localnet (`localnet already running (sequencer pid=...)`) instead of starting a new sequencer, and — when guest binaries, IDL, config, and sequencer are all unchanged — replaces `[5/N] Deploying...` with `[5/N] Deploy skipped (guest binaries + IDL + config + sequencer unchanged; pass --reset ...)`. Post-deploy hooks still fire after a dedup-skipped deploy. Use `--reset` (or delete `.scaffold/state/run_deploy.json`) when the scenario needs to force a real re-deploy.
 - After adding the `[run]` block, `run` reports `[6/6] Running N post-deploy hook(s)` and each hook prints a non-empty value for its env var. `cwd` for each hook is the project root (verifiable with a `pwd` hook). For a single-program project, `$SCAFFOLD_PROGRAM_ID` is the deployed program's risc0 image ID and `$SCAFFOLD_GUEST_BIN` is the absolute path to the guest binary.
 - `--post-deploy "echo override"` ignores `[run].post_deploy` and runs only the override.
 - `--no-post-deploy` skips the post-deploy step entirely; the run prints the deployed-programs summary instead.
@@ -757,9 +783,12 @@ From the LEZ project root:
 ```bash
 "$SCAFFOLD_BIN" deploy
 export NSSA_WALLET_HOME_DIR="$PWD/.scaffold/wallet"
+export HOST_CC=cc HOST_CXX=c++
 cargo run --bin run_lez_counter -- init --to <account-id>
 cargo run --bin run_lez_counter -- increment --counter <account-id> --authority <account-id> --amount 5
 ```
+
+`HOST_CC`/`HOST_CXX` matter for direct `cargo run` in lez-framework projects when the risc0 C++ toolchain is installed: the guest embed refingerprints under your shell env, risc0-build exports plain `CC` = riscv gcc, and the guest graph's host-side proc-macro deps (`spel-framework-macros` → … → `ring`) then compile host C with the riscv compiler and die on `-m64`. Scaffold's own `build`/IDL/client commands pin these automatically; direct cargo invocations need the export (CI's template-e2e does the same at the job level).
 
 ### Expected Success Signals
 
