@@ -53,7 +53,7 @@
 - Logos Core DevEx for overall developer journey alignment and terminology.
 - Logos Blockchain and Logos Execution Environment for functionality.
 - Wallet Module for interactions with Logos Execution Environment.
-- `logos-co/spel` CLI — vendored per project at a pinned commit (`DEFAULT_SPEL`, currently tag `v0.2.0-rc.5`); supplies the `spel inspect` output that `deploy` parses for the program ID.
+- `logos-co/spel` CLI — vendored per project at a pinned commit (`DEFAULT_SPEL`, currently tag `v0.2.0-rc.5`); supplies the `spel program-id` output that `deploy` parses for the program ID.
 
 #### Runtime Dependencies
 
@@ -91,7 +91,7 @@
 ### Performance
 
 1. The run is bounded by the underlying tools (cargo build, IDL test harness, sequencer startup, wallet topup, wallet deploy-program); scaffold adds no waiting steps beyond what each underlying command already imposes.
-2. Single-program metadata (program ID, guest binary path) is resolved once per invocation and reused across every post-deploy hook, so multiple hooks don't multiply `spel inspect` cost.
+2. Single-program metadata (program ID, guest binary path) is resolved once per invocation and reused across every post-deploy hook, so multiple hooks don't multiply `spel program-id` cost.
 
 ### Supportability
 

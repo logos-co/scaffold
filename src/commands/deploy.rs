@@ -43,10 +43,20 @@ const SPEL_IMAGE_ID_PREFIX: &str = "ImageID (hex bytes):";
 /// inscriptions gracefully, wait after each successful submission for the
 /// head block id to advance (block production drains the mempool) before
 /// submitting the next program, so each deployment lands in its own block.
+///
+/// Pacing fails CLOSED: if the head cannot be confirmed to advance (stalled
+/// block production, or the post-submission baseline read keeps erroring),
+/// the remaining programs are marked failed instead of being submitted
+/// unpaced — continuing blind is exactly the batch-into-one-block crash this
+/// exists to prevent. Scope: pacing is per-process. Concurrent deploy
+/// processes (or any other client submitting deployment transactions to the
+/// same sequencer) are not serialized by scaffold; the sequencer itself is
+/// the only place that invariant can be enforced, tracked upstream.
 const DEPLOY_PACING_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// Generous ceiling: covers the 15s localnet default `block_create_timeout`
-/// with margin; degraded to a warning (never a hard failure) on expiry
-/// because pacing is a crash-avoidance heuristic, not a correctness gate.
+/// with margin. On expiry the deploy aborts fail-closed (see above); raise
+/// via `LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS` when a project runs blocks
+/// longer than this ceiling.
 const DEPLOY_PACING_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// `LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS` overrides the pacing ceiling —
@@ -143,12 +153,14 @@ pub(crate) fn deploy_for_project(
 
     // One program per block (see DEPLOY_PACING_* docs). Single-program
     // deploys never pace; the head read after each successful submission is
-    // what the next iteration waits on.
+    // what the next iteration waits on. Both pacing failure modes abort the
+    // remaining submissions (fail-closed) rather than continue unpaced.
     let pace_deploys = selected_programs.len() > 1;
     let mut prev_submission_head: Option<u64> = None;
 
     let mut results = Vec::new();
-    for program in selected_programs {
+    let mut remaining = selected_programs.into_iter();
+    while let Some(program) = remaining.next() {
         if let Some(prev_head) = prev_submission_head.take() {
             if !json {
                 println!(
@@ -156,13 +168,24 @@ pub(crate) fn deploy_for_project(
                      (one program per block; bedrock inscription size cap)..."
                 );
             }
-            wait_for_block_past(
+            if !wait_for_block_past(
                 &sequencer_addr,
                 prev_head,
                 deploy_pacing_timeout(),
                 DEPLOY_PACING_POLL_INTERVAL,
-                json,
-            );
+            ) {
+                let detail = format!(
+                    "deploy pacing aborted: sequencer head did not advance past block \
+                     {prev_head} within {}s; refusing to submit further program ELFs into \
+                     the same block (the pinned sequencer crashes on oversized bedrock \
+                     inscriptions). Raise LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS if this \
+                     project's block interval exceeds the ceiling, then re-run \
+                     `logos-scaffold deploy` for the remaining programs.",
+                    deploy_pacing_timeout().as_secs()
+                );
+                abort_remaining_programs(program, &mut remaining, &detail, json, &mut results);
+                break;
+            }
         }
 
         let Some(binary_path) = discovered.get(&program).cloned() else {
@@ -265,9 +288,41 @@ pub(crate) fn deploy_for_project(
             // next iteration then waits for a strictly newer block, which is
             // guaranteed to have drained this submission from the mempool.
             // (Racing a just-sealed block costs one extra wait interval, never
-            // a lost pacing guarantee.) A failed read degrades to unpaced —
-            // the preflight above already proved the RPC reachable once.
-            prev_submission_head = rpc_get_last_block_id(&sequencer_addr).ok();
+            // a lost pacing guarantee.) Transient RPC errors are retried up to
+            // the pacing deadline; if no baseline can be established the
+            // remaining programs are aborted — submitting the next ELF without
+            // a baseline would skip the pacing wait entirely and can recreate
+            // the oversized-block crash.
+            match read_head_with_retry(
+                &sequencer_addr,
+                deploy_pacing_timeout(),
+                DEPLOY_PACING_POLL_INTERVAL,
+            ) {
+                Some(head) => prev_submission_head = Some(head),
+                None => {
+                    let detail = format!(
+                        "deploy pacing aborted: could not read the sequencer head after \
+                         submitting the previous program (retried for {}s); refusing to \
+                         submit further program ELFs without a pacing baseline (the pinned \
+                         sequencer crashes on oversized bedrock inscriptions). Check \
+                         `logos-scaffold localnet status`, then re-run `logos-scaffold \
+                         deploy` for the remaining programs.",
+                        deploy_pacing_timeout().as_secs()
+                    );
+                    // When this was the last program there is nothing left to
+                    // guard — the submission above already succeeded.
+                    if let Some(next_program) = remaining.next() {
+                        abort_remaining_programs(
+                            next_program,
+                            &mut remaining,
+                            &detail,
+                            json,
+                            &mut results,
+                        );
+                    }
+                    break;
+                }
+            }
         }
     }
 
@@ -345,15 +400,14 @@ pub(crate) fn render_deploy_result_json(result: &DeployResult) -> serde_json::Va
 
 /// Poll the sequencer until its last block id exceeds `submitted_at_head`,
 /// i.e. at least one block was produced after the caller's submission was
-/// admitted. Returns `true` when the head advanced, `false` on timeout
-/// (with a stdout warning unless `json`); RPC hiccups are retried until the
-/// deadline rather than treated as fatal.
+/// admitted. Returns `true` when the head advanced and `false` on timeout —
+/// the caller decides the consequence (deploy aborts fail-closed). RPC
+/// hiccups are retried until the deadline rather than treated as fatal.
 fn wait_for_block_past(
     sequencer_addr: &str,
     submitted_at_head: u64,
     timeout: Duration,
     poll_interval: Duration,
-    json: bool,
 ) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
@@ -363,16 +417,57 @@ fn wait_for_block_past(
             }
         }
         if Instant::now() >= deadline {
-            if !json {
-                println!(
-                    "warning: sequencer block id did not advance past {submitted_at_head} within {}s; \
-                     continuing without deploy pacing",
-                    timeout.as_secs()
-                );
-            }
             return false;
         }
         std::thread::sleep(poll_interval);
+    }
+}
+
+/// Read the sequencer head, retrying transient RPC failures until `timeout`.
+/// Used for the post-submission pacing baseline: a single blip must not
+/// silently disable pacing for the next program (fail-open), so the read is
+/// retried and `None` — returned only after the full deadline of consecutive
+/// failures — makes the caller abort the remaining submissions instead.
+fn read_head_with_retry(
+    sequencer_addr: &str,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> Option<u64> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(head) = rpc_get_last_block_id(sequencer_addr) {
+            return Some(head);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(poll_interval);
+    }
+}
+
+/// Fail-closed tail of a paced deploy: mark `first_unsubmitted` and every
+/// program still queued behind it as failed with `detail`, printing the
+/// per-program FAIL lines unless in `--json` mode. Submitting them without a
+/// confirmed pacing boundary is what this refuses to do.
+fn abort_remaining_programs(
+    first_unsubmitted: String,
+    remaining: &mut std::vec::IntoIter<String>,
+    detail: &str,
+    json: bool,
+    results: &mut Vec<DeployResult>,
+) {
+    for program in std::iter::once(first_unsubmitted).chain(remaining) {
+        if !json {
+            println!("FAIL {program} not submitted");
+            println!("  Error: {detail}");
+        }
+        results.push(DeployResult {
+            program,
+            status: DeployStatus::Failed,
+            detail: detail.to_string(),
+            tx: None,
+            program_id: None,
+        });
     }
 }
 
@@ -760,30 +855,38 @@ mod tests {
         discover_program_binaries(root, &[program.to_string()]).remove(program)
     }
 
-    /// Serve one scripted `getLastBlockId` JSON-RPC response per incoming
-    /// connection, then stop accepting. Mirrors the single-shot helper in
-    /// `wallet_support::tests`, extended to a response sequence so pacing
-    /// can observe a head that advances between polls.
+    /// Serve one scripted `getLastBlockId` response per incoming connection,
+    /// then stop accepting. `Some(id)` answers with a valid JSON-RPC result;
+    /// `None` answers with a 500 and no body (a transient RPC failure).
+    /// Mirrors the single-shot helper in `wallet_support::tests`, extended to
+    /// a response sequence so pacing can observe heads that advance — or
+    /// reads that fail and then recover — between polls.
     fn spawn_scripted_block_id_server(
-        block_ids: Vec<u64>,
+        responses: Vec<Option<u64>>,
     ) -> (String, std::thread::JoinHandle<()>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub server");
         let url = format!("http://{}", listener.local_addr().expect("local addr"));
         let handle = std::thread::spawn(move || {
-            for block_id in block_ids {
+            for response in responses {
                 let Ok((mut stream, _)) = listener.accept() else {
                     return;
                 };
                 let mut buf = [0_u8; 4096];
                 let _ = stream.read(&mut buf);
-                let body = format!(r#"{{"jsonrpc":"2.0","result":{block_id},"id":1}}"#);
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = stream.write_all(response.as_bytes());
+                let payload = match response {
+                    Some(block_id) => {
+                        let body = format!(r#"{{"jsonrpc":"2.0","result":{block_id},"id":1}}"#);
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                    }
+                    None => "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n"
+                        .to_string(),
+                };
+                let _ = stream.write_all(payload.as_bytes());
             }
         });
         (url, handle)
@@ -791,31 +894,52 @@ mod tests {
 
     #[test]
     fn wait_for_block_past_returns_true_once_head_advances() {
-        let (url, handle) = spawn_scripted_block_id_server(vec![5, 5, 6]);
-        let advanced = wait_for_block_past(
-            &url,
-            5,
-            Duration::from_secs(10),
-            Duration::from_millis(10),
-            true,
-        );
+        let (url, handle) = spawn_scripted_block_id_server(vec![Some(5), Some(5), Some(6)]);
+        let advanced =
+            wait_for_block_past(&url, 5, Duration::from_secs(10), Duration::from_millis(10));
         assert!(advanced, "head reached 6 > 5, pacing wait must succeed");
         handle.join().expect("server thread");
     }
 
     #[test]
     fn wait_for_block_past_times_out_when_head_stalls() {
-        let (url, handle) = spawn_scripted_block_id_server(vec![5; 64]);
+        let (url, handle) = spawn_scripted_block_id_server(vec![Some(5); 64]);
         let advanced = wait_for_block_past(
             &url,
             5,
             Duration::from_millis(200),
             Duration::from_millis(10),
-            true,
         );
         assert!(
             !advanced,
             "stalled head must report timeout, not spin forever"
+        );
+        drop(handle); // server thread parks in accept(); do not join.
+    }
+
+    #[test]
+    fn read_head_with_retry_recovers_after_transient_failure() {
+        // Reviewer scenario (PR #241): the post-submission baseline read
+        // fails once and then recovers — pacing must keep its baseline
+        // instead of failing open (pre-fix) or aborting prematurely.
+        let (url, handle) = spawn_scripted_block_id_server(vec![None, Some(7)]);
+        let head = read_head_with_retry(&url, Duration::from_secs(10), Duration::from_millis(10));
+        assert_eq!(
+            head,
+            Some(7),
+            "one transient 500 must not lose the baseline"
+        );
+        handle.join().expect("server thread");
+    }
+
+    #[test]
+    fn read_head_with_retry_gives_up_after_deadline_of_failures() {
+        let (url, handle) = spawn_scripted_block_id_server(vec![None; 64]);
+        let head =
+            read_head_with_retry(&url, Duration::from_millis(200), Duration::from_millis(10));
+        assert_eq!(
+            head, None,
+            "persistent RPC failure must surface as no-baseline so the deploy aborts fail-closed"
         );
         drop(handle); // server thread parks in accept(); do not join.
     }

@@ -121,14 +121,15 @@ mkdir -p "$DEST" && tar xzf /tmp/rust-tc.tar.gz -C "$DEST"
 "$DEST/bin/rustc" --version                        # → rustc 1.91.1-dev
 ```
 
-The `lez-framework` template's guest additionally compiles C (the default template's guests do not), so the L-series `build` also needs the risc0 **C++** toolchain; without it the guest build dies in cc-rs with `failed to find tool "/no_risc0_cpp_toolchain_installed_run_rzup_install_cpp"`. Same rzup layout, date-based version (dir uses the semver form of the tag, e.g. tag `2024.01.05` → dir `v2024.1.5`):
+The `lez-framework` template's guest additionally compiles C (the default template's guests do not), so the L-series `build` also needs the risc0 **C++** toolchain; without it the guest build dies in cc-rs with `failed to find tool "/no_risc0_cpp_toolchain_installed_run_rzup_install_cpp"`. Same rzup layout, date-based version (dir uses the semver form of the tag, e.g. tag `2024.01.05` → dir `v2024.1.5`). The release asset (and the directory inside the tarball) is platform-specific and does **not** follow `$TRIPLE`: pick `riscv32im-linux-x86_64` on Linux x86_64 and `riscv32im-osx-arm64` on macOS arm64:
 
 ```bash
+CPPASSET=riscv32im-linux-x86_64                    # riscv32im-osx-arm64 on macOS arm64
 curl -sSL -H "Authorization: Bearer $GH_TOKEN" -o /tmp/cpp-tc.tar.xz \
-  "https://github.com/risc0/toolchain/releases/download/2024.01.05/riscv32im-linux-x86_64.tar.xz"
+  "https://github.com/risc0/toolchain/releases/download/2024.01.05/$CPPASSET.tar.xz"
 CPPDEST="$HOME/.risc0/toolchains/v2024.1.5-cpp-$TRIPLE"
 mkdir -p /tmp/cpp-tc && tar xJf /tmp/cpp-tc.tar.xz -C /tmp/cpp-tc
-mkdir -p "$CPPDEST" && mv /tmp/cpp-tc/riscv32im-linux-x86_64/* "$CPPDEST/"
+mkdir -p "$CPPDEST" && mv /tmp/cpp-tc/"$CPPASSET"/* "$CPPDEST/"
 ln -sfn "$CPPDEST" "$HOME/.risc0/cpp"
 "$CPPDEST/bin/riscv32-unknown-elf-gcc" --version   # → gcc 13.2.0
 ```
@@ -140,10 +141,9 @@ ln -sfn "$CPPDEST" "$HOME/.risc0/cpp"
 "$SCAFFOLD_BIN" test-node doctor  --project "$P" --json | jq .ok   # → true (all checks pass)
 ```
 
-**4. (Only for real transactions — T4) build the wallet via `setup`.** Two gotchas distinguish `setup` from `test-node prepare`: its circuits precheck does **not** consult the scaffold cache (it only accepts `LOGOS_BLOCKCHAIN_CIRCUITS` or `$HOME/.logos-blockchain-circuits/`), so ensure one of those is present before running it; and it uses cwd discovery, so it must run **inside** the project (no `--project` flag):
+**4. (Only for real transactions — T4) build the wallet via `setup`.** One gotcha distinguishes `setup` from `test-node prepare`: it uses cwd discovery, so it must run **inside** the project (no `--project` flag). Circuits need no manual provisioning here — projects with a `[circuits]` table (every freshly generated one) materialize the pinned release into `.scaffold/circuits` during `setup` automatically; set `LOGOS_BLOCKCHAIN_CIRCUITS` only to override with a local checkout (the env var wins when set):
 
 ```bash
-export LOGOS_BLOCKCHAIN_CIRCUITS="$("$SCAFFOLD_BIN" test-node pins --project "$P" --json | jq -r .circuits_path)"
 ( cd "$P" && "$SCAFFOLD_BIN" setup )   # builds wallet + spel, seeds the default wallet (~3 min) → "setup complete"
 ```
 
@@ -153,7 +153,7 @@ Sanity-check the provisioned toolchain before running the T-series:
 "$EXT/r0vm" --version
 ls "$LEZ/target/release/sequencer_service"          # real sequencer (T1–T3)
 ls "$LEZ/target/release/wallet"                     # real wallet (T4)
-ls "$LOGOS_BLOCKCHAIN_CIRCUITS"/pol/verification_key.json
+ls "$P"/.scaffold/circuits/pol/verification_key.json   # project-local [circuits] install
 ```
 
 If any of these is missing, do not "skip the real run" — go back and fix the step that produced it.
@@ -235,7 +235,7 @@ Use `new` for the main runnable project and `create` as the lightweight alias-pa
 - `setup` completes after syncing LEZ to the configured pin, building both `sequencer_service` and `wallet` inside the project's LEZ tree, and either seeding the default wallet or reporting that a default wallet is already configured. With `--prebuilt`: `sequencer_service` is downloaded instead of built from source (falls back to source build if no artifact is published); `wallet` is always built from source regardless of `--prebuilt`.
 - `localnet start` reports a ready localnet rather than only a spawned PID.
 - `build` exits successfully after preparing the project workspace, resolving the configured circuits release, and — when the project has a `methods/Cargo.toml` (Risc0 guest crate excluded from the main workspace) — also prints `Building guest methods...` and produces a `methods/target/.../release` artifact.
-- `deploy` prints a submission summary with zero failures when built binaries are present. Multi-program deploys are paced one program per sequencer block (`Waiting for a new block past N before the next deployment ...` between submissions): the pinned LEZ settles each block as a single bedrock inscription with a ~896 KiB payload cap and panics fatally when a block exceeds it, so batching several ~370 KiB deployment ELFs into one block kills the sequencer. Expect roughly one `block_create_timeout` (15s) of wait per additional program. A deploy that skips pacing and crashes localnet mid-flow is a regression; equally, record it if the upstream cap is lifted and pacing becomes dead weight.
+- `deploy` prints a submission summary with zero failures when built binaries are present. Multi-program deploys are paced one program per sequencer block (`Waiting for a new block past N before the next deployment ...` between submissions): the pinned LEZ settles each block as a single bedrock inscription with a ~896 KiB payload cap and panics fatally when a block exceeds it, so batching several ~370 KiB deployment ELFs into one block kills the sequencer. Expect roughly one `block_create_timeout` (15s) of wait per additional program. Pacing fails closed: a stalled head or an unreadable post-submission baseline aborts the remaining submissions with `deploy pacing aborted ...` and a non-zero exit rather than batching unpaced (re-run `deploy` for the rest once the sequencer recovers, or raise `LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS` for slow block intervals). A deploy that continues unpaced and crashes localnet mid-flow is a regression; equally, record it if the upstream cap is lifted and pacing becomes dead weight.
 - `wallet topup` succeeds without an explicit address because the project default wallet was seeded during setup.
 - `wallet -- check-health` succeeds against the running localnet without requiring a global `wallet` install or manual `PATH` changes.
 - Generated `scaffold.toml` stores `[wallet].home_dir` but does not carry a wallet binary override; wallet location is derived from the pinned LEZ checkout.

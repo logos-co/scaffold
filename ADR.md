@@ -155,7 +155,7 @@ Three options were considered:
 1. Compute the image ID in-process by depending on a risc0 crate
    (`risc0-binfmt` / `risc0-zkvm`).
 2. Re-implement the SHA-256 + page-tree construction directly in scaffold.
-3. Shell out to `spel inspect` and parse its output.
+3. Shell out to `spel program-id` and parse its output.
 
 Option (1) ties scaffold's image-ID computation to a specific risc0 release;
 version skew with the user's project's risc0 dependency would silently
@@ -363,7 +363,7 @@ would silently break those hooks.
 
 The single-program metadata is resolved once per `lgs run` invocation
 and reused across every hook so multiple hooks don't multiply the cost
-of `spel inspect`.
+of `spel program-id`.
 
 ## Build Output Discovery
 

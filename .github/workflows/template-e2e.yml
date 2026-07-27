@@ -156,16 +156,13 @@ jobs:
           "$HOME/.risc0/bin/rzup" install cpp
 
       - name: Build rendered project workspace
-        env:
-          # risc0-build exports an *unqualified* CC pointing at its riscv32
-          # cross-gcc for the whole guest cargo invocation. Host-side compiles
-          # inside that invocation (proc-macro deps: spel-framework-macros ->
-          # nssa_core -> risc0-zkvm[client] -> bonsai-sdk -> reqwest -> ring)
-          # then pair host x86_64 cflags (-m64) with the riscv compiler and
-          # die. cc-rs consults HOST_CC before CC when target == host, so this
-          # keeps host compiles on the system compiler while guest-target
-          # compiles still fall through to risc0's CC.
-          HOST_CC: cc
+        # HOST_CC/HOST_CXX are intentionally NOT set here: scaffold pins them
+        # itself for every cargo invocation that can trigger the guest embed
+        # (`apply_host_cc_overrides` in src/process.rs — build, IDL, client
+        # gen), which is what keeps host-side compiles inside the guest graph
+        # (proc-macro deps: spel-framework-macros -> ... -> ring) off risc0's
+        # riscv cross-gcc. Leaving the env unset makes this E2E exercise that
+        # defaulting path instead of masking it.
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/e2e-app"

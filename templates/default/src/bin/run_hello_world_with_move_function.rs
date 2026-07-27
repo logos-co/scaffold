@@ -91,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
                 "submitted transaction: tx_hash={}",
                 hex::encode(response.0)
             );
-            println!("verification hint: wallet account get --account-id {account_id}");
+            println!("verification hint: wallet account get --account-id Public/{account_id}");
         }
         Command::WritePrivate {
             account_id,
@@ -119,10 +119,14 @@ async fn main() -> anyhow::Result<()> {
             let instruction: Instruction = (MOVE_DATA_FUNCTION_ID, vec![]);
             let from = parse_account_id(&from)?;
             let to = parse_account_id(&to)?;
-            // Both claimed accounts sign: the sequencer's execution check
-            // requires every `Claim::Authorized` account to be witnessed by
-            // its own key (fresh `to` accounts always; providing `from`'s
-            // signature is valid regardless of its ownership state).
+            // Both claimed accounts sign. This runner requires both `from`
+            // and `to` to be self-owned public accounts (it errors below when
+            // either key is missing from the local wallet): the sequencer's
+            // execution check demands a witness for any `Claim::Authorized`
+            // account the program does not already own — always true for a
+            // fresh `to`, and true for `from` until this program has claimed
+            // it. Signing with both keys covers every combination this
+            // example is meant to demonstrate.
             let from_key = wallet_core
                 .storage()
                 .user_data
@@ -156,8 +160,8 @@ async fn main() -> anyhow::Result<()> {
                 "submitted transaction: tx_hash={}",
                 hex::encode(response.0)
             );
-            println!("verification hint: wallet account get --account-id {from}");
-            println!("verification hint: wallet account get --account-id {to}");
+            println!("verification hint: wallet account get --account-id Public/{from}");
+            println!("verification hint: wallet account get --account-id Public/{to}");
         }
         Command::MoveDataPublicToPrivate { from, to } => {
             let instruction: Instruction = (MOVE_DATA_FUNCTION_ID, vec![]);

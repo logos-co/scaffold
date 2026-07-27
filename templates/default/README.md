@@ -102,7 +102,7 @@ logos-scaffold wallet -- account sync-private
 cargo run --bin run_hello_world_with_authorization_through_tail_call_with_pda
 ```
 
-Each runner now prints transaction submission details (`status` + `tx_hash`) on success.
+Each runner prints the submitted transaction hash (`tx_hash=...`) and a copy-pasteable `wallet account get` verification hint on success.
 
 ## Optional Program Path Overrides
 

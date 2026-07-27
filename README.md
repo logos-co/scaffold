@@ -253,7 +253,7 @@ environment variables pre-set:
 | `NSSA_WALLET_HOME_DIR` | Absolute path to project wallet directory |
 | `SCAFFOLD_PROJECT_ROOT` | Absolute path to project root |
 | `SCAFFOLD_IDL_DIR` | Absolute path to IDL output directory |
-| `SCAFFOLD_PROGRAM_ID` | risc0 image ID (hex) of the deployed program. Set only when the project has exactly one deployable program; unset if `spel inspect` cannot extract the ID |
+| `SCAFFOLD_PROGRAM_ID` | risc0 image ID (hex) of the deployed program. Set only when the project has exactly one deployable program; unset if `spel program-id` cannot extract the ID |
 | `SCAFFOLD_GUEST_BIN` | Absolute path to the guest `.bin`. Set only when the project has exactly one deployable program |
 
 `SCAFFOLD_PROGRAM_ID` and `SCAFFOLD_GUEST_BIN` are unset for

@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
         "submitted transaction: tx_hash={}",
         hex::encode(response.0)
     );
-    println!("verification hint: wallet account get --account-id {}", cli.account_id);
+    println!("verification hint: wallet account get --account-id Public/{account_id}");
 
     Ok(())
 }

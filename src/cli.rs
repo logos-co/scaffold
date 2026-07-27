@@ -110,7 +110,7 @@ enum Commands {
         long_about = "Forward arguments to the project-vendored `spel` binary.\n\n\
                       Use the form: `logos-scaffold spel -- <spel-subcommand...>`\n\n\
                       Examples:\n  \
-                      logos-scaffold spel -- inspect path/to/program.bin\n  \
+                      logos-scaffold spel -- program-id path/to/program.bin\n  \
                       logos-scaffold spel -- generate-idl"
     )]
     Spel(SpelArgs),
@@ -1679,7 +1679,7 @@ fn spel_passthrough_args(args: &[String], start: usize) -> DynResult<Option<Vec<
     let (sep_idx, quiet_seen) = skip_inline_quiet(args, start + 1);
     if args.len() <= sep_idx {
         return Err(anyhow!(
-            "`spel` requires arguments. Use the passthrough form, e.g. `logos-scaffold spel -- inspect <bin>`."
+            "`spel` requires arguments. Use the passthrough form, e.g. `logos-scaffold spel -- program-id <bin>`."
         ));
     }
     if args[sep_idx] != "--" {
@@ -1691,7 +1691,7 @@ fn spel_passthrough_args(args: &[String], start: usize) -> DynResult<Option<Vec<
     }
     if args.len() == sep_idx + 1 {
         return Err(anyhow!(
-            "spel passthrough requires at least one argument after `--`. Example: `logos-scaffold spel -- inspect <bin>`"
+            "spel passthrough requires at least one argument after `--`. Example: `logos-scaffold spel -- program-id <bin>`"
         ));
     }
     if quiet_seen {

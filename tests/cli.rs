@@ -2284,6 +2284,47 @@ fn deploy_plain_output_has_single_program_id_line_per_program() {
 }
 
 #[test]
+fn deploy_aborts_remaining_programs_when_head_stalls() {
+    // PR #241 review: a pacing timeout must gate the next submission.
+    // Continuing unpaced after a stalled head can batch the remaining ELFs
+    // into one block and recreate the fatal oversized-inscription sequencer
+    // crash, so the deploy aborts fail-closed: first program submitted,
+    // every remaining program marked failed, non-zero exit.
+    let temp = tempdir().expect("tempdir");
+    let rpc = RpcStub::start_stalled();
+    setup_wallet_project(temp.path(), Some(&rpc.url));
+    write_guest_program(temp.path(), "alpha");
+    write_guest_program(temp.path(), "beta");
+    write_guest_binary(temp.path(), "alpha");
+    write_guest_binary(temp.path(), "beta");
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .env("LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS", "200")
+        .arg("deploy")
+        .output()
+        .expect("run deploy against a stalled head");
+
+    assert!(
+        !output.status.success(),
+        "a pacing abort must exit non-zero"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("OK  alpha submitted"),
+        "first program must be submitted before the stall is detected:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("FAIL beta not submitted") && stdout.contains("deploy pacing aborted"),
+        "remaining program must be aborted fail-closed, not submitted unpaced:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Succeeded: 1") && stdout.contains("Failed: 1"),
+        "summary must reflect one submitted + one aborted program:\n{stdout}"
+    );
+}
+
+#[test]
 fn deploy_program_path_json_includes_program_id() {
     let temp = tempdir().expect("tempdir");
     let rpc = RpcStub::start();
@@ -3822,7 +3863,22 @@ struct RpcStub {
 }
 
 impl RpcStub {
+    /// Monotonically increasing head: deploy pacing waits for the block id
+    /// to advance between submissions, so a constant value would park every
+    /// multi-program deploy test in the pacing timeout. Incrementing per
+    /// poll mirrors a live sequencer.
     fn start() -> Self {
+        Self::start_with_advance(true)
+    }
+
+    /// Constant head: models a sequencer whose block production has stalled,
+    /// for asserting that deploy pacing aborts fail-closed instead of
+    /// batching the remaining ELFs unpaced.
+    fn start_stalled() -> Self {
+        Self::start_with_advance(false)
+    }
+
+    fn start_with_advance(advance: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind rpc stub");
         let addr = listener.local_addr().expect("local addr");
         let addr_str = addr.to_string();
@@ -3834,16 +3890,14 @@ impl RpcStub {
         let stop_flag = Arc::clone(&stop);
 
         let handle = thread::spawn(move || {
-            // Monotonically increasing head: deploy pacing waits for the
-            // block id to advance between submissions, so a constant value
-            // would park every multi-program deploy test in the pacing
-            // timeout. Incrementing per poll mirrors a live sequencer.
             let mut block_id: u64 = 123;
             while !stop_flag.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         respond_last_block(&mut stream, block_id);
-                        block_id += 1;
+                        if advance {
+                            block_id += 1;
+                        }
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));

@@ -82,7 +82,6 @@ fn build_methods_guests(cwd: &Path) -> DynResult<()> {
 mod tests {
     use super::build_methods_guests;
     use std::fs;
-    use std::process::Command;
     use tempfile::tempdir;
 
     #[test]
