@@ -22,6 +22,7 @@ use crate::commands::setup::ensure_default_wallet_seeded;
 use crate::commands::wallet::{cmd_wallet_topup_inner, TopupOutcome};
 use crate::constants::{
     DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, FRAMEWORK_KIND_LEZ_FRAMEWORK, SPEL_BIN_REL_PATH,
+    WALLET_BIN_REL_PATH, WALLET_HOME_ENV_VARS,
 };
 use crate::model::{LocalnetOwnership, Project, RunProfile};
 use crate::project::{load_project, resolve_repo_path, run_in_project_dir};
@@ -521,7 +522,7 @@ fn reseed_after_wipe(project: &Project) -> DynResult<()> {
     let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
     let wallet_home = project.root.join(&project.config.wallet_home_dir);
     prepare_wallet_home(&lez, &wallet_home)?;
-    ensure_default_wallet_seeded(&project.root, &wallet_home)
+    ensure_default_wallet_seeded(&project.root, &wallet_home, &lez.join(WALLET_BIN_REL_PATH))
 }
 
 /// Per-program metadata exposed to post-deploy hooks via env vars.
@@ -761,7 +762,6 @@ fn build_hook_command(
     cmd.arg("-c")
         .arg(hook_command)
         .env("SEQUENCER_URL", &sequencer_url)
-        .env("NSSA_WALLET_HOME_DIR", &wallet_home)
         .env("SCAFFOLD_PROJECT_ROOT", &project_root)
         .env("SCAFFOLD_IDL_DIR", &idl_dir)
         // Always-on: deploy-skip state is run-level (it's the same for
@@ -772,6 +772,11 @@ fn build_hook_command(
             if run_deploy_skipped { "1" } else { "0" },
         )
         .current_dir(&project.root);
+    // Both wallet home names (old NSSA_*, v0.2.0 LEE_*) so hook-spawned
+    // wallet CLIs target the project wallet regardless of the LEZ pin.
+    for name in WALLET_HOME_ENV_VARS {
+        cmd.env(name, &wallet_home);
+    }
 
     // Per-program metadata: `SCAFFOLD_PROGRAMS` holds the space-separated
     // list of names, with parallel `SCAFFOLD_PROGRAM_ID_<name>`,
@@ -1007,15 +1012,25 @@ mod tests {
         let env_file = temp.path().join("env_out.txt");
         let project = make_test_project(temp.path().to_path_buf());
 
-        let hook = format!("echo \"$NSSA_WALLET_HOME_DIR\" > '{}'", env_file.display());
+        // Both wallet home names must reach the hook: older wallet binaries
+        // read NSSA_WALLET_HOME_DIR, LEZ v0.2.0 reads LEE_WALLET_HOME_DIR.
+        let hook = format!(
+            "printf '%s\\n' \"$NSSA_WALLET_HOME_DIR\" \"$LEE_WALLET_HOME_DIR\" > '{}'",
+            env_file.display()
+        );
         run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
             .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
-        assert!(
-            content.trim().ends_with(".scaffold/wallet"),
-            "expected wallet home to end with .scaffold/wallet, got: {content}"
-        );
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2, "expected both wallet home vars: {content}");
+        for line in &lines {
+            assert!(
+                line.ends_with(".scaffold/wallet"),
+                "expected wallet home to end with .scaffold/wallet, got: {content}"
+            );
+        }
+        assert_eq!(lines[0], lines[1], "both vars must agree: {content}");
     }
 
     #[test]
@@ -1153,6 +1168,7 @@ mod tests {
             "{{ \
                 echo \"SEQUENCER_URL=$SEQUENCER_URL\"; \
                 echo \"NSSA_WALLET_HOME_DIR=$NSSA_WALLET_HOME_DIR\"; \
+                echo \"LEE_WALLET_HOME_DIR=$LEE_WALLET_HOME_DIR\"; \
                 echo \"SCAFFOLD_PROJECT_ROOT=$SCAFFOLD_PROJECT_ROOT\"; \
                 echo \"SCAFFOLD_IDL_DIR=$SCAFFOLD_IDL_DIR\"; \
             }} > '{}'",
@@ -1174,14 +1190,19 @@ mod tests {
             "wallet home line was: {}",
             lines[1]
         );
+        assert!(
+            lines[2].starts_with("LEE_WALLET_HOME_DIR=") && lines[2].ends_with(".scaffold/wallet"),
+            "v0.2.0 wallet home line was: {}",
+            lines[2]
+        );
         assert_eq!(
-            lines[2],
+            lines[3],
             format!("SCAFFOLD_PROJECT_ROOT={}", canonical.display())
         );
         assert!(
-            lines[3].starts_with("SCAFFOLD_IDL_DIR=") && lines[3].ends_with("/idl"),
+            lines[4].starts_with("SCAFFOLD_IDL_DIR=") && lines[4].ends_with("/idl"),
             "idl dir line was: {}",
-            lines[3]
+            lines[4]
         );
     }
 
@@ -1559,7 +1580,12 @@ mod tests {
             let lez = baseline.path().join("lez");
             let wallet_home = baseline.path().join(".scaffold/wallet");
             prepare_wallet_home(&lez, &wallet_home).expect("baseline prepare");
-            ensure_default_wallet_seeded(baseline.path(), &wallet_home).expect("baseline seed");
+            ensure_default_wallet_seeded(
+                baseline.path(),
+                &wallet_home,
+                &lez.join(crate::constants::WALLET_BIN_REL_PATH),
+            )
+            .expect("baseline seed");
         }
 
         // Post-reset: drive `reseed_after_wipe` directly.

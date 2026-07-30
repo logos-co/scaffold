@@ -291,9 +291,12 @@ fn is_broken_symlink(path: &Path) -> bool {
 }
 
 pub(crate) fn check_standalone_support(lez_path: &Path) -> CheckRow {
+    // Probe both LEZ repo layouts: flat (v0.1.x, `sequencer/...`) and nested
+    // (v0.2.0+, `lez/sequencer/...`).
     let files = [
         lez_path.join("Cargo.toml"),
         lez_path.join("sequencer/service/Cargo.toml"),
+        lez_path.join("lez/sequencer/service/Cargo.toml"),
         lez_path.join("README.md"),
     ];
 

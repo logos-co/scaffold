@@ -57,6 +57,13 @@ pub(crate) const CIRCUITS_RELEASE_BASE_URL: &str =
 pub(crate) const DEFAULT_HELLO_WORLD_IMAGE_ID_HEX: &str =
     "4880b298f59699c1e4263c5c2245c80123632d608b9116f4b253c63e6c340771";
 pub(crate) const DEFAULT_WALLET_PASSWORD: &str = "logos-scaffold-v0";
+/// Env vars naming the wallet home directory for wallet subprocesses. LEZ
+/// v0.2.0 renamed the variable to `LEE_WALLET_HOME_DIR`; earlier pins read
+/// `NSSA_WALLET_HOME_DIR`. Scaffold sets both on every wallet invocation so
+/// the binary from either pin targets the project wallet — a v0.2.0 wallet
+/// that only sees the old name silently falls back to `~/.lee/wallet`
+/// (scaffold#240).
+pub(crate) const WALLET_HOME_ENV_VARS: &[&str] = &["NSSA_WALLET_HOME_DIR", "LEE_WALLET_HOME_DIR"];
 pub(crate) const WALLET_CONFIG_REL_PATH: &str = "wallet/configs/debug/wallet_config.json";
 pub(crate) const WALLET_CONFIG_NESTED_REL_PATH: &str =
     "lez/wallet/configs/debug/wallet_config.json";

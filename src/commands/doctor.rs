@@ -3,7 +3,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::bail;
 
-use super::wallet_support::wallet_password;
+use super::wallet_support::{set_wallet_home_env, wallet_password};
 use crate::commands::wallet_support::WALLET_CONFIG_PRIMARY;
 use crate::constants::{
     DEFAULT_LEZ, DEFAULT_SPEL, SEQUENCER_BIN_REL_PATH, SPEL_BIN_REL_PATH, WALLET_BIN_REL_PATH,
@@ -20,7 +20,10 @@ use crate::DynResult;
 
 const STEP_SETUP: &str = "logos-scaffold setup";
 const STEP_LOCALNET_START: &str = "logos-scaffold localnet start";
-const STEP_EXPORT_WALLET_HOME: &str = "export NSSA_WALLET_HOME_DIR=$(pwd)/.scaffold/wallet";
+// Both wallet home names in one export: older wallet binaries read NSSA_*,
+// LEZ v0.2.0 reads LEE_* (see `WALLET_HOME_ENV_VARS`).
+const STEP_EXPORT_WALLET_HOME: &str =
+    "export NSSA_WALLET_HOME_DIR=$(pwd)/.scaffold/wallet LEE_WALLET_HOME_DIR=$(pwd)/.scaffold/wallet";
 const STEP_DOCTOR: &str = "logos-scaffold doctor";
 
 pub(crate) fn cmd_doctor(as_json: bool) -> DynResult<()> {
@@ -290,8 +293,8 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
         }
 
         let mut health_cmd = Command::new(&wallet_binary_path);
+        set_wallet_home_env(&mut health_cmd, &wallet_home);
         health_cmd
-            .env("NSSA_WALLET_HOME_DIR", wallet_home.display().to_string())
             .arg("check-health")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -325,8 +328,7 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
                         name: "wallet usability".to_string(),
                         detail: one_line(&out.stderr),
                         remediation: Some(
-                            "Verify wallet config and run `export NSSA_WALLET_HOME_DIR=$(pwd)/.scaffold/wallet`, then `logos-scaffold doctor`"
-                                .to_string(),
+                            format!("Verify wallet config and run `{STEP_EXPORT_WALLET_HOME}`, then `logos-scaffold doctor`"),
                         ),
                     });
                 }
@@ -336,8 +338,7 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
                 name: "wallet usability".to_string(),
                 detail: err.to_string(),
                 remediation: Some(
-                    "Verify wallet binary and run `export NSSA_WALLET_HOME_DIR=$(pwd)/.scaffold/wallet`, then `logos-scaffold doctor`"
-                        .to_string(),
+                    format!("Verify wallet binary and run `{STEP_EXPORT_WALLET_HOME}`, then `logos-scaffold doctor`"),
                 ),
             }),
         }

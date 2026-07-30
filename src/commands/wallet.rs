@@ -11,8 +11,8 @@ use super::wallet_support::{
     default_sequencer_http_url_for_project, extract_tx_identifier, is_already_initialized_failure,
     is_confirmation_timeout_failure, is_connectivity_failure, is_uninitialized_account_output,
     load_wallet_runtime, read_default_wallet_address, resolve_wallet_address,
-    sequencer_unreachable_hint, summarize_command_failure, wallet_password, wallet_state_path,
-    write_default_wallet_address,
+    sequencer_unreachable_hint, set_wallet_home_env, summarize_command_failure, wallet_password,
+    wallet_state_path, write_default_wallet_address,
 };
 
 /// Result of a wallet topup attempt. `cmd_run` distinguishes the
@@ -55,12 +55,8 @@ pub(crate) fn wallet_list_for_project(
     let wallet = load_wallet_runtime(project)?;
 
     let mut command = Command::new(&wallet.wallet_binary);
-    // Pass the path as an `OsStr` (not via `to_string_lossy`) so a non-UTF8
-    // wallet-home path reaches the child verbatim instead of being corrupted.
-    command
-        .env("NSSA_WALLET_HOME_DIR", &wallet.wallet_home)
-        .arg("account")
-        .arg("list");
+    set_wallet_home_env(&mut command, &wallet.wallet_home);
+    command.arg("account").arg("list");
     if long {
         command.arg("--long");
     }
@@ -155,13 +151,8 @@ fn cmd_wallet_list(project: &crate::model::Project, long: bool, json: bool) -> D
     let wallet = load_wallet_runtime(project)?;
 
     let mut command = Command::new(&wallet.wallet_binary);
-    command
-        .env(
-            "NSSA_WALLET_HOME_DIR",
-            wallet.wallet_home.as_os_str().to_string_lossy().to_string(),
-        )
-        .arg("account")
-        .arg("list");
+    set_wallet_home_env(&mut command, &wallet.wallet_home);
+    command.arg("account").arg("list");
 
     if long {
         command.arg("--long");
@@ -181,10 +172,7 @@ pub(crate) fn cmd_wallet_proxy(project: &crate::model::Project, args: &[String])
     let wallet = load_wallet_runtime(project)?;
 
     let mut command = Command::new(&wallet.wallet_binary);
-    command.env(
-        "NSSA_WALLET_HOME_DIR",
-        wallet.wallet_home.as_os_str().to_string_lossy().to_string(),
-    );
+    set_wallet_home_env(&mut command, &wallet.wallet_home);
     for arg in args {
         command.arg(arg);
     }
@@ -249,24 +237,24 @@ pub(crate) fn cmd_wallet_topup_inner(
     let password_input = format!("{}\n", wallet_password());
 
     let mut preflight_command = Command::new(&wallet.wallet_binary);
+    set_wallet_home_env(&mut preflight_command, &wallet.wallet_home);
     preflight_command
-        .env("NSSA_WALLET_HOME_DIR", wallet_home.clone())
         .arg("account")
         .arg("get")
         .arg("--account-id")
         .arg(&resolved_to);
 
     let mut init_command = Command::new(&wallet.wallet_binary);
+    set_wallet_home_env(&mut init_command, &wallet.wallet_home);
     init_command
-        .env("NSSA_WALLET_HOME_DIR", wallet_home.clone())
         .arg("auth-transfer")
         .arg("init")
         .arg("--account-id")
         .arg(&resolved_to);
 
     let mut pinata_command = Command::new(&wallet.wallet_binary);
+    set_wallet_home_env(&mut pinata_command, &wallet.wallet_home);
     pinata_command
-        .env("NSSA_WALLET_HOME_DIR", wallet_home.clone())
         .arg("pinata")
         .arg("claim")
         .arg("--to")
@@ -287,7 +275,9 @@ pub(crate) fn cmd_wallet_topup_inner(
             return Ok(TopupOutcome::Success);
         }
         println!("dry-run: wallet topup command will not be executed");
-        println!("NSSA_WALLET_HOME_DIR={wallet_home}");
+        for name in crate::constants::WALLET_HOME_ENV_VARS {
+            println!("{name}={wallet_home}");
+        }
         println!("$ {}", render_command(&preflight_command));
         println!("planned preflight: check destination wallet initialization");
         println!(

@@ -344,7 +344,8 @@ impl Project {
     }
 
     /// Forward raw arguments to the vendored wallet binary with the project's
-    /// wallet environment (`NSSA_WALLET_HOME_DIR`), streaming its output.
+    /// wallet environment (`NSSA_WALLET_HOME_DIR` and its LEZ v0.2.0 rename
+    /// `LEE_WALLET_HOME_DIR`), streaming its output.
     /// Non-zero exit surfaces as [`Error::Command`].
     pub fn wallet_passthrough(&self, args: &[String]) -> Result<()> {
         cmd_wallet_proxy(&self.inner, args).map_err(error::classify)

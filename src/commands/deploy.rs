@@ -14,7 +14,7 @@ use crate::DynResult;
 
 use super::wallet_support::{
     default_sequencer_http_url_for_project, extract_tx_identifier, is_connectivity_failure,
-    load_wallet_runtime, rpc_get_last_block_id, sequencer_unreachable_hint,
+    load_wallet_runtime, rpc_get_last_block_id, sequencer_unreachable_hint, set_wallet_home_env,
     summarize_command_failure, wallet_password, RpcReachabilityError,
 };
 
@@ -210,13 +210,8 @@ pub(crate) fn deploy_for_project(
         };
 
         let mut command = Command::new(&wallet.wallet_binary);
-        command
-            .env(
-                "NSSA_WALLET_HOME_DIR",
-                wallet.wallet_home.as_os_str().to_string_lossy().to_string(),
-            )
-            .arg("deploy-program")
-            .arg(&binary_path);
+        set_wallet_home_env(&mut command, &wallet.wallet_home);
+        command.arg("deploy-program").arg(&binary_path);
 
         let output = match run_with_stdin(command, format!("{}\n", wallet_password())) {
             Ok(output) => output,
@@ -555,13 +550,8 @@ fn deploy_single_program(
     preflight_sequencer_reachability(sequencer_addr)?;
 
     let mut command = std::process::Command::new(&wallet.wallet_binary);
-    command
-        .env(
-            "NSSA_WALLET_HOME_DIR",
-            wallet.wallet_home.as_os_str().to_string_lossy().to_string(),
-        )
-        .arg("deploy-program")
-        .arg(binary_path);
+    set_wallet_home_env(&mut command, &wallet.wallet_home);
+    command.arg("deploy-program").arg(binary_path);
 
     // Suppress the `$ <cmd>` echo on stdout for --json so the output is a
     // pure JSON object that pipes cleanly into `jq`. RAII guard restores echo
