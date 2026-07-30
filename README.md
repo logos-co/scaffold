@@ -285,6 +285,25 @@ post_deploy = ["scripts/deploy-and-demo.sh"]
 
 `deploy` defaults to `true`; omit it for the normal deploy loop.
 
+#### Self-funding projects (`topup = false`)
+
+`run` tops up the project's default wallet before deploying (step 4), and
+hard-fails when no default wallet address is configured. A project that
+funds its own accounts — e.g. its demo binary claims from the faucet at
+runtime, or a `post_deploy` hook handles funding — can set `topup = false`
+to skip scaffold's topup step. The pipeline then runs
+build → IDL → localnet → deploy → `post_deploy`, without requiring a
+default wallet address to be set. It works inline under `[run]` or per
+profile, and combines with `deploy = false`:
+
+```toml
+[run.profiles.demo]
+topup = false
+post_deploy = ["cargo run --bin demo"]
+```
+
+`topup` defaults to `true`; omit it for the normal topup-then-deploy loop.
+
 #### One-off override / skip
 
 To run a different hook without editing `scaffold.toml`:

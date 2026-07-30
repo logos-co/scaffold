@@ -184,14 +184,25 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
         ensure_localnet(project, params.localnet_timeout_sec)?;
     }
 
-    // Step 4: Wallet topup
-    println!("[4/{total_steps}] Topping up wallet...");
-    let outcome = cmd_wallet_topup_inner(project, None, false, false)?;
-    if let TopupOutcome::ConfirmationTimeout { message } = outcome {
-        bail!(
-            "{message}\n\
-             Run aborted before deploy to avoid deploying with uncertain funding.\n\
-             Hint: retry `logos-scaffold run` or run `logos-scaffold wallet topup` manually."
+    // Step 4: Wallet topup. Skipped entirely when the run profile sets
+    // `topup = false` (project funds its own accounts).
+    if params.resolved.topup {
+        println!("[4/{total_steps}] Topping up wallet...");
+        let outcome = cmd_wallet_topup_inner(project, None, false, false)?;
+        if let TopupOutcome::ConfirmationTimeout { message } = outcome {
+            bail!(
+                "{message}\n\
+                 Run aborted before deploy to avoid deploying with uncertain funding.\n\
+                 Hint: retry `logos-scaffold run` or run `logos-scaffold wallet topup` manually."
+            );
+        }
+    } else {
+        // `topup = false`: the project funds its own accounts (e.g. claims
+        // from the faucet at runtime, from a demo binary or a post_deploy
+        // hook). Skip scaffold's topup — which otherwise hard-fails when no
+        // default wallet address is configured — and proceed to deploy/hooks.
+        println!(
+            "[4/{total_steps}] Topup skipped (`topup = false` in the run profile; this project funds its own accounts — e.g. via faucet claims at runtime)"
         );
     }
 

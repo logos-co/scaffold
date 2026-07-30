@@ -113,6 +113,11 @@ fn parse_run(doc: &DocumentMut) -> DynResult<RunConfig> {
         .and_then(Item::as_value)
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
+    let inline_topup = run_table
+        .get("topup")
+        .and_then(Item::as_value)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     let inline_post_deploy = parse_post_deploy(run_table.get("post_deploy"))?;
 
     let mut profiles: std::collections::BTreeMap<String, RunProfile> =
@@ -132,6 +137,11 @@ fn parse_run(doc: &DocumentMut) -> DynResult<RunConfig> {
                 .and_then(Item::as_value)
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
+            let topup = table
+                .get("topup")
+                .and_then(Item::as_value)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
             let post_deploy = parse_post_deploy(table.get("post_deploy"))?;
             profiles.insert(
                 name.to_string(),
@@ -139,6 +149,7 @@ fn parse_run(doc: &DocumentMut) -> DynResult<RunConfig> {
                     reset,
                     post_deploy,
                     deploy,
+                    topup,
                 },
             );
         }
@@ -160,6 +171,7 @@ fn parse_run(doc: &DocumentMut) -> DynResult<RunConfig> {
             reset: inline_reset,
             post_deploy: inline_post_deploy,
             deploy: inline_deploy,
+            topup: inline_topup,
         },
         profiles,
         watch,
@@ -915,7 +927,10 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
 }
 
 fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
-    let has_inline = run.inline.reset || !run.inline.post_deploy.is_empty() || !run.inline.deploy;
+    let has_inline = run.inline.reset
+        || !run.inline.post_deploy.is_empty()
+        || !run.inline.deploy
+        || !run.inline.topup;
     let has_default_profile = run.default_profile.is_some();
     let has_profiles = !run.profiles.is_empty();
     let has_watch = run.watch != WatchConfig::default();
@@ -932,10 +947,13 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
     if run.inline.reset {
         run_table["reset"] = value(true);
     }
-    // Only emit `deploy` when it deviates from the `true` default, to keep a
-    // fresh scaffold.toml minimal.
+    // Only emit `deploy`/`topup` when they deviate from the `true` default,
+    // to keep a fresh scaffold.toml minimal.
     if !run.inline.deploy {
         run_table["deploy"] = value(false);
+    }
+    if !run.inline.topup {
+        run_table["topup"] = value(false);
     }
     if !run.inline.post_deploy.is_empty() {
         for hook in &run.inline.post_deploy {
@@ -964,6 +982,9 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
             }
             if !profile.deploy {
                 profile_table["deploy"] = value(false);
+            }
+            if !profile.topup {
+                profile_table["topup"] = value(false);
             }
             if !profile.post_deploy.is_empty() {
                 profile_table["post_deploy"] = post_deploy_value(&profile.post_deploy);
@@ -2065,6 +2086,61 @@ role = "project"
     }
 
     #[test]
+    fn run_profile_topup_defaults_to_true() {
+        // Absent `topup` key → topup runs, preserving historical behavior.
+        let toml = minimal_v0_2_0() + "[run.profiles.demo]\npost_deploy = \"echo demo\"\n";
+        let cfg = parse_config(&toml).expect("parse");
+        assert!(cfg.run.profiles.get("demo").expect("demo present").topup);
+        // The inline/default profile also defaults topup to true.
+        assert!(RunProfile::default().topup);
+        assert!(cfg.run.inline.topup);
+    }
+
+    #[test]
+    fn parse_config_run_profile_topup_false() {
+        let toml = minimal_v0_2_0()
+            + "[run.profiles.demo]\ntopup = false\npost_deploy = [\"cargo run --bin demo\"]\n";
+        let cfg = parse_config(&toml).expect("parse");
+        let demo = cfg.run.profiles.get("demo").expect("demo present");
+        assert!(!demo.topup);
+        assert_eq!(demo.post_deploy, vec!["cargo run --bin demo".to_string()]);
+    }
+
+    #[test]
+    fn parse_config_inline_run_topup_false() {
+        let toml = minimal_v0_2_0() + "[run]\ntopup = false\n";
+        let cfg = parse_config(&toml).expect("parse");
+        assert!(!cfg.run.inline.topup);
+        let resolved = cfg.run.resolve_profile(None).expect("resolve");
+        assert!(!resolved.topup);
+    }
+
+    #[test]
+    fn run_profile_topup_round_trips_through_parse_serialize() {
+        let toml = minimal_v0_2_0()
+            + "[run]\ntopup = false\n[run.profiles.demo]\ntopup = false\npost_deploy = [\"echo demo\"]\n";
+        let cfg1 = parse_config(&toml).expect("parse");
+        let serialized = serialize_config(&cfg1).expect("serialize");
+        let cfg2 = parse_config(&serialized).expect("re-parse");
+        assert!(!cfg2.run.inline.topup);
+        let demo = cfg2.run.profiles.get("demo").expect("demo present");
+        assert!(!demo.topup);
+        assert_eq!(demo.post_deploy, vec!["echo demo".to_string()]);
+    }
+
+    #[test]
+    fn run_profile_topup_true_is_not_serialized() {
+        // The `true` default must not be emitted, to keep scaffold.toml minimal.
+        let toml = minimal_v0_2_0() + "[run.profiles.demo]\npost_deploy = [\"echo demo\"]\n";
+        let cfg = parse_config(&toml).expect("parse");
+        let serialized = serialize_config(&cfg).expect("serialize");
+        assert!(
+            !serialized.contains("topup = true"),
+            "default topup=true should not be serialized:\n{serialized}"
+        );
+    }
+
+    #[test]
     fn serialize_rejects_newline_in_profile_post_deploy() {
         let mut cfg = base_config();
         let mut profiles = std::collections::BTreeMap::new();
@@ -2074,6 +2150,7 @@ role = "project"
                 reset: false,
                 post_deploy: vec!["echo a\n[run.profiles.evil]".to_string()],
                 deploy: true,
+                topup: true,
             },
         );
         cfg.run = RunConfig {

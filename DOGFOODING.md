@@ -601,6 +601,18 @@ post_deploy = ["echo 'deploy skipped:' $SCAFFOLD_DEPLOY_SKIPPED"]
 "$SCAFFOLD_BIN" run --profile self-deploy   # skips step 5, still fires hooks
 ```
 
+Then add a profile that funds its own accounts (`topup = false`) and run it:
+
+```toml
+[run.profiles.self-fund]
+topup = false
+post_deploy = ["echo 'self-fund hook ran'"]
+```
+
+```bash
+"$SCAFFOLD_BIN" run --profile self-fund   # skips step 4, still deploys + fires hooks
+```
+
 ### Expected Success Signals
 
 - The first `run` (no hooks configured) prints a numbered step header for each phase (`[1/5] Building...` through `[5/5] Deploying...`) and ends with a deployed-programs summary.
@@ -611,6 +623,7 @@ post_deploy = ["echo 'deploy skipped:' $SCAFFOLD_DEPLOY_SKIPPED"]
 - `--post-deploy` with `--no-post-deploy` errors at clap parse time with a `cannot be used with` message; exit code is non-zero.
 - A non-zero hook exit aborts the run with a clear `post-deploy hook exited with status N` message.
 - With `deploy = false` in the selected profile, `run --profile self-deploy` prints ``[5/6] Deploy skipped (`deploy = false` in the run profile; ...)`` instead of `[5/6] Deploying...`, skips the program-hash/deploy work entirely, and still runs the `post_deploy` hooks. Each hook sees `SCAFFOLD_DEPLOY_SKIPPED=1` (here `echo 'deploy skipped:' $SCAFFOLD_DEPLOY_SKIPPED` prints `deploy skipped: 1`).
+- With `topup = false` in the selected profile, `run --profile self-fund` prints ``[4/6] Topup skipped (`topup = false` in the run profile; ...)`` instead of `[4/6] Topping up wallet...`, skips the wallet-topup call entirely (no default-wallet-address requirement), and still runs deploy and the `post_deploy` hooks.
 
 ### Failure Signals / Common Pitfalls
 
@@ -625,6 +638,7 @@ post_deploy = ["echo 'deploy skipped:' $SCAFFOLD_DEPLOY_SKIPPED"]
 - Output of `run --post-deploy "echo override"` showing only the override hook fires.
 - Output of `run --no-post-deploy` showing the deployed-programs summary instead of hooks.
 - Output of `run --profile self-deploy` showing the ``[5/6] Deploy skipped (`deploy = false` ...)`` header and the `post_deploy` hook reporting `deploy skipped: 1`.
+- Output of `run --profile self-fund` showing the ``[4/6] Topup skipped (`topup = false` ...)`` header followed by the deploy step and hooks.
 
 ## L1. LEZ Template Bootstrap
 
@@ -1687,7 +1701,7 @@ HEAD0=$("$SCAFFOLD_BIN" test-node blocks head --url "$URL" --json | jq -r .block
 - Changes to wallet flows or wallet-related defaults: rerun `D4`.
 - Changes to diagnostics, report contents, or redaction logic: rerun `D5`.
 - Changes to example runner binaries or template `src/bin/*` code: rerun `D6`.
-- Changes to `run` step ordering, the `deploy = false` deploy-skip branch, post-deploy env vars, post-deploy CLI override flag handling, or `[run]` config parsing: rerun `D7`.
+- Changes to `run` step ordering, the `deploy = false` deploy-skip branch, the `topup = false` topup-skip branch, post-deploy env vars, post-deploy CLI override flag handling, or `[run]` config parsing: rerun `D7`.
 - Changes to LEZ template scaffolding or generated outputs: rerun `L1`, `L2`, `L3`, and `L4`.
 - Changes to CLI argument parsing, help text, or error messages: rerun `E1`.
 - Changes to `create`/`new` flags or template selection logic: rerun `E2`.
