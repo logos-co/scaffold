@@ -253,8 +253,15 @@ environment variables pre-set:
 | `NSSA_WALLET_HOME_DIR` | Absolute path to project wallet directory |
 | `SCAFFOLD_PROJECT_ROOT` | Absolute path to project root |
 | `SCAFFOLD_IDL_DIR` | Absolute path to IDL output directory |
+| `SCAFFOLD_TOPUP_SKIPPED` | `1` when step 4 was skipped (`topup = false`), `0` when scaffold topped up the wallet. Always set |
+| `SCAFFOLD_DEPLOY_SKIPPED` | `1` when step 5 deployed nothing — either `deploy = false`, or the deploy cache found guest binaries, IDL, config and sequencer unchanged — and `0` when it deployed. Always set |
 | `SCAFFOLD_PROGRAM_ID` | risc0 image ID (hex) of the deployed program. Set only when the project has exactly one deployable program; unset if `spel program-id` cannot extract the ID |
 | `SCAFFOLD_GUEST_BIN` | Absolute path to the guest `.bin`. Set only when the project has exactly one deployable program |
+
+`SCAFFOLD_TOPUP_SKIPPED` and `SCAFFOLD_DEPLOY_SKIPPED` describe the run as a
+whole, so unlike the program-specific variables they are always set — including
+for projects with no deployable programs. Hooks should branch on their value,
+not on whether they exist.
 
 `SCAFFOLD_PROGRAM_ID` and `SCAFFOLD_GUEST_BIN` are unset for
 multi-program projects so hooks fail loudly rather than silently
@@ -287,20 +294,25 @@ post_deploy = ["scripts/deploy-and-demo.sh"]
 
 #### Self-funding projects (`topup = false`)
 
-`run` tops up the project's default wallet before deploying (step 4), and
-hard-fails when no default wallet address is configured. A project that
-funds its own accounts — e.g. its demo binary claims from the faucet at
-runtime, or a `post_deploy` hook handles funding — can set `topup = false`
-to skip scaffold's topup step. The pipeline then runs
-build → IDL → localnet → deploy → `post_deploy`, without requiring a
-default wallet address to be set. It works inline under `[run]` or per
-profile, and combines with `deploy = false`:
+`run` tops up the project's default wallet before deploying (step 4). A
+project that funds its own accounts — e.g. its demo binary claims from the
+faucet at runtime, or a `post_deploy` hook handles funding — can set
+`topup = false` to skip that step and keep funding in one place instead of
+splitting it between scaffold and the project. The pipeline then runs
+build → IDL → localnet → deploy → `post_deploy`. It works inline under
+`[run]` or per profile, and combines with `deploy = false`:
 
 ```toml
 [run.profiles.demo]
 topup = false
 post_deploy = ["cargo run --bin demo"]
 ```
+
+Hooks see `SCAFFOLD_TOPUP_SKIPPED=1` on such a run, so a funding hook can
+claim only when scaffold did not. The topup step itself needs a destination
+address, but `lgs setup` seeds one into `.scaffold/state/wallet.state` from
+the first preconfigured public account in the wallet config, so on a pin
+that ships those accounts it is already there.
 
 `topup` defaults to `true`; omit it for the normal topup-then-deploy loop.
 

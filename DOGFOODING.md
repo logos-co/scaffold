@@ -606,11 +606,13 @@ Then add a profile that funds its own accounts (`topup = false`) and run it:
 ```toml
 [run.profiles.self-fund]
 topup = false
-post_deploy = ["echo 'self-fund hook ran'"]
+post_deploy = ["echo 'topup skipped:' $SCAFFOLD_TOPUP_SKIPPED"]
 ```
 
 ```bash
 "$SCAFFOLD_BIN" run --profile self-fund   # skips step 4, still deploys + fires hooks
+# same hook without the profile: topup runs, so the variable reports 0
+"$SCAFFOLD_BIN" run --post-deploy 'echo "topup skipped:" $SCAFFOLD_TOPUP_SKIPPED'
 ```
 
 ### Expected Success Signals
@@ -623,7 +625,7 @@ post_deploy = ["echo 'self-fund hook ran'"]
 - `--post-deploy` with `--no-post-deploy` errors at clap parse time with a `cannot be used with` message; exit code is non-zero.
 - A non-zero hook exit aborts the run with a clear `post-deploy hook exited with status N` message.
 - With `deploy = false` in the selected profile, `run --profile self-deploy` prints ``[5/6] Deploy skipped (`deploy = false` in the run profile; ...)`` instead of `[5/6] Deploying...`, skips the program-hash/deploy work entirely, and still runs the `post_deploy` hooks. Each hook sees `SCAFFOLD_DEPLOY_SKIPPED=1` (here `echo 'deploy skipped:' $SCAFFOLD_DEPLOY_SKIPPED` prints `deploy skipped: 1`).
-- With `topup = false` in the selected profile, `run --profile self-fund` prints ``[4/6] Topup skipped (`topup = false` in the run profile; ...)`` instead of `[4/6] Topping up wallet...`, skips the wallet-topup call entirely (no default-wallet-address requirement), and still runs deploy and the `post_deploy` hooks.
+- With `topup = false` in the selected profile, `run --profile self-fund` prints ``[4/6] Topup skipped (`topup = false` in the run profile; ...)`` instead of `[4/6] Topping up wallet...`, skips the wallet-topup call entirely (no destination-address requirement), and still runs deploy and the `post_deploy` hooks. Each hook sees `SCAFFOLD_TOPUP_SKIPPED=1` (here `echo 'topup skipped:' $SCAFFOLD_TOPUP_SKIPPED` prints `topup skipped: 1`). The same hook run without `--profile self-fund` prints `topup skipped: 0` — the variable is always set, never absent.
 
 ### Failure Signals / Common Pitfalls
 
@@ -638,7 +640,7 @@ post_deploy = ["echo 'self-fund hook ran'"]
 - Output of `run --post-deploy "echo override"` showing only the override hook fires.
 - Output of `run --no-post-deploy` showing the deployed-programs summary instead of hooks.
 - Output of `run --profile self-deploy` showing the ``[5/6] Deploy skipped (`deploy = false` ...)`` header and the `post_deploy` hook reporting `deploy skipped: 1`.
-- Output of `run --profile self-fund` showing the ``[4/6] Topup skipped (`topup = false` ...)`` header followed by the deploy step and hooks.
+- Output of `run --profile self-fund` showing the ``[4/6] Topup skipped (`topup = false` ...)`` header followed by the deploy step and the `post_deploy` hook reporting `topup skipped: 1`, plus the profile-less run of the same hook reporting `topup skipped: 0`.
 
 ## L1. LEZ Template Bootstrap
 
