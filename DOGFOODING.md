@@ -603,6 +603,20 @@ post_deploy = ["echo 'deploy skipped:' $SCAFFOLD_DEPLOY_SKIPPED"]
 "$SCAFFOLD_BIN" run --profile self-deploy   # skips step 5, still fires hooks
 ```
 
+Then add a profile that funds its own accounts (`topup = false`) and run it:
+
+```toml
+[run.profiles.self-fund]
+topup = false
+post_deploy = ["echo 'topup skipped:' $SCAFFOLD_TOPUP_SKIPPED"]
+```
+
+```bash
+"$SCAFFOLD_BIN" run --profile self-fund   # skips step 4, still deploys + fires hooks
+# same hook without the profile: topup runs, so the variable reports 0
+"$SCAFFOLD_BIN" run --post-deploy 'echo "topup skipped:" $SCAFFOLD_TOPUP_SKIPPED'
+```
+
 ### Expected Success Signals
 
 - The first `run` (no hooks configured) prints a numbered step header for each phase (`[1/5] Building...` through `[5/5] Deploying...`) and ends with a deployed-programs summary.
@@ -613,6 +627,7 @@ post_deploy = ["echo 'deploy skipped:' $SCAFFOLD_DEPLOY_SKIPPED"]
 - `--post-deploy` with `--no-post-deploy` errors at clap parse time with a `cannot be used with` message; exit code is non-zero.
 - A non-zero hook exit aborts the run with a clear `post-deploy hook exited with status N` message.
 - With `deploy = false` in the selected profile, `run --profile self-deploy` prints ``[5/6] Deploy skipped (`deploy = false` in the run profile; ...)`` instead of `[5/6] Deploying...`, skips the program-hash/deploy work entirely, and still runs the `post_deploy` hooks. Each hook sees `SCAFFOLD_DEPLOY_SKIPPED=1` (here `echo 'deploy skipped:' $SCAFFOLD_DEPLOY_SKIPPED` prints `deploy skipped: 1`).
+- With `topup = false` in the selected profile, `run --profile self-fund` prints ``[4/6] Topup skipped (`topup = false` in the run profile; ...)`` instead of `[4/6] Topping up wallet...`, skips the wallet-topup call entirely (no destination-address requirement), and still runs deploy and the `post_deploy` hooks. Each hook sees `SCAFFOLD_TOPUP_SKIPPED=1` (here `echo 'topup skipped:' $SCAFFOLD_TOPUP_SKIPPED` prints `topup skipped: 1`). The same hook run without `--profile self-fund` prints `topup skipped: 0` — the variable is always set, never absent.
 
 ### Failure Signals / Common Pitfalls
 
@@ -627,6 +642,7 @@ post_deploy = ["echo 'deploy skipped:' $SCAFFOLD_DEPLOY_SKIPPED"]
 - Output of `run --post-deploy "echo override"` showing only the override hook fires.
 - Output of `run --no-post-deploy` showing the deployed-programs summary instead of hooks.
 - Output of `run --profile self-deploy` showing the ``[5/6] Deploy skipped (`deploy = false` ...)`` header and the `post_deploy` hook reporting `deploy skipped: 1`.
+- Output of `run --profile self-fund` showing the ``[4/6] Topup skipped (`topup = false` ...)`` header followed by the deploy step and the `post_deploy` hook reporting `topup skipped: 1`, plus the profile-less run of the same hook reporting `topup skipped: 0`.
 
 ## L1. LEZ Template Bootstrap
 
@@ -1201,15 +1217,16 @@ Within the running UIs, exercise whatever p2p surface the module exposes (chat e
 - Custom profile pairs open against their own profile dirs under `.scaffold/basecamp/profiles/<profile>/` and their configured runtime/log/env paths.
 - Each window shows the project's `.lgx` modules installed and ready.
 - `LOGOS_PROFILE=alice` and `LOGOS_PROFILE=bob` are visible in each respective process environment (helpful for debugging).
-- On the macOS portable stack, each process environment carries an absolute `LOGOS_DATA_DIR` pointing at its own profile's module root — set automatically by `launch`, no manual export needed.
-- The two instances do not collide on Qt remote-objects or any non-module port; per-profile port-override env vars (per the spec) are set on each `launch`.
+- On the macOS portable stack, each process environment carries an absolute `LOGOS_DATA_DIR` *and* an absolute `LOGOS_USER_DIR`, both pointing at that profile's own module root (`.scaffold/basecamp/profiles/<profile>/xdg-data/Logos/LogosBasecamp`) — set automatically by `launch`, no manual export needed. Basecamp 0.1.x reads the first and 0.2.x the second, so which one the app actually honors depends on the `[repos.basecamp]` pin; `launch` sets both so the check is the same either way.
+- The two instances do not collide on Qt remote-objects or any non-module port. Do not go hunting for per-module port-override env vars in the process environment: the registry they would flow in through is empty in v1 (no module has published a name yet), so `launch` exports none. A module-level port collision between `alice` and `bob` is therefore still possible, and belongs to the owning module rather than to scaffold.
 - A p2p interaction triggered from `alice` is observable in `bob` (and vice versa) within the module's expected latency window.
 
 ### Failure Signals / Common Pitfalls
 
 - Two windows opening but sharing identity keys, profile state, or message history is a clean-slate / XDG-isolation regression.
+- On the macOS portable stack, both windows showing only basecamp's bundled modules — none of the project's `.lgx` modules — while their logs report a base data directory under the shared `~/Library/Application Support/Logos/LogosBasecamp` is the profile-collapse signature: the app is not reading the per-profile module root at all. Check that both `LOGOS_DATA_DIR` and `LOGOS_USER_DIR` are present, absolute, and distinct per profile in each process environment.
 - A non-module port collision (Qt remote objects, etc.) is a real finding — file upstream against the affected component, do not patch around it inside scaffold.
-- A module that does not honor an externally-provided port override is documented as a known gap pending an upstream fix on that module; capture the module name, the env var that should have worked, and the observed collision.
+- A module that hardcodes its port is a known gap pending an upstream fix on that module. Scaffold exports no override for it to honor (see the signal above), so capture the module name and the observed collision — not a missing env var.
 - One window crashing while the other survives is recordable evidence; capture the crashing instance's logs from `.scaffold/basecamp/profiles/<name>/` before relaunching.
 - Running `basecamp launch alice` twice in parallel is undefined in v1 — record the behavior if you trip it accidentally, but don't treat it as a supported scenario.
 
@@ -1217,7 +1234,9 @@ Within the running UIs, exercise whatever p2p surface the module exposes (chat e
 
 - The exact two-terminal command sequence used.
 - A short transcript or screenshot pair showing a p2p interaction propagating from one instance to the other.
-- The env block of each running process (e.g., `tr '\0' '\n' < /proc/<pid>/environ | grep -E 'XDG_|LOGOS_'`).
+- The env block of each running process. `launch` records the basecamp PID in `.scaffold/basecamp/profiles/<profile>/launch.state` as `pid=<pid>`; read the env with:
+  - Linux: `tr '\0' '\n' < /proc/<pid>/environ | grep -E 'XDG_|LOGOS_'`
+  - macOS (no `/proc`): `ps eww -p <pid>` — read the `XDG_*` / `LOGOS_*` assignments off the line directly rather than splitting on spaces, since the profile-collapse target (`~/Library/Application Support/…`) contains one and would be truncated at `Application`.
 - Any port-collision error text verbatim, with the module that owns the colliding port.
 - If custom profiles are used, `basecamp paths <profile> --json` for each profile and the resolved log/runtime dirs.
 
@@ -1690,7 +1709,7 @@ HEAD0=$("$SCAFFOLD_BIN" test-node blocks head --url "$URL" --json | jq -r .block
 - Changes to the wallet-home env contract (`WALLET_HOME_ENV_VARS`, `set_wallet_home_env`, or any new upstream rename), to default-wallet seeding (`ensure_default_wallet_seeded` and its storage-initialization fallback), or to the LEZ pin across the v0.2.0 boundary: rerun `D1`, `D4`, `D6`, and `D7` — `D1`/`D4` cover seeding, `D6` covers the direct-`cargo run` export, `D7` covers the hook env contract.
 - Changes to diagnostics, report contents, or redaction logic: rerun `D5`.
 - Changes to example runner binaries or template `src/bin/*` code: rerun `D6`.
-- Changes to `run` step ordering, the `deploy = false` deploy-skip branch, post-deploy env vars, post-deploy CLI override flag handling, or `[run]` config parsing: rerun `D7`.
+- Changes to `run` step ordering, the `deploy = false` deploy-skip branch, the `topup = false` topup-skip branch, post-deploy env vars, post-deploy CLI override flag handling, or `[run]` config parsing: rerun `D7`.
 - Changes to LEZ template scaffolding or generated outputs: rerun `L1`, `L2`, `L3`, and `L4`.
 - Changes to CLI argument parsing, help text, or error messages: rerun `E1`.
 - Changes to `create`/`new` flags or template selection logic: rerun `E2`.

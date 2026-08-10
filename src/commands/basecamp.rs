@@ -515,11 +515,27 @@ fn cmd_basecamp_launch(
         });
     }
     // macOS `bin-macos-app` Basecamp ignores XDG and loads its modules from
-    // `LOGOS_DATA_DIR` (see `set_absolute_logos_data_dir`). Apply this after the
-    // scaffold.toml env layering so a user-supplied relative value is absolutized
-    // too. Scoped to the macOS portable stack; a no-op elsewhere.
+    // `LOGOS_DATA_DIR` (0.1.x) / `LOGOS_USER_DIR` (0.2.x) — see
+    // `set_absolute_basecamp_data_dirs`. Apply this after the scaffold.toml env
+    // layering so a user-supplied relative value is absolutized too.
+    //
+    // Why the gate is this narrow: `is_portable_basecamp` matches every attr in
+    // `BASECAMP_PORTABLE_ATTRS` — `bin-macos-app`, `bin-appimage` and
+    // `bin-bundle-dir` — but the XDG-ignoring behaviour that makes this override
+    // necessary has only been observed on `bin-macos-app`, so the
+    // `cfg!(target_os = "macos")` conjunct keeps the write to that stack and
+    // makes it a no-op everywhere else. The Linux portable stacks are *untested*
+    // here rather than known-good: whether basecamp resolves its data tree from
+    // an `XDG_DATA_HOME`-backed location on Linux (in which case `launch_env`'s
+    // isolation already covers them) has not been verified for either
+    // generation. If a Linux AppImage or bundle-dir turns out to ignore XDG too,
+    // the fix is to drop the `cfg!` conjunct: for an unset key the value written
+    // is the same `<profile>/xdg-data/<subpath>` root `XDG_DATA_HOME` already
+    // implies. Note that widening it is not purely additive — it would also
+    // start rewriting relative `LOGOS_*_DIR` values declared in
+    // `[basecamp.env]` on Linux — so it needs a live check, not a guess.
     if cfg!(target_os = "macos") && is_portable_basecamp(basecamp_repo) {
-        set_absolute_logos_data_dir(&mut env, &project.root, &profile_dir, basecamp_repo);
+        set_absolute_basecamp_data_dirs(&mut env, &project.root, &profile_dir, basecamp_repo);
     }
     println!("launching basecamp for profile {profile}");
     let mut cmd = Command::new(&state.basecamp_bin);
@@ -762,49 +778,75 @@ fn launch_env(
     env
 }
 
-/// Ensure `LOGOS_DATA_DIR` is set to an **absolute** path pointing at the
-/// profile's installed module/plugin root.
+/// Ensure `LOGOS_DATA_DIR` (Basecamp 0.1.x) and `LOGOS_USER_DIR` (Basecamp
+/// 0.2.x) are each set to an **absolute** path pointing at the profile's
+/// installed module/plugin root.
 ///
-/// The macOS `bin-macos-app` Basecamp bundle predates the `--user-dir` /
-/// `LOGOS_USER_DIR` flag (see #178) and does **not** honor `XDG_DATA_HOME` on
-/// macOS: it loads its modules/plugins from `LOGOS_DATA_DIR`, falling back to
+/// The macOS `bin-macos-app` Basecamp bundle does **not** honor
+/// `XDG_DATA_HOME` on macOS: it loads its modules/plugins from its data-tree
+/// override env var, falling back to
 /// `~/Library/Application Support/Logos/LogosBasecamp/` when that is unset. So
 /// although `launch_env` isolates the profile via `XDG_DATA_HOME` and scaffold
 /// installs the profile's modules under `<profile>/xdg-data/<subpath>`, the app
-/// never sees them unless `LOGOS_DATA_DIR` points there.
+/// never sees them unless the override points there.
 ///
-/// The value **must be absolute**: with a *relative* `LOGOS_DATA_DIR` the app
-/// loads the backend modules but the dlopen'd `main_ui` / `package_manager_ui`
-/// dylibs fail `@rpath` resolution ("shared library was not found") and the
-/// shell UI never renders. Only an absolute path brings up the full stack.
+/// Which env var *is* the override depends on the Basecamp generation: 0.1.x
+/// reads `LOGOS_DATA_DIR`; 0.2.x renamed it to `LOGOS_USER_DIR` / `--user-dir`
+/// (basecamp #164, resolved in `LogosBasecampPaths.h::baseDirectory()`) and
+/// drops `LOGOS_DATA_DIR` entirely — with only the old key set, every 0.2.x
+/// profile silently collapses onto the shared fallback dir and none of the
+/// project's modules appear. The two keys are read by disjoint basecamp
+/// versions, so this sets both and stays pin-agnostic.
 ///
-/// This finalizer therefore:
-///   * defaults `LOGOS_DATA_DIR` to the profile's absolute module root
+/// The values **must be absolute**, for a different reason per generation:
+///   * 0.1.x: with a *relative* `LOGOS_DATA_DIR` the app loads the backend
+///     modules but the dlopen'd `main_ui` / `package_manager_ui` dylibs fail
+///     `@rpath` resolution ("shared library was not found") and the shell UI
+///     never renders.
+///   * 0.2.x: basecamp absolutizes the `--user-dir` *flag* but consumes the
+///     `LOGOS_USER_DIR` *env var* verbatim, so a relative value scatters the
+///     app's state under whatever cwd it was launched from.
+///
+/// This finalizer therefore, for each key independently:
+///   * defaults it to the profile's absolute module root
 ///     (`<profile>/xdg-data/<basecamp_xdg_subpath>`, e.g.
 ///     `.../Logos/LogosBasecamp` for the portable stack) when unset, and
-///   * rewrites any caller-supplied relative `LOGOS_DATA_DIR` (from
-///     `[basecamp.env]` / `[basecamp.profiles.<name>.env]`) to absolute against
-///     the project root, so a relative value can't silently break the UI, and
+///   * rewrites any caller-supplied relative value (from `[basecamp.env]` /
+///     `[basecamp.profiles.<name>.env]`) to absolute against the project root,
+///     so a relative value can't silently break the launch, and
 ///   * treats an empty (or whitespace-only) caller value as unset — absolutizing
 ///     `""` would collapse to the project root, which is not a module root.
 ///
 /// The caller gates this to the macOS portable stack; the transform itself is
 /// platform-independent so it stays unit-testable on any host.
-fn set_absolute_logos_data_dir(
+fn set_absolute_basecamp_data_dirs(
     env: &mut BTreeMap<String, OsString>,
     project_root: &Path,
     profile_dir: &Path,
     basecamp_repo: Option<&RepoRef>,
 ) {
-    const KEY: &str = "LOGOS_DATA_DIR";
+    for key in ["LOGOS_DATA_DIR", "LOGOS_USER_DIR"] {
+        set_absolute_module_root_var(env, key, project_root, profile_dir, basecamp_repo);
+    }
+}
+
+/// Per-key transform behind `set_absolute_basecamp_data_dirs`; see its doc
+/// comment for the semantics.
+fn set_absolute_module_root_var(
+    env: &mut BTreeMap<String, OsString>,
+    key: &str,
+    project_root: &Path,
+    profile_dir: &Path,
+    basecamp_repo: Option<&RepoRef>,
+) {
     match env
-        .get(KEY)
+        .get(key)
         .filter(|v| !v.to_string_lossy().trim().is_empty())
     {
         Some(existing) => {
             let path = PathBuf::from(existing);
             if path.is_relative() {
-                env.insert(KEY.into(), absolutize(project_root, &path).into_os_string());
+                env.insert(key.into(), absolutize(project_root, &path).into_os_string());
             }
         }
         None => {
@@ -812,7 +854,7 @@ fn set_absolute_logos_data_dir(
                 .join("xdg-data")
                 .join(basecamp_xdg_subpath(basecamp_repo));
             env.insert(
-                KEY.into(),
+                key.into(),
                 absolutize(project_root, &default_dir).into_os_string(),
             );
         }
@@ -3779,26 +3821,29 @@ mod tests {
     }
 
     #[test]
-    fn set_absolute_logos_data_dir_defaults_to_profile_module_root_when_unset() {
+    fn set_absolute_basecamp_data_dirs_defaults_both_keys_to_profile_module_root_when_unset() {
         let portable = repo_with_attr("bin-macos-app");
         let project_root = Path::new("/abs/project");
         let profile_dir = project_root
             .join(".scaffold/basecamp/profiles")
             .join("alice");
         let mut env: BTreeMap<String, OsString> = BTreeMap::new();
-        set_absolute_logos_data_dir(&mut env, project_root, &profile_dir, Some(&portable));
+        set_absolute_basecamp_data_dirs(&mut env, project_root, &profile_dir, Some(&portable));
+        let expected = profile_dir
+            .join("xdg-data")
+            .join(BASECAMP_XDG_APP_SUBPATH_PORTABLE);
+        // 0.1.x reads LOGOS_DATA_DIR, 0.2.x reads LOGOS_USER_DIR; both must
+        // point at the same profile module root for the launch to be
+        // pin-agnostic.
         assert_eq!(
             env.get("LOGOS_DATA_DIR").map(PathBuf::from),
-            Some(
-                profile_dir
-                    .join("xdg-data")
-                    .join(BASECAMP_XDG_APP_SUBPATH_PORTABLE)
-            )
+            Some(expected.clone())
         );
+        assert_eq!(env.get("LOGOS_USER_DIR").map(PathBuf::from), Some(expected));
     }
 
     #[test]
-    fn set_absolute_logos_data_dir_absolutizes_relative_caller_value() {
+    fn set_absolute_basecamp_data_dirs_absolutizes_relative_logos_data_dir() {
         let portable = repo_with_attr("bin-macos-app");
         let project_root = Path::new("/abs/project");
         let profile_dir = project_root.join("profiles/alice");
@@ -3806,7 +3851,7 @@ mod tests {
         // A relative value (e.g. from [basecamp.profiles.<name>.env]) loads the
         // backend modules but breaks @rpath resolution of the UI dylibs.
         env.insert("LOGOS_DATA_DIR".into(), OsString::from("custom/data"));
-        set_absolute_logos_data_dir(&mut env, project_root, &profile_dir, Some(&portable));
+        set_absolute_basecamp_data_dirs(&mut env, project_root, &profile_dir, Some(&portable));
         assert_eq!(
             env.get("LOGOS_DATA_DIR").map(PathBuf::from),
             Some(project_root.join("custom/data"))
@@ -3814,21 +3859,43 @@ mod tests {
     }
 
     #[test]
-    fn set_absolute_logos_data_dir_leaves_absolute_caller_value_untouched() {
+    fn set_absolute_basecamp_data_dirs_absolutizes_relative_logos_user_dir() {
+        let portable = repo_with_attr("bin-macos-app");
+        let project_root = Path::new("/abs/project");
+        let profile_dir = project_root.join("profiles/alice");
+        let mut env: BTreeMap<String, OsString> = BTreeMap::new();
+        // Basecamp 0.2.x consumes the LOGOS_USER_DIR env var verbatim (only
+        // the --user-dir flag is absolutized app-side), so a relative value
+        // would scatter state under the app's cwd.
+        env.insert("LOGOS_USER_DIR".into(), OsString::from("custom/user"));
+        set_absolute_basecamp_data_dirs(&mut env, project_root, &profile_dir, Some(&portable));
+        assert_eq!(
+            env.get("LOGOS_USER_DIR").map(PathBuf::from),
+            Some(project_root.join("custom/user"))
+        );
+    }
+
+    #[test]
+    fn set_absolute_basecamp_data_dirs_leaves_absolute_caller_values_untouched() {
         let portable = repo_with_attr("bin-macos-app");
         let project_root = Path::new("/abs/project");
         let profile_dir = project_root.join("profiles/alice");
         let mut env: BTreeMap<String, OsString> = BTreeMap::new();
         env.insert("LOGOS_DATA_DIR".into(), OsString::from("/somewhere/else"));
-        set_absolute_logos_data_dir(&mut env, project_root, &profile_dir, Some(&portable));
+        env.insert("LOGOS_USER_DIR".into(), OsString::from("/another/place"));
+        set_absolute_basecamp_data_dirs(&mut env, project_root, &profile_dir, Some(&portable));
         assert_eq!(
             env.get("LOGOS_DATA_DIR").map(PathBuf::from),
             Some(PathBuf::from("/somewhere/else"))
         );
+        assert_eq!(
+            env.get("LOGOS_USER_DIR").map(PathBuf::from),
+            Some(PathBuf::from("/another/place"))
+        );
     }
 
     #[test]
-    fn set_absolute_logos_data_dir_treats_empty_caller_value_as_unset() {
+    fn set_absolute_basecamp_data_dirs_treats_empty_caller_values_as_unset() {
         let portable = repo_with_attr("bin-macos-app");
         let project_root = Path::new("/abs/project");
         let profile_dir = project_root.join("profiles/alice");
@@ -3837,7 +3904,32 @@ mod tests {
         // absolutize to the project root itself, which is not a module root;
         // it must fall back to the profile default instead.
         env.insert("LOGOS_DATA_DIR".into(), OsString::new());
-        set_absolute_logos_data_dir(&mut env, project_root, &profile_dir, Some(&portable));
+        env.insert("LOGOS_USER_DIR".into(), OsString::new());
+        set_absolute_basecamp_data_dirs(&mut env, project_root, &profile_dir, Some(&portable));
+        let expected = profile_dir
+            .join("xdg-data")
+            .join(BASECAMP_XDG_APP_SUBPATH_PORTABLE);
+        assert_eq!(
+            env.get("LOGOS_DATA_DIR").map(PathBuf::from),
+            Some(expected.clone())
+        );
+        assert_eq!(env.get("LOGOS_USER_DIR").map(PathBuf::from), Some(expected));
+    }
+
+    #[test]
+    fn set_absolute_basecamp_data_dirs_handles_each_key_independently() {
+        let portable = repo_with_attr("bin-macos-app");
+        let project_root = Path::new("/abs/project");
+        let profile_dir = project_root.join("profiles/alice");
+        let mut env: BTreeMap<String, OsString> = BTreeMap::new();
+        // Only one key overridden (relative): it must be absolutized while the
+        // other still gets the profile default — no cross-key leakage.
+        env.insert("LOGOS_USER_DIR".into(), OsString::from("custom/user"));
+        set_absolute_basecamp_data_dirs(&mut env, project_root, &profile_dir, Some(&portable));
+        assert_eq!(
+            env.get("LOGOS_USER_DIR").map(PathBuf::from),
+            Some(project_root.join("custom/user"))
+        );
         assert_eq!(
             env.get("LOGOS_DATA_DIR").map(PathBuf::from),
             Some(

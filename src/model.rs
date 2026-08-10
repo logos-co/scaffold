@@ -360,18 +360,28 @@ pub(crate) struct RunProfile {
     /// to the post-deploy hooks, instead of bailing on the missing default
     /// program directory.
     pub(crate) deploy: bool,
+    /// Whether `lgs run` performs its own wallet-topup step. Defaults to
+    /// `true`. Set `topup = false` for a project that funds its own accounts
+    /// (e.g. claims from the faucet at runtime, from a demo binary or a
+    /// `post_deploy` hook): the pipeline then skips step 4's topup — along
+    /// with its requirement that a destination address be resolvable — and
+    /// proceeds straight to deploy/hooks. Hooks observe the choice through
+    /// `SCAFFOLD_TOPUP_SKIPPED`.
+    pub(crate) topup: bool,
 }
 
 impl Default for RunProfile {
     fn default() -> Self {
-        // `deploy` defaults to `true` so a project with no `[run]` config (or a
-        // profile that omits the key) keeps the historical behavior of running
-        // scaffold's deploy step. `derive(Default)` would give `false`, which
-        // would silently disable deploy for every existing project.
+        // `deploy` and `topup` default to `true` so a project with no `[run]`
+        // config (or a profile that omits the keys) keeps the historical
+        // behavior of running scaffold's deploy and topup steps.
+        // `derive(Default)` would give `false`, which would silently disable
+        // those steps for every existing project.
         Self {
             reset: false,
             post_deploy: Vec::new(),
             deploy: true,
+            topup: true,
         }
     }
 }

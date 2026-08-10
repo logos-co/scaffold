@@ -185,15 +185,29 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
         ensure_localnet(project, params.localnet_timeout_sec)?;
     }
 
-    // Step 4: Wallet topup
-    println!("[4/{total_steps}] Topping up wallet...");
-    let outcome = cmd_wallet_topup_inner(project, None, false, false)?;
-    if let TopupOutcome::ConfirmationTimeout { message } = outcome {
-        bail!(
-            "{message}\n\
-             Run aborted before deploy to avoid deploying with uncertain funding.\n\
-             Hint: retry `logos-scaffold run` or run `logos-scaffold wallet topup` manually."
+    // Step 4: Wallet topup. Skipped entirely when the run profile sets
+    // `topup = false` (project funds its own accounts). The branch below and
+    // the value hooks read from `SCAFFOLD_TOPUP_SKIPPED` come from the same
+    // expression, so what the hook is told can't drift from what step 4 did.
+    let topup_skipped = topup_step_skipped(&params.resolved);
+    if topup_skipped {
+        // `topup = false`: the project funds its own accounts (e.g. claims
+        // from the faucet at runtime, from a demo binary or a post_deploy
+        // hook). Skip scaffold's topup — including its requirement that a
+        // destination address be resolvable — and proceed to deploy/hooks.
+        println!(
+            "[4/{total_steps}] Topup skipped (`topup = false` in the run profile; this project funds its own accounts — e.g. via faucet claims at runtime)"
         );
+    } else {
+        println!("[4/{total_steps}] Topping up wallet...");
+        let outcome = cmd_wallet_topup_inner(project, None, false, false)?;
+        if let TopupOutcome::ConfirmationTimeout { message } = outcome {
+            bail!(
+                "{message}\n\
+                 Run aborted before deploy to avoid deploying with uncertain funding.\n\
+                 Hint: retry `logos-scaffold run` or run `logos-scaffold wallet topup` manually."
+            );
+        }
     }
 
     // Step 5: Deploy. Skipped entirely when the run profile sets
@@ -255,7 +269,7 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
         warn_on_rewritten_program_names(&deployed.programs);
         for (i, hook) in params.hooks.iter().enumerate() {
             println!("===> post_deploy[{}/{n}]: {hook}", i + 1);
-            run_post_deploy_hook(project, hook, &deployed)?;
+            run_post_deploy_hook(project, hook, &deployed, topup_skipped)?;
             println!("<=== post_deploy[{}/{n}] OK", i + 1);
         }
     } else {
@@ -263,6 +277,16 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
     }
 
     Ok(())
+}
+
+/// Whether step 4 skips scaffold's wallet topup for `resolved` — which is
+/// also the value hooks read from `SCAFFOLD_TOPUP_SKIPPED`.
+///
+/// Extracted as its own function so a unit test can pin the polarity
+/// directly: `run_pipeline_once` needs a real sequencer to drive, so an
+/// inverted signal here would otherwise reach every hook unchallenged.
+fn topup_step_skipped(resolved: &RunProfile) -> bool {
+    !resolved.topup
 }
 
 fn reset_for_run(project: &Project, verify_timeout_sec: u64) -> DynResult<()> {
@@ -734,10 +758,14 @@ fn print_deploy_summary(project: &Project) -> DynResult<()> {
     Ok(())
 }
 
+/// `topup_skipped` is threaded in as its own parameter rather than carried
+/// on `DeployedPrograms`: step 4's outcome has no per-program dimension, so
+/// it does not belong on a struct that describes deployed programs.
 fn build_hook_command(
     project: &Project,
     hook_command: &str,
     deployed: &DeployedPrograms,
+    topup_skipped: bool,
 ) -> Command {
     let sequencer_url =
         crate::commands::wallet_support::default_sequencer_http_url_for_project(project);
@@ -771,6 +799,14 @@ fn build_hook_command(
             "SCAFFOLD_DEPLOY_SKIPPED",
             if run_deploy_skipped { "1" } else { "0" },
         )
+        // Always-on for the same reason: topup-skip is run-level state with
+        // no per-program dimension at all. A hook that funds accounts itself
+        // (the `topup = false` case) needs it to decide whether to claim,
+        // rather than always claiming and tolerating an already-funded wallet.
+        .env(
+            "SCAFFOLD_TOPUP_SKIPPED",
+            if topup_skipped { "1" } else { "0" },
+        )
         .current_dir(&project.root);
     // Both wallet home names (old NSSA_*, v0.2.0 LEE_*) so hook-spawned
     // wallet CLIs target the project wallet regardless of the LEZ pin.
@@ -797,8 +833,8 @@ fn build_hook_command(
     }
     // Single-program shortcut: only set when there's exactly one program.
     // Hooks that handle multi-program projects must use the indexed forms.
-    // `SCAFFOLD_DEPLOY_SKIPPED` is set unconditionally above (run-level),
-    // so it's not duplicated here.
+    // `SCAFFOLD_DEPLOY_SKIPPED` and `SCAFFOLD_TOPUP_SKIPPED` are set
+    // unconditionally above (run-level), so they're not duplicated here.
     if let [single] = deployed.programs.as_slice() {
         cmd.env("SCAFFOLD_PROGRAM_NAME", &single.name);
         if let Some(id) = &single.program_id {
@@ -813,8 +849,9 @@ fn run_post_deploy_hook(
     project: &Project,
     hook_command: &str,
     deployed: &DeployedPrograms,
+    topup_skipped: bool,
 ) -> DynResult<()> {
-    let status = build_hook_command(project, hook_command, deployed)
+    let status = build_hook_command(project, hook_command, deployed, topup_skipped)
         .status()
         .context("failed to execute post-deploy hook")?;
 
@@ -999,7 +1036,7 @@ mod tests {
         let project = make_test_project(temp.path().to_path_buf());
 
         let hook = format!("echo \"$SEQUENCER_URL\" > '{}'", env_file.display());
-        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default(), false)
             .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
@@ -1018,7 +1055,7 @@ mod tests {
             "printf '%s\\n' \"$NSSA_WALLET_HOME_DIR\" \"$LEE_WALLET_HOME_DIR\" > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default(), false)
             .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
@@ -1040,7 +1077,7 @@ mod tests {
         let project = make_test_project(temp.path().to_path_buf());
 
         let hook = format!("echo \"$SCAFFOLD_PROJECT_ROOT\" > '{}'", env_file.display());
-        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default(), false)
             .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
@@ -1058,7 +1095,7 @@ mod tests {
         let project = make_test_project(temp.path().to_path_buf());
 
         let hook = format!("echo \"$SCAFFOLD_IDL_DIR\" > '{}'", env_file.display());
-        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default(), false)
             .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
@@ -1076,7 +1113,7 @@ mod tests {
         project.config.localnet.port = 9999;
 
         let hook = format!("echo \"$SEQUENCER_URL\" > '{}'", env_file.display());
-        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default(), false)
             .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
@@ -1088,7 +1125,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let project = make_test_project(temp.path().to_path_buf());
 
-        let result = run_post_deploy_hook(&project, "exit 42", &DeployedPrograms::default());
+        let result = run_post_deploy_hook(&project, "exit 42", &DeployedPrograms::default(), false);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -1104,7 +1141,7 @@ mod tests {
         let project = make_test_project(temp.path().to_path_buf());
 
         let hook = format!("pwd > '{}'", pwd_file.display());
-        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default(), false)
             .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&pwd_file).expect("read pwd output");
@@ -1174,7 +1211,7 @@ mod tests {
             }} > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default(), false)
             .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
@@ -1242,7 +1279,7 @@ mod tests {
             "echo \"$SCAFFOLD_PROGRAM_ID|$SCAFFOLD_GUEST_BIN\" > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, &deployed).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &deployed, false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         let expected_bin = temp.path().join("counter.bin");
@@ -1274,7 +1311,7 @@ mod tests {
             "if [ -z \"${{SCAFFOLD_PROGRAM_ID+set}}\" ]; then echo unset; else echo set; fi > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, &deployed).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &deployed, false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content.trim(), "unset");
@@ -1292,7 +1329,7 @@ mod tests {
             "echo \"id=${{SCAFFOLD_PROGRAM_ID+set}}|bin=${{SCAFFOLD_GUEST_BIN+set}}\" > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default(), false)
             .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
@@ -1320,7 +1357,7 @@ mod tests {
             "echo \"$SCAFFOLD_DEPLOY_SKIPPED\" > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, &deployed).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &deployed, false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content.trim(), "1");
@@ -1339,11 +1376,77 @@ mod tests {
             "echo \"$SCAFFOLD_DEPLOY_SKIPPED\" > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default(), false)
             .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content.trim(), "0");
+    }
+
+    #[test]
+    fn hook_receives_topup_skipped_env_for_multiprogram_run() {
+        // `SCAFFOLD_TOPUP_SKIPPED` is run-level state (step 4 has no
+        // per-program dimension), so it must reach multi-program hooks too —
+        // a self-funding hook decides whether to claim based on it.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env_file = temp.path().join("env_out.txt");
+        let project = make_test_project(temp.path().to_path_buf());
+        let deployed = programs(
+            vec![
+                fake_deployed("a", Some("h1")),
+                fake_deployed("b", Some("h2")),
+            ],
+            false,
+        );
+
+        let hook = format!(
+            "echo \"$SCAFFOLD_TOPUP_SKIPPED\" > '{}'",
+            env_file.display()
+        );
+        run_post_deploy_hook(&project, &hook, &deployed, true).expect("hook should succeed");
+
+        let content = std::fs::read_to_string(&env_file).expect("read env output");
+        assert_eq!(content.trim(), "1");
+    }
+
+    #[test]
+    fn hook_receives_topup_skipped_zero_when_topup_ran() {
+        // The var is always set, so a hook can branch on it directly rather
+        // than treating "unset" as "scaffold topped up".
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env_file = temp.path().join("env_out.txt");
+        let project = make_test_project(temp.path().to_path_buf());
+
+        let hook = format!(
+            "echo \"$SCAFFOLD_TOPUP_SKIPPED\" > '{}'",
+            env_file.display()
+        );
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default(), false)
+            .expect("hook should succeed");
+
+        let content = std::fs::read_to_string(&env_file).expect("read env output");
+        assert_eq!(content.trim(), "0");
+    }
+
+    /// The two tests above pass `topup_skipped` in explicitly, so they pin
+    /// how `build_hook_command` renders the flag but not how step 4 decides
+    /// it. This one pins the decision: swapping the polarity would hand every
+    /// hook the exact inverse of what the pipeline did, and no test that
+    /// stops at `build_hook_command` can notice.
+    #[test]
+    fn topup_step_skipped_follows_the_profile_flag() {
+        // Default profile (`topup = true`) tops up, so nothing was skipped.
+        assert!(
+            !topup_step_skipped(&RunProfile::default()),
+            "`topup = true` must report SCAFFOLD_TOPUP_SKIPPED=0"
+        );
+        assert!(
+            topup_step_skipped(&RunProfile {
+                topup: false,
+                ..RunProfile::default()
+            }),
+            "`topup = false` must report SCAFFOLD_TOPUP_SKIPPED=1"
+        );
     }
 
     #[test]
@@ -1357,7 +1460,7 @@ mod tests {
             "echo \"$SCAFFOLD_PROGRAM_ID_counter\" > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, &deployed).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &deployed, false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content.trim(), "deadbeef");
@@ -1374,7 +1477,7 @@ mod tests {
             "printf '%s|%s|%s' \"$SCAFFOLD_PROGRAM_NAME\" \"$SCAFFOLD_PROGRAM_ID\" \"$SCAFFOLD_DEPLOY_SKIPPED\" > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, &deployed).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &deployed, false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content, "counter|abc123|0");
@@ -1397,7 +1500,7 @@ mod tests {
             "echo \"[${{SCAFFOLD_PROGRAM_NAME:-unset}}]\" > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, &deployed).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &deployed, false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content.trim(), "[unset]");
@@ -1417,7 +1520,7 @@ mod tests {
             "printf '%s|%s|%s' \"$SCAFFOLD_PROGRAMS\" \"$SCAFFOLD_DEPLOY_SKIPPED_a\" \"$SCAFFOLD_DEPLOY_SKIPPED_b\" > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, &deployed).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &deployed, false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content, "a b|1|1");
@@ -1434,7 +1537,7 @@ mod tests {
             "echo \"[${{SCAFFOLD_PROGRAM_ID_noid:-unset}}]\" > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, &deployed).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &deployed, false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content.trim(), "[unset]");

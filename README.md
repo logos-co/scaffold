@@ -254,8 +254,16 @@ environment variables pre-set:
 | `LEE_WALLET_HOME_DIR` | Same path under the name LEZ v0.2.0 reads. Both are always set, so a hook that execs the wallet binary works on either pin |
 | `SCAFFOLD_PROJECT_ROOT` | Absolute path to project root |
 | `SCAFFOLD_IDL_DIR` | Absolute path to IDL output directory |
+| `SCAFFOLD_TOPUP_SKIPPED` | `1` when step 4 was skipped (`topup = false`), `0` when scaffold topped up the wallet. Always set |
+| `SCAFFOLD_DEPLOY_SKIPPED` | `1` when step 5 deployed nothing — either `deploy = false`, or the deploy cache found guest binaries, IDL, config and sequencer unchanged — and `0` when it deployed. Always set |
 | `SCAFFOLD_PROGRAM_ID` | risc0 image ID (hex) of the deployed program. Set only when the project has exactly one deployable program; unset if `spel program-id` cannot extract the ID |
 | `SCAFFOLD_GUEST_BIN` | Absolute path to the guest `.bin`. Set only when the project has exactly one deployable program |
+
+`SCAFFOLD_TOPUP_SKIPPED` and `SCAFFOLD_DEPLOY_SKIPPED` describe the run as a
+whole, so they are set on every hook invocation — including for projects with
+no deployable programs, where `SCAFFOLD_PROGRAM_ID` and `SCAFFOLD_GUEST_BIN`
+are absent. Hooks should branch on their `1`/`0` value, not on whether they
+exist.
 
 `SCAFFOLD_PROGRAM_ID` and `SCAFFOLD_GUEST_BIN` are unset for
 multi-program projects so hooks fail loudly rather than silently
@@ -285,6 +293,32 @@ post_deploy = ["scripts/deploy-and-demo.sh"]
 ```
 
 `deploy` defaults to `true`; omit it for the normal deploy loop.
+
+#### Self-funding projects (`topup = false`)
+
+`run` tops up the project's default wallet before deploying (step 4). A
+project that funds its own accounts — e.g. its demo binary claims from the
+faucet at runtime, or a `post_deploy` hook handles funding — can set
+`topup = false` to skip that step and keep funding in one place instead of
+splitting it between scaffold and the project. The pipeline then runs
+build → IDL → localnet → deploy → `post_deploy`. It works inline under
+`[run]` or per profile, and combines with `deploy = false`:
+
+```toml
+[run.profiles.demo]
+topup = false
+post_deploy = ["cargo run --bin demo"]
+```
+
+Hooks see `SCAFFOLD_TOPUP_SKIPPED=1` on such a run, so a funding hook can
+claim only when scaffold did not. The topup step itself needs a destination
+address, but on a pin whose wallet config ships preconfigured accounts one is
+already in place by step 4: step 1 of every `lgs run` chains `lgs setup`,
+which seeds `.scaffold/state/wallet.state` from the first preconfigured
+public account whenever that file is missing — and `--reset`, which wipes the
+wallet later, at step 3, re-seeds it before the run continues.
+
+`topup` defaults to `true`; omit it for the normal topup-then-deploy loop.
 
 #### One-off override / skip
 
