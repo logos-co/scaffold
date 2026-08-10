@@ -877,6 +877,17 @@ mod tests {
                         .to_string(),
                 };
                 let _ = stream.write_all(payload.as_bytes());
+                let _ = stream.flush();
+                // The single `read` above can return before the client has
+                // finished sending its request body. Closing a socket that
+                // still has unread inbound data makes the kernel send RST
+                // instead of FIN, and the RST discards the response we just
+                // wrote — the client then sees a truncated read rather than
+                // the scripted answer. Drain to EOF (bounded by a short
+                // timeout) so every connection closes gracefully.
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+                let mut sink = [0_u8; 1024];
+                while matches!(stream.read(&mut sink), Ok(n) if n > 0) {}
             }
         });
         (url, handle)
