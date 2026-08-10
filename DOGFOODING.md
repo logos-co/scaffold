@@ -1059,7 +1059,7 @@ ls .scaffold/basecamp/profiles
 
 ### Expected Success Signals
 
-- `basecamp --help` lists `setup`, `modules`, `install`, `launch`, `paths`, `build-portable`, `doctor`, and `docs`.
+- `basecamp --help` lists `setup`, `modules`, `install`, `launch`, `develop`, `build`, `build-portable`, `run`, `doctor`, `paths`, and `docs`.
 - `basecamp docs` prints the canonical project-compatibility rules, including per-profile `env_file`, `runtime_dir`, `log_file`, custom profile names, and per-platform `[repos.basecamp.attr]`.
 - First `basecamp setup` clones the pinned basecamp repo into a pin-isolated cache path, builds `basecamp` and `lgpm` via Nix, seeds `.scaffold/basecamp/profiles/alice/` and `.scaffold/basecamp/profiles/bob/`, and reports completion.
 - If `[repos.basecamp.attr]` is a per-platform map, setup uses the current host's attr and preserves the map plus scalar fallback on serialize.
