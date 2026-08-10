@@ -95,7 +95,7 @@ Failure modes:
 
 ## Example Runners
 
-The template ships seven host-side runners under `src/bin/`. Each uses `runner_support::parse_account_id` and `runner_support::load_program` from `src/lib.rs`. They expect the wallet home to be exported when invoked directly via `cargo run` (scaffold `wallet --` passthrough sets it automatically; direct `cargo run` does not). Export both names: LEZ reads `NSSA_WALLET_HOME_DIR` up to v0.1.2 and `LEE_WALLET_HOME_DIR` from v0.2.0, and a wallet that sees only the name it does not read silently falls back to `~/.lee/wallet` instead of failing.
+The template ships seven host-side runners under `src/bin/`. Each uses `runner_support::parse_account_id` and `runner_support::load_program` from `src/lib.rs`. They expect the wallet home to be exported when invoked directly via `cargo run` (scaffold `wallet --` passthrough sets it automatically; direct `cargo run` does not). Export both names: LEZ reads `NSSA_WALLET_HOME_DIR` up to v0.1.2 and `LEE_WALLET_HOME_DIR` from v0.2.0. Exporting only one is not symmetric — a v0.2.0 wallet that sees only `NSSA_WALLET_HOME_DIR` ignores it and silently falls back to `~/.lee/wallet`, while a pre-v0.2.0 wallet that sees only `LEE_WALLET_HOME_DIR` has no wallet home set at all and fails at `WalletCore::from_env()`.
 
 ```bash
 export NSSA_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet" LEE_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet"
@@ -147,7 +147,7 @@ cargo run --bin run_hello_world_through_tail_call_private -- \
 5. `cargo run --bin run_<program> -- <args>` to invoke against the running localnet.
 6. `lgs wallet -- account get --account-id <id>` to verify state mutation.
 
-If you hit the wallet `from_env()` panic on direct `cargo run`, you forgot `export NSSA_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet" LEE_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet"`. If the runner instead starts against an unexpectedly empty wallet, you exported only the name your LEZ pin does not read and it fell back to `~/.lee/wallet`.
+If you hit the wallet `from_env()` panic on direct `cargo run`, the name your LEZ pin reads is unset — you forgot `export NSSA_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet" LEE_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet"`, or you exported only `LEE_WALLET_HOME_DIR` on a pre-v0.2.0 pin. The quiet variant of the same mistake is the other direction: on a v0.2.0 pin, exporting only `NSSA_WALLET_HOME_DIR` produces no error at all — the wallet falls back to `~/.lee/wallet` and the runner starts against an unexpectedly empty wallet.
 
 ## Account Creation
 
@@ -186,7 +186,7 @@ Drop down to this `default` template when you need primitives the framework hasn
 
 - **One guest program per `methods/guest/src/bin/<name>.rs`.** The basename is the program name `lgs deploy` recognises.
 - **One host runner per program, named `src/bin/run_<name>.rs`.** Reuse `runner_support::parse_account_id` and `runner_support::load_program`.
-- **The wallet home must be exported for direct `cargo run`.** Use `export NSSA_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet" LEE_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet"` once per shell — both names, since v0.2.0 renamed the variable and setting only one leaves the other pin pointed at `~/.lee/wallet`.
+- **The wallet home must be exported for direct `cargo run`.** Use `export NSSA_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet" LEE_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet"` once per shell — both names, since v0.2.0 renamed the variable. Setting only `NSSA_WALLET_HOME_DIR` leaves a v0.2.0 wallet silently pointed at `~/.lee/wallet`; setting only `LEE_WALLET_HOME_DIR` leaves a pre-v0.2.0 wallet with no wallet home at all, which fails at `WalletCore::from_env()`.
 - **Account IDs are passed as CLI args**, never hardcoded. Use `lgs wallet -- account new {public,private}` to create fresh ones.
 - **Don't add Qt / UI / QML deps.** This template is for zk programs; UI work belongs in a separate Logos module project (different repo, different toolchain).
 - **Parent `Cargo.toml` should keep `methods/` excluded** from workspace members; `lgs build` handles its compilation separately.

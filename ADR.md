@@ -364,9 +364,11 @@ silently break those hooks. That reasoning is unchanged — but upstream
 now has two such names. LEZ v0.2.0 renamed `NSSA_WALLET_HOME_DIR` to
 `LEE_WALLET_HOME_DIR`, and a v0.2.0 wallet that sees only the old name
 does not error: it falls back to `~/.lee/wallet`. Scaffold therefore
-sets *both* names, to the same path, on every wallet subprocess and on
-every hook. The list lives in `WALLET_HOME_ENV_VARS` (`constants.rs`);
-wallet subprocesses apply it through `set_wallet_home_env`. Follow that
+sets *both* names, to the same path, on every wallet subprocess that
+touches the wallet home and on every hook — the exception is doctor's
+`wallet --version` probe, which only reads the binary's version string.
+The list lives in `WALLET_HOME_ENV_VARS` (`constants.rs`); wallet
+subprocesses apply it through `set_wallet_home_env`. Follow that
 pattern for any future rename: add the new name, keep the old one,
 never swap.
 

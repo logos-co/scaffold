@@ -19,7 +19,7 @@ logos-scaffold run
 logos-scaffold wallet -- check-health
 ```
 
-`logos-scaffold run` runs setup, build, IDL, localnet, topup, and deploy in one pipeline. The first run performs `setup`, which auto-seeds `.scaffold/state/wallet.state` with the first preconfigured public wallet if no default exists.
+`logos-scaffold run` runs setup, build, IDL, localnet, topup, and deploy in one pipeline. The first run performs `setup`, which records a default wallet in `.scaffold/state/wallet.state` if no default exists: the first preconfigured public account from the pinned LEZ debug wallet config when it ships any, otherwise — LEZ v0.2.0 ships none — the first public account the wallet CLI reports after creating its own storage on first use. That second path creates fresh key material under the scaffold wallet password, so export `LOGOS_SCAFFOLD_WALLET_PASSWORD` before the first run if you do not want the default one.
 
 ### First run step-by-step (optional)
 

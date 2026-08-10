@@ -128,31 +128,45 @@ pub(crate) fn first_public_wallet_address(wallet_home: &Path) -> DynResult<Optio
 }
 
 /// Extract the first `Public/<base58-account-id>` account from wallet
-/// `account list` output. Listing entries render as `/ Public/<account-id>`,
-/// and only lines with that leading `/ ` marker are considered: the address
-/// this returns becomes the project's default topup destination, so a banner
-/// or status line that happens to print a real address must not be adopted.
-/// The account id is additionally validated through [`normalize_address_ref`]
-/// — it must decode to exactly 32 bytes.
+/// `account list` output.
+///
+/// In the output shapes captured in this repo (unit tests here and the fake
+/// wallet in `tests/cli.rs`) listing entries render as `/ Public/<account-id>`,
+/// so `/ `-prefixed lines are preferred: the address this returns becomes the
+/// project's default topup destination, and base58 validation alone cannot
+/// tell a listing entry from a real address printed in a banner or status
+/// line.
+///
+/// When the output contains no usable `/ `-prefixed entry, the scan falls back
+/// to any whitespace-separated `Public/<account-id>` token anywhere in the
+/// output. The marker is not a documented contract of the wallet CLI, and
+/// returning `None` here leaves `.scaffold/state/wallet.state` without a
+/// `default_address=` line — the failure scaffold#240 was about — so an
+/// unmarked candidate is better than none.
+///
+/// Either way the account id is validated through [`normalize_address_ref`] —
+/// it must decode to exactly 32 bytes.
 pub(crate) fn first_public_address_in_listing(output: &str) -> Option<String> {
-    for line in output.lines() {
-        let Some(entry) = line.trim().strip_prefix("/ ") else {
-            continue;
-        };
-        let Some(rest) = entry.trim_start().strip_prefix("Public/") else {
-            continue;
-        };
-        // Trim anything after the base58 run (e.g. trailing punctuation).
-        let account_id: String = rest
-            .chars()
-            .take_while(char::is_ascii_alphanumeric)
-            .collect();
-        if let Ok(normalized) = normalize_address_ref(&format!("Public/{account_id}")) {
-            return Some(normalized);
-        }
+    let marked = output.lines().find_map(|line| {
+        let entry = line.trim().strip_prefix("/ ")?;
+        public_address_at_start(entry.trim_start())
+    });
+    if marked.is_some() {
+        return marked;
     }
 
-    None
+    output.split_whitespace().find_map(public_address_at_start)
+}
+
+/// Parse a `Public/<base58-account-id>` reference at the start of `text`,
+/// trimming anything after the base58 run (e.g. trailing punctuation).
+fn public_address_at_start(text: &str) -> Option<String> {
+    let rest = text.strip_prefix("Public/")?;
+    let account_id: String = rest
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect();
+    normalize_address_ref(&format!("Public/{account_id}")).ok()
 }
 
 pub(crate) fn wallet_state_path(project_root: &Path) -> PathBuf {
@@ -757,25 +771,56 @@ mod tests {
 
     /// A wallet build that prints a real, well-formed address in a banner or
     /// status line before the listing must not have that address adopted as
-    /// the project's default topup destination: only `/ `-prefixed listing
-    /// entries count. Validating base58 alone is not enough, because banner
-    /// addresses are just as valid as entry ones.
+    /// the project's default topup destination while the listing itself
+    /// carries `/ `-prefixed entries. Validating base58 alone is not enough,
+    /// because banner addresses are just as valid as entry ones.
     #[test]
-    fn first_public_address_in_listing_ignores_addresses_outside_listing_entries() {
+    fn first_public_address_in_listing_prefers_listing_entries_over_banner_addresses() {
         const BANNER_ID: &str = "2ECgkFTaXzwjJBXR7ZKmXYQtpHbvTTHK9Auma4NL9AUo";
 
-        let banner_only = format!("wallet ready; active account Public/{BANNER_ID}\n");
-        assert!(
-            first_public_address_in_listing(&banner_only).is_none(),
-            "a banner address must never be adopted as the default wallet"
+        let banner_then_listing = format!(
+            "wallet ready; active account Public/{BANNER_ID}\n\
+             Accounts:\n\
+             / Public/{ACCOUNT_ID}\n\
+             / Private/{BANNER_ID}\n"
         );
-
-        let banner_then_listing =
-            format!("{banner_only}Accounts:\n/ Public/{ACCOUNT_ID}\n/ Private/{BANNER_ID}\n");
         assert_eq!(
             first_public_address_in_listing(&banner_then_listing).as_deref(),
             Some(format!("Public/{ACCOUNT_ID}").as_str()),
             "the first listing entry wins over any earlier banner address"
+        );
+    }
+
+    /// The `/ ` entry marker is not a documented contract of the wallet CLI.
+    /// A build that prints its accounts without the marker must still yield
+    /// an address: returning `None` here is what leaves `wallet.state` with
+    /// no `default_address=` line (scaffold#240).
+    #[test]
+    fn first_public_address_in_listing_falls_back_when_no_entry_marker_is_present() {
+        let unmarked = format!("Accounts:\n  Public/{ACCOUNT_ID}\n");
+        assert_eq!(
+            first_public_address_in_listing(&unmarked).as_deref(),
+            Some(format!("Public/{ACCOUNT_ID}").as_str()),
+            "an unmarked candidate is better than no default address at all"
+        );
+    }
+
+    /// Pins which account wins on the shape the repo's own fake wallet in
+    /// `tests/cli.rs` prints: an unmarked `Preconfigured Public/<id>` line
+    /// followed by a marked `/ Public/<id>` entry. The marked entry is the
+    /// listing entry, so it is the one adopted.
+    #[test]
+    fn first_public_address_in_listing_prefers_marked_entry_over_earlier_unmarked_line() {
+        const MARKED_ID: &str = "8zxWNm1qh6FLsJpVBuDxdxcTm55qHPgFEdqJpPVu1fuy";
+
+        let output = format!(
+            "Preconfigured Public/{ACCOUNT_ID}\n\
+             / Public/{MARKED_ID}\n"
+        );
+        assert_eq!(
+            first_public_address_in_listing(&output).as_deref(),
+            Some(format!("Public/{MARKED_ID}").as_str()),
+            "a `/ `-marked entry wins over an earlier unmarked Public/ mention"
         );
     }
 
