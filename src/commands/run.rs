@@ -185,8 +185,19 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
     }
 
     // Step 4: Wallet topup. Skipped entirely when the run profile sets
-    // `topup = false` (project funds its own accounts).
-    let topup_skipped = if params.resolved.topup {
+    // `topup = false` (project funds its own accounts). The branch below and
+    // the value hooks read from `SCAFFOLD_TOPUP_SKIPPED` come from the same
+    // expression, so what the hook is told can't drift from what step 4 did.
+    let topup_skipped = topup_step_skipped(&params.resolved);
+    if topup_skipped {
+        // `topup = false`: the project funds its own accounts (e.g. claims
+        // from the faucet at runtime, from a demo binary or a post_deploy
+        // hook). Skip scaffold's topup — including its requirement that a
+        // destination address be resolvable — and proceed to deploy/hooks.
+        println!(
+            "[4/{total_steps}] Topup skipped (`topup = false` in the run profile; this project funds its own accounts — e.g. via faucet claims at runtime)"
+        );
+    } else {
         println!("[4/{total_steps}] Topping up wallet...");
         let outcome = cmd_wallet_topup_inner(project, None, false, false)?;
         if let TopupOutcome::ConfirmationTimeout { message } = outcome {
@@ -196,17 +207,7 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
                  Hint: retry `logos-scaffold run` or run `logos-scaffold wallet topup` manually."
             );
         }
-        false
-    } else {
-        // `topup = false`: the project funds its own accounts (e.g. claims
-        // from the faucet at runtime, from a demo binary or a post_deploy
-        // hook). Skip scaffold's topup — including its requirement that a
-        // destination address be resolvable — and proceed to deploy/hooks.
-        println!(
-            "[4/{total_steps}] Topup skipped (`topup = false` in the run profile; this project funds its own accounts — e.g. via faucet claims at runtime)"
-        );
-        true
-    };
+    }
 
     // Step 5: Deploy. Skipped entirely when the run profile sets
     // `deploy = false` (project owns deployment); otherwise idempotent —
@@ -275,6 +276,16 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
     }
 
     Ok(())
+}
+
+/// Whether step 4 skips scaffold's wallet topup for `resolved` — which is
+/// also the value hooks read from `SCAFFOLD_TOPUP_SKIPPED`.
+///
+/// Extracted as its own function so a unit test can pin the polarity
+/// directly: `run_pipeline_once` needs a real sequencer to drive, so an
+/// inverted signal here would otherwise reach every hook unchallenged.
+fn topup_step_skipped(resolved: &RunProfile) -> bool {
+    !resolved.topup
 }
 
 fn reset_for_run(project: &Project, verify_timeout_sec: u64) -> DynResult<()> {
@@ -1394,6 +1405,27 @@ mod tests {
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content.trim(), "0");
+    }
+
+    /// The two tests above pass `topup_skipped` in explicitly, so they pin
+    /// how `build_hook_command` renders the flag but not how step 4 decides
+    /// it. This one pins the decision: swapping the polarity would hand every
+    /// hook the exact inverse of what the pipeline did, and no test that
+    /// stops at `build_hook_command` can notice.
+    #[test]
+    fn topup_step_skipped_follows_the_profile_flag() {
+        // Default profile (`topup = true`) tops up, so nothing was skipped.
+        assert!(
+            !topup_step_skipped(&RunProfile::default()),
+            "`topup = true` must report SCAFFOLD_TOPUP_SKIPPED=0"
+        );
+        assert!(
+            topup_step_skipped(&RunProfile {
+                topup: false,
+                ..RunProfile::default()
+            }),
+            "`topup = false` must report SCAFFOLD_TOPUP_SKIPPED=1"
+        );
     }
 
     #[test]

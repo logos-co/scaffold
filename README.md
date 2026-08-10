@@ -259,9 +259,10 @@ environment variables pre-set:
 | `SCAFFOLD_GUEST_BIN` | Absolute path to the guest `.bin`. Set only when the project has exactly one deployable program |
 
 `SCAFFOLD_TOPUP_SKIPPED` and `SCAFFOLD_DEPLOY_SKIPPED` describe the run as a
-whole, so unlike the program-specific variables they are always set — including
-for projects with no deployable programs. Hooks should branch on their value,
-not on whether they exist.
+whole, so they are set on every hook invocation — including for projects with
+no deployable programs, where `SCAFFOLD_PROGRAM_ID` and `SCAFFOLD_GUEST_BIN`
+are absent. Hooks should branch on their `1`/`0` value, not on whether they
+exist.
 
 `SCAFFOLD_PROGRAM_ID` and `SCAFFOLD_GUEST_BIN` are unset for
 multi-program projects so hooks fail loudly rather than silently
@@ -310,9 +311,11 @@ post_deploy = ["cargo run --bin demo"]
 
 Hooks see `SCAFFOLD_TOPUP_SKIPPED=1` on such a run, so a funding hook can
 claim only when scaffold did not. The topup step itself needs a destination
-address, but `lgs setup` seeds one into `.scaffold/state/wallet.state` from
-the first preconfigured public account in the wallet config, so on a pin
-that ships those accounts it is already there.
+address, but step 1 of every `lgs run` chains `lgs setup`, which seeds one
+into `.scaffold/state/wallet.state` from the first preconfigured public
+account in the wallet config whenever that file is missing. So on a pin that
+ships those accounts the address is in place before step 4 — including after
+the file is deleted, and after `--reset` wipes the wallet.
 
 `topup` defaults to `true`; omit it for the normal topup-then-deploy loop.
 
