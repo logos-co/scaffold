@@ -339,8 +339,27 @@ the env contract that hooks see is uniform across projects.
 
 The pipeline composes the existing primitives (`cmd_build_shortcut`,
 `build_idl_for_current_project`, `cmd_localnet`, `cmd_wallet_topup_inner`,
-`cmd_deploy`) — no parallel implementation. Step ordering is fixed; if a
-new step is needed, it joins the chain rather than offering a knob.
+`cmd_deploy`) — no parallel implementation. Step *ordering* is fixed: a new
+step joins the chain rather than being sequenced by configuration.
+
+Individual steps may, however, expose a boolean skip — `deploy = false`
+(step 5) and `topup = false` (step 4) both do. The boundary is ownership,
+not convenience: a step becomes skippable only when the project can
+legitimately own that concern itself (it deploys from a `post_deploy` hook;
+its demo binary claims from the faucet at runtime), and never to work around
+a scaffold bug. Three constraints keep the pipeline shape visible even when
+a step is skipped:
+
+- The step header still prints, in its own slot, saying it was skipped and
+  why — `total_steps` does not shrink and the remaining steps are not
+  renumbered.
+- The skip defaults to *not skipping*, written as a hand-rolled `Default`
+  rather than `derive(Default)`, so an existing project's behavior cannot
+  change by adding the field.
+- The decision is exported to hooks (below), so a project that took over a
+  concern can tell whether scaffold acted on this run.
+
+A step whose skip cannot satisfy all three does not get a knob.
 
 ## Hook Env Contract is a Documented Public Surface
 
@@ -351,6 +370,16 @@ integration tests:
 - `SEQUENCER_URL` / `NSSA_WALLET_HOME_DIR` / `LEE_WALLET_HOME_DIR` /
   `SCAFFOLD_PROJECT_ROOT` / `SCAFFOLD_IDL_DIR` — pipeline state. The two
   wallet-home vars always carry the same path.
+- `SCAFFOLD_TOPUP_SKIPPED` / `SCAFFOLD_DEPLOY_SKIPPED` — run-level outcome
+  of the two skippable steps, `1` or `0`. Always set, never absent: a hook
+  that had to treat "unset" as "scaffold did it" could not distinguish that
+  from an older scaffold that cannot report. Each is produced by the same
+  expression that executes or skips its step, so what a hook is told cannot
+  drift from what ran. Neither has a per-program form — both describe the
+  run, not a program.
+- `SCAFFOLD_DEPLOY_SKIPPED_<name>` — per-program deploy outcome, alongside
+  `SCAFFOLD_PROGRAMS` / `SCAFFOLD_PROGRAM_ID_<name>` /
+  `SCAFFOLD_GUEST_BIN_<name>`.
 - `SCAFFOLD_PROGRAM_ID` / `SCAFFOLD_GUEST_BIN` — single-program shortcuts.
   Set only when exactly one program is deployable; absent for
   multi-program projects so hooks fail loudly rather than silently

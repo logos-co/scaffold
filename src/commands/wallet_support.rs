@@ -134,8 +134,15 @@ pub(crate) fn first_public_wallet_address(wallet_home: &Path) -> DynResult<Optio
 /// wallet in `tests/cli.rs`) listing entries render as `/ Public/<account-id>`,
 /// so `/ `-prefixed lines are preferred: the address this returns becomes the
 /// project's default topup destination, and base58 validation alone cannot
-/// tell a listing entry from a real address printed in a banner or status
-/// line.
+/// tell a listing entry from a real address printed on some other line.
+///
+/// Those other lines are not hypothetical. A real `wallet account list` run
+/// prints the wallet's own built-in `Preconfigured Public/<id>` /
+/// `Preconfigured Private/<id>` entries *above* the stored accounts — and it
+/// prints them even when the pinned debug config ships no `initial_accounts`,
+/// which is exactly the case that reaches this function. Without the `/ `
+/// tier the scan would adopt the first of those instead of the account the
+/// wallet just created in its own persistent storage.
 ///
 /// When the output contains no usable `/ `-prefixed entry, the scan falls back
 /// to any whitespace-separated `Public/<account-id>` token anywhere in the
@@ -821,6 +828,35 @@ mod tests {
             first_public_address_in_listing(&output).as_deref(),
             Some(format!("Public/{MARKED_ID}").as_str()),
             "a `/ `-marked entry wins over an earlier unmarked Public/ mention"
+        );
+    }
+
+    /// The listing shape a **real** wallet prints on the path this function
+    /// exists for: a debug config with `initial_accounts` removed. The wallet
+    /// still emits its own built-in `Preconfigured …` entries above the
+    /// stored accounts, so "the config ships no preconfigured account" does
+    /// not imply "the listing contains none". Captured from a live run
+    /// against the pinned LEZ during review of scaffold#246.
+    ///
+    /// This is what makes the `/ ` tier load-bearing rather than defensive
+    /// garnish: a first-`Public/`-token scan adopts `6iArKUXx…`, four lines
+    /// above the account the wallet actually created in its own storage.
+    #[test]
+    fn first_public_address_in_listing_skips_preconfigured_entries_on_real_output() {
+        const STORED_ID: &str = "EkA2CTdiiPw6b2syzMxBZcZ33n4W5RCbWH3DDsonWy6w";
+
+        let output = "\
+            Preconfigured Public/6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV\n\
+            Preconfigured Public/7wHg9sbJwc6h3NP1S9bekfAzB8CHifEcxKswCKUt3YQo\n\
+            Preconfigured Private/5ya25h4Xc9GAmrGB2WrTEnEWtQKJwRwQx3Xfo2tucNcE\n\
+            Preconfigured Private/E8HwiTyQe4H9HK7icTvn95HQMnzx49mP9A2ddtMLpNaN\n\
+            / Public/EkA2CTdiiPw6b2syzMxBZcZ33n4W5RCbWH3DDsonWy6w\n\
+            / Private/4vgGxgZ5vkP99trgfVDLaF7o5NdHjnJUh26BGRUqCmRD\n";
+
+        assert_eq!(
+            first_public_address_in_listing(output).as_deref(),
+            Some(format!("Public/{STORED_ID}").as_str()),
+            "the stored account must win over the wallet's Preconfigured entries"
         );
     }
 

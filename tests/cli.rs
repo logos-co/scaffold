@@ -4818,7 +4818,7 @@ fn run_help_lists_command_summary() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Build, start localnet, top up wallet, deploy, and run post-deploy hook",
+            "Build, start localnet, top up wallet, deploy, and run post-deploy hooks (topup/deploy skippable)",
         ));
 }
 

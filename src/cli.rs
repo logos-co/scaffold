@@ -118,7 +118,12 @@ enum Commands {
     Basecamp(BasecampArgs),
     #[command(about = "Check project health and report actionable next steps")]
     Doctor(DoctorArgs),
-    #[command(about = "Build, start localnet, top up wallet, deploy, and run post-deploy hook")]
+    // Steps 4 and 5 are skippable per run profile (`topup = false` /
+    // `deploy = false`), so the summary no longer asserts that every step
+    // always runs. Kept under 100 chars so clap does not wrap it.
+    #[command(
+        about = "Build, start localnet, top up wallet, deploy, and run post-deploy hooks (topup/deploy skippable)"
+    )]
     Run(RunArgs),
     #[command(about = "Collect a sanitized diagnostics archive for issue reporting")]
     Report(ReportArgs),

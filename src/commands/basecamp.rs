@@ -12,10 +12,10 @@ use anyhow::{anyhow, bail, Context};
 use crate::config::{default_basecamp_repo, default_lgpm_repo};
 use crate::constants::{
     BASECAMP_ATTR, BASECAMP_AUTODISCOVER_SKIP_SUBDIRS, BASECAMP_DEPENDENCIES,
-    BASECAMP_PORTABLE_ATTRS, BASECAMP_PREINSTALLED_MODULES, BASECAMP_PROFILES_REL,
-    BASECAMP_PROFILE_ALICE, BASECAMP_PROFILE_BOB, BASECAMP_SOURCE, BASECAMP_XDG_APP_SUBPATH_DEV,
-    BASECAMP_XDG_APP_SUBPATH_PORTABLE, DEFAULT_BASECAMP_PIN, DEFAULT_LGPM_PIN, LGPM_ATTR,
-    LGPM_ATTR_PORTABLE, LGPM_SOURCE,
+    BASECAMP_MODULE_ROOT_ENV_VARS, BASECAMP_PORTABLE_ATTRS, BASECAMP_PREINSTALLED_MODULES,
+    BASECAMP_PROFILES_REL, BASECAMP_PROFILE_ALICE, BASECAMP_PROFILE_BOB, BASECAMP_SOURCE,
+    BASECAMP_XDG_APP_SUBPATH_DEV, BASECAMP_XDG_APP_SUBPATH_PORTABLE, DEFAULT_BASECAMP_PIN,
+    DEFAULT_LGPM_PIN, LGPM_ATTR, LGPM_ATTR_PORTABLE, LGPM_SOURCE,
 };
 use crate::model::{
     BasecampConfig, BasecampSource, BasecampState, ModuleEntry, ModuleRole, Project, RepoBuild,
@@ -796,7 +796,8 @@ fn launch_env(
 /// drops `LOGOS_DATA_DIR` entirely — with only the old key set, every 0.2.x
 /// profile silently collapses onto the shared fallback dir and none of the
 /// project's modules appear. The two keys are read by disjoint basecamp
-/// versions, so this sets both and stays pin-agnostic.
+/// versions, so this sets both (from [`BASECAMP_MODULE_ROOT_ENV_VARS`]) and
+/// stays pin-agnostic.
 ///
 /// The values **must be absolute**, for a different reason per generation:
 ///   * 0.1.x: with a *relative* `LOGOS_DATA_DIR` the app loads the backend
@@ -825,7 +826,7 @@ fn set_absolute_basecamp_data_dirs(
     profile_dir: &Path,
     basecamp_repo: Option<&RepoRef>,
 ) {
-    for key in ["LOGOS_DATA_DIR", "LOGOS_USER_DIR"] {
+    for key in BASECAMP_MODULE_ROOT_ENV_VARS {
         set_absolute_module_root_var(env, key, project_root, profile_dir, basecamp_repo);
     }
 }
@@ -3938,6 +3939,49 @@ mod tests {
                     .join(BASECAMP_XDG_APP_SUBPATH_PORTABLE)
             )
         );
+    }
+
+    /// Basecamp 0.2.x consumes `LOGOS_USER_DIR` as the *base* directory and
+    /// appends `modules/` and `plugins/` to it — so the exported value has to
+    /// sit at exactly the depth `basecamp install` writes into, not one level
+    /// above or below it. Every other `set_absolute_basecamp_data_dirs_*` test
+    /// asserts the two keys are *equal*; none of them would notice a
+    /// `basecamp_xdg_subpath` change that moved the shared value to the wrong
+    /// depth, which would load zero project modules while the suite stayed
+    /// green. This pins the value against `profile_modules_and_plugins`, the
+    /// one place the install layout lives.
+    #[test]
+    fn set_absolute_basecamp_data_dirs_defaults_to_the_dir_install_writes_into() {
+        let portable = repo_with_attr("bin-macos-app");
+        let project_root = Path::new("/abs/project");
+        let profiles_root = project_root.join(BASECAMP_PROFILES_REL);
+        let profile_dir = profiles_root.join(BASECAMP_PROFILE_ALICE);
+        let mut env: BTreeMap<String, OsString> = BTreeMap::new();
+        set_absolute_basecamp_data_dirs(&mut env, project_root, &profile_dir, Some(&portable));
+
+        let (modules_dir, plugins_dir) =
+            profile_modules_and_plugins(&profiles_root, BASECAMP_PROFILE_ALICE, Some(&portable));
+        for key in BASECAMP_MODULE_ROOT_ENV_VARS {
+            let exported = env
+                .get(*key)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| panic!("{key} must be exported"));
+            assert_eq!(
+                modules_dir.parent(),
+                Some(exported.as_path()),
+                "{key} must be the parent of the modules dir install writes into"
+            );
+            assert_eq!(
+                plugins_dir.parent(),
+                Some(exported.as_path()),
+                "{key} must be the parent of the plugins dir install writes into"
+            );
+            assert!(
+                exported.ends_with(BASECAMP_XDG_APP_SUBPATH_PORTABLE),
+                "{key} must end in {BASECAMP_XDG_APP_SUBPATH_PORTABLE}, got: {}",
+                exported.display()
+            );
+        }
     }
 
     #[test]

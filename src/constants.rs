@@ -64,6 +64,13 @@ pub(crate) const DEFAULT_WALLET_PASSWORD: &str = "logos-scaffold-v0";
 /// wallet — a v0.2.0 wallet that only sees the old name silently falls back to
 /// `~/.lee/wallet` (scaffold#240). `doctor`'s `wallet --version` probe is the
 /// one deliberate exception: it reads no wallet state.
+///
+/// Every name is set to the *same* path, so the order of this list is not
+/// significant. If a future pin ever reads two of these with different
+/// meanings, that stops being true and the callers of
+/// [`crate::commands::wallet_support::set_wallet_home_env`] need revisiting.
+/// When upstream renames the variable again: add the new name, keep the old
+/// one, never swap.
 pub(crate) const WALLET_HOME_ENV_VARS: &[&str] = &["NSSA_WALLET_HOME_DIR", "LEE_WALLET_HOME_DIR"];
 pub(crate) const WALLET_CONFIG_REL_PATH: &str = "wallet/configs/debug/wallet_config.json";
 pub(crate) const WALLET_CONFIG_NESTED_REL_PATH: &str =
@@ -118,6 +125,20 @@ pub(crate) const BASECAMP_AUTODISCOVER_SKIP_SUBDIRS: &[&str] =
 /// `LogosBasecamp`.
 pub(crate) const BASECAMP_XDG_APP_SUBPATH_DEV: &str = "Logos/LogosBasecampDev";
 pub(crate) const BASECAMP_XDG_APP_SUBPATH_PORTABLE: &str = "Logos/LogosBasecamp";
+
+/// Env vars naming basecamp's data-tree root, i.e. the directory it loads
+/// user modules and UI plugins from. Basecamp 0.2.x renamed the override to
+/// `LOGOS_USER_DIR` (`LogosBasecampPaths.h::baseDirectory()`) and dropped the
+/// 0.1.x `LOGOS_DATA_DIR` entirely, so `launch` sets both on the portable
+/// stack and the launch stays pin-agnostic — the two names are read by
+/// disjoint basecamp generations. Same two-generation compat shape as
+/// [`WALLET_HOME_ENV_VARS`], and the same rule on the next rename: add the
+/// new name, keep the old, never swap.
+///
+/// Each name is resolved independently (see
+/// `set_absolute_basecamp_data_dirs`), so a caller may override one without
+/// disturbing the other; the order of this list is not significant.
+pub(crate) const BASECAMP_MODULE_ROOT_ENV_VARS: &[&str] = &["LOGOS_DATA_DIR", "LOGOS_USER_DIR"];
 
 /// `[repos.basecamp].attr` values that select the portable distribution stack.
 /// Anything else (including unrecognised attrs) is treated as dev.

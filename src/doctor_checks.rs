@@ -356,7 +356,9 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
-    use super::{check_logos_blockchain_circuits_with, container_runtime_row};
+    use super::{
+        check_logos_blockchain_circuits_with, check_standalone_support, container_runtime_row,
+    };
 
     #[test]
     fn container_runtime_row_prefers_docker() {
@@ -560,5 +562,58 @@ mod tests {
             "{row:?}"
         );
         assert!(row.remediation.is_some());
+    }
+
+    /// Write `contents` to `root/rel`, creating parent directories.
+    fn write_marker_file(root: &std::path::Path, rel: &str, contents: &str) {
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
+        fs::write(&path, contents).expect("write marker file");
+    }
+
+    /// The flat LEZ layout (v0.1.x): `sequencer/service/Cargo.toml`.
+    #[test]
+    fn standalone_support_found_in_flat_layout() {
+        let tmp = tempdir().expect("tempdir");
+        write_marker_file(
+            tmp.path(),
+            "sequencer/service/Cargo.toml",
+            "[features]\nstandalone = []\n",
+        );
+        let row = check_standalone_support(tmp.path());
+        assert_eq!(row.status, CheckStatus::Pass, "{row:?}");
+    }
+
+    /// The nested LEZ layout (v0.2.0+): the crate tree lives under `lez/`.
+    /// This is the probe #234 missed and scaffold#240 added — without it a
+    /// v0.2.0 checkout fails a check it should pass.
+    #[test]
+    fn standalone_support_found_in_nested_layout() {
+        let tmp = tempdir().expect("tempdir");
+        write_marker_file(
+            tmp.path(),
+            "lez/sequencer/service/Cargo.toml",
+            "[features]\nstandalone = []\n",
+        );
+        let row = check_standalone_support(tmp.path());
+        assert_eq!(row.status, CheckStatus::Pass, "{row:?}");
+    }
+
+    /// A checkout with the probed files present but no marker still fails —
+    /// otherwise the two cases above would pass for the wrong reason.
+    #[test]
+    fn standalone_support_fails_when_no_layout_carries_the_marker() {
+        let tmp = tempdir().expect("tempdir");
+        write_marker_file(tmp.path(), "Cargo.toml", "[workspace]\n");
+        write_marker_file(tmp.path(), "sequencer/service/Cargo.toml", "[package]\n");
+        write_marker_file(
+            tmp.path(),
+            "lez/sequencer/service/Cargo.toml",
+            "[package]\n",
+        );
+        write_marker_file(tmp.path(), "README.md", "# lez\n");
+        let row = check_standalone_support(tmp.path());
+        assert_eq!(row.status, CheckStatus::Fail, "{row:?}");
+        assert!(row.remediation.is_some(), "{row:?}");
     }
 }

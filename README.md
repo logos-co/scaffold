@@ -154,7 +154,7 @@ Each subcommand documents copy-paste examples under `--help`. Global `-q` / `--q
 - `wallet topup` checks account state first (`wallet account get --account-id ...`), runs `wallet auth-transfer init --account-id ...` only when the destination is uninitialized, then performs Piñata faucet claim (`wallet pinata claim --to ...`). If address is omitted, scaffold uses project default wallet from `.scaffold/state/wallet.state`.
 - `wallet default set` stores a project-scoped default wallet address in `.scaffold/state/wallet.state`.
 - `wallet -- ...` forwards raw wallet CLI arguments to the project-local wallet binary while preserving project wallet environment.
-- `run` combines build (which chains `setup`), IDL build, localnet start, wallet topup, and deploy into a single command — the inner loop for day-to-day development. It works with no configuration. If a `[run]` section with `post_deploy` is present in `scaffold.toml`, each hook is executed after deploy via `sh -c` (cwd = project root) with `SEQUENCER_URL`, `NSSA_WALLET_HOME_DIR`, `LEE_WALLET_HOME_DIR`, `SCAFFOLD_PROJECT_ROOT`, and `SCAFFOLD_IDL_DIR` env vars; when the project has exactly one deployable program, `SCAFFOLD_PROGRAM_ID` and `SCAFFOLD_GUEST_BIN` are also set. If a localnet is already running it is reused; otherwise it is started, and deploy is skipped when the guest binaries + IDL + config and the sequencer instance are unchanged. `--profile NAME` selects a named pipeline from `[run.profiles.<name>]`; `--reset` wipes sequencer state + wallet and re-seeds before the run (`--no-reset` overrides a config-set default); `--post-deploy <cmd>` (repeatable) overrides the configured hooks and `--no-post-deploy` skips them entirely; `--watch` re-runs the pipeline on file changes. `run` covers the deploy loop only — it does not run `wallet -- check-health` or any `basecamp` command.
+- `run` combines build (which chains `setup`), IDL build, localnet start, wallet topup, and deploy into a single command — the inner loop for day-to-day development. It works with no configuration. If a `[run]` section with `post_deploy` is present in `scaffold.toml`, each hook is executed after deploy via `sh -c` (cwd = project root) with `SEQUENCER_URL`, `NSSA_WALLET_HOME_DIR`, `LEE_WALLET_HOME_DIR`, `SCAFFOLD_PROJECT_ROOT`, `SCAFFOLD_IDL_DIR`, `SCAFFOLD_TOPUP_SKIPPED`, and `SCAFFOLD_DEPLOY_SKIPPED` env vars; when the project has exactly one deployable program, `SCAFFOLD_PROGRAM_ID` and `SCAFFOLD_GUEST_BIN` are also set. If a localnet is already running it is reused; otherwise it is started, and deploy is skipped when the guest binaries + IDL + config and the sequencer instance are unchanged. `--profile NAME` selects a named pipeline from `[run.profiles.<name>]`; `--reset` wipes sequencer state + wallet and re-seeds before the run (`--no-reset` overrides a config-set default); `--post-deploy <cmd>` (repeatable) overrides the configured hooks and `--no-post-deploy` skips them entirely; `--watch` re-runs the pipeline on file changes. `run` covers the deploy loop only — it does not run `wallet -- check-health` or any `basecamp` command.
 - `spel -- ...` forwards raw spel CLI arguments to the project-vendored `spel` binary so any spel subcommand (`inspect`, `pda`, `generate-idl`, …) runs against the project's pinned version without a global install.
 - `basecamp setup` pins basecamp + `lgpm` (read from `[repos.basecamp]` / `[repos.lgpm]` — both `build = "nix-flake"`), builds both (logged to `.scaffold/logs/<timestamp>-setup-*.log`), and seeds per-profile XDG directories for `alice` and `bob` under `.scaffold/basecamp/profiles/`. Runtime config (`port_base`, `port_stride`) is in `[basecamp]`.
 - `basecamp modules` is the sole writer of the captured module set, which lives in top-level `[modules.<name>]` sections (each with `flake` and `role = "project" | "dependency"`). Modules aren't basecamp's property — they're the project's Logos modules, which basecamp happens to be one consumer of. Zero-arg runs auto-discovery: walks project flakes (root `.#lgx` first, else immediate sub-flakes), derives a `module_name` per source (from `metadata.json.name` for local paths; heuristic from the github repo slug for remote refs, with a one-line assumption note you can correct in `scaffold.toml`), then resolves each declared dep name by: (1) already keyed in `[modules]`, (2) basecamp preinstall list, (3) the source's own `flake.lock`, (4) scaffold-default pin. Unresolved deps **fail fast** — no silent skip. `--flake <ref>` / `--path <file>` capture explicit project sources; `--show` prints the current set without mutating. Re-runs are idempotent: existing `[modules]` entries are preserved so hand-edits survive. Project contract: see [docs/basecamp-module-requirements.md](./docs/basecamp-module-requirements.md).
@@ -294,6 +294,15 @@ post_deploy = ["scripts/deploy-and-demo.sh"]
 
 `deploy` defaults to `true`; omit it for the normal deploy loop.
 
+A named profile is used **as-is**: selecting one (via `--profile NAME` or
+`[run].default_profile`) shadows the inline `[run]` values entirely rather
+than inheriting them. So `deploy = false` under `[run]` combined with
+`--profile demo` — where `demo` omits the key — deploys, because `demo`
+supplies its own default of `true`. This applies to every profile key
+(`reset`, `deploy`, `topup`, `post_deploy`): whatever a profile does not
+state, it defaults, it does not inherit. Set the key in each profile that
+needs it.
+
 #### Self-funding projects (`topup = false`)
 
 `run` tops up the project's default wallet before deploying (step 4). A
@@ -317,6 +326,13 @@ already in place by step 4: step 1 of every `lgs run` chains `lgs setup`,
 which seeds `.scaffold/state/wallet.state` from the first preconfigured
 public account whenever that file is missing — and `--reset`, which wipes the
 wallet later, at step 3, re-seeds it before the run continues.
+
+Skipping topup does not move the funding requirement, only the responsibility
+for meeting it. With the default `deploy = true`, step 5 still runs against
+whatever the wallet holds — so if the deploy path needs funds, the project
+has to provide them *before* deploy, not from a `post_deploy` hook that runs
+after it. A project that funds from a hook generally wants `deploy = false`
+too, and to deploy from that same hook after funding.
 
 `topup` defaults to `true`; omit it for the normal topup-then-deploy loop.
 

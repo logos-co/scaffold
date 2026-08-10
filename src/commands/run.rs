@@ -20,9 +20,10 @@ use crate::commands::run_state::{
 };
 use crate::commands::setup::ensure_default_wallet_seeded;
 use crate::commands::wallet::{cmd_wallet_topup_inner, TopupOutcome};
+use crate::commands::wallet_support::set_wallet_home_env;
 use crate::constants::{
     DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, FRAMEWORK_KIND_LEZ_FRAMEWORK, SPEL_BIN_REL_PATH,
-    WALLET_BIN_REL_PATH, WALLET_HOME_ENV_VARS,
+    WALLET_BIN_REL_PATH,
 };
 use crate::model::{LocalnetOwnership, Project, RunProfile};
 use crate::project::{load_project, resolve_repo_path, run_in_project_dir};
@@ -319,11 +320,8 @@ fn reset_for_run(project: &Project, verify_timeout_sec: u64) -> DynResult<()> {
     Ok(())
 }
 
-/// Re-seed the project's default wallet after `cmd_localnet_reset` wiped
-/// it. Reuses the same primitives `cmd_setup` calls so the resulting
-/// `wallet.state` is byte-equivalent to a fresh `lgs setup`. Extracted as
-/// its own helper so the byte-equivalence test can drive it directly
-/// without booting a real sequencer.
+/// Re-run the pipeline on each filesystem change, coalescing bursts within
+/// `debounce_ms` into a single re-run.
 fn watch_loop(project: &Project, params: &PipelineParams, debounce_ms: u64) -> DynResult<()> {
     let (tx, rx) = mpsc::channel();
     let mut watcher = notify::recommended_watcher(move |res| {
@@ -542,6 +540,11 @@ fn segment_match(pat: &[u8], seg: &[u8]) -> bool {
     p == pat.len()
 }
 
+/// Re-seed the project's default wallet after `cmd_localnet_reset` wiped
+/// it. Reuses the same primitives `cmd_setup` calls so the resulting
+/// `wallet.state` is byte-equivalent to a fresh `lgs setup`. Extracted as
+/// its own helper so the byte-equivalence test can drive it directly
+/// without booting a real sequencer.
 fn reseed_after_wipe(project: &Project) -> DynResult<()> {
     let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
     let wallet_home = project.root.join(&project.config.wallet_home_dir);
@@ -809,10 +812,11 @@ fn build_hook_command(
         )
         .current_dir(&project.root);
     // Both wallet home names (old NSSA_*, v0.2.0 LEE_*) so hook-spawned
-    // wallet CLIs target the project wallet regardless of the LEZ pin.
-    for name in WALLET_HOME_ENV_VARS {
-        cmd.env(name, &wallet_home);
-    }
+    // wallet CLIs target the project wallet regardless of the LEZ pin. Routed
+    // through the same helper every wallet subprocess uses rather than
+    // iterating `WALLET_HOME_ENV_VARS` here, so the "every wallet-home consumer
+    // gets every name" invariant is greppable by one function name.
+    set_wallet_home_env(&mut cmd, &wallet_home);
 
     // Per-program metadata: `SCAFFOLD_PROGRAMS` holds the space-separated
     // list of names, with parallel `SCAFFOLD_PROGRAM_ID_<name>`,
