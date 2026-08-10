@@ -228,17 +228,17 @@ The last two rows are finalized *after* the env layering, so they are the one pl
 
 ### The macOS `sun_path == 104` socket-path budget
 
-When a module loads, liblogos opens a Unix-domain socket (a `QLocalServer` named `logos_token_<module>_<pid>`) under the temp root — `TMPDIR`, which `launch` always sets. macOS caps the full socket path (`sockaddr_un.sun_path`) at **104 bytes**, so a long runtime root overflows it and basecamp aborts module loading with:
+When a module loads, liblogos opens a Unix-domain socket (a `QLocalServer` named `logos_token_<module>`) under the temp root — `TMPDIR`, which `launch` always sets. macOS caps the full socket path (`sockaddr_un.sun_path`) at **104 bytes**, so a long runtime root overflows it and basecamp aborts module loading with:
 
 ```
 [SubprocessContainer] Unix socket path too long (122 >= 104)
 ```
 
-the in-profile runtime root `…/.scaffold/basecamp/profiles/<profile>/xdg-tmp` is long: for a typical project path plus the `logos_token_<module>_<pid>` socket name it easily blows the 104-byte budget. To avoid that, `launch` resolves `runtime_dir` with this precedence, exporting a resolved value as both `TMPDIR` and `XDG_RUNTIME_DIR`:
+the in-profile runtime root `…/.scaffold/basecamp/profiles/<profile>/xdg-tmp` is long: for a typical project path plus the `logos_token_<module>` socket name it easily blows the 104-byte budget. To avoid that, `launch` resolves `runtime_dir` with this precedence, exporting a resolved value as both `TMPDIR` and `XDG_RUNTIME_DIR`:
 
 1. **`[basecamp.profiles.<name>].runtime_dir`** if set (project-relative paths are joined to the project root).
 2. **`/tmp/lgs-<profile>`** — the automatic default on macOS (short, well under the budget).
-3. The in-profile `xdg-tmp` on Linux, where the path budget is far larger and not a practical concern. Nothing resolves in this case, so `TMPDIR` points at `xdg-tmp` and no `XDG_RUNTIME_DIR` is exported at all (matching the table above).
+3. The in-profile `xdg-tmp` on Linux, whose `sun_path` budget is 108 bytes — four more than macOS, so a deep project root can overflow there too; set `runtime_dir` explicitly if you hit it. Nothing resolves in this case, so `TMPDIR` points at `xdg-tmp` and `launch` exports no `XDG_RUNTIME_DIR` of its own (matching the table above) — the child still inherits whatever ambient value the shell had, since `launch` clears nothing.
 
 If you override `runtime_dir` on macOS, keep it short (a `/tmp/…` root is safest) — a deep or project-relative path can still exceed 104 bytes once the socket name is appended.
 
