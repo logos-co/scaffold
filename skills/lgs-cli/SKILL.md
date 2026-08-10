@@ -98,7 +98,7 @@ Everything scaffold writes lives under `.scaffold/` inside the project. Treat th
 | `.scaffold/logs/sequencer.log` | Sequencer stdout/stderr. Tail with `lgs localnet logs --tail N`. |
 | `.scaffold/logs/<ts>-install.log` | `basecamp install` per-source nix build logs. |
 | `.scaffold/logs/<ts>-setup-*.log` | `basecamp setup` build logs. |
-| `.scaffold/wallet/` | Project wallet home (`NSSA_WALLET_HOME_DIR`). **Never** included in `report` archives — contains keys. |
+| `.scaffold/wallet/` | Project wallet home (`NSSA_WALLET_HOME_DIR` / `LEE_WALLET_HOME_DIR`). **Never** included in `report` archives — contains keys. |
 | `.scaffold/basecamp/profiles/{alice,bob}/` | Per-profile XDG roots for basecamp. |
 | `.scaffold/basecamp/portable/<NN>-<name>.lgx` | Symlinks to `.#lgx-portable` builds for AppImage hand-loading. Wiped each `build-portable`. |
 | `.scaffold/repos/{lez,spel}/` | Vendored repo checkouts (only when project was created with `--vendor-deps`). |
@@ -130,7 +130,8 @@ Apply in order. Stop as soon as the issue is identified.
 | `scaffold.toml` schema mismatch (e.g. missing `[repos.spel]`) | Project predates current schema. | `lgs init` (idempotent migration); then `lgs setup`. |
 | Doctor warns LEZ pin drift | `[repos.lez].pin` differs from scaffold default. | Either update `scaffold.toml` to the default and `lgs setup`, or accept the divergence. |
 | Doctor warns spel/LEZ protocol mismatch | `spel-cli/Cargo.toml` vendors a different LEZ than scaffold. | Bump `[repos.spel].pin` to a commit whose spel-cli pins matching LEZ. |
-| `wallet -- check-health` fails | Sequencer down or `NSSA_WALLET_HOME_DIR` not set for direct `cargo run`. | `lgs localnet start`; for direct runners: `export NSSA_WALLET_HOME_DIR=$(pwd)/.scaffold/wallet`. |
+| `wallet -- check-health` fails | Sequencer down, or the wallet home not exported for direct `cargo run`. | `lgs localnet start`; for direct runners: `export NSSA_WALLET_HOME_DIR=$(pwd)/.scaffold/wallet LEE_WALLET_HOME_DIR=$(pwd)/.scaffold/wallet`. |
+| Wallet commands succeed but the wallet looks empty | Only one wallet-home name exported; LEZ v0.2.0 reads `LEE_WALLET_HOME_DIR`, earlier pins read `NSSA_WALLET_HOME_DIR`, and the unmatched case falls back to `~/.lee/wallet` without an error. | Export both names as above, then re-run `lgs doctor`. |
 | `basecamp not set up yet` hint | `lgs basecamp setup` never ran in this project. | `lgs basecamp setup` (one-time per project). |
 | `basecamp install` fails with `no \`main\` field in metadata.json` | Sub-flake transitively pulls a newer `logos-module-builder`. | Add `inputs.<dep>.inputs.logos-module-builder.follows = "logos-module-builder";` in the offending sub-flake; `nix flake update`. See `docs/basecamp-module-requirements.md`. |
 | `basecamp build-portable` fails: `.#lgx-portable` not exposed | Flake only exposes `.#lgx`. | Add the `lgx-portable` output, or pass `--flake <ref>#lgx-portable` to opt in explicitly. |
@@ -141,7 +142,8 @@ Apply in order. Stop as soon as the issue is identified.
 | Variable | Purpose |
 |---|---|
 | `LOGOS_SCAFFOLD_WALLET_PASSWORD` | Override the default wallet password. Forwarded through `wallet --` passthrough. |
-| `NSSA_WALLET_HOME_DIR` | Wallet home dir; required for direct `cargo run --bin run_*`. Scaffold wallet commands set it automatically. |
+| `NSSA_WALLET_HOME_DIR` | Wallet home dir read by LEZ up to v0.1.2; required for direct `cargo run --bin run_*`. Scaffold wallet commands set it automatically. |
+| `LEE_WALLET_HOME_DIR` | Same wallet home dir under the name LEZ v0.2.0 reads. Export both for direct `cargo run --bin run_*`; scaffold sets both on every wallet subprocess. A wallet that sees only the name it does not read silently uses `~/.lee/wallet`. |
 | `LOGOS_SCAFFOLD_PRINT_OUTPUT` | Equivalent to `--print-output`; streams nix output instead of writing to `.scaffold/logs/`. |
 | `EXAMPLE_PROGRAMS_BUILD_DIR` | Override the default risc0 guest build dir for explicit `--program-path` invocations. |
 

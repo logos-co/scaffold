@@ -232,7 +232,7 @@ Use `new` for the main runnable project and `create` as the lightweight alias-pa
 
 - Project creation succeeds and prints the destination path, pinned LEZ commit, and cache root.
 - Generated `scaffold.toml` includes a `[circuits]` table. The default install dir is project-local (`.scaffold/circuits`), and the configured version/download template/install dir become the single source of truth for commands that need `logos-blockchain-circuits`.
-- `setup` completes after syncing LEZ to the configured pin, building both `sequencer_service` and `wallet` inside the project's LEZ tree, and either seeding the default wallet or reporting that a default wallet is already configured. With `--prebuilt`: `sequencer_service` is downloaded instead of built from source (falls back to source build if no artifact is published); `wallet` is always built from source regardless of `--prebuilt`.
+- `setup` completes after syncing LEZ to the configured pin, building both `sequencer_service` and `wallet` inside the project's LEZ tree, and either seeding the default wallet or reporting that a default wallet is already configured. Both seeding paths are a PASS: `default wallet seeded from preconfigured account` when the pinned LEZ debug config ships an `initial_accounts` entry, and `default wallet seeded by initializing wallet storage (config ships no preconfigured account)` on LEZ v0.2.0, whose debug config ships none — there `setup` runs the freshly built `wallet` to create its persistent storage and adopts the first `Public/` account it reports. Either line is followed by `  Address:` and `  State file:`. Only `warning: could not seed default wallet automatically` is a failure. With `--prebuilt`: `sequencer_service` is downloaded instead of built from source (falls back to source build if no artifact is published); `wallet` is always built from source regardless of `--prebuilt`.
 - `localnet start` reports a ready localnet rather than only a spawned PID.
 - `build` exits successfully after preparing the project workspace, resolving the configured circuits release, and — when the project has a `methods/Cargo.toml` (Risc0 guest crate excluded from the main workspace) — also prints `Building guest methods...` and produces a `methods/target/.../release` artifact.
 - `deploy` prints a submission summary with zero failures when built binaries are present. Multi-program deploys are paced one program per sequencer block (`Waiting for a new block past N before the next deployment ...` between submissions): the pinned LEZ settles each block as a single bedrock inscription with a ~896 KiB payload cap and panics fatally when a block exceeds it, so batching several ~370 KiB deployment ELFs into one block kills the sequencer. Expect roughly one `block_create_timeout` (15s) of wait per additional program. Pacing fails closed: a stalled head or an unreadable post-submission baseline aborts the remaining submissions with `deploy pacing aborted ...` and a non-zero exit rather than batching unpaced (re-run `deploy` for the rest once the sequencer recovers, or raise `LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS` for slow block intervals). A deploy that continues unpaced and crashes localnet mid-flow is a regression; equally, record it if the upstream cap is lifted and pacing becomes dead weight.
@@ -244,7 +244,7 @@ Use `new` for the main runnable project and `create` as the lightweight alias-pa
 
 - Running `setup`, `build`, `deploy`, or wallet commands outside the generated project root should fail with a project-scoped message.
 - A foreign listener or stale state on the localnet port is a real dogfooding finding; capture `localnet status`, not just the final error.
-- If `wallet topup` without an address says no destination is configured, record that as a regression in default-wallet seeding or persistence.
+- If `wallet topup` without an address says no destination is configured, record that as a regression in default-wallet seeding or persistence. On a v0.2.0 pin this is what a broken storage-initialization fallback looks like: `setup` prints `warning: could not seed default wallet automatically`, `.scaffold/state/wallet.state` never gains a `default_address=` line, and `run`'s topup step fails.
 - If `setup` or wallet commands depend on `wallet` being installed globally or on `PATH`, record that as a regression in the self-contained project model.
 - If `deploy` fails due to missing binaries after a successful `build`, capture the exact missing path.
 
@@ -402,8 +402,8 @@ Use a real address from `wallet list` when explicitly validating `wallet default
 - `wallet list` and `wallet list --long` proxy wallet account enumeration from the project-scoped wallet home using the LEZ-local wallet binary.
 - `wallet default set` accepts either positional address or `--address` and persists the normalized project default.
 - `wallet topup --dry-run` renders the underlying faucet claim command instead of mutating state.
-- `wallet topup` without an explicit address uses the saved default wallet.
-- `wallet -- ...` preserves the project wallet environment while forwarding the raw wallet command to `<lez>/target/release/wallet`.
+- `wallet topup` without an explicit address uses the saved default wallet. On a LEZ v0.2.0 pin that default came from `setup`'s `default wallet seeded by initializing wallet storage (config ships no preconfigured account)` path rather than from a preconfigured account — both are a PASS; check that the address in `.scaffold/state/wallet.state` is one `wallet list` reports.
+- `wallet -- ...` preserves the project wallet environment while forwarding the raw wallet command to `<lez>/target/release/wallet`. That environment names the wallet home under **both** `NSSA_WALLET_HOME_DIR` (LEZ up to v0.1.2) and `LEE_WALLET_HOME_DIR` (LEZ v0.2.0); verify with `"$SCAFFOLD_BIN" wallet -- account list` listing the project's accounts and not an unrelated `~/.lee/wallet` set.
 
 Optional: validate `LOGOS_SCAFFOLD_WALLET_PASSWORD` override behavior by setting the env var to a non-default value and observing whether wallet commands honor it.
 
@@ -418,6 +418,7 @@ LOGOS_SCAFFOLD_WALLET_PASSWORD="custom-pw" "$SCAFFOLD_BIN" wallet topup --dry-ru
 - Connectivity failures during topup should mention localnet/sequencer reachability rather than only raw wallet output.
 - Passthrough flows require the literal `--`; if the CLI starts accepting or mangling passthrough without it, record that change.
 - If wallet flows only succeed when `wallet` is separately installed on `PATH`, or if missing-binary errors point anywhere other than the LEZ-local `target/release/wallet`, record that as a regression.
+- Wallet commands that succeed but enumerate accounts the project never created point at the wallet home falling back to `~/.lee/wallet` — the failure is silent, so compare `wallet list` against `ls .scaffold/wallet` rather than trusting exit code 0.
 
 ### Evidence to Capture
 
@@ -511,7 +512,7 @@ Capture each account ID from the output (format: `Public/<base58>`). The runners
 From the generated project root:
 
 ```bash
-export NSSA_WALLET_HOME_DIR="$PWD/.scaffold/wallet"
+export NSSA_WALLET_HOME_DIR="$PWD/.scaffold/wallet" LEE_WALLET_HOME_DIR="$PWD/.scaffold/wallet"
 cargo run --bin run_hello_world -- <account-id-a>
 "$SCAFFOLD_BIN" wallet -- account get --account-id Public/<account-id-a>
 cargo run --bin run_hello_world_with_move_function -- write-public <account-id-b> "dogfood-test-message"
@@ -544,7 +545,7 @@ The first runner (`run_hello_world`) submits a basic public transaction; once co
 
 ### Execution Notes
 
-- `NSSA_WALLET_HOME_DIR` must be set for runners that initialize `WalletCore::from_env()`. The scaffold wallet commands set this automatically, but direct `cargo run` does not.
+- The wallet home must be exported for runners that initialize `WalletCore::from_env()`. The scaffold wallet commands set it automatically, but direct `cargo run` does not. Export **both** names: LEZ reads `NSSA_WALLET_HOME_DIR` up to v0.1.2 and `LEE_WALLET_HOME_DIR` from v0.2.0, and the pin that sees only the other name falls back to `~/.lee/wallet` with no error — the runner then reports an unknown or empty account instead of failing loudly.
 - Use the fresh public account created in the preconditions rather than reusing accounts from other scenarios. This avoids confusion about pre-existing state.
 - If additional runners are available (e.g., `run_hello_world_private`, `run_hello_world_through_tail_call`), exercising them is valuable but not required for this scenario.
 
@@ -577,6 +578,7 @@ post_deploy = [
   "echo 'idl:' $SCAFFOLD_IDL_DIR",
   "echo 'project root:' $SCAFFOLD_PROJECT_ROOT",
   "echo 'wallet home:' $NSSA_WALLET_HOME_DIR",
+  "echo 'wallet home (lez v0.2.0 name):' $LEE_WALLET_HOME_DIR",
   "echo 'program id:' ${SCAFFOLD_PROGRAM_ID:-unavailable}",
   "echo 'guest bin:' ${SCAFFOLD_GUEST_BIN:-unavailable}",
 ]
@@ -615,7 +617,7 @@ post_deploy = ["echo 'deploy skipped:' $SCAFFOLD_DEPLOY_SKIPPED"]
 ### Failure Signals / Common Pitfalls
 
 - A `run` invocation that restarts the sequencer when one is already running healthy is a regression in the localnet-reuse path.
-- Hooks running with `cwd` somewhere other than the project root, or missing any of `SEQUENCER_URL` / `NSSA_WALLET_HOME_DIR` / `SCAFFOLD_PROJECT_ROOT` / `SCAFFOLD_IDL_DIR`, is a regression in the env contract.
+- Hooks running with `cwd` somewhere other than the project root, or missing any of `SEQUENCER_URL` / `NSSA_WALLET_HOME_DIR` / `LEE_WALLET_HOME_DIR` / `SCAFFOLD_PROJECT_ROOT` / `SCAFFOLD_IDL_DIR`, is a regression in the env contract. `NSSA_WALLET_HOME_DIR` and `LEE_WALLET_HOME_DIR` must both be set and must print the same path; one of them empty means hooks that exec the wallet binary silently target `~/.lee/wallet` on one of the two LEZ pins.
 - `$SCAFFOLD_PROGRAM_ID` unset after a successful deploy on a single-program project with a vendored `spel` binary is a regression. Hint: `lgs setup` builds the spel binary; if it's missing, `program_id: unavailable` will also appear in the deploy summary.
 
 ### Evidence to Capture
@@ -782,7 +784,7 @@ From the LEZ project root:
 
 ```bash
 "$SCAFFOLD_BIN" deploy
-export NSSA_WALLET_HOME_DIR="$PWD/.scaffold/wallet"
+export NSSA_WALLET_HOME_DIR="$PWD/.scaffold/wallet" LEE_WALLET_HOME_DIR="$PWD/.scaffold/wallet"
 export HOST_CC=cc HOST_CXX=c++
 cargo run --bin run_lez_counter -- init --to <account-id>
 cargo run --bin run_lez_counter -- increment --counter <account-id> --authority <account-id> --amount 5
@@ -801,7 +803,7 @@ Note: as of this writing, the LEZ counter runner contains `TODO` placeholders fo
 ### Failure Signals / Common Pitfalls
 
 - If `deploy` cannot find `lez_counter` in the discovered program list, record the actual discovered list.
-- If the runner panics on wallet initialization, `NSSA_WALLET_HOME_DIR` may not be set.
+- If the runner panics on wallet initialization, the wallet home may not be exported. If it instead starts against an empty wallet, only one of the two names was exported and the other pin fell back to `~/.lee/wallet`.
 - If the runner accepts the subcommand but does nothing (due to TODO stubs), record the output and note the gap.
 
 ### Evidence to Capture
@@ -812,7 +814,7 @@ Note: as of this writing, the LEZ counter runner contains `TODO` placeholders fo
 
 ### Execution Notes
 
-- `NSSA_WALLET_HOME_DIR` must be set for the runner. Scaffold wallet commands set this automatically, but direct `cargo run` does not.
+- Both `NSSA_WALLET_HOME_DIR` (LEZ up to v0.1.2) and `LEE_WALLET_HOME_DIR` (LEZ v0.2.0) must be exported for the runner. Scaffold wallet commands set both automatically, but direct `cargo run` does not.
 - Keep LEZ interaction evidence separate from default-template interaction evidence.
 
 ## E1. CLI Discoverability and Error Quality
@@ -1636,7 +1638,7 @@ The capstone end-to-end proof: a real wallet transaction, executed by a real tes
 ### Preconditions
 
 - Full toolchain provisioned **including the wallet**: r0vm + circuits + real `sequencer_service` (T1) **and** `setup` complete so the LEZ-local `wallet` is built and the default wallet is seeded (see "Provisioning the Real LEZ Sequencer Toolchain", step 4).
-- The wallet targets the `sequencer_addr` in the wallet config (`$NSSA_WALLET_HOME_DIR/wallet_config.json`) when set; otherwise it defaults to `http://127.0.0.1:<localnet.port>` (default 3040). Start the test-node on that port (or update `sequencer_addr`) so the wallet talks to it.
+- The wallet targets the `sequencer_addr` in the wallet config (`wallet_config.json` under the wallet home named by `$NSSA_WALLET_HOME_DIR` / `$LEE_WALLET_HOME_DIR`) when set; otherwise it defaults to `http://127.0.0.1:<localnet.port>` (default 3040). Start the test-node on that port (or update `sequencer_addr`) so the wallet talks to it.
 
 ### Commands / Actions
 
@@ -1685,6 +1687,7 @@ HEAD0=$("$SCAFFOLD_BIN" test-node blocks head --url "$URL" --json | jq -r .block
 - Changes to onboarding, project creation, setup, localnet, or build flows: rerun `D1`, `D2`, and `D6`.
 - Changes to deploy behavior or deploy output formatting: rerun `D3` and `D6`.
 - Changes to wallet flows or wallet-related defaults: rerun `D4`.
+- Changes to the wallet-home env contract (`WALLET_HOME_ENV_VARS`, `set_wallet_home_env`, or any new upstream rename), to default-wallet seeding (`ensure_default_wallet_seeded` and its storage-initialization fallback), or to the LEZ pin across the v0.2.0 boundary: rerun `D1`, `D4`, `D6`, and `D7` — `D1`/`D4` cover seeding, `D6` covers the direct-`cargo run` export, `D7` covers the hook env contract.
 - Changes to diagnostics, report contents, or redaction logic: rerun `D5`.
 - Changes to example runner binaries or template `src/bin/*` code: rerun `D6`.
 - Changes to `run` step ordering, the `deploy = false` deploy-skip branch, post-deploy env vars, post-deploy CLI override flag handling, or `[run]` config parsing: rerun `D7`.

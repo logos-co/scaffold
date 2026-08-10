@@ -95,10 +95,10 @@ Failure modes:
 
 ## Example Runners
 
-The template ships seven host-side runners under `src/bin/`. Each uses `runner_support::parse_account_id` and `runner_support::load_program` from `src/lib.rs`. They expect `NSSA_WALLET_HOME_DIR` to be set when invoked directly via `cargo run` (scaffold `wallet --` passthrough sets it automatically; direct `cargo run` does not).
+The template ships seven host-side runners under `src/bin/`. Each uses `runner_support::parse_account_id` and `runner_support::load_program` from `src/lib.rs`. They expect the wallet home to be exported when invoked directly via `cargo run` (scaffold `wallet --` passthrough sets it automatically; direct `cargo run` does not). Export both names: LEZ reads `NSSA_WALLET_HOME_DIR` up to v0.1.2 and `LEE_WALLET_HOME_DIR` from v0.2.0, and a wallet that sees only the name it does not read silently falls back to `~/.lee/wallet` instead of failing.
 
 ```bash
-export NSSA_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet"
+export NSSA_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet" LEE_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet"
 
 cargo run --bin run_hello_world -- <public_account_id>
 cargo run --bin run_hello_world_private -- <private_account_id>
@@ -147,7 +147,7 @@ cargo run --bin run_hello_world_through_tail_call_private -- \
 5. `cargo run --bin run_<program> -- <args>` to invoke against the running localnet.
 6. `lgs wallet -- account get --account-id <id>` to verify state mutation.
 
-If you hit the wallet `from_env()` panic on direct `cargo run`, you forgot `export NSSA_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet"`.
+If you hit the wallet `from_env()` panic on direct `cargo run`, you forgot `export NSSA_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet" LEE_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet"`. If the runner instead starts against an unexpectedly empty wallet, you exported only the name your LEZ pin does not read and it fell back to `~/.lee/wallet`.
 
 ## Account Creation
 
@@ -186,7 +186,7 @@ Drop down to this `default` template when you need primitives the framework hasn
 
 - **One guest program per `methods/guest/src/bin/<name>.rs`.** The basename is the program name `lgs deploy` recognises.
 - **One host runner per program, named `src/bin/run_<name>.rs`.** Reuse `runner_support::parse_account_id` and `runner_support::load_program`.
-- **`NSSA_WALLET_HOME_DIR` must be set for direct `cargo run`.** Use `export NSSA_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet"` once per shell.
+- **The wallet home must be exported for direct `cargo run`.** Use `export NSSA_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet" LEE_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet"` once per shell — both names, since v0.2.0 renamed the variable and setting only one leaves the other pin pointed at `~/.lee/wallet`.
 - **Account IDs are passed as CLI args**, never hardcoded. Use `lgs wallet -- account new {public,private}` to create fresh ones.
 - **Don't add Qt / UI / QML deps.** This template is for zk programs; UI work belongs in a separate Logos module project (different repo, different toolchain).
 - **Parent `Cargo.toml` should keep `methods/` excluded** from workspace members; `lgs build` handles its compilation separately.

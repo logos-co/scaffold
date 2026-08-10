@@ -174,7 +174,7 @@ lgs deploy          # auto-discovers methods/guest/src/bin/lez_counter.rs
 The runner at `src/bin/run_lez_counter.rs` exposes `init` and `increment` subcommands:
 
 ```bash
-export NSSA_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet"
+export NSSA_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet" LEE_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet"
 lgs wallet -- account new public            # capture the base58 account id
 
 cargo run --bin run_lez_counter -- init      --to <account-id>
@@ -229,4 +229,4 @@ A project can host multiple `#[lez_program]` modules, each one its own program w
 - **Use `LezOutput::states_only(…)`** as the default success return; reach for richer variants only when needed.
 - **Run `cargo test` to dump the IDL** — the test `__lssa_idl_print` prints `PROGRAM_IDL_JSON` between `--- LSSA IDL BEGIN/END ---` markers, useful for debugging IDL regressions.
 - **Don't bypass the framework for ad-hoc dispatch.** If you find yourself writing manual instruction matching, drop down to the `default` template instead.
-- **`NSSA_WALLET_HOME_DIR` is required for direct `cargo run`.** Same as the default template.
+- **The wallet home is required for direct `cargo run`.** Export both `NSSA_WALLET_HOME_DIR` and `LEE_WALLET_HOME_DIR` (v0.2.0 renamed the variable). Same as the default template.

@@ -72,7 +72,7 @@
 
 1. `lgs run` collapses the inner-loop sequence — build → IDL build → ensure-localnet → wallet topup → deploy → optional post-deploy hooks — into one command. Every step's failure aborts the pipeline with a numbered step header (`[3/N] …`) so the failing phase is unambiguous in console output.
 2. Source edits drive fresh on-chain program identity automatically: when the guest ELF changes, its risc0 image ID changes, and the new program's storage starts empty. Scaffold relies on this for the default cycle and adds no per-run reset.
-3. Post-deploy hooks: `[run].post_deploy` is a list of shell commands executed in order via `sh -c` with `cwd` set to the project root. Hooks see a documented env contract: `SEQUENCER_URL`, `NSSA_WALLET_HOME_DIR`, `SCAFFOLD_PROJECT_ROOT`, `SCAFFOLD_IDL_DIR`, plus single-program shortcuts `SCAFFOLD_PROGRAM_ID` / `SCAFFOLD_GUEST_BIN` (set only when exactly one program is deployable).
+3. Post-deploy hooks: `[run].post_deploy` is a list of shell commands executed in order via `sh -c` with `cwd` set to the project root. Hooks see a documented env contract: `SEQUENCER_URL`, `NSSA_WALLET_HOME_DIR` and `LEE_WALLET_HOME_DIR` (the same wallet home under both the pre-v0.2.0 and v0.2.0 LEZ names), `SCAFFOLD_PROJECT_ROOT`, `SCAFFOLD_IDL_DIR`, plus single-program shortcuts `SCAFFOLD_PROGRAM_ID` / `SCAFFOLD_GUEST_BIN` (set only when exactly one program is deployable).
 4. CLI overrides: `--post-deploy <cmd>` (repeatable) replaces `[run].post_deploy` for one invocation. `--no-post-deploy` skips hooks entirely. The two flags conflict and are rejected at clap parse time.
 5. Localnet reuse: if a managed sequencer is already running, the run reuses it. If the configured port is held by an unrelated process, the run aborts with a diagnostic naming the foreign PID.
 6. Topup safety: a wallet-topup confirmation timeout aborts before deploy so the developer is never left wondering whether deploy used a half-funded wallet.
@@ -102,7 +102,7 @@
 ### + (Privacy, Anonymity, Censorship-Resistance)
 
 - Hooks run locally with the developer's own wallet; no network egress beyond what the deploy step already needs.
-- Post-deploy hooks have direct access to the deployer's wallet home via `NSSA_WALLET_HOME_DIR`. Hooks are user-authored and trusted — same threat model as `scaffold.toml` itself.
+- Post-deploy hooks have direct access to the deployer's wallet home via `NSSA_WALLET_HOME_DIR` and `LEE_WALLET_HOME_DIR`. Hooks are user-authored and trusted — same threat model as `scaffold.toml` itself.
 
 ### Dependencies
 

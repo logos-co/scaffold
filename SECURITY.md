@@ -20,7 +20,9 @@ Override with:
 export LOGOS_SCAFFOLD_WALLET_PASSWORD='<your-local-dev-password>'
 ```
 
-This override applies to scaffold commands that submit wallet password input (`wallet`, `deploy`, `doctor` checks).
+This override applies to scaffold commands that submit wallet password input (`setup`, `wallet`, `deploy`, `doctor` checks).
+
+Export it **before the first `setup`** (or the first `run`, which chains `setup`). Against a LEZ pin whose debug wallet config ships no preconfigured account — v0.2.0 ships none — `setup` seeds the default wallet by running `wallet account list` against `.scaffold/wallet` with that password on stdin, which makes the wallet CLI create its persistent storage on first use. The deterministic password therefore guards freshly created key material, not just storage the debug config pre-seeded, and the resulting address is recorded in `.scaffold/state/wallet.state` as the default topup destination. If storage was already created under the default, export the override and re-run with `run --reset`, which wipes the wallet and re-seeds it.
 
 ## Repository Hygiene
 

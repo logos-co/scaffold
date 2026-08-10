@@ -348,18 +348,27 @@ Post-deploy hooks run via `sh -c` with `cwd` at the project root. The env
 they see is stable, documented in README, and validated by unit and
 integration tests:
 
-- `SEQUENCER_URL` / `NSSA_WALLET_HOME_DIR` / `SCAFFOLD_PROJECT_ROOT` /
-  `SCAFFOLD_IDL_DIR` — pipeline state.
+- `SEQUENCER_URL` / `NSSA_WALLET_HOME_DIR` / `LEE_WALLET_HOME_DIR` /
+  `SCAFFOLD_PROJECT_ROOT` / `SCAFFOLD_IDL_DIR` — pipeline state. The two
+  wallet-home vars always carry the same path.
 - `SCAFFOLD_PROGRAM_ID` / `SCAFFOLD_GUEST_BIN` — single-program shortcuts.
   Set only when exactly one program is deployable; absent for
   multi-program projects so hooks fail loudly rather than silently
   picking up the wrong program.
 
-`NSSA_WALLET_HOME_DIR` keeps its upstream-wallet name rather than being
-renamed to a `SCAFFOLD_*` prefix: hooks that exec the wallet binary
-(directly or via `cargo run --bin run_*`) need the var under the name the
-binary's `WalletCore::from_env()` reads. Renaming for hook ergonomics
-would silently break those hooks.
+The wallet home is exported under its upstream-wallet names rather than
+under a `SCAFFOLD_*` prefix: hooks that exec the wallet binary (directly
+or via `cargo run --bin run_*`) need the var under the name the binary's
+`WalletCore::from_env()` reads. Renaming for hook ergonomics would
+silently break those hooks. That reasoning is unchanged — but upstream
+now has two such names. LEZ v0.2.0 renamed `NSSA_WALLET_HOME_DIR` to
+`LEE_WALLET_HOME_DIR`, and a v0.2.0 wallet that sees only the old name
+does not error: it falls back to `~/.lee/wallet`. Scaffold therefore
+sets *both* names, to the same path, on every wallet subprocess and on
+every hook. The list lives in `WALLET_HOME_ENV_VARS` (`constants.rs`);
+wallet subprocesses apply it through `set_wallet_home_env`. Follow that
+pattern for any future rename: add the new name, keep the old one,
+never swap.
 
 The single-program metadata is resolved once per `lgs run` invocation
 and reused across every hook so multiple hooks don't multiply the cost

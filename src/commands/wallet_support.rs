@@ -127,14 +127,19 @@ pub(crate) fn first_public_wallet_address(wallet_home: &Path) -> DynResult<Optio
     Ok(None)
 }
 
-/// Extract the first `Public/<base58-account-id>` reference from wallet
-/// `account list` output (entries render as `/ Public/<account-id>`). Each
-/// candidate is validated through [`normalize_address_ref`] — the account id
-/// must decode to exactly 32 bytes — so surrounding prose that merely mentions
-/// `Public/` cannot be mistaken for an address.
+/// Extract the first `Public/<base58-account-id>` account from wallet
+/// `account list` output. Listing entries render as `/ Public/<account-id>`,
+/// and only lines with that leading `/ ` marker are considered: the address
+/// this returns becomes the project's default topup destination, so a banner
+/// or status line that happens to print a real address must not be adopted.
+/// The account id is additionally validated through [`normalize_address_ref`]
+/// — it must decode to exactly 32 bytes.
 pub(crate) fn first_public_address_in_listing(output: &str) -> Option<String> {
-    for token in output.split_whitespace() {
-        let Some(rest) = token.strip_prefix("Public/") else {
+    for line in output.lines() {
+        let Some(entry) = line.trim().strip_prefix("/ ") else {
+            continue;
+        };
+        let Some(rest) = entry.trim_start().strip_prefix("Public/") else {
             continue;
         };
         // Trim anything after the base58 run (e.g. trailing punctuation).
@@ -748,6 +753,30 @@ mod tests {
     fn first_public_address_in_listing_returns_none_without_public_entries() {
         let output = "/ Private/2ECgkFTaXzwjJBXR7ZKmXYQtpHbvTTHK9Auma4NL9AUo\n";
         assert!(first_public_address_in_listing(output).is_none());
+    }
+
+    /// A wallet build that prints a real, well-formed address in a banner or
+    /// status line before the listing must not have that address adopted as
+    /// the project's default topup destination: only `/ `-prefixed listing
+    /// entries count. Validating base58 alone is not enough, because banner
+    /// addresses are just as valid as entry ones.
+    #[test]
+    fn first_public_address_in_listing_ignores_addresses_outside_listing_entries() {
+        const BANNER_ID: &str = "2ECgkFTaXzwjJBXR7ZKmXYQtpHbvTTHK9Auma4NL9AUo";
+
+        let banner_only = format!("wallet ready; active account Public/{BANNER_ID}\n");
+        assert!(
+            first_public_address_in_listing(&banner_only).is_none(),
+            "a banner address must never be adopted as the default wallet"
+        );
+
+        let banner_then_listing =
+            format!("{banner_only}Accounts:\n/ Public/{ACCOUNT_ID}\n/ Private/{BANNER_ID}\n");
+        assert_eq!(
+            first_public_address_in_listing(&banner_then_listing).as_deref(),
+            Some(format!("Public/{ACCOUNT_ID}").as_str()),
+            "the first listing entry wins over any earlier banner address"
+        );
     }
 
     #[test]
