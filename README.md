@@ -311,11 +311,11 @@ post_deploy = ["cargo run --bin demo"]
 
 Hooks see `SCAFFOLD_TOPUP_SKIPPED=1` on such a run, so a funding hook can
 claim only when scaffold did not. The topup step itself needs a destination
-address, but step 1 of every `lgs run` chains `lgs setup`, which seeds one
-into `.scaffold/state/wallet.state` from the first preconfigured public
-account in the wallet config whenever that file is missing. So on a pin that
-ships those accounts the address is in place before step 4 — including after
-the file is deleted, and after `--reset` wipes the wallet.
+address, but on a pin whose wallet config ships preconfigured accounts one is
+already in place by step 4: step 1 of every `lgs run` chains `lgs setup`,
+which seeds `.scaffold/state/wallet.state` from the first preconfigured
+public account whenever that file is missing — and `--reset`, which wipes the
+wallet later, at step 3, re-seeds it before the run continues.
 
 `topup` defaults to `true`; omit it for the normal topup-then-deploy loop.
 
