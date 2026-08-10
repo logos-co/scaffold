@@ -59,10 +59,11 @@ pub(crate) const DEFAULT_HELLO_WORLD_IMAGE_ID_HEX: &str =
 pub(crate) const DEFAULT_WALLET_PASSWORD: &str = "logos-scaffold-v0";
 /// Env vars naming the wallet home directory for wallet subprocesses. LEZ
 /// v0.2.0 renamed the variable to `LEE_WALLET_HOME_DIR`; earlier pins read
-/// `NSSA_WALLET_HOME_DIR`. Scaffold sets both on every wallet invocation so
-/// the binary from either pin targets the project wallet — a v0.2.0 wallet
-/// that only sees the old name silently falls back to `~/.lee/wallet`
-/// (scaffold#240).
+/// `NSSA_WALLET_HOME_DIR`. Scaffold sets both on every wallet invocation that
+/// touches the wallet home, so the binary from either pin targets the project
+/// wallet — a v0.2.0 wallet that only sees the old name silently falls back to
+/// `~/.lee/wallet` (scaffold#240). `doctor`'s `wallet --version` probe is the
+/// one deliberate exception: it reads no wallet state.
 pub(crate) const WALLET_HOME_ENV_VARS: &[&str] = &["NSSA_WALLET_HOME_DIR", "LEE_WALLET_HOME_DIR"];
 pub(crate) const WALLET_CONFIG_REL_PATH: &str = "wallet/configs/debug/wallet_config.json";
 pub(crate) const WALLET_CONFIG_NESTED_REL_PATH: &str =
