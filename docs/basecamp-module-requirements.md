@@ -173,7 +173,7 @@ logos-scaffold basecamp build-portable
 
 `build-portable` does not touch profiles, `basecamp.state`, or the AppImage itself — it only produces artefacts. Load them into your AppImage in the printed order via its "install lgx" button; scaffold is intentionally unaware of the AppImage's install path.
 
-If you launch the AppImage with `--user-dir <path>` (the `bin-macos-app` flag that sets `LOGOS_USER_DIR`), the AppImage stores its state at `<path>` rather than its default XDG data root — orthogonal to scaffold's per-profile XDG isolation under `.scaffold/basecamp/profiles/{alice,bob}/`. The two are independent mechanisms at different layers: scaffold's profiles isolate dev-stack runs; `--user-dir` isolates a single AppImage launch's installed-modules + identity state.
+If you launch a portable basecamp build by hand with `--user-dir <path>` (basecamp 0.2.x; `LOGOS_USER_DIR` is its env equivalent), the app stores its installed-modules + identity state at `<path>` rather than at its default data root. `build-portable` never sets that — it only produces artefacts — but `launch` does: on the macOS portable stack it exports an absolute per-profile `LOGOS_USER_DIR` (and `LOGOS_DATA_DIR`, the 0.1.x name for the same override) pointing at that profile's own module root, because the portable bundle does not honor `XDG_DATA_HOME` on macOS and would otherwise collapse every profile onto the shared `~/Library/Application Support/Logos/LogosBasecamp`. So hand-launching with `--user-dir` and `launch`-ing a profile are the same data-tree redirect reached from two entry points, not independent mechanisms: the flag isolates one ad-hoc launch, while `launch` wires the env equivalent per profile so scaffold's isolation under `.scaffold/basecamp/profiles/{alice,bob}/` actually reaches the app. A `LOGOS_USER_DIR` / `LOGOS_DATA_DIR` you declare yourself in `[basecamp.env]` or `[basecamp.profiles.<name>.env]` is honored rather than overwritten — `launch` only rewrites it to absolute against the project root when it is relative (see "Env exported to the basecamp process" below).
 
 The `.scaffold/basecamp/portable/` directory is wiped and recreated on every `build-portable` run, so re-running after you've removed a module via `basecamp modules` doesn't leave stale symlinks behind.
 
@@ -206,6 +206,25 @@ A project that ships more than one basecamp variant can map the flake attr per h
 aarch64-darwin = "bin-macos-app"
 aarch64-linux  = "bin-appimage"
 ```
+
+### Env exported to the basecamp process
+
+`launch` sets the variables below on the basecamp child, on top of the environment `lgs` itself inherited (nothing is cleared). `<profile-dir>` is `.scaffold/basecamp/profiles/<profile>/`, and the env layering above can override any of them.
+
+| Variable | Value | Set when |
+|---|---|---|
+| `XDG_CONFIG_HOME` | `<profile-dir>/xdg-config` | always |
+| `XDG_DATA_HOME` | `<profile-dir>/xdg-data` | always |
+| `XDG_CACHE_HOME` | `<profile-dir>/xdg-cache` | always |
+| `TMPDIR` | the resolved `runtime_dir`, else `<profile-dir>/xdg-tmp` | always |
+| `XDG_RUNTIME_DIR` | the resolved `runtime_dir` | only when one resolves — a configured `runtime_dir`, or the `/tmp/lgs-<profile>` macOS default |
+| `LOGOS_PROFILE` | the profile name | always |
+| `LOGOS_DATA_DIR` | `<profile-dir>/xdg-data/Logos/LogosBasecamp` | macOS **and** a portable `[repos.basecamp].attr` (`bin-macos-app`, `bin-appimage`, `bin-bundle-dir`) |
+| `LOGOS_USER_DIR` | same as `LOGOS_DATA_DIR` | as above |
+
+Module-owned port-override variables are not in this list: no module has published a name yet, so scaffold exports none.
+
+The last two rows are finalized *after* the env layering, so they are the one place a declared value is post-processed rather than simply taken as-is: an absolute value you declared is kept, a relative one is rewritten to absolute against the project root, and an empty (or whitespace-only) one is treated as unset and replaced by the profile default. Both keys are written because basecamp 0.1.x reads `LOGOS_DATA_DIR` while 0.2.x reads `LOGOS_USER_DIR`, so setting both keeps `launch` agnostic to the pinned generation.
 
 ### The macOS `sun_path == 104` socket-path budget
 

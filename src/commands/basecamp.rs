@@ -517,8 +517,23 @@ fn cmd_basecamp_launch(
     // macOS `bin-macos-app` Basecamp ignores XDG and loads its modules from
     // `LOGOS_DATA_DIR` (0.1.x) / `LOGOS_USER_DIR` (0.2.x) — see
     // `set_absolute_basecamp_data_dirs`. Apply this after the scaffold.toml env
-    // layering so a user-supplied relative value is absolutized too. Scoped to
-    // the macOS portable stack; a no-op elsewhere.
+    // layering so a user-supplied relative value is absolutized too.
+    //
+    // Why the gate is this narrow: `is_portable_basecamp` matches every attr in
+    // `BASECAMP_PORTABLE_ATTRS` — `bin-macos-app`, `bin-appimage` and
+    // `bin-bundle-dir` — but the XDG-ignoring behaviour that makes this override
+    // necessary has only been observed on `bin-macos-app`, so the
+    // `cfg!(target_os = "macos")` conjunct keeps the write to that stack and
+    // makes it a no-op everywhere else. The Linux portable stacks are *untested*
+    // here rather than known-good: whether basecamp resolves its data tree from
+    // an `XDG_DATA_HOME`-backed location on Linux (in which case `launch_env`'s
+    // isolation already covers them) has not been verified for either
+    // generation. If a Linux AppImage or bundle-dir turns out to ignore XDG too,
+    // the fix is to drop the `cfg!` conjunct: for an unset key the value written
+    // is the same `<profile>/xdg-data/<subpath>` root `XDG_DATA_HOME` already
+    // implies. Note that widening it is not purely additive — it would also
+    // start rewriting relative `LOGOS_*_DIR` values declared in
+    // `[basecamp.env]` on Linux — so it needs a live check, not a guess.
     if cfg!(target_os = "macos") && is_portable_basecamp(basecamp_repo) {
         set_absolute_basecamp_data_dirs(&mut env, &project.root, &profile_dir, basecamp_repo);
     }

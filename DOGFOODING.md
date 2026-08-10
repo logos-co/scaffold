@@ -1170,13 +1170,14 @@ Within the running UIs, exercise whatever p2p surface the module exposes (chat e
 - Custom profile pairs open against their own profile dirs under `.scaffold/basecamp/profiles/<profile>/` and their configured runtime/log/env paths.
 - Each window shows the project's `.lgx` modules installed and ready.
 - `LOGOS_PROFILE=alice` and `LOGOS_PROFILE=bob` are visible in each respective process environment (helpful for debugging).
-- On the macOS portable stack, each process environment carries an absolute `LOGOS_DATA_DIR` pointing at its own profile's module root — set automatically by `launch`, no manual export needed.
+- On the macOS portable stack, each process environment carries an absolute `LOGOS_DATA_DIR` *and* an absolute `LOGOS_USER_DIR`, both pointing at that profile's own module root (`.scaffold/basecamp/profiles/<profile>/xdg-data/Logos/LogosBasecamp`) — set automatically by `launch`, no manual export needed. Basecamp 0.1.x reads the first and 0.2.x the second, so which one the app actually honors depends on the `[repos.basecamp]` pin; `launch` sets both so the check is the same either way.
 - The two instances do not collide on Qt remote-objects or any non-module port; per-profile port-override env vars (per the spec) are set on each `launch`.
 - A p2p interaction triggered from `alice` is observable in `bob` (and vice versa) within the module's expected latency window.
 
 ### Failure Signals / Common Pitfalls
 
 - Two windows opening but sharing identity keys, profile state, or message history is a clean-slate / XDG-isolation regression.
+- On the macOS portable stack, both windows showing only basecamp's bundled modules — none of the project's `.lgx` modules — while their logs report a base data directory under the shared `~/Library/Application Support/Logos/LogosBasecamp` is the profile-collapse signature: the app is not reading the per-profile module root at all. Check that both `LOGOS_DATA_DIR` and `LOGOS_USER_DIR` are present, absolute, and distinct per profile in each process environment.
 - A non-module port collision (Qt remote objects, etc.) is a real finding — file upstream against the affected component, do not patch around it inside scaffold.
 - A module that does not honor an externally-provided port override is documented as a known gap pending an upstream fix on that module; capture the module name, the env var that should have worked, and the observed collision.
 - One window crashing while the other survives is recordable evidence; capture the crashing instance's logs from `.scaffold/basecamp/profiles/<name>/` before relaunching.
