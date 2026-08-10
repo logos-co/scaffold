@@ -1171,7 +1171,7 @@ Within the running UIs, exercise whatever p2p surface the module exposes (chat e
 - Each window shows the project's `.lgx` modules installed and ready.
 - `LOGOS_PROFILE=alice` and `LOGOS_PROFILE=bob` are visible in each respective process environment (helpful for debugging).
 - On the macOS portable stack, each process environment carries an absolute `LOGOS_DATA_DIR` *and* an absolute `LOGOS_USER_DIR`, both pointing at that profile's own module root (`.scaffold/basecamp/profiles/<profile>/xdg-data/Logos/LogosBasecamp`) — set automatically by `launch`, no manual export needed. Basecamp 0.1.x reads the first and 0.2.x the second, so which one the app actually honors depends on the `[repos.basecamp]` pin; `launch` sets both so the check is the same either way.
-- The two instances do not collide on Qt remote-objects or any non-module port; per-profile port-override env vars (per the spec) are set on each `launch`.
+- The two instances do not collide on Qt remote-objects or any non-module port. Do not go hunting for per-module port-override env vars in the process environment: the registry they would flow in through is empty in v1 (no module has published a name yet), so `launch` exports none. A module-level port collision between `alice` and `bob` is therefore still possible, and belongs to the owning module rather than to scaffold.
 - A p2p interaction triggered from `alice` is observable in `bob` (and vice versa) within the module's expected latency window.
 
 ### Failure Signals / Common Pitfalls
@@ -1187,7 +1187,9 @@ Within the running UIs, exercise whatever p2p surface the module exposes (chat e
 
 - The exact two-terminal command sequence used.
 - A short transcript or screenshot pair showing a p2p interaction propagating from one instance to the other.
-- The env block of each running process (e.g., `tr '\0' '\n' < /proc/<pid>/environ | grep -E 'XDG_|LOGOS_'`).
+- The env block of each running process. `launch` records the basecamp PID in `.scaffold/basecamp/profiles/<profile>/launch.state` as `pid=<pid>`; read the env with:
+  - Linux: `tr '\0' '\n' < /proc/<pid>/environ | grep -E 'XDG_|LOGOS_'`
+  - macOS (no `/proc`): `ps eww -p <pid> | tr ' ' '\n' | grep -E 'XDG_|LOGOS_'`
 - Any port-collision error text verbatim, with the module that owns the colliding port.
 - If custom profiles are used, `basecamp paths <profile> --json` for each profile and the resolved log/runtime dirs.
 

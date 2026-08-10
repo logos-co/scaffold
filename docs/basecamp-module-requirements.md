@@ -173,7 +173,7 @@ logos-scaffold basecamp build-portable
 
 `build-portable` does not touch profiles, `basecamp.state`, or the AppImage itself — it only produces artefacts. Load them into your AppImage in the printed order via its "install lgx" button; scaffold is intentionally unaware of the AppImage's install path.
 
-If you launch a portable basecamp build by hand with `--user-dir <path>` (basecamp 0.2.x; `LOGOS_USER_DIR` is its env equivalent), the app stores its installed-modules + identity state at `<path>` rather than at its default data root. `build-portable` never sets that — it only produces artefacts — but `launch` does: on the macOS portable stack it exports an absolute per-profile `LOGOS_USER_DIR` (and `LOGOS_DATA_DIR`, the 0.1.x name for the same override) pointing at that profile's own module root, because the portable bundle does not honor `XDG_DATA_HOME` on macOS and would otherwise collapse every profile onto the shared `~/Library/Application Support/Logos/LogosBasecamp`. So hand-launching with `--user-dir` and `launch`-ing a profile are the same data-tree redirect reached from two entry points, not independent mechanisms: the flag isolates one ad-hoc launch, while `launch` wires the env equivalent per profile so scaffold's isolation under `.scaffold/basecamp/profiles/{alice,bob}/` actually reaches the app. A `LOGOS_USER_DIR` / `LOGOS_DATA_DIR` you declare yourself in `[basecamp.env]` or `[basecamp.profiles.<name>.env]` is honored rather than overwritten — `launch` only rewrites it to absolute against the project root when it is relative (see "Env exported to the basecamp process" below).
+If you launch a portable basecamp build by hand with `--user-dir <path>` (basecamp 0.2.x; `LOGOS_USER_DIR` is its env equivalent), the app stores its installed-modules + identity state at `<path>` rather than at its default data root. `build-portable` never sets that — it only produces artefacts — but `launch` does: on the macOS portable stack it exports an absolute per-profile `LOGOS_USER_DIR` (and `LOGOS_DATA_DIR`, the 0.1.x name for the same override) pointing at that profile's own module root, because the portable bundle does not honor `XDG_DATA_HOME` on macOS and would otherwise collapse every profile onto the shared `~/Library/Application Support/Logos/LogosBasecamp`. So hand-launching with `--user-dir` and `launch`-ing a profile are the same data-tree redirect reached from two entry points, not independent mechanisms: the flag isolates one ad-hoc launch, while `launch` wires the env equivalent per profile so scaffold's isolation under `.scaffold/basecamp/profiles/{alice,bob}/` actually reaches the app. A non-empty `LOGOS_USER_DIR` / `LOGOS_DATA_DIR` you declare yourself in `[basecamp.env]` or `[basecamp.profiles.<name>.env]` is honored rather than overwritten — `launch` only rewrites it to absolute against the project root when it is relative. An empty or whitespace-only value is the exception: it counts as unset and is replaced by the profile default (see "Env exported to the basecamp process" below).
 
 The `.scaffold/basecamp/portable/` directory is wiped and recreated on every `build-portable` run, so re-running after you've removed a module via `basecamp modules` doesn't leave stale symlinks behind.
 
@@ -220,25 +220,25 @@ aarch64-linux  = "bin-appimage"
 | `XDG_RUNTIME_DIR` | the resolved `runtime_dir` | only when one resolves — a configured `runtime_dir`, or the `/tmp/lgs-<profile>` macOS default |
 | `LOGOS_PROFILE` | the profile name | always |
 | `LOGOS_DATA_DIR` | `<profile-dir>/xdg-data/Logos/LogosBasecamp` | macOS **and** a portable `[repos.basecamp].attr` (`bin-macos-app`, `bin-appimage`, `bin-bundle-dir`) |
-| `LOGOS_USER_DIR` | same as `LOGOS_DATA_DIR` | as above |
+| `LOGOS_USER_DIR` | same default as `LOGOS_DATA_DIR`, resolved independently of it | as above |
 
 Module-owned port-override variables are not in this list: no module has published a name yet, so scaffold exports none.
 
-The last two rows are finalized *after* the env layering, so they are the one place a declared value is post-processed rather than simply taken as-is: an absolute value you declared is kept, a relative one is rewritten to absolute against the project root, and an empty (or whitespace-only) one is treated as unset and replaced by the profile default. Both keys are written because basecamp 0.1.x reads `LOGOS_DATA_DIR` while 0.2.x reads `LOGOS_USER_DIR`, so setting both keeps `launch` agnostic to the pinned generation.
+The last two rows are finalized *after* the env layering, so they are the one place a declared value is post-processed rather than simply taken as-is: an absolute value you declared is kept, a relative one is rewritten to absolute against the project root, and an empty (or whitespace-only) one is treated as unset and replaced by the profile default. Each of the two keys goes through that on its own, so declaring only one of them leaves the other at the profile default and the two can end up pointing at different trees. Both keys are written because basecamp 0.1.x reads `LOGOS_DATA_DIR` while 0.2.x reads `LOGOS_USER_DIR`, so setting both keeps `launch` agnostic to the pinned generation.
 
 ### The macOS `sun_path == 104` socket-path budget
 
-When a module loads, liblogos opens a Unix-domain socket (a `QLocalServer` named `logos_token_<module>_<pid>`) under `XDG_RUNTIME_DIR`. macOS caps the full socket path (`sockaddr_un.sun_path`) at **104 bytes**, so a long runtime root overflows it and basecamp aborts module loading with:
+When a module loads, liblogos opens a Unix-domain socket (a `QLocalServer` named `logos_token_<module>_<pid>`) under the temp root — `TMPDIR`, which `launch` always sets. macOS caps the full socket path (`sockaddr_un.sun_path`) at **104 bytes**, so a long runtime root overflows it and basecamp aborts module loading with:
 
 ```
 [SubprocessContainer] Unix socket path too long (122 >= 104)
 ```
 
-the in-profile runtime root `…/.scaffold/basecamp/profiles/<profile>/xdg-tmp` is long: for a typical project path plus the `logos_token_<module>_<pid>` socket name it easily blows the 104-byte budget. To avoid that, `launch` resolves `runtime_dir` with this precedence and exports it as both `TMPDIR` and `XDG_RUNTIME_DIR`:
+the in-profile runtime root `…/.scaffold/basecamp/profiles/<profile>/xdg-tmp` is long: for a typical project path plus the `logos_token_<module>_<pid>` socket name it easily blows the 104-byte budget. To avoid that, `launch` resolves `runtime_dir` with this precedence, exporting a resolved value as both `TMPDIR` and `XDG_RUNTIME_DIR`:
 
 1. **`[basecamp.profiles.<name>].runtime_dir`** if set (project-relative paths are joined to the project root).
 2. **`/tmp/lgs-<profile>`** — the automatic default on macOS (short, well under the budget).
-3. The in-profile `xdg-tmp` on Linux, where the path budget is far larger and not a practical concern.
+3. The in-profile `xdg-tmp` on Linux, where the path budget is far larger and not a practical concern. Nothing resolves in this case, so `TMPDIR` points at `xdg-tmp` and no `XDG_RUNTIME_DIR` is exported at all (matching the table above).
 
 If you override `runtime_dir` on macOS, keep it short (a `/tmp/…` root is safest) — a deep or project-relative path can still exceed 104 bytes once the socket name is appended.
 
