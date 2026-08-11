@@ -214,6 +214,50 @@ mod tests {
     }
 
     #[test]
+    fn basecamp_skills_track_current_schema_and_command_surface() {
+        fn contains_command(skill: &str, verb: &str) -> bool {
+            let needle = format!("basecamp {verb}");
+            skill.match_indices(&needle).any(|(index, matched)| {
+                !skill[index + matched.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == '-')
+            })
+        }
+
+        let skills = [
+            ("basecamp", include_str!("../../skills/basecamp/SKILL.md")),
+            ("lgs-cli", include_str!("../../skills/lgs-cli/SKILL.md")),
+        ];
+        let verbs = [
+            "setup",
+            "modules",
+            "install",
+            "launch",
+            "develop",
+            "build",
+            "build-portable",
+            "run",
+            "doctor",
+            "paths",
+            "docs",
+        ];
+
+        for (name, skill) in skills {
+            assert!(
+                skill.contains("[modules]") && !skill.contains("[basecamp.modules"),
+                "{name} must teach the current top-level [modules] schema"
+            );
+            for verb in verbs {
+                assert!(
+                    contains_command(skill, verb),
+                    "{name} is missing the `basecamp {verb}` command"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn apply_skills_writes_claude_cursor_and_agents_layouts() {
         let temp = mk_temp_dir();
         let target = temp.path();

@@ -80,7 +80,8 @@ pub(crate) const SEQUENCER_BIN_REL_PATH: &str = "target/release/sequencer_servic
 /// Project-relative directory holding the Risc0 guest crate (`methods/Cargo.toml`,
 /// `methods/guest/...`). Shared between the build side (`build_methods_guests`),
 /// which compiles the manifest, and the deploy side, which discovers the resulting
-/// `.bin` artefacts under `methods/target/...`.
+/// `.bin` artefacts under the canonical workspace `target/riscv-guest/...` layout
+/// or the supported sub-crate `methods/target/...` compatibility layout.
 pub(crate) const METHODS_DIR: &str = "methods";
 pub(crate) const SEQUENCER_CONFIG_REL_PATH: &str =
     "sequencer/service/configs/debug/sequencer_config.json";
@@ -147,12 +148,12 @@ pub(crate) const LGPM_ATTR_PORTABLE: &str = "cli-portable";
 /// shipped as portable-only, so dev basecamp can't load them). When
 /// `basecamp modules` auto-discovery walks a project's `metadata.json` and
 /// finds a dep in this table, it captures the pinned flake ref into
-/// `[basecamp.modules]` so `install` builds and installs the dev variant.
+/// `[modules]` so `install` builds and installs the dev variant.
 ///
 /// Keyed by the module name as it appears in `metadata.json` `dependencies`.
 /// Paired conceptually with `DEFAULT_BASECAMP_PIN` — when basecamp bumps, revisit
-/// these pins to stay ABI-compatible. Per-project overrides go in
-/// `[basecamp.dependencies]` in `scaffold.toml`.
+/// these pins to stay ABI-compatible. Projects override a default by capturing
+/// an explicit `[modules.<name>]` entry in `scaffold.toml`.
 ///
 /// See the upstream issue tracking a proper `logos-modules` release pin:
 /// <https://github.com/logos-co/logos-basecamp/issues/167>. Once that lands

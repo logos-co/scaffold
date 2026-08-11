@@ -69,7 +69,7 @@ lgs build my-project   # explicit project path
 
 Key behavior (FURPS Functionality #5): `build` auto-compiles `methods/Cargo.toml` even when the parent workspace excludes the guest crate. No manual `cargo build --manifest-path methods/Cargo.toml` needed.
 
-Success criteria: `methods/target/.../release/<program>.bin` artefacts exist for every guest in `methods/guest/src/bin/`.
+Success criteria: `target/riscv-guest/<methods-crate>/<guest-crate>/riscv32im-risc0-zkvm-elf/release/<program>.bin` artefacts exist for every guest in `methods/guest/src/bin/`. `methods/target/...` remains supported for sub-crate workspace layouts, but it is not the default template output.
 
 ## Deploy Pipeline
 

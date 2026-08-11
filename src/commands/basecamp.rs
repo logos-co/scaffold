@@ -441,7 +441,7 @@ fn cmd_basecamp_launch(
         let _ = fs::remove_file(&launch_state_path);
     }
 
-    // Clean-slate launch replays `[basecamp.modules]` into the freshly-scrubbed
+    // Clean-slate launch replays `[modules]` into the freshly-scrubbed
     // profile. An empty capture set would make that replay a silent no-op, so
     // the profile would come up with zero modules. Fail fast with a hint.
     if total_captured_modules(&project) == 0 {
@@ -1799,7 +1799,7 @@ fn resolve_dep_from_project_flake_lock(source_flake_path: &Path, dep_name: &str)
     Some(format!("github:{owner}/{repo}/{rev}#lgx"))
 }
 
-/// Capture the project module set into `[basecamp.modules.*]` in
+/// Capture the project module set into `[modules.*]` in
 /// scaffold.toml. Sole writer of that section. `install` / `build-portable`
 /// / `launch` only read it — they never discover on their own.
 ///
@@ -1813,7 +1813,7 @@ fn resolve_dep_from_project_flake_lock(source_flake_path: &Path, dep_name: &str)
 /// Dependency resolution from each source's `metadata.json.dependencies`
 /// array lands in M2d and is intentionally absent here.
 ///
-/// Idempotency: if a module_name already exists in `[basecamp.modules]`, its
+/// Idempotency: if a module_name already exists in `[modules]`, its
 /// entry is preserved — user intent (a hand-edited flake or role override)
 /// wins over re-derivation.
 fn cmd_basecamp_modules(
@@ -2032,7 +2032,7 @@ pub(crate) fn derive_module_name(
 }
 
 /// Lowercase `raw` and confirm it matches the TOML bare-key charset scaffold
-/// uses for `[basecamp.modules.<name>]` section headers — `[a-z0-9_-]` with a
+/// uses for `[modules.<name>]` section headers — `[a-z0-9_-]` with a
 /// non-dash first character. Guards against section-header injection through
 /// `metadata.json`'s `name` or a github-slug derivation when that name flows
 /// into the serialized scaffold.toml.
@@ -2052,7 +2052,7 @@ fn normalize_and_validate_module_name(
         bail!(
             "invalid module name `{raw}` from {source}: must match [a-z0-9_-] with a \
              non-dash first character (case is normalized). Edit the source's metadata.json \
-             `name` field, or hand-edit `[basecamp.modules]` in scaffold.toml."
+             `name` field, or hand-edit `[modules]` in scaffold.toml."
         );
     }
     Ok(normalized)
@@ -2063,7 +2063,7 @@ fn normalize_and_validate_module_name(
 /// as the place to correct it.
 pub(crate) fn assumption_note_line(note: &AssumptionNote) -> String {
     format!(
-        "note: flake `{}` — assumed module_name = `{}`. If wrong, edit `[basecamp.modules]` in scaffold.toml.",
+        "note: flake `{}` — assumed module_name = `{}`. If wrong, edit `[modules]` in scaffold.toml.",
         note.flake_ref, note.inferred_name,
     )
 }
@@ -2118,7 +2118,7 @@ fn read_source_metadata_dependencies(src: &BasecampSource) -> Vec<String> {
 }
 
 /// Resolve dependencies declared in project sources' `metadata.json` into
-/// new `[basecamp.modules]` entries with `role = Dependency`. Returns only
+/// new `[modules]` entries with `role = Dependency`. Returns only
 /// the entries that need to be *added* to `captured` — names already in
 /// `captured` (any role) are silently skipped.
 ///
@@ -2201,7 +2201,7 @@ fn resolve_manifest_dependencies(
             "Either:\n  \
              (a) capture the module as a project source: `basecamp modules --flake <ref>#lgx`, or\n  \
              (b) add an explicit entry to scaffold.toml:\n      \
-             [basecamp.modules.<name>]\n      \
+             [modules.<name>]\n      \
              flake = \"<ref>#lgx\"\n      \
              role = \"dependency\"\n",
         );
@@ -2600,7 +2600,7 @@ fn run_lgpm_install(
 }
 
 /// Used by launch replay: build lgx files from the captured modules in
-/// `[basecamp.modules]` and hand them to lgpm for the given profile(s).
+/// `[modules]` and hand them to lgpm for the given profile(s).
 /// No-op if no modules are captured. Dependencies build before project
 /// sources so a broken companion pin surfaces before we invest nix build
 /// time on the dev's own modules.
@@ -2875,7 +2875,7 @@ pub(crate) struct ModuleDriftReport {
 }
 
 /// Run `basecamp modules` auto-discovery as a dry-run and diff the project
-/// sources it would find against `[basecamp.modules]` entries with
+/// sources it would find against `[modules]` entries with
 /// `role = "project"`. Dependencies are not considered here — if a project
 /// source is captured, `basecamp modules` resolves its deps deterministically
 /// at capture time, so any dep drift surfaces via the modules command itself
@@ -2971,7 +2971,7 @@ fn cmd_basecamp_doctor(project: Project, as_json: bool) -> DynResult<()> {
 /// source's flake ref + commit/tag + installed api headers), manifest variant
 /// checks per seeded profile, and a missing-module drift check against
 /// auto-discovery. No-op when neither `basecamp.state` nor
-/// `[basecamp.modules]` carries anything.
+/// `[modules]` carries anything.
 fn push_basecamp_doctor_rows(project: &Project, rows: &mut Vec<crate::model::CheckRow>) {
     use crate::model::{CheckRow, CheckStatus};
 
@@ -3481,7 +3481,7 @@ fn module_entry_to_source(project_root: &Path, entry: &ModuleEntry) -> BasecampS
     }
 }
 
-/// Convert captured modules in `[basecamp.modules]` filtered by `role` into
+/// Convert captured modules in `[modules]` filtered by `role` into
 /// a `Vec<BasecampSource>` in key order. Key order is BTreeMap-sorted, which
 /// happens to give deps-first semantics only by coincidence — callers that
 /// need deps-first explicitly should iterate by role.
@@ -5270,7 +5270,7 @@ mod tests {
 
     #[test]
     fn resolve_manifest_dependencies_skips_names_already_in_captured_table() {
-        // V-4 fix: a dep name that already has a `[basecamp.modules]` entry
+        // V-4 fix: a dep name that already has a `[modules]` entry
         // (regardless of role) is silently skipped. vpavlin's repro: yolo
         // declares `storage_module` as a dep; the user captured
         // logos-storage-module as a project source via explicit --flake,
@@ -5311,7 +5311,7 @@ mod tests {
             "expected fail-fast error naming the dep, got: {msg}"
         );
         assert!(
-            msg.contains("basecamp modules --flake") || msg.contains("[basecamp.modules."),
+            msg.contains("basecamp modules --flake") && msg.contains("[modules.<name>]"),
             "expected both user-side fixes in error, got: {msg}"
         );
         assert!(
@@ -5639,6 +5639,10 @@ role = "dependency"
             msg.contains("module name") || msg.contains("invalid"),
             "error should flag the invalid name: {msg}"
         );
+        assert!(
+            msg.contains("[modules]") && !msg.contains("hand-edit `[basecamp.modules]`"),
+            "error remediation must use the current top-level module schema: {msg}"
+        );
     }
 
     #[test]
@@ -5714,6 +5718,10 @@ role = "dependency"
         assert!(
             line.contains("scaffold.toml"),
             "note line should point user at scaffold.toml: {line}"
+        );
+        assert!(
+            line.contains("[modules]") && !line.contains("[basecamp.modules]"),
+            "note line must use the current top-level module schema: {line}"
         );
     }
 
