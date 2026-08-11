@@ -878,14 +878,19 @@ mod tests {
                 };
                 let _ = stream.write_all(payload.as_bytes());
                 let _ = stream.flush();
+                // Half-close the response immediately so the client can
+                // observe a complete HTTP message while we drain its request.
+                let _ = stream.shutdown(std::net::Shutdown::Write);
                 // The single `read` above can return before the client has
                 // finished sending its request body. Closing a socket that
                 // still has unread inbound data makes the kernel send RST
                 // instead of FIN, and the RST discards the response we just
                 // wrote — the client then sees a truncated read rather than
-                // the scripted answer. Drain to EOF (bounded by a short
-                // timeout) so every connection closes gracefully.
-                let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+                // the scripted answer. Drain to EOF with a one-second ceiling;
+                // the happy path exits as soon as the client closes, while
+                // loaded CI gets enough time to avoid turning this back into
+                // a reset.
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
                 let mut sink = [0_u8; 1024];
                 while matches!(stream.read(&mut sink), Ok(n) if n > 0) {}
             }

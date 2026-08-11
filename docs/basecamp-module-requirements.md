@@ -1,6 +1,6 @@
 # Basecamp Module Requirements
 
-This is the contract between a module project and `logos-scaffold basecamp {setup,install,launch,reset,build-portable}`. If your project satisfies the rules below, the commands will resolve, build, and install your `.lgx` artefacts into the pre-seeded `alice` and `bob` profiles automatically. `build-portable` additionally targets the `lgx-portable` flake output for hand-loading into a basecamp AppImage.
+`logos-scaffold basecamp` provides `setup`, `modules`, `install`, `launch`, `develop`, `build`, `build-portable`, `run`, `doctor`, `paths`, and `docs`. This document defines the module-project compatibility contract shared by those workflows. If your project satisfies the rules below, commands that consume the captured module set will resolve, build, and install your `.lgx` artefacts into the pre-seeded `alice` and `bob` profiles automatically. `build-portable` additionally targets the `lgx-portable` flake output for hand-loading into a basecamp AppImage.
 
 ## Hard requirements
 
