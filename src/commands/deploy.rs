@@ -838,6 +838,7 @@ pub(crate) fn discover_program_binaries(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::test_support::drain_http_request;
     use std::fs;
     use tempfile::TempDir;
 
@@ -848,13 +849,13 @@ mod tests {
     /// Serve one scripted `getLastBlockId` response per incoming connection,
     /// then stop accepting. `Some(id)` answers with a valid JSON-RPC result;
     /// `None` answers with a 500 and no body (a transient RPC failure).
-    /// Mirrors the single-shot helper in `wallet_support::tests`, extended to
-    /// a response sequence so pacing can observe heads that advance — or
-    /// reads that fail and then recover — between polls.
+    /// Uses the same complete-request drain as the wallet-support stub, but
+    /// extends it to a response sequence so pacing can observe heads that
+    /// advance — or reads that fail and then recover — between polls.
     fn spawn_scripted_block_id_server(
         responses: Vec<Option<u64>>,
     ) -> (String, std::thread::JoinHandle<()>) {
-        use std::io::{Read, Write};
+        use std::io::Write;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub server");
         let url = format!("http://{}", listener.local_addr().expect("local addr"));
         let handle = std::thread::spawn(move || {
@@ -862,8 +863,7 @@ mod tests {
                 let Ok((mut stream, _)) = listener.accept() else {
                     return;
                 };
-                let mut buf = [0_u8; 4096];
-                let _ = stream.read(&mut buf);
+                drain_http_request(&mut stream);
                 let payload = match response {
                     Some(block_id) => {
                         let body = format!(r#"{{"jsonrpc":"2.0","result":{block_id},"id":1}}"#);
@@ -878,21 +878,6 @@ mod tests {
                 };
                 let _ = stream.write_all(payload.as_bytes());
                 let _ = stream.flush();
-                // Half-close the response immediately so the client can
-                // observe a complete HTTP message while we drain its request.
-                let _ = stream.shutdown(std::net::Shutdown::Write);
-                // The single `read` above can return before the client has
-                // finished sending its request body. Closing a socket that
-                // still has unread inbound data makes the kernel send RST
-                // instead of FIN, and the RST discards the response we just
-                // wrote — the client then sees a truncated read rather than
-                // the scripted answer. Drain to EOF with a one-second ceiling;
-                // the happy path exits as soon as the client closes, while
-                // loaded CI gets enough time to avoid turning this back into
-                // a reset.
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
-                let mut sink = [0_u8; 1024];
-                while matches!(stream.read(&mut sink), Ok(n) if n > 0) {}
             }
         });
         (url, handle)
