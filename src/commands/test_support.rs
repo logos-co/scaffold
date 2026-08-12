@@ -7,6 +7,10 @@ use std::time::Duration;
 /// Consuming the complete request prevents the stub from closing a socket with
 /// unread inbound data, which can turn the close into an RST and discard a
 /// response that was already written.
+///
+/// Assumes a `Content-Length`-delimited request (what `ureq` sends for a fixed
+/// body). `Transfer-Encoding: chunked` is not decoded — a chunked request would
+/// be treated as header-only and its body left unread.
 pub(crate) fn drain_http_request(stream: &mut TcpStream) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let mut request = Vec::new();

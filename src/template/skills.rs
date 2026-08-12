@@ -214,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn basecamp_skills_track_current_schema_and_command_surface() {
+    fn basecamp_guidance_tracks_current_schema_and_command_surface() {
         fn contains_command(skill: &str, verb: &str) -> bool {
             let needle = format!("basecamp {verb}");
             skill.match_indices(&needle).any(|(index, matched)| {
@@ -229,31 +229,46 @@ mod tests {
             ("basecamp", include_str!("../../skills/basecamp/SKILL.md")),
             ("lgs-cli", include_str!("../../skills/lgs-cli/SKILL.md")),
         ];
-        let verbs = [
-            "setup",
-            "modules",
-            "install",
-            "launch",
-            "develop",
-            "build",
-            "build-portable",
-            "run",
-            "doctor",
-            "paths",
-            "docs",
-        ];
+        // `basecamp docs` ships this file verbatim, so it is a third surface
+        // that can drift out of sync with the CLI.
+        let embedded_docs = include_str!("../../docs/basecamp-module-requirements.md");
+
+        // Derive the verb set from clap so that adding a subcommand fails here
+        // until every shipped surface documents it.
+        let command = crate::cli::cli_command();
+        let basecamp = command
+            .get_subcommands()
+            .find(|command| command.get_name() == "basecamp")
+            .expect("basecamp subcommand");
+        let verbs: Vec<&str> = basecamp
+            .get_subcommands()
+            .map(|command| command.get_name())
+            .collect();
 
         for (name, skill) in skills {
             assert!(
                 skill.contains("[modules]") && !skill.contains("[basecamp.modules"),
                 "{name} must teach the current top-level [modules] schema"
             );
-            for verb in verbs {
+            for verb in &verbs {
                 assert!(
                     contains_command(skill, verb),
                     "{name} is missing the `basecamp {verb}` command"
                 );
             }
+        }
+
+        // The embedded doc still names the pre-0.2.0 layout in its migration
+        // note, so it only carries the positive schema assertion.
+        assert!(
+            embedded_docs.contains("[modules"),
+            "basecamp docs must teach the current top-level [modules] schema"
+        );
+        for verb in &verbs {
+            assert!(
+                embedded_docs.contains(&format!("`{verb}`")),
+                "basecamp docs is missing the `{verb}` command"
+            );
         }
     }
 
