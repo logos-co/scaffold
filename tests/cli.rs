@@ -3295,7 +3295,7 @@ fn basecamp_launch_accepts_custom_profile_name() {
 #[cfg(unix)]
 #[test]
 fn basecamp_launch_bails_when_no_modules_captured() {
-    // launch scrubs and replays the captured module set. If [basecamp.modules]
+    // launch scrubs and replays the captured module set. If [modules]
     // is empty, the replay is silently a no-op — the profile comes up with
     // zero modules installed, which violates the clean-slate guarantee.
     // Surface as an error with a concrete hint.

@@ -75,7 +75,7 @@ pub(crate) fn write_basecamp_state(path: &Path, state: &BasecampState) -> DynRes
     check_state_value("lgpm_bin", &state.lgpm_bin)?;
 
     // Source lines are no longer part of the state file — the captured module
-    // set lives in `[basecamp.modules.*]` in scaffold.toml (v0.4). Any
+    // set lives in `[modules.*]` in scaffold.toml (schema v0.2.0). Any
     // residual `project_sources` / `dependencies` values on the struct are
     // intentionally ignored here; the fields are removed in Phase 3.
     let mut content = String::new();
@@ -121,7 +121,7 @@ pub(crate) fn read_basecamp_state(path: &Path) -> DynResult<BasecampState> {
         }
         // Any other key (legacy `project:*`, `dep:*`, `source:*` lines from
         // in-PR iterations) is silently ignored. The captured module set is
-        // now sourced from scaffold.toml's `[basecamp.modules.*]` section.
+        // now sourced from scaffold.toml's `[modules.*]` section.
     }
 
     Ok(state)

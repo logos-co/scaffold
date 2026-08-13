@@ -18,7 +18,7 @@ Once a project exists on disk, also pull in the matching template / integration 
 
 - `lez-template` — bare LEZ standalone (Rust + risc0). Identify by absence of `framework = "lez-framework"` in `scaffold.toml` and presence of `methods/guest/src/bin/*.rs`.
 - `lez-framework-template` — declarative macros (Anchor parallel). Identify by `framework = "lez-framework"` in `scaffold.toml` plus `crates/lez-client-gen/` and `idl/`.
-- `basecamp` — `lgs basecamp …` lifecycle for Logos module projects (capture / install / launch with profile-isolated state). Activates additionally on any `lgs basecamp` invocation, presence of `[basecamp.modules]` in `scaffold.toml`, or `.scaffold/basecamp/profiles/`. Independent of the template skills — can layer onto either template or stand alone in an external module project.
+- `basecamp` — `lgs basecamp …` lifecycle for Logos module projects (capture / develop / build / run / install / launch with profile-isolated state). Activates additionally on any `lgs basecamp` invocation, presence of `[modules]` in `scaffold.toml`, or `.scaffold/basecamp/profiles/`. Independent of the template skills — can layer onto either template or stand alone in an external module project.
 
 ## Command Map
 
@@ -42,11 +42,15 @@ Once a project exists on disk, also pull in the matching template / integration 
 | Runtime | `wallet -- <args>` | Raw passthrough to project-local wallet binary; preserves project wallet env. |
 | Runtime | `spel -- <args>` | Raw passthrough to project-vendored `spel` binary. |
 | Modules | `basecamp setup` | One-time: pin basecamp + lgpm, build, seed `alice` / `bob` profiles. |
-| Modules | `basecamp modules [--show] [--flake REF]… [--path PATH]…` | Sole writer of `[basecamp.modules.<name>]` in `scaffold.toml`. |
+| Modules | `basecamp modules [--show] [--flake REF]… [--path PATH]…` | Sole writer of `[modules.<name>]` in `scaffold.toml`. |
 | Modules | `basecamp install [--print-output]` | Build captured sources and install via `lgpm` into both profiles. |
 | Modules | `basecamp launch <profile>` | Scrub profile, replay modules, exec basecamp. Profiles: `alice`, `bob`. |
-| Modules | `basecamp build-portable` | Build `.#lgx-portable` for `role = "project"` entries; symlink under `.scaffold/basecamp/portable/`. |
+| Modules | `basecamp develop <module> [--dev-shell ATTR]` | Enter the captured module's Nix dev shell. |
+| Modules | `basecamp build [--variant lgx\|lgx-portable\|all] [--module NAME]` | Build captured project-module variants without installing; defaults to both variants. |
+| Modules | `basecamp build-portable [--module NAME]` | Alias for `build --variant lgx-portable`; symlink under `.scaffold/basecamp/portable/`. |
+| Modules | `basecamp run <module> [--host standalone]` | Run the captured module's standalone flake app. |
 | Modules | `basecamp doctor [--json]` | Basecamp-specific health (modules, variant check, dep drift, discovery drift). |
+| Modules | `basecamp paths <profile> [--json]` | Print the resolved profile path manifest without mutation. |
 | Modules | `basecamp docs` | Print canonical `docs/basecamp-module-requirements.md`. |
 | Diagnostics | `doctor [--json]` | Top-level health checks + actionable next steps. |
 | Diagnostics | `report [--out PATH] [--tail N]` | Sanitised `.tar.gz` diagnostics bundle. |
@@ -100,7 +104,7 @@ Everything scaffold writes lives under `.scaffold/` inside the project. Treat th
 | `.scaffold/logs/<ts>-setup-*.log` | `basecamp setup` build logs. |
 | `.scaffold/wallet/` | Project wallet home (`NSSA_WALLET_HOME_DIR` / `LEE_WALLET_HOME_DIR`). **Never** included in `report` archives — contains keys. |
 | `.scaffold/basecamp/profiles/{alice,bob}/` | Per-profile XDG roots for basecamp. |
-| `.scaffold/basecamp/portable/<NN>-<name>.lgx` | Symlinks to `.#lgx-portable` builds for AppImage hand-loading. Wiped each `build-portable`. |
+| `.scaffold/basecamp/portable/<NN>-<name>.lgx` | Symlinks to `.#lgx-portable` builds for AppImage hand-loading. Wiped by each portable build. |
 | `.scaffold/repos/{lez,spel}/` | Vendored repo checkouts (only when project was created with `--vendor-deps`). |
 | `.scaffold/reports/report-<unix-ts>.tar.gz` | Output of `lgs report`. |
 | `.scaffold/commands.md` | Canned reference scaffold ships into projects (sequencer command, status / doctor JSON commands, etc.). |
@@ -167,14 +171,14 @@ The canonical scenarios in `DOGFOODING.md`:
 - **D1–D6** — default template (bootstrap, localnet/doctor, deploy variants, wallet, report, runner interaction).
 - **L1–L4** — lez-framework template (bootstrap, IDL regen, client regen, deploy + counter).
 - **E1–E2** — CLI surface (help/version/error quality, advanced `new` flags).
-- **B1–B5** — basecamp (setup, modules+install+launch, p2p, clean-slate, build-portable).
+- **B1–B6** — basecamp (setup, modules+install+paths+launch, p2p, clean-slate, variant builds, standalone run).
 
 When reproducing a failure, name the matching scenario in the bug report.
 
 ## Key Rules
 
 - **Never** `rm -rf .scaffold/wallet/` — it contains keys; `lgs report` deliberately excludes it.
-- **Never** edit `[basecamp.modules]` while `lgs basecamp modules` is running. Otherwise hand-edits in that section are preserved across re-runs.
+- **Never** edit `[modules]` while `lgs basecamp modules` is running. Otherwise hand-edits in that section are preserved across re-runs.
 - **Always** `lgs localnet stop` before any destructive reset; otherwise scaffold may leave a stale PID.
 - **Always** inspect `.scaffold/reports/*.tar.gz` (`tar -tzf <path>`) before sharing publicly. Sanitisation is best-effort, not absolute.
 - **Prefer** project-local binaries via `lgs wallet -- ...` and `lgs spel -- ...` over global installs. Nothing scaffold builds is added to PATH on purpose.
