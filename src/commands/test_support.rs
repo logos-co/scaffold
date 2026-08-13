@@ -32,6 +32,7 @@ pub(crate) fn drain_http_request(stream: &mut TcpStream) {
             {
                 break
             }
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(err) => panic!("read request: {err}"),
         }
     }

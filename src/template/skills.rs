@@ -258,18 +258,38 @@ mod tests {
             }
         }
 
-        // The embedded doc still names the pre-0.2.0 layout in its migration
-        // note, so it only carries the positive schema assertion.
+        // The migration note intentionally names the pre-0.2.0 layout, so the
+        // schema assertion is made against the rest of the document.
+        let schema_body = embedded_docs
+            .lines()
+            .filter(|line| !line.contains("The pre-0.2.0 schema used"))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
-            embedded_docs.contains("[modules"),
-            "basecamp docs must teach the current top-level [modules] schema"
+            schema_body.contains("[modules.") && !schema_body.contains("[basecamp.modules"),
+            "basecamp docs must teach the current top-level [modules] schema outside its migration note"
         );
-        for verb in &verbs {
-            assert!(
-                embedded_docs.contains(&format!("`{verb}`")),
-                "basecamp docs is missing the `{verb}` command"
-            );
-        }
+
+        // Compare the opening canonical list exactly so missing, reordered, or
+        // phantom verbs cannot hide behind incidental mentions in later prose.
+        let verb_list = embedded_docs
+            .lines()
+            .find(|line| line.contains("`logos-scaffold basecamp` provides"))
+            .expect("basecamp docs must carry the canonical verb list");
+        let canonical_list = verb_list
+            .split_once(". This document")
+            .map(|(list, _)| list)
+            .expect("basecamp docs canonical verb list must be its opening sentence");
+        let documented_verbs: Vec<&str> = canonical_list
+            .split('`')
+            .enumerate()
+            .filter_map(|(index, value)| (index % 2 == 1).then_some(value))
+            .skip(1)
+            .collect();
+        assert_eq!(
+            documented_verbs, verbs,
+            "basecamp docs verb list must match the clap command surface exactly"
+        );
     }
 
     #[test]
