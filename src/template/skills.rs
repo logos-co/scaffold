@@ -215,14 +215,17 @@ mod tests {
 
     #[test]
     fn basecamp_guidance_tracks_current_schema_and_command_surface() {
-        fn contains_command(skill: &str, verb: &str) -> bool {
-            let needle = format!("basecamp {verb}");
-            skill.match_indices(&needle).any(|(index, matched)| {
-                !skill[index + matched.len()..]
+        fn contains_exact(text: &str, needle: &str) -> bool {
+            text.match_indices(needle).any(|(index, matched)| {
+                !text[index + matched.len()..]
                     .chars()
                     .next()
                     .is_some_and(|c| c.is_ascii_alphanumeric() || c == '-')
             })
+        }
+
+        fn contains_command(skill: &str, verb: &str) -> bool {
+            contains_exact(skill, &format!("basecamp {verb}"))
         }
 
         let skills = [
@@ -289,6 +292,44 @@ mod tests {
         assert_eq!(
             documented_verbs, verbs,
             "basecamp docs verb list must match the clap command surface exactly"
+        );
+
+        // README is the most user-facing guidance surface and drifted the same
+        // way before: its usage block must list the clap surface exactly and
+        // in order, and every verb must keep a Command Semantics bullet.
+        let readme = include_str!("../../README.md");
+        let readme_usage: Vec<&str> = readme
+            .lines()
+            .filter_map(|line| line.strip_prefix("logos-scaffold basecamp "))
+            .filter_map(|rest| rest.split_whitespace().next())
+            .collect();
+        assert_eq!(
+            readme_usage, verbs,
+            "README usage block must match the clap basecamp surface exactly"
+        );
+        for verb in &verbs {
+            assert!(
+                contains_exact(readme, &format!("- `basecamp {verb}")),
+                "README Command Semantics is missing the `basecamp {verb}` bullet"
+            );
+        }
+
+        // DOGFOODING pins the expected `basecamp --help` output in B1; compare
+        // that list exactly so the runbook cannot silently go stale again.
+        let dogfooding = include_str!("../../DOGFOODING.md");
+        let help_line = dogfooding
+            .lines()
+            .find(|line| line.contains("`basecamp --help` lists"))
+            .expect("DOGFOODING must pin the basecamp --help verb list");
+        let dogfooding_verbs: Vec<&str> = help_line
+            .split('`')
+            .enumerate()
+            .filter_map(|(index, value)| (index % 2 == 1).then_some(value))
+            .skip(1)
+            .collect();
+        assert_eq!(
+            dogfooding_verbs, verbs,
+            "DOGFOODING B1 verb list must match the clap command surface exactly"
         );
     }
 
