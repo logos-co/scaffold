@@ -341,18 +341,19 @@ export EXAMPLE_PROGRAMS_BUILD_DIR="$PWD/target/riscv-guest/example_program_deplo
 
 Use a known default-template program name such as `hello_world`. If the generated project exposes a different set of programs in `methods/guest/src/bin`, record the discovered list.
 
-`--json` only produces structured JSON output when combined with `--program-path`. On the discovery-based path (`deploy` or `deploy <name>`), the `--json` flag is accepted but silently ignored. This scenario validates that distinction.
+Both deploy paths honor `--json`, with a different shape each. `--program-path --json` prints one flat object for the single submitted program; the discovery-based path (`deploy` or `deploy <name>`) wraps one such object per attempted program in `{"deploys":[…]}`. Either way `--json` is pure JSON on stdout — no command echoes, no summary block. This scenario validates that distinction. (Both shapes omit absent fields rather than emitting `null`: today the pinned LEZ exposes no transaction receipt for a deploy, so `tx` is always absent and consumers test `has("tx")` rather than branching on a guaranteed-null key. `program_id` is present whenever the vendored `spel` binary resolved it, and a failed entry carries `error` in its place.)
 
 ### Expected Success Signals
 
 - `deploy hello_world` reports `OK  hello_world submitted` and ends with a human-readable success summary.
-- `deploy --program-path ... --json` prints a parseable JSON object with at least `status`, `program`, and `tx` fields.
+- `deploy --program-path ... --json` prints a parseable JSON object with at least `status` and `program` (plus `program_id` once `setup` has built `spel`).
+- `deploy <name> --json` and bare `deploy --json` print a parseable `{"deploys":[…]}` object whose entries carry the same fields.
 - `deploy --program-path ...` without `--json` prints a human-readable `OK` line with the binary path.
 - `deploy nonexistent_program` fails with an error listing the available discovered programs.
 
 ### Failure Signals / Common Pitfalls
 
-- If `deploy hello_world --json` starts producing JSON output (instead of the normal human-readable summary), record that as a behavior change worth verifying.
+- If either `--json` path starts emitting a guaranteed-null `tx` key, or mixes command echoes and the human-readable summary into the JSON stream, record that as a machine-readability regression.
 - If localnet is unreachable, deploy should fail with a sequencer-unavailable hint instead of a vague wallet error.
 - Unknown program names should report the available discovered programs.
 - Missing binaries should point back to `logos-scaffold build`.
@@ -360,13 +361,13 @@ Use a known default-template program name such as `hello_world`. If the generate
 ### Evidence to Capture
 
 - One successful human-readable deploy excerpt from the discovery path.
-- One successful JSON deploy output from the `--program-path` path.
+- One successful JSON deploy output from the `--program-path` path, and one `{"deploys":[…]}` output from the discovery path.
 - The error output for an unknown program name.
 - Any failure-path excerpt for unreachable sequencer or missing binary when intentionally probed.
 
 ### Execution Notes
 
-- Keep the `--program-path --json` examples separate from discovery-based deploys. Only `--program-path` produces JSON.
+- Record both JSON shapes: the flat object from `--program-path` and the `{"deploys":[…]}` wrapper from the discovery path. They are separate contracts and a change to one does not imply a change to the other.
 - When recording a custom `--program-path`, preserve the absolute path used in the run log.
 
 ## D4. Default Template Wallet Workflows and Passthrough
@@ -1035,9 +1036,9 @@ Validate that a module project can fetch the pinned basecamp + `lgpm` binaries, 
 
 ### Preconditions
 
-- Nix with flakes enabled.
+- Nix with flakes enabled — **and unrestricted GitHub access for Nix specifically**. This is a stricter requirement than the rest of this runbook and the usual reason a `B`-series run stalls in an agent container, so check it before installing anything. Nix resolves `github:` flake inputs over `https://api.github.com/repos/…/commits/HEAD` and `https://github.com/…/archive/<rev>.tar.gz`; a proxy that allowlists GitHub per repository answers `403` on both, and the basecamp closure pulls ~25 repos across `logos-co`, `NixOS/nixpkgs` and `oxalica/rust-overlay`. Neither `git clone` working nor `nix --version` working proves this — probe it directly with `curl -sS -o /dev/null -w '%{http_code}\n' https://api.github.com/repos/NixOS/nixpkgs/commits/HEAD` (expect `200`) before starting. Rewriting the project's own input to `git+https://` does not help: the transitive inputs are already locked as `github:` inside each dependency's own `flake.lock`. If the probe fails, `B1`–`B6` are out of reach in that environment and the honest result is to record the blocker — the scaffold-side surface that needs no Nix (`basecamp --help`, `basecamp docs`, the missing-Nix hint, `basecamp doctor`, out-of-project errors) is still worth exercising and reporting as partial coverage.
 - Latest scaffold binary built from the repo root (`"$SCAFFOLD_BIN"`).
-- A module project on disk whose `flake.nix` exposes `packages.<system>.lgx` (see `"$SCAFFOLD_BIN" basecamp docs`). Reachable as `$MODULE_PROJECT`.
+- A module project on disk whose `flake.nix` exposes `packages.<system>.lgx` (see `"$SCAFFOLD_BIN" basecamp docs`). Reachable as `$MODULE_PROJECT`. `logos-module-builder`'s `templates/minimal-module` is the smallest one that satisfies the contract.
 - `scaffold.toml` is present at the project root; if not, run `"$SCAFFOLD_BIN" init` once.
 
 ### Commands / Actions

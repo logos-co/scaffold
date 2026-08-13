@@ -30,7 +30,7 @@ Once a project exists on disk, also pull in the matching template / integration 
 | Project | `init` | Adopt scaffold in an existing project (writes `scaffold.toml`, creates `.scaffold/`, appends to `.gitignore`). Re-run to migrate older schemas or refresh shipped AI skills in place. |
 | Project | `setup` | Sync LEZ + spel to pinned commits, build `sequencer_service` / `wallet` / `spel` locally, seed default wallet. Project-local; no PATH installs. |
 | Project | `build [project-path]` | Runs `setup` then `cargo build --workspace`; auto-compiles `methods/Cargo.toml` if present. |
-| Project | `deploy [program-name]` | Deploys one or all guest programs discovered in `methods/guest/src/bin/*.rs`. Prints `program_id` (risc0 image ID) on success. `--json` only structured when combined with `--program-path`. |
+| Project | `deploy [program-name]` | Deploys one or all guest programs discovered in `methods/guest/src/bin/*.rs`. Prints `program_id` (risc0 image ID) on success. `--json` is structured on both paths, with a different shape each — see JSON Outputs. |
 | Project | `run [--profile NAME] [--reset \| --no-reset] [--post-deploy <cmd>…] [--no-post-deploy] [--watch] [--localnet-timeout N]` | Inner loop: build (chains setup) → IDL → localnet → topup → deploy → optional post-deploy hooks. Prefer over manual setup/build/deploy/topup for daily work. Works with zero config; deploy is skipped when inputs + sequencer are unchanged. Does **not** run `check-health` or any `basecamp` command. |
 | Runtime | `localnet start [--timeout-sec N]` | Spawn sequencer; waits for pid alive + 127.0.0.1:3040 reachable. |
 | Runtime | `localnet stop` | Stop tracked sequencer. |
@@ -159,10 +159,11 @@ Use `--json` whenever piping to other tools:
 lgs localnet status --json    # { tracked_pid, listener_present, ownership, ready }
 lgs doctor --json             # { status, summary, checks, next_steps }
 lgs deploy --program-path "<path>" --json   # { status, program, tx?, program_id? }
+lgs deploy --json                           # { deploys: [ { status, program, tx?, program_id? | error }, ... ] }
 lgs basecamp doctor --json
 ```
 
-`lgs deploy --json` only produces structured JSON when combined with `--program-path`. On the discovery path, `--json` is silently accepted but ignored.
+`lgs deploy --json` is structured on both paths, with a different shape each: `--program-path` emits the bare object, the discovery path (`deploy` / `deploy <name>`) wraps one object per attempted program in `{"deploys":[…]}`. Absent values are omitted rather than emitted as `null`, so test presence with `has("tx")` / `has("program_id")` instead of branching on null — `tx` is always absent at the current LEZ pin, which exposes no deploy receipt. Discovery-path exit code is non-zero if any entry failed, and the object is still emitted so partial results stay inspectable.
 
 ## DOGFOODING Cross-Reference
 
@@ -182,5 +183,5 @@ When reproducing a failure, name the matching scenario in the bug report.
 - **Always** `lgs localnet stop` before any destructive reset; otherwise scaffold may leave a stale PID.
 - **Always** inspect `.scaffold/reports/*.tar.gz` (`tar -tzf <path>`) before sharing publicly. Sanitisation is best-effort, not absolute.
 - **Prefer** project-local binaries via `lgs wallet -- ...` and `lgs spel -- ...` over global installs. Nothing scaffold builds is added to PATH on purpose.
-- **Don't** assume `--json` is structured for every command; it's structured only where the table above says so (status, doctor, deploy w/ `--program-path`, basecamp doctor).
+- **Don't** assume `--json` is structured for every command; it's structured only where the table above says so (status, doctor, deploy, basecamp doctor) — and for `deploy`, read the shape off the code path you invoked.
 - Project-scoped commands run outside a project root produce a clear `Not a logos-scaffold project ...` error — don't try to work around it; `cd` into the project or `lgs init`.

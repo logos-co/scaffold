@@ -85,7 +85,7 @@ lgs deploy --program-path "<path>" --json
 JSON output shapes (FURPS Functionality #9):
 
 - `--program-path … --json` — bare object: `{"status":"submitted","program":...,"tx"?:...,"program_id"?:...}`. Absent values are omitted, not `null`.
-- Auto-discovery `--json` — silently accepted but ignored. (Use `lgs deploy <name> --program-path` if you need JSON for a single program.)
+- Auto-discovery `--json` (`lgs deploy` / `lgs deploy <name>`) — `{"deploys":[<entry>,...]}`, one entry per attempted program, each entry the same shape as above with `error` in place of `program_id` when that program failed. Exit code is non-zero if any entry failed; the object is still emitted.
 
 Failure modes:
 
@@ -191,4 +191,4 @@ Drop down to this `default` template when you need primitives the framework hasn
 - **Don't add Qt / UI / QML deps.** This template is for zk programs; UI work belongs in a separate Logos module project (different repo, different toolchain).
 - **Parent `Cargo.toml` should keep `methods/` excluded** from workspace members; `lgs build` handles its compilation separately.
 - **Don't hand-edit `target/` or `.scaffold/`**. Treat them as generated output.
-- **JSON deploys require `--program-path`.** Discovery-path `--json` is silently accepted; if you need structured output, deploy one program at a time.
+- **Read the `--json` shape off the deploy path you took.** `--program-path` gives a bare object; discovery gives `{"deploys":[…]}`. Both are structured — do not deploy one program at a time just to get JSON.

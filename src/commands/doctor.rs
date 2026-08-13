@@ -503,6 +503,12 @@ fn derive_next_steps(rows: &[CheckRow]) -> Vec<String> {
     let mut include_setup = false;
     let mut include_localnet_start = false;
     let mut include_wallet_home = false;
+    // Remediations that map to none of the canonical steps above (`Install
+    // `nix``, ``run `logos-scaffold basecamp setup``, …). Without these the
+    // list collapses to the trailing re-run step alone, i.e. "next step: run
+    // the command you just ran" — the check row carries the only actionable
+    // text and the section that exists to surface it says nothing.
+    let mut unmapped: Vec<String> = Vec::new();
 
     for row in rows {
         if !matches!(row.status, CheckStatus::Warn | CheckStatus::Fail) {
@@ -511,17 +517,28 @@ fn derive_next_steps(rows: &[CheckRow]) -> Vec<String> {
 
         has_warn_or_fail = true;
 
-        let remediation = row.remediation.as_deref().unwrap_or("");
+        let Some(remediation) = row.remediation.as_deref() else {
+            continue;
+        };
+        let mut mapped = false;
         if remediation.contains(STEP_SETUP) {
             include_setup = true;
+            mapped = true;
         }
         if remediation.contains(STEP_LOCALNET_START) {
             include_localnet_start = true;
+            mapped = true;
         }
         if remediation.contains(STEP_EXPORT_WALLET_HOME)
             || remediation.contains("NSSA_WALLET_HOME_DIR")
         {
             include_wallet_home = true;
+            mapped = true;
+        }
+        // Two rows can share one remediation (e.g. a missing tool reported by
+        // more than one check); emit it once.
+        if !mapped && !unmapped.iter().any(|seen| seen == remediation) {
+            unmapped.push(remediation.to_string());
         }
     }
 
@@ -535,6 +552,7 @@ fn derive_next_steps(rows: &[CheckRow]) -> Vec<String> {
     if include_wallet_home {
         out.push(STEP_EXPORT_WALLET_HOME.to_string());
     }
+    out.extend(unmapped);
     if has_warn_or_fail {
         out.push(STEP_DOCTOR.to_string());
     }
@@ -545,6 +563,77 @@ fn derive_next_steps(rows: &[CheckRow]) -> Vec<String> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn warn_row(name: &str, remediation: Option<&str>) -> CheckRow {
+        CheckRow {
+            status: CheckStatus::Warn,
+            name: name.to_string(),
+            detail: String::new(),
+            remediation: remediation.map(str::to_string),
+        }
+    }
+
+    /// A warn whose remediation is none of the three canonical steps used to
+    /// produce `["logos-scaffold doctor"]` and nothing else — telling the
+    /// reader to re-run the command that just printed the advice, while the
+    /// only actionable text sat in the check row. `basecamp doctor` on an
+    /// un-set-up project is the standing case: its sole warn remediates with
+    /// `basecamp setup`.
+    #[test]
+    fn next_steps_carry_a_remediation_that_maps_to_no_canonical_step() {
+        let steps = derive_next_steps(&[warn_row(
+            "basecamp state",
+            Some("run `logos-scaffold basecamp setup`"),
+        )]);
+        assert_eq!(
+            steps,
+            vec![
+                "run `logos-scaffold basecamp setup`".to_string(),
+                STEP_DOCTOR.to_string(),
+            ],
+            "an unmapped remediation must reach the next-steps list, not be dropped in favor of a bare re-run"
+        );
+    }
+
+    /// Canonical steps keep leading (they are the ordered recovery path);
+    /// unmapped remediations follow, deduplicated, and the re-run stays last.
+    #[test]
+    fn next_steps_keep_canonical_order_and_dedupe_unmapped_remediations() {
+        let steps = derive_next_steps(&[
+            warn_row("tool nix", Some("Install `nix`")),
+            warn_row(
+                "wallet usability",
+                Some(format!("Run `{STEP_LOCALNET_START}`, then `{STEP_DOCTOR}`").as_str()),
+            ),
+            warn_row("another nix consumer", Some("Install `nix`")),
+        ]);
+        assert_eq!(
+            steps,
+            vec![
+                STEP_LOCALNET_START.to_string(),
+                "Install `nix`".to_string(),
+                STEP_DOCTOR.to_string(),
+            ]
+        );
+    }
+
+    /// An all-clear report still yields no next steps, and a warn with no
+    /// remediation at all still yields the re-run only — neither path gains a
+    /// spurious entry from the unmapped branch.
+    #[test]
+    fn next_steps_stay_empty_when_every_check_passes() {
+        let pass = CheckRow {
+            status: CheckStatus::Pass,
+            name: "tool git".to_string(),
+            detail: "found".to_string(),
+            remediation: None,
+        };
+        assert!(derive_next_steps(&[pass]).is_empty());
+        assert_eq!(
+            derive_next_steps(&[warn_row("no advice", None)]),
+            vec![STEP_DOCTOR.to_string()]
+        );
+    }
 
     fn write_spel_cargo(spel_root: &std::path::Path, contents: &str) {
         let dir = spel_root.join("spel-cli");
