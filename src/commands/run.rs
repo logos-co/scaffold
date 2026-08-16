@@ -1201,6 +1201,14 @@ mod tests {
         // Integration-style assertion: every documented always-on env var
         // reaches the hook in a single shell invocation, in the same form
         // `cmd_run` would produce.
+        //
+        // The two skip flags belong here even though dedicated tests cover
+        // their *values* (`hook_receives_topup_skipped_env_for_multiprogram_run`
+        // and friends). README, FURPS, the ADR and DOGFOODING D7 all document
+        // them as always set / never absent — D7 calls an unset one the
+        // regression by itself — so the one test whose stated job is the
+        // contract *as a whole* has to enumerate them, or it drifts from the
+        // contract while every individual behavior stays guarded.
         let temp = tempfile::tempdir().expect("tempdir");
         let env_file = temp.path().join("env_out.txt");
         let project = make_test_project(temp.path().to_path_buf());
@@ -1212,6 +1220,8 @@ mod tests {
                 echo \"LEE_WALLET_HOME_DIR=$LEE_WALLET_HOME_DIR\"; \
                 echo \"SCAFFOLD_PROJECT_ROOT=$SCAFFOLD_PROJECT_ROOT\"; \
                 echo \"SCAFFOLD_IDL_DIR=$SCAFFOLD_IDL_DIR\"; \
+                echo \"SCAFFOLD_TOPUP_SKIPPED=$SCAFFOLD_TOPUP_SKIPPED\"; \
+                echo \"SCAFFOLD_DEPLOY_SKIPPED=$SCAFFOLD_DEPLOY_SKIPPED\"; \
             }} > '{}'",
             env_file.display()
         );
@@ -1244,6 +1254,18 @@ mod tests {
             lines[4].starts_with("SCAFFOLD_IDL_DIR=") && lines[4].ends_with("/idl"),
             "idl dir line was: {}",
             lines[4]
+        );
+        // `=0`, not merely "present": an empty value is what an unset variable
+        // expands to in the hook shell, so asserting the concrete not-skipped
+        // value is what distinguishes "scaffold reported the step ran" from
+        // "scaffold reported nothing".
+        assert_eq!(
+            lines[5], "SCAFFOLD_TOPUP_SKIPPED=0",
+            "topup-skip flag must be set, and 0 for this not-skipped run"
+        );
+        assert_eq!(
+            lines[6], "SCAFFOLD_DEPLOY_SKIPPED=0",
+            "deploy-skip flag must be set, and 0 for this not-skipped run"
         );
     }
 

@@ -3945,11 +3945,24 @@ mod tests {
     /// appends `modules/` and `plugins/` to it — so the exported value has to
     /// sit at exactly the depth `basecamp install` writes into, not one level
     /// above or below it. Every other `set_absolute_basecamp_data_dirs_*` test
-    /// asserts the two keys are *equal*; none of them would notice a
-    /// `basecamp_xdg_subpath` change that moved the shared value to the wrong
-    /// depth, which would load zero project modules while the suite stayed
-    /// green. This pins the value against `profile_modules_and_plugins`, the
-    /// one place the install layout lives.
+    /// asserts the two keys are *equal*, which would not notice a value at the
+    /// wrong depth: both keys move together, and the profile would load zero
+    /// project modules while the suite stayed green.
+    ///
+    /// Two independent things are pinned here, and they need different kinds of
+    /// assertion because they are different kinds of contract:
+    ///
+    ///   * **Exporter vs. installer** — the exported value must be the parent of
+    ///     the dirs `basecamp install` writes into. Both sides route through
+    ///     `basecamp_xdg_subpath`, so this catches a depth change in
+    ///     `set_absolute_module_root_var`'s join chain alone (either direction),
+    ///     which is the drift scaffold can introduce on its own.
+    ///   * **The shared value itself** — `Logos/LogosBasecamp` is basecamp
+    ///     0.2.x's `LogosBasecampPaths.h::baseDirectory()`, not something
+    ///     scaffold chooses. Because the exported path is *derived from*
+    ///     `BASECAMP_XDG_APP_SUBPATH_PORTABLE`, only a literal can pin it —
+    ///     asserting against the constant co-moves with the edit it is meant to
+    ///     catch and passes for `Logos/LogosBasecamp/WRONG_DEPTH`.
     #[test]
     fn set_absolute_basecamp_data_dirs_defaults_to_the_dir_install_writes_into() {
         let portable = repo_with_attr("bin-macos-app");
@@ -3976,9 +3989,19 @@ mod tests {
                 Some(exported.as_path()),
                 "{key} must be the parent of the plugins dir install writes into"
             );
+            // Literal, not `BASECAMP_XDG_APP_SUBPATH_PORTABLE`. `exported` is
+            // built *from* that constant via `basecamp_xdg_subpath`, so
+            // asserting against the constant moves in lockstep with the value
+            // it is meant to pin: setting it to `Logos/LogosBasecamp/WRONG_DEPTH`
+            // keeps this assertion — and the whole suite — green. The depth is
+            // basecamp 0.2.x's own `LogosBasecampPaths.h::baseDirectory()`, an
+            // upstream contract scaffold does not get to choose, so the
+            // expectation has to be spelled out rather than derived.
             assert!(
-                exported.ends_with(BASECAMP_XDG_APP_SUBPATH_PORTABLE),
-                "{key} must end in {BASECAMP_XDG_APP_SUBPATH_PORTABLE}, got: {}",
+                exported.ends_with("Logos/LogosBasecamp"),
+                "{key} must end in Logos/LogosBasecamp (basecamp 0.2.x's own \
+                 baseDirectory()); changing this is an upstream-contract change, \
+                 got: {}",
                 exported.display()
             );
         }

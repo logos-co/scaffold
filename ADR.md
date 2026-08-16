@@ -375,11 +375,16 @@ integration tests:
   that had to treat "unset" as "scaffold did it" could not distinguish that
   from an older scaffold that cannot report. Each is produced by the same
   expression that executes or skips its step, so what a hook is told cannot
-  drift from what ran. Neither has a per-program form — both describe the
-  run, not a program.
-- `SCAFFOLD_DEPLOY_SKIPPED_<name>` — per-program deploy outcome, alongside
-  `SCAFFOLD_PROGRAMS` / `SCAFFOLD_PROGRAM_ID_<name>` /
-  `SCAFFOLD_GUEST_BIN_<name>`.
+  drift from what ran. Both describe the run rather than a program;
+  `SCAFFOLD_TOPUP_SKIPPED` has no per-program form at all, and the deploy
+  one's suffixed spelling is not an independent per-program signal (below).
+- `SCAFFOLD_DEPLOY_SKIPPED_<name>` — the run-level `SCAFFOLD_DEPLOY_SKIPPED`
+  value repeated under each program's suffix, so the per-program family
+  (`SCAFFOLD_PROGRAMS` / `SCAFFOLD_PROGRAM_ID_<name>` /
+  `SCAFFOLD_GUEST_BIN_<name>`) stays parallel and a hook iterating
+  `$SCAFFOLD_PROGRAMS` never hits a missing var. Deploy is skipped for the
+  whole invocation or none of it, so every program's copy carries the same
+  value — do not read a per-program outcome into it.
 - `SCAFFOLD_PROGRAM_ID` / `SCAFFOLD_GUEST_BIN` — single-program shortcuts.
   Set only when exactly one program is deployable; absent for
   multi-program projects so hooks fail loudly rather than silently
