@@ -84,6 +84,10 @@ jobs:
       - name: Dry-run publish package
         run: cargo publish --dry-run --locked
 
+      - name: Drop cargo package staging dir
+        if: always()
+        run: rm -rf target/package
+
   publish:
     runs-on: ubuntu-latest
     needs:
@@ -179,3 +183,7 @@ jobs:
             echo "- version: ${RELEASE_VERSION}"
             echo "- status: ${status}"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Drop cargo package staging dir
+        if: always()
+        run: rm -rf target/package
