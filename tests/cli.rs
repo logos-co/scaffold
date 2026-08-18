@@ -1078,7 +1078,14 @@ fn localnet_start_fails_when_process_exits_before_ready() {
         .stderr(
             predicate::str::contains("sequencer process exited before becoming ready")
                 .or(predicate::str::contains("localnet start timed out after")),
-        );
+        )
+        // The fake sequencer above exits before writing a line, so the printed
+        // tail is `<no log output yet>` — the shape this failure takes in the
+        // wild when the spawned sequencer cannot bind the port. Without a next
+        // step the message is a dead end: every other `LocalnetError` carries
+        // one, and `localnet status` is what names the actual conflict.
+        .stderr(predicate::str::contains("<no log output yet>"))
+        .stderr(predicate::str::contains("logos-scaffold localnet status"));
 
     assert!(
         !temp.path().join(".scaffold/state/localnet.state").exists(),

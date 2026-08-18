@@ -64,10 +64,27 @@ pub(crate) enum LocalnetError {
     #[error("missing sequencer binary at {path}; run `logos-scaffold setup`")]
     MissingSequencerBinary { path: String },
 
-    #[error("sequencer process exited before becoming ready (pid={pid})\nlast logs:\n{log_tail}")]
+    // Both start failures carry a next step for the same reason: the log tail
+    // they print is frequently empty. A sequencer that dies during startup —
+    // the common case being a port it could not bind, which the pre-flight
+    // check can miss when a previous instance is still releasing the socket —
+    // exits before writing a line, so the user is left with
+    // `last logs:\n<no log output yet>` and nowhere to go. `localnet status`
+    // is the command that names the actual conflict (foreign listener, stale
+    // state, ownership), so it leads.
+    #[error(
+        "sequencer process exited before becoming ready (pid={pid})\nlast logs:\n{log_tail}\n\
+         Next: run `logos-scaffold localnet status` to check for a foreign listener or stale \
+         state on the port, then `logos-scaffold localnet logs --tail 200` for startup errors."
+    )]
     ExitedBeforeReady { pid: u32, log_tail: String },
 
-    #[error("localnet start timed out after {timeout_sec}s (pid={pid})\nlast logs:\n{log_tail}")]
+    #[error(
+        "localnet start timed out after {timeout_sec}s (pid={pid})\nlast logs:\n{log_tail}\n\
+         Next: run `logos-scaffold localnet status` to check for a foreign listener or stale \
+         state on the port, then `logos-scaffold localnet logs --tail 200` for startup errors. \
+         Raise `--timeout-sec` if the sequencer is merely slow to bind."
+    )]
     StartTimeout {
         timeout_sec: u64,
         pid: u32,

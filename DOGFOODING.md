@@ -300,7 +300,7 @@ If the scenario begins with localnet stopped, run `"$SCAFFOLD_BIN" localnet star
 ### Failure Signals / Common Pitfalls
 
 - Contradictions between tracked PID, listener ownership, and readiness are high-value findings.
-- Empty or unhelpful logs after a failed startup are worth recording.
+- Empty or unhelpful logs after a failed startup are worth recording. A sequencer that dies during startup — most often because it could not bind the port, which the pre-flight check can miss while a previous instance is still releasing the socket — exits before writing a line, so the tail reads `<no log output yet>`. That is expected; what the failure must still carry is a next step. Both `localnet start` failures name `logos-scaffold localnet status` (the command that identifies a foreign listener, stale state, or ownership) and `localnet logs --tail 200`; a start failure that ends at the empty tail with nowhere to go is the regression.
 - If `doctor` omits next steps or machine-readable output becomes malformed, treat that as a DX regression.
 
 ### Evidence to Capture
