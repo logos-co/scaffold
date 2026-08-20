@@ -169,11 +169,12 @@
 ### Supportability
 
 1. `logos-scaffold doctor` gains a basecamp section when `.scaffold/basecamp/` exists, covering binary presence, profile integrity, and installed-module state.
-2. Basecamp and `lgpm` pinned commits are explicit in `scaffold.toml`.
+2. Basecamp and `lgpm` pinned commits are explicit in `scaffold.toml`, and the defaults move as a set: scaffold's default `lgpm` rev is the one the pinned basecamp release locks, because the app embeds that same package-manager library to read what `lgpm` installed. An existing project keeps whatever it pinned until it edits both and re-runs `setup`.
 3. `.scaffold/state/basecamp.state` is plain-text and line-oriented, matching existing scaffold state conventions.
 4. Dogfooding scenarios (`B1`–`B4` in `DOGFOODING.md`) cover setup, single-instance, multi-instance p2p, and clean-slate behaviors.
 5. `build-portable`'s manual load-into-AppImage step is explicit: scaffold stages browsable symlinks under `.scaffold/basecamp/portable/` but does not know or auto-feed the AppImage's install dialog. The AppImage lifecycle is intentionally outside scaffold's scope — see ADR "AppImage Path is Outside Scaffold's Scope".
 6. Known limitation: multi-sub-flake projects must unify transitive `logos-module-builder` references via `inputs.<dep>.inputs.logos-module-builder.follows = "logos-module-builder"`. Without it, `install` can fail via the overridden sibling's lock even when a direct `nix build` succeeds. Documented fully in `docs/basecamp-module-requirements.md`; expected to become obsolete once upstream `logos-module-builder` scaffolding emits this `follows` automatically.
+9. Known limitation: modules must be packaged by `logos-module-builder` 0.2.x (or `nix-bundle-lgx`). The pinned `lgpm` validates package structure and Merkle content hashes on install, which tutorial-era `.lgx` files do not carry; `install` surfaces that as a targeted hint rather than a bare exit status. Scaffold deliberately does not pass `--allow-unsigned` to work around it — that would disable the same validation basecamp itself performs.
 7. Assumption notes from Usability 7 are printed to stderr (not the captured log), so pasting them into a bug report is straightforward.
 8. `scaffold.toml` diffs in version control surface module-identity changes as explicit, reviewable edits — same footing as any other project config change.
 
