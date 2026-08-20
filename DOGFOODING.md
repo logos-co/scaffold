@@ -1152,6 +1152,7 @@ If your project does not auto-discover correctly, capture explicit sources:
 - `basecamp doctor` reports each profile's installed modules matching the captured set; drift between `[modules]` and on-disk profile state is flagged, not hidden.
 - `basecamp paths <profile> --json` is pure path resolution: it emits parseable JSON for XDG config/data/cache, runtime dir, module/plugin dirs, launch state, log file, and env file without building or mutating anything.
 - Custom profile names launch like default profiles when they are a single safe path component; `env_file` is sourced before global/profile inline env, `runtime_dir` is exported as both `TMPDIR` and `XDG_RUNTIME_DIR`, and `--log-file` overrides the configured `log_file`.
+- With no configured `runtime_dir`, every profile still gets one: `basecamp paths <profile> --json` reports `tmpdir` == `xdg_runtime_dir` == `/tmp/lgs-<project-hash>-<profile>` (the hash scopes it to the project root, so two checkouts never share a temp root). This path is deliberately **outside** the project tree — `launch` leaves live `logos_token_*` Unix sockets in it, and `nix build path:<project-root>#lgx` refuses to copy a socket (`file ... has an unsupported type`). An in-project temp root therefore broke every `basecamp install` / `basecamp launch` after the first launch, and made concurrent `alice` / `bob` launches fail against each other's live sockets. A `tmpdir` that resolves under `<project>/.scaffold/` by default is that regression; so is any socket found by `find .scaffold -type s` after a launch.
 - `basecamp launch alice` kills any prior `logos_host` / `logos-basecamp` descendants for that profile, scrubs the profile's XDG dirs under `.scaffold/basecamp/profiles/alice/`, reinstalls each captured source for that profile, sets `XDG_{CONFIG,DATA,CACHE}_HOME` plus `LOGOS_PROFILE=alice`, and `exec`s basecamp.
 
 ### Failure Signals / Common Pitfalls
@@ -1283,7 +1284,8 @@ test -e .scaffold/basecamp/profiles/alice/.scaffold-xdg-data/scratch/marker.txt 
 - The `marker.txt` file surviving `launch alice` is a regression: clean-slate is the v1 contract.
 - A `launch` scrubbing a path outside the profile's XDG dirs is a severe safety regression — capture the offending path and stop.
 - An empty `[modules]` plus a `launch` that wipes the profile and leaves it empty is a real regression; the empty-modules bail must fire first.
-- A custom `runtime_dir` on macOS that makes `<runtime_dir>/logos_token_<module>_<pid>` exceed the 104-byte Unix socket path budget is a dogfooding finding; keep custom values short, preferably under `/tmp`.
+- A custom `runtime_dir` on macOS that makes `<runtime_dir>/logos_token_<module>_<pid>` exceed the 104-byte Unix socket path budget is a dogfooding finding; keep custom values short, preferably under `/tmp`. Note that a custom `runtime_dir` is resolved relative to the project root, so pointing it back inside the project re-creates the socket-in-the-flake-tree failure described in B2 — prefer an absolute path under `/tmp`.
+- `launch` scrubs `xdg-data`, `xdg-cache`, and the legacy in-profile `xdg-tmp`. The last one matters for profiles first launched by an older scaffold, which left sockets under `<profile>/xdg-tmp`; without that scrub such a project can never build its own root flake again.
 
 ### Evidence to Capture
 

@@ -894,10 +894,42 @@ fn resolve_profile_runtime_dir(
     {
         return Some(project_root.join(rt));
     }
-    if cfg!(target_os = "macos") {
-        return Some(PathBuf::from(format!("/tmp/lgs-{profile}")));
+    // Default: a short, project-scoped temp root OUTSIDE the project tree.
+    //
+    // It must live outside the project because a module project's flake is
+    // usually the project root itself, and `nix build path:<root>#lgx` copies
+    // that whole tree into the store. `launch` leaves a live `logos_token_*`
+    // Unix socket in the profile's temp dir, and nix refuses to copy a socket
+    // ("file ... has an unsupported type"), so an in-project temp root made
+    // every `basecamp install` / `basecamp launch` after the first launch fail
+    // — and made concurrent alice/bob launches (B3) fail against each other's
+    // live sockets, which no amount of scrubbing can fix.
+    //
+    // The project-root hash keeps two checkouts from sharing a temp root, and
+    // the whole path stays far below the macOS `sun_path == 104` budget that
+    // the long in-profile path could exceed.
+    Some(PathBuf::from(format!(
+        "/tmp/lgs-{}-{profile}",
+        project_root_tag(project_root)
+    )))
+}
+
+/// Short, stable tag for a project root — first 8 hex of the sha256 of its
+/// canonical path. Used to scope shared-temp paths per project.
+fn project_root_tag(project_root: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let canon = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let mut hasher = Sha256::new();
+    hasher.update(canon.as_os_str().as_encoded_bytes());
+    let digest = hasher.finalize();
+    use std::fmt::Write as _;
+    let mut tag = String::new();
+    for byte in &digest[..4] {
+        let _ = write!(tag, "{byte:02x}");
     }
-    None
+    tag
 }
 
 /// `lgs basecamp develop <module>` — enter a module's Nix dev shell.
@@ -1144,7 +1176,13 @@ fn scrub_profile_data_and_cache(project_root: &Path, profile_dir: &Path) -> DynR
             canon_safe.display()
         );
     }
-    for xdg in ["xdg-data", "xdg-cache"] {
+    for xdg in ["xdg-data", "xdg-cache", "xdg-tmp"] {
+        // `xdg-tmp` is the legacy in-profile temp root. Newly launched
+        // profiles get a temp root outside the project (see
+        // `resolve_profile_runtime_dir`), but a profile launched by an older
+        // scaffold still has stale `logos_token_*` sockets here — and any
+        // socket inside the project tree breaks `nix build path:<root>#...`.
+        // Scrubbing it lets such a project heal itself on the next launch.
         let dir = profile_dir.join(xdg);
         if dir.exists() {
             fs::remove_dir_all(&dir).with_context(|| format!("scrub {}", dir.display()))?;
@@ -4451,6 +4489,56 @@ mod tests {
             resolve_profile_runtime_dir(Path::new("/proj"), "alice", Some(&cfg)),
             Some(PathBuf::from("/proj/run/alice"))
         );
+    }
+
+    #[test]
+    fn default_runtime_dir_is_outside_the_project_tree() {
+        // Regression: the Linux default used to be the in-profile `xdg-tmp`.
+        // `launch` leaves Unix sockets there, and `nix build path:<root>#lgx`
+        // refuses to copy a socket, so every install/launch after the first
+        // one failed for a project-root flake.
+        let tmp = tempdir().expect("tempdir");
+        let root = tmp.path();
+        let rt = resolve_profile_runtime_dir(root, "alice", None)
+            .expect("a default runtime dir must resolve on every platform");
+        let canon_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        assert!(
+            !rt.starts_with(&canon_root),
+            "runtime dir {} must not live inside the project tree {}",
+            rt.display(),
+            canon_root.display()
+        );
+        assert!(rt.to_string_lossy().ends_with("-alice"), "got {}", rt.display());
+        // Short enough for the macOS sun_path == 104 budget with room for a
+        // `logos_token_<module>_<pid>` leaf.
+        assert!(rt.as_os_str().len() < 60, "got {}", rt.display());
+    }
+
+    #[test]
+    fn default_runtime_dir_is_project_scoped() {
+        let a = tempdir().expect("tempdir");
+        let b = tempdir().expect("tempdir");
+        assert_ne!(
+            resolve_profile_runtime_dir(a.path(), "alice", None),
+            resolve_profile_runtime_dir(b.path(), "alice", None),
+            "two project roots must not share a temp root"
+        );
+    }
+
+    #[test]
+    fn scrub_removes_legacy_in_profile_tmp_dir() {
+        // Projects launched by an older scaffold still carry sockets under
+        // `<profile>/xdg-tmp`; scrubbing lets them heal on the next launch.
+        let tmp = tempdir().expect("tempdir");
+        let root = tmp.path();
+        let profile_dir = root.join(".scaffold/basecamp/profiles/alice");
+        let legacy = profile_dir.join("xdg-tmp");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("logos_token_pkg"), b"x").unwrap();
+
+        scrub_profile_data_and_cache(root, &profile_dir).expect("scrub");
+
+        assert!(!legacy.exists(), "legacy xdg-tmp must be scrubbed");
     }
 
     #[test]
