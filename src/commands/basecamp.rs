@@ -2940,12 +2940,17 @@ pub(crate) fn compute_module_drift(project: &Project) -> DynResult<ModuleDriftRe
     )
     .unwrap_or_default();
 
+    // Compare on the normalized (absolutized) form. `basecamp modules`
+    // persists in-project sources relatively (`path:.#lgx`) so a committed
+    // scaffold.toml stays portable, while discovery yields the absolute
+    // `path:/abs/root#lgx`. Comparing the raw strings made every in-project
+    // flake look permanently uncaptured.
     let captured_flakes: std::collections::HashSet<String> = project
         .config
         .modules
         .values()
         .filter(|e| e.role == ModuleRole::Project)
-        .map(|e| e.flake.clone())
+        .map(|e| normalize_flake_ref(&project.root, &e.flake))
         .collect();
 
     let mut discovered_not_captured: Vec<BasecampSource> = discovered_project
@@ -4489,6 +4494,23 @@ mod tests {
             resolve_profile_runtime_dir(Path::new("/proj"), "alice", Some(&cfg)),
             Some(PathBuf::from("/proj/run/alice"))
         );
+    }
+
+    #[test]
+    fn captured_relative_flake_ref_normalizes_to_the_discovered_form() {
+        // Regression: `basecamp modules` persists in-project sources
+        // relatively (`path:.#lgx`) while discovery yields the absolute
+        // `path:/abs/root#lgx`. `compute_module_drift` compared the raw
+        // strings, so a captured project-root flake was reported as
+        // permanently "uncaptured" drift.
+        let tmp = tempdir().expect("tempdir");
+        let root = tmp.path();
+        let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let discovered = flake_ref(&BasecampSource::Flake(format!(
+            "path:{}#lgx",
+            canon.display()
+        )));
+        assert_eq!(normalize_flake_ref(root, "path:.#lgx"), discovered);
     }
 
     #[test]
