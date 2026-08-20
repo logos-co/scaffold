@@ -2915,7 +2915,17 @@ fn lgpm_install_hint(err: &anyhow::Error) -> Option<&'static str> {
         .map(|failed| format!("{}\n{}", failed.stderr, failed.stdout))
         .unwrap_or_else(|| err.to_string());
 
-    if text.contains("content hashes") || text.contains("Package validation failed") {
+    // Match the hash signal specifically, not the `Package validation failed:`
+    // prefix it happens to arrive under. That prefix is liblgx's banner for
+    // *every* structural rejection — a truncated archive, a bad variant tree,
+    // `Manifest: 'name' field is empty` — and answering all of them with "your
+    // package predates content hashes" points people at a rebuild that fixes
+    // nothing. Observed verbatim from the pinned `lgpm`:
+    //   Package validation failed: Missing content hashes in manifest
+    //   Package validation failed: Manifest: 'name' field is empty
+    // Only the first is a pin-set mismatch scaffold can explain; the rest are
+    // package bugs whose own stderr is already the better message.
+    if text.contains("content hashes") {
         // liblgx validates structure + Merkle content hashes on install, and
         // the CLI's default `warn` signature policy still runs that check.
         // Packages from pre-0.2 module tooling carry no hashes at all.
@@ -4247,6 +4257,27 @@ mod tests {
     fn lgpm_install_hint_is_silent_on_unrecognised_failures() {
         assert!(lgpm_install_hint(&lgpm_failure("Permission denied")).is_none());
         assert!(lgpm_install_hint(&anyhow!("no such file or directory")).is_none());
+    }
+
+    /// `Package validation failed:` is liblgx's banner for every structural
+    /// rejection, not a hash-specific signal — the pinned `lgpm` emits it
+    /// verbatim for a malformed manifest too. Keying the hash hint on the
+    /// banner told the author of a broken package to rebuild with newer
+    /// tooling, which fixes nothing and buries the real message.
+    #[test]
+    fn lgpm_install_hint_does_not_blame_hashes_for_other_validation_failures() {
+        // Both strings observed from the pinned lgpm rev against a real `.lgx`.
+        let unrelated = lgpm_failure("Package validation failed: Manifest: 'name' field is empty");
+        assert!(
+            lgpm_install_hint(&unrelated).is_none(),
+            "a non-hash validation failure must fall through to lgpm's own stderr"
+        );
+
+        let hashes = lgpm_failure("Package validation failed: Missing content hashes in manifest");
+        assert!(
+            lgpm_install_hint(&hashes).is_some_and(|h| h.contains("logos-module-builder")),
+            "the hash failure must still be recognised"
+        );
     }
 
     /// A split pin pair is the one state that silently breaks: the CLI writes
