@@ -448,6 +448,14 @@ fn cmd_basecamp_launch(
         bail!("no modules captured — run `logos-scaffold basecamp modules` before launching.");
     }
 
+    // Same fail-fast reasoning as the bail above: prepare the runtime dir
+    // before the scrub + reinstall, not after. A hostile or unusable one is
+    // then reported in milliseconds instead of after a multi-minute nix
+    // build, and without having already wiped the profile.
+    let runtime_dir =
+        resolve_profile_runtime_dir(&project.root, &profile, project.config.basecamp.as_ref());
+    ensure_private_runtime_dir(&runtime_dir)?;
+
     // Pre-seed in case a prior crash between scrub and re-seed left the profile
     // without its xdg subdirs; scrub assumes both exist. seed_profiles is
     // idempotent and cheap.
@@ -491,10 +499,6 @@ fn cmd_basecamp_launch(
         }
     }
 
-    let runtime_dir =
-        resolve_profile_runtime_dir(&project.root, &profile, project.config.basecamp.as_ref());
-    fs::create_dir_all(&runtime_dir)
-        .with_context(|| format!("create runtime dir {}", runtime_dir.display()))?;
     let mut env = launch_env(&profile_dir, &profile, &runtime_dir);
     // Layer scaffold.toml-declared launch env on top of the scaffold-owned
     // base (#163): [basecamp.env_append] path joins, then the per-profile
@@ -902,6 +906,77 @@ fn resolve_profile_runtime_dir(
         "/tmp/lgs-{}-{profile}",
         project_root_tag(project_root)
     ))
+}
+
+/// Create the per-profile runtime dir as a private (0700) directory we own.
+///
+/// The default runtime dir lives under `/tmp`, which is world-writable, and
+/// its name is derived from the project path rather than a secret — so another
+/// local user can pre-create it and wait. The sticky bit stops them removing a
+/// dir we already own, but not claiming the name first. Whatever ends up there
+/// holds the modules' `logos_token_*` sockets, so a hostile or merely
+/// world-readable dir means another user can reach a running module.
+///
+/// Three cases:
+/// - Missing: create it with 0700 already set, so there is no window in which
+///   it exists with umask-derived permissions.
+/// - Ours: tighten to 0700 if the mode is loose.
+/// - Someone else's: `set_permissions` fails with `EPERM`, which is the
+///   ownership check — no `libc::getuid` needed.
+///
+/// A symlink is rejected outright rather than followed, so a pre-planted link
+/// cannot redirect the sockets somewhere else.
+fn ensure_private_runtime_dir(dir: &Path) -> DynResult<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    match fs::symlink_metadata(dir) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                bail!(
+                    "refusing to use runtime dir {} — it is a symlink. Remove it, or point \
+                     `[basecamp.profiles.<profile>].runtime_dir` somewhere you control.",
+                    dir.display()
+                );
+            }
+            if !meta.is_dir() {
+                bail!(
+                    "refusing to use runtime dir {} — it exists but is not a directory.",
+                    dir.display()
+                );
+            }
+            if meta.permissions().mode() & 0o077 != 0 {
+                fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).with_context(|| {
+                    format!(
+                        "cannot restrict permissions on runtime dir {} — it is owned by another \
+                         user. Remove it, or set `[basecamp.profiles.<profile>].runtime_dir`.",
+                        dir.display()
+                    )
+                })?;
+            }
+        }
+        Err(_) => {
+            if let Some(parent) = dir.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create {}", parent.display()))?;
+            }
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(dir)
+                .with_context(|| format!("create runtime dir {}", dir.display()))?;
+        }
+    }
+
+    // Re-check after the fact: a racing swap between the stat above and the
+    // chmod would otherwise go unnoticed.
+    let meta =
+        fs::symlink_metadata(dir).with_context(|| format!("stat runtime dir {}", dir.display()))?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        bail!(
+            "runtime dir {} changed type while being prepared — refusing to launch.",
+            dir.display()
+        );
+    }
+    Ok(())
 }
 
 /// Short, stable tag for a project root — first 8 hex of the sha256 of its
@@ -4571,6 +4646,64 @@ mod tests {
             canon.display()
         )));
         assert_eq!(normalize_flake_ref(root, "path:.#lgx"), discovered);
+    }
+
+    #[test]
+    fn ensure_private_runtime_dir_creates_it_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempdir().expect("tempdir");
+        let dir = tmp.path().join("rt");
+        ensure_private_runtime_dir(&dir).expect("create");
+        let mode = fs::metadata(&dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "got {:o}", mode & 0o777);
+    }
+
+    #[test]
+    fn ensure_private_runtime_dir_tightens_loose_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempdir().expect("tempdir");
+        let dir = tmp.path().join("rt");
+        fs::create_dir_all(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();
+
+        ensure_private_runtime_dir(&dir).expect("tighten");
+
+        let mode = fs::metadata(&dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0, "group/other bits survived: {:o}", mode);
+    }
+
+    #[test]
+    fn ensure_private_runtime_dir_rejects_a_symlink() {
+        // A pre-planted symlink in world-writable /tmp must not be followed —
+        // it would redirect the modules' `logos_token_*` sockets.
+        let tmp = tempdir().expect("tempdir");
+        let target = tmp.path().join("elsewhere");
+        fs::create_dir_all(&target).unwrap();
+        let link = tmp.path().join("rt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = ensure_private_runtime_dir(&link).expect_err("symlink must be rejected");
+        assert!(err.to_string().contains("symlink"), "got: {err}");
+    }
+
+    #[test]
+    fn ensure_private_runtime_dir_rejects_a_non_directory() {
+        let tmp = tempdir().expect("tempdir");
+        let file = tmp.path().join("rt");
+        fs::write(&file, b"x").unwrap();
+
+        let err = ensure_private_runtime_dir(&file).expect_err("file must be rejected");
+        assert!(err.to_string().contains("not a directory"), "got: {err}");
+    }
+
+    #[test]
+    fn ensure_private_runtime_dir_is_idempotent() {
+        let tmp = tempdir().expect("tempdir");
+        let dir = tmp.path().join("rt");
+        ensure_private_runtime_dir(&dir).expect("first");
+        fs::write(dir.join("logos_token_x"), b"x").unwrap();
+        ensure_private_runtime_dir(&dir).expect("second");
+        assert!(dir.join("logos_token_x").exists(), "must not wipe contents");
     }
 
     #[test]
