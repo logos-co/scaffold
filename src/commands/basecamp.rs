@@ -3028,6 +3028,59 @@ fn push_basecamp_doctor_rows(project: &Project, rows: &mut Vec<crate::model::Che
 
     let profiles_root = project.root.join(BASECAMP_PROFILES_REL);
     let basecamp_repo = project.config.basecamp_repo.as_ref();
+
+    // Setup-level rows: the two binaries `basecamp setup` builds and the two
+    // profiles it seeds. Without these a green `setup` produced a doctor with
+    // no PASS rows at all, so a user had no way to confirm setup actually
+    // landed before moving on to `modules` / `install`.
+    for (label, recorded) in [
+        ("basecamp binary", state.basecamp_bin.as_str()),
+        ("lgpm binary", state.lgpm_bin.as_str()),
+    ] {
+        if recorded.is_empty() {
+            rows.push(CheckRow {
+                status: CheckStatus::Fail,
+                name: label.to_string(),
+                detail: "not recorded in .scaffold/state/basecamp.state".to_string(),
+                remediation: Some("run `logos-scaffold basecamp setup`".to_string()),
+            });
+        } else if Path::new(recorded).exists() {
+            rows.push(CheckRow {
+                status: CheckStatus::Pass,
+                name: label.to_string(),
+                detail: format!("found {recorded}"),
+                remediation: None,
+            });
+        } else {
+            rows.push(CheckRow {
+                status: CheckStatus::Fail,
+                name: label.to_string(),
+                detail: format!("recorded at {recorded} but the path is missing"),
+                remediation: Some(
+                    "run `logos-scaffold basecamp setup` to rebuild it".to_string(),
+                ),
+            });
+        }
+    }
+
+    for profile in [BASECAMP_PROFILE_ALICE, BASECAMP_PROFILE_BOB] {
+        let profile_dir = profiles_root.join(profile);
+        if profile_dir.is_dir() {
+            rows.push(CheckRow {
+                status: CheckStatus::Pass,
+                name: format!("basecamp profile {profile}"),
+                detail: format!("seeded at {}", profile_dir.display()),
+                remediation: None,
+            });
+        } else {
+            rows.push(CheckRow {
+                status: CheckStatus::Fail,
+                name: format!("basecamp profile {profile}"),
+                detail: format!("missing {}", profile_dir.display()),
+                remediation: Some("run `logos-scaffold basecamp setup`".to_string()),
+            });
+        }
+    }
     let alice_modules = profiles_root
         .join(BASECAMP_PROFILE_ALICE)
         .join("xdg-data")
