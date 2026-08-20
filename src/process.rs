@@ -632,7 +632,9 @@ pub(crate) fn spawn_to_log(cmd: &mut Command, log_path: &Path) -> DynResult<u32>
     }
     let file = File::create(log_path)?;
     let err_file = file.try_clone()?;
-    cmd.stdin(Stdio::null()).stdout(Stdio::from(file)).stderr(Stdio::from(err_file));
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::from(file))
+        .stderr(Stdio::from(err_file));
 
     // Daemonize: detach from parent process group so the sequencer
     // survives shell/tmux session closure

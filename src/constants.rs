@@ -136,6 +136,23 @@ pub(crate) const BASECAMP_AUTODISCOVER_SKIP_SUBDIRS: &[&str] =
 pub(crate) const BASECAMP_XDG_APP_SUBPATH_DEV: &str = "Logos/LogosBasecampDev";
 pub(crate) const BASECAMP_XDG_APP_SUBPATH_PORTABLE: &str = "Logos/LogosBasecamp";
 
+/// The 0.1.x dev (`#app`) launcher and the binary it `exec`s.
+///
+/// Neither basecamp generation wraps its Qt binary in place (`wrapQtApps` is
+/// skipped so the process name stays `LogosBasecamp` for the macOS Dock), so a
+/// `/bin/sh` launcher is what exports `QT_PLUGIN_PATH` / `QML2_IMPORT_PATH` /
+/// `LD_LIBRARY_PATH`. The generations disagree on which *name* is the launcher:
+/// 0.1.x installs `bin/logos-basecamp` next to the raw `bin/LogosBasecamp`,
+/// while 0.2.x installs no `logos-basecamp` at all and makes `bin/LogosBasecamp`
+/// itself the launcher (over a hidden `bin/.LogosBasecamp`).
+///
+/// Two call sites depend on that pair and must not drift apart:
+/// `resolve_basecamp_binary` probes the launcher first so a 0.1.x pin is never
+/// started as an unwrapped binary, and `basecamp_comm_candidates` maps the
+/// launcher name onto the name the live process actually reports.
+pub(crate) const BASECAMP_BIN_LAUNCHER_V01: &str = "logos-basecamp";
+pub(crate) const BASECAMP_BIN_V01_TARGET: &str = "LogosBasecamp";
+
 /// Env vars naming basecamp's data-tree root, i.e. the directory it loads user
 /// modules and UI plugins from. Basecamp 0.2.x renamed the override to
 /// `LOGOS_USER_DIR` (`LogosBasecampPaths.h::baseDirectory()`) and dropped the

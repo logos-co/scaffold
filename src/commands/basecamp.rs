@@ -13,11 +13,12 @@ use crate::config::{default_basecamp_repo, default_lgpm_repo};
 use crate::constants::{
     BASECAMP_ATTR, BASECAMP_AUTODISCOVER_SKIP_SUBDIRS, BASECAMP_BASE_DIR_LOGS,
     BASECAMP_BASE_DIR_MODULES, BASECAMP_BASE_DIR_MODULE_DATA, BASECAMP_BASE_DIR_PLUGINS,
-    BASECAMP_DEPENDENCIES, BASECAMP_MODULE_ROOT_ENV_VAR_DATA_DIR,
-    BASECAMP_MODULE_ROOT_ENV_VAR_USER_DIR, BASECAMP_PORTABLE_ATTRS, BASECAMP_PREINSTALLED_MODULES,
-    BASECAMP_PROFILES_REL, BASECAMP_PROFILE_ALICE, BASECAMP_PROFILE_BOB, BASECAMP_SOURCE,
-    BASECAMP_XDG_APP_SUBPATH_DEV, BASECAMP_XDG_APP_SUBPATH_PORTABLE, DEFAULT_BASECAMP_PIN,
-    DEFAULT_LGPM_PIN, LGPM_ATTR, LGPM_ATTR_PORTABLE, LGPM_SOURCE,
+    BASECAMP_BIN_LAUNCHER_V01, BASECAMP_BIN_V01_TARGET, BASECAMP_DEPENDENCIES,
+    BASECAMP_MODULE_ROOT_ENV_VAR_DATA_DIR, BASECAMP_MODULE_ROOT_ENV_VAR_USER_DIR,
+    BASECAMP_PORTABLE_ATTRS, BASECAMP_PREINSTALLED_MODULES, BASECAMP_PROFILES_REL,
+    BASECAMP_PROFILE_ALICE, BASECAMP_PROFILE_BOB, BASECAMP_SOURCE, BASECAMP_XDG_APP_SUBPATH_DEV,
+    BASECAMP_XDG_APP_SUBPATH_PORTABLE, DEFAULT_BASECAMP_PIN, DEFAULT_LGPM_PIN, LGPM_ATTR,
+    LGPM_ATTR_PORTABLE, LGPM_SOURCE,
 };
 use crate::model::{
     BasecampConfig, BasecampSource, BasecampState, ModuleEntry, ModuleRole, Project, RepoBuild,
@@ -341,22 +342,34 @@ fn build_lgpm(project_root: &Path, out_dir: &Path, flake_ref: &str) -> DynResult
 }
 
 fn resolve_basecamp_binary(app_link: &Path) -> DynResult<PathBuf> {
-    // Dev (`#app`) layout:
-    //   - 0.2.x: bin/LogosBasecamp — a /bin/sh wrapper that sets Qt env and
-    //     execs the sibling bin/.LogosBasecamp. Every platform gets it, so the
-    //     dev stack is CLI-invocable on macOS too (it was not under 0.1.x).
-    //   - 0.1.x: bin/logos-basecamp launcher script alongside bin/LogosBasecamp.
-    // Portable bundle layouts:
+    // Both generations ship a `/bin/sh` launcher that exports `QT_PLUGIN_PATH`,
+    // `QML2_IMPORT_PATH` and `LD_LIBRARY_PATH` before exec'ing the real binary —
+    // neither build wraps the Qt app itself (`wrapQtApps` is skipped so the
+    // process name stays `LogosBasecamp` for the macOS Dock). Launching the raw
+    // binary instead of its launcher starts an app that cannot find its Qt
+    // platform plugin or QML imports, so which name we pick is not cosmetic.
+    //
+    // The catch is that the two generations give the launcher *different* names,
+    // and each generation's launcher name is the other's raw binary:
+    //
+    //   path                  | 0.1.x `#app`     | 0.2.x dev `#app`    | 0.2.x portable
+    //   ----------------------|------------------|---------------------|----------------
+    //   bin/logos-basecamp    | launcher         | absent              | absent
+    //   bin/LogosBasecamp     | raw binary       | launcher (execs     | raw binary
+    //                         |                  | bin/.LogosBasecamp) | (bundle sets Qt)
+    //
+    // `bin/logos-basecamp` therefore goes first: it exists *only* on 0.1.x, so
+    // it can never shadow a 0.2.x build, and when it does exist it is the only
+    // correct entry point. Probing `bin/LogosBasecamp` ahead of it would silently
+    // pick 0.1.x's unwrapped binary — the app comes up with no Qt environment.
+    //
+    // Portable bundle layouts (no launcher; the bundle supplies Qt paths):
     //   - bin/LogosBasecamp (Linux portable / AppImage internals, bin-bundle-dir)
     //   - LogosBasecamp.app/Contents/MacOS/LogosBasecamp (macOS bin-macos-app)
-    //
-    // `bin/LogosBasecamp` is probed first because it is the entry point on both
-    // generations and on every stack; `bin/logos-basecamp` stays as the 0.1.x
-    // fallback for a build result that somehow lacks the canonical name.
     for rel in [
-        "bin/LogosBasecamp",
-        "LogosBasecamp.app/Contents/MacOS/LogosBasecamp",
-        "bin/logos-basecamp",
+        &format!("bin/{BASECAMP_BIN_LAUNCHER_V01}"),
+        &format!("bin/{BASECAMP_BIN_V01_TARGET}"),
+        &format!("{BASECAMP_BIN_V01_TARGET}.app/Contents/MacOS/{BASECAMP_BIN_V01_TARGET}"),
         "bin/basecamp",
     ] {
         let candidate = app_link.join(rel);
@@ -1379,9 +1392,9 @@ fn write_launch_pid(path: &Path, pid: u32) -> DynResult<()> {
 /// Matching only the resolved basename therefore misses the wrapper cases, and
 /// the miss is silent: `launch` skips the kill and the previous instance keeps
 /// the profile's sockets and ports while a second one starts. So the candidate
-/// set is the basename plus its dot-prefixed twin, which covers the
-/// hide-the-real-binary convention without loosening the comparison to a
-/// prefix match.
+/// set is the basename plus every name a launcher of that basename is known to
+/// `exec` — the two hide-the-real-binary conventions upstream uses — rather
+/// than loosening the comparison to a prefix match.
 fn basecamp_comm_candidates(basecamp_bin: &str) -> Vec<String> {
     let base = Path::new(basecamp_bin)
         .file_name()
@@ -1389,14 +1402,24 @@ fn basecamp_comm_candidates(basecamp_bin: &str) -> Vec<String> {
         .unwrap_or("basecamp");
     let truncate = |s: &str| -> String { s.chars().take(15).collect() };
     let mut candidates = vec![truncate(base)];
+    let mut add = |name: String| {
+        if !name.is_empty() && !candidates.contains(&name) {
+            candidates.push(name);
+        }
+    };
     // A dotted resolved name (we execed the hidden binary directly) needs the
     // undotted twin instead; anything else needs the dotted one added.
-    let twin = match base.strip_prefix('.') {
-        Some(undotted) => truncate(undotted),
-        None => truncate(&format!(".{base}")),
-    };
-    if !twin.is_empty() && !candidates.contains(&twin) {
-        candidates.push(twin);
+    match base.strip_prefix('.') {
+        Some(undotted) => add(truncate(undotted)),
+        None => add(truncate(&format!(".{base}"))),
+    }
+    // The 0.1.x indirection is a *rename*, not a dot: `bin/logos-basecamp`
+    // execs its sibling `bin/LogosBasecamp`, so the live process reports a name
+    // that shares no prefix with what we execed. Without this the kill path
+    // silently no-ops on every 0.1.x-pinned project — the same defect the
+    // dotted twin fixes for 0.2.x, which the dot rule alone does not cover.
+    if base == BASECAMP_BIN_LAUNCHER_V01 {
+        add(truncate(BASECAMP_BIN_V01_TARGET));
     }
     candidates
 }
@@ -3440,8 +3463,14 @@ fn describe_pin_set(
 ) -> (crate::model::CheckStatus, String, Option<String>) {
     use crate::model::CheckStatus;
 
-    let basecamp_default = basecamp_pin == DEFAULT_BASECAMP_PIN;
-    let lgpm_default = lgpm_pin == DEFAULT_LGPM_PIN;
+    // An empty pin is not a third state: `setup` fills an unset or blank pin
+    // with the scaffold default (see `cmd_basecamp_setup`), so the *effective*
+    // pin of a project missing `[repos.lgpm]` is `DEFAULT_LGPM_PIN`. Reading
+    // blank as "not at the default" would warn about a split pair on a project
+    // whose two effective pins are exactly the matched defaults — the row is
+    // meant to catch a half-finished bump, not a section a user never wrote.
+    let basecamp_default = basecamp_pin.is_empty() || basecamp_pin == DEFAULT_BASECAMP_PIN;
+    let lgpm_default = lgpm_pin.is_empty() || lgpm_pin == DEFAULT_LGPM_PIN;
     let short = |pin: &str| -> String {
         if pin.is_empty() {
             "(unset)".to_string()
@@ -4257,14 +4286,43 @@ mod tests {
         }
     }
 
-    /// An unpinned project (no `[repos.*]` sections yet) reads as "away from
-    /// the defaults" rather than as a split pair — `setup` fills both in.
+    /// An unpinned project (no `[repos.*]` sections yet) reads as "at the
+    /// defaults" rather than as a split pair — `setup` fills both in.
     #[test]
     fn describe_pin_set_does_not_warn_before_setup_has_filled_the_pins() {
         use crate::model::CheckStatus;
         let (status, detail, _) = describe_pin_set("", "");
         assert_eq!(status, CheckStatus::Pass);
         assert!(detail.contains("(unset)"), "got: {detail}");
+    }
+
+    /// One pin written and the other absent is the *same* pin set as both
+    /// written, because `setup` resolves a blank pin to the scaffold default.
+    /// Warning here sent a user to "fix" a split that does not exist — and the
+    /// remediation told them to re-run `setup`, which would change nothing.
+    #[test]
+    fn describe_pin_set_treats_a_missing_section_as_the_default_not_a_split() {
+        use crate::model::CheckStatus;
+
+        for (basecamp, lgpm) in [(DEFAULT_BASECAMP_PIN, ""), ("", DEFAULT_LGPM_PIN)] {
+            let (status, detail, remediation) = describe_pin_set(basecamp, lgpm);
+            assert_eq!(
+                status,
+                CheckStatus::Pass,
+                "an unwritten section is not a split pair (basecamp={basecamp:?}, lgpm={lgpm:?}), \
+                 got: {detail}"
+            );
+            assert!(
+                remediation.is_none(),
+                "nothing to remediate: {remediation:?}"
+            );
+        }
+
+        // ...but a pin explicitly moved to some *other* rev still warns: that
+        // is the half-finished bump the row exists to catch.
+        let other = "0123456789012345678901234567890123456789";
+        let (status, _, _) = describe_pin_set(DEFAULT_BASECAMP_PIN, other);
+        assert_eq!(status, CheckStatus::Warn, "a real split must still warn");
     }
 
     #[test]
@@ -5306,6 +5364,64 @@ mod tests {
         );
     }
 
+    fn touch_exe(root: &Path, rel: &str) {
+        let p = root.join(rel);
+        fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+        fs::write(&p, "#!/bin/sh\n").expect("write");
+    }
+
+    /// Neither generation wraps the Qt app itself, so the launcher script is
+    /// what exports `QT_PLUGIN_PATH` / `QML2_IMPORT_PATH` / `LD_LIBRARY_PATH`.
+    /// The generations disagree on its *name*, and each one's launcher name is
+    /// the other one's raw binary:
+    ///
+    ///   * 0.1.x `#app` ships `bin/logos-basecamp` (launcher) **and**
+    ///     `bin/LogosBasecamp` (the unwrapped binary).
+    ///   * 0.2.x `#app` ships no `bin/logos-basecamp` at all; there
+    ///     `bin/LogosBasecamp` *is* the launcher.
+    ///
+    /// So `bin/logos-basecamp` has to be probed first. It cannot shadow a 0.2.x
+    /// build (it does not exist there), and demoting it silently picks 0.1.x's
+    /// unwrapped binary — an app launched with no Qt environment, which fails
+    /// to find its platform plugin rather than failing here where we could say
+    /// why.
+    #[test]
+    fn resolve_basecamp_binary_prefers_each_generations_qt_launcher() {
+        // 0.1.x: both names present, launcher must win.
+        let v01 = tempdir().expect("tempdir");
+        touch_exe(v01.path(), "bin/logos-basecamp");
+        touch_exe(v01.path(), "bin/LogosBasecamp");
+        assert_eq!(
+            resolve_basecamp_binary(v01.path()).expect("0.1.x resolves"),
+            v01.path().join("bin/logos-basecamp"),
+            "0.1.x must launch through its `logos-basecamp` launcher, not the raw binary"
+        );
+
+        // 0.2.x dev: no `logos-basecamp`; `LogosBasecamp` is itself the wrapper
+        // and the hidden `.LogosBasecamp` must never be selected directly.
+        let v02 = tempdir().expect("tempdir");
+        touch_exe(v02.path(), "bin/LogosBasecamp");
+        touch_exe(v02.path(), "bin/.LogosBasecamp");
+        assert_eq!(
+            resolve_basecamp_binary(v02.path()).expect("0.2.x resolves"),
+            v02.path().join("bin/LogosBasecamp"),
+            "0.2.x must launch the wrapper that execs the hidden binary"
+        );
+
+        // macOS portable bundle: only the `.app` payload exists.
+        let mac = tempdir().expect("tempdir");
+        touch_exe(mac.path(), "LogosBasecamp.app/Contents/MacOS/LogosBasecamp");
+        assert_eq!(
+            resolve_basecamp_binary(mac.path()).expect("bundle resolves"),
+            mac.path()
+                .join("LogosBasecamp.app/Contents/MacOS/LogosBasecamp"),
+        );
+
+        // Nothing recognisable: a named error, not a silent empty path.
+        let empty = tempdir().expect("tempdir");
+        assert!(resolve_basecamp_binary(empty.path()).is_err());
+    }
+
     /// Basecamp 0.2.x's dev build installs `bin/LogosBasecamp` as a shell
     /// wrapper that `exec`s the hidden `bin/.LogosBasecamp`, so the process
     /// `launch` records reports the dotted name even though we execed the
@@ -5325,6 +5441,32 @@ mod tests {
         assert!(
             from_hidden.iter().any(|c| c == "LogosBasecamp"),
             "the launcher name must be a candidate, got: {from_hidden:?}"
+        );
+    }
+
+    /// The 0.1.x launcher renames rather than dot-hides: `bin/logos-basecamp`
+    /// execs `bin/LogosBasecamp`, so the live process reports a name sharing no
+    /// prefix with the path `launch` execed. The dotted-twin rule cannot reach
+    /// it, and without the mapping `pid_comm_matches` never matches — `launch`
+    /// skips the kill and a 0.1.x-pinned project silently accumulates a second
+    /// instance on the same profile.
+    #[test]
+    fn basecamp_comm_candidates_cover_the_0_1_x_launcher_rename() {
+        let candidates = basecamp_comm_candidates("/nix/store/xyz/bin/logos-basecamp");
+        assert!(
+            candidates.iter().any(|c| c == "LogosBasecamp"),
+            "the 0.1.x launcher's exec target must be a candidate, got: {candidates:?}"
+        );
+        assert!(
+            candidates.iter().any(|c| c == "logos-basecamp"),
+            "the launcher's own name must stay a candidate, got: {candidates:?}"
+        );
+        // The mapping is one-directional and name-specific: an unrelated binary
+        // must not inherit basecamp's exec target.
+        let unrelated = basecamp_comm_candidates("/x/some-other-app");
+        assert!(
+            !unrelated.iter().any(|c| c == "LogosBasecamp"),
+            "mapping must not leak onto unrelated names, got: {unrelated:?}"
         );
     }
 
