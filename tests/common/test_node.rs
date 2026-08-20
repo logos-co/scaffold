@@ -141,7 +141,7 @@ PY
 fn write_scaffold_toml(project_root: &Path, lez_path: &Path) {
     let spel_path = project_root.join("spel");
     let content = format!(
-        "[scaffold]\nversion = \"0.2.0\"\ncache_root = \"{}\"\n\n[repos.lez]\nsource = \"https://github.com/logos-blockchain/logos-execution-zone.git\"\npin = \"{}\"\npath = \"{}\"\n\n[repos.spel]\nsource = \"https://github.com/logos-co/spel.git\"\npin = \"{}\"\npath = \"{}\"\n\n[wallet]\nhome_dir = \".scaffold/wallet\"\n",
+        "[scaffold]\nversion = \"0.3.0\"\ncache_root = \"{}\"\n\n[repos.lez]\nsource = \"https://github.com/logos-blockchain/logos-execution-zone.git\"\npin = \"{}\"\npath = \"{}\"\n\n[repos.spel]\nsource = \"https://github.com/logos-co/spel.git\"\npin = \"{}\"\npath = \"{}\"\n\n[wallet]\nhome_dir = \".scaffold/wallet\"\n",
         project_root.join("cache").display(),
         TEST_PIN,
         lez_path.display(),

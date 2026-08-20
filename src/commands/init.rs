@@ -13,7 +13,7 @@ use crate::constants::{
     DEFAULT_FRAMEWORK_VERSION, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL, FRAMEWORK_KIND_DEFAULT,
     SCAFFOLD_TOML_SCHEMA_VERSION,
 };
-use crate::migrate::migrate_to_v0_2_0;
+use crate::migrate::migrate;
 use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RunConfig};
 use crate::state::write_text_atomic;
 use crate::template::project::ensure_scaffold_in_gitignore;
@@ -46,7 +46,7 @@ pub(crate) fn cmd_init_at(
             )
         })?;
 
-        let report = migrate_to_v0_2_0(&mut doc)?;
+        let report = migrate(&mut doc)?;
         let migrated = !report.changes.is_empty();
 
         if migrated {
@@ -165,7 +165,7 @@ pub(crate) fn cmd_init_at(
         return Ok(());
     }
 
-    // Fresh init — schema 0.2.0 by construction. Create the .scaffold/
+    // Fresh init — current schema by construction. Create the .scaffold/
     // directories first so that a failure here leaves no scaffold.toml
     // behind and a re-run starts cleanly.
     let cfg = fresh_default_config();
@@ -245,7 +245,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn init_writes_parseable_v0_2_0_scaffold_toml() {
+    fn init_writes_parseable_current_schema_scaffold_toml() {
         let temp = tempdir().expect("tempdir");
         let target = temp.path();
         cmd_init_at(target, "lgs", false, false).expect("init");
@@ -254,6 +254,10 @@ mod tests {
         let cfg = parse_config(&text).expect("parse scaffold.toml");
 
         assert_eq!(cfg.version, SCAFFOLD_TOML_SCHEMA_VERSION);
+        assert!(
+            text.contains(r#"version = "0.3.0""#),
+            "fresh init must stamp the current schema version; got:\n{text}"
+        );
         assert_eq!(cfg.lez.pin, DEFAULT_LEZ.sha);
         assert_eq!(cfg.spel.pin, DEFAULT_SPEL.sha);
         assert_eq!(cfg.framework.kind, FRAMEWORK_KIND_DEFAULT);
@@ -275,7 +279,7 @@ mod tests {
         let text = fs::read_to_string(target.join("scaffold.toml")).expect("read");
         assert!(
             !text.contains("url ="),
-            "v0.2.0 scaffold.toml must not contain url field; got:\n{text}"
+            "current-schema scaffold.toml must not contain url field; got:\n{text}"
         );
     }
 
@@ -295,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn init_is_idempotent_when_already_at_v0_2_0_and_refreshes_skills() {
+    fn init_is_idempotent_when_already_at_current_schema_and_refreshes_skills() {
         let temp = tempdir().expect("tempdir");
         let target = temp.path();
         cmd_init_at(target, "lgs", false, false).expect("init");
@@ -372,7 +376,7 @@ home_dir = ".scaffold/wallet"
             "comments preserved; got:\n{after}"
         );
         assert!(
-            after.contains("version = \"0.2.0\""),
+            after.contains("version = \"0.3.0\""),
             "version bumped; got:\n{after}"
         );
         assert!(
@@ -673,7 +677,7 @@ home_dir = ".scaffold/wallet"
 
         let after = fs::read_to_string(target.join("scaffold.toml")).expect("read");
         assert!(
-            after.contains("0.2.0"),
+            after.contains("0.3.0"),
             "scaffold.toml migrated; got:\n{after}"
         );
     }
@@ -746,7 +750,7 @@ home_dir = ".scaffold/wallet"
         cmd_init_at(target, "lgs", false, true).expect("migrate with --no-backup");
         let after = fs::read_to_string(target.join("scaffold.toml")).expect("read");
         assert!(
-            after.contains("0.2.0"),
+            after.contains("0.3.0"),
             "no-backup form must still migrate; got:\n{after}"
         );
     }
@@ -788,7 +792,7 @@ home_dir = ".scaffold/wallet"
         let target = temp.path();
         // First, a normal init.
         cmd_init_at(target, "lgs", false, false).expect("init");
-        // Simulate a wedge: scaffold.toml landed at v0.2.0 but `.scaffold/` is gone.
+        // Simulate a wedge: scaffold.toml landed at the current schema but `.scaffold/` is gone.
         fs::remove_dir_all(target.join(".scaffold")).expect("nuke .scaffold");
         assert!(target.join("scaffold.toml").exists());
         assert!(!target.join(".scaffold/state").exists());

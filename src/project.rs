@@ -244,7 +244,7 @@ mod tests {
         Project {
             root,
             config: Config {
-                version: "0.2.0".into(),
+                version: "0.3.0".into(),
                 cache_root: cache_root.to_string(),
                 lez: RepoRef::default(),
                 spel: RepoRef::default(),

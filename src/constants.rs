@@ -1,9 +1,10 @@
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Schema version persisted as `[scaffold].version` in `scaffold.toml`.
-/// Bumped when the file's section/field shape changes in a way that requires
-/// a one-shot migration through `init`. Parsers reject any other value with
-/// a targeted error pointing at `init`.
-pub(crate) const SCAFFOLD_TOML_SCHEMA_VERSION: &str = "0.2.0";
+/// Bumped when projects must pass through `init` before this build will read
+/// their config — a section/field reshape, or (as in 0.2.0 -> 0.3.0) a stamp
+/// bump on its own. Parsers reject any other value with a targeted error
+/// pointing at `init`. Independent of the crate version in `Cargo.toml`.
+pub(crate) const SCAFFOLD_TOML_SCHEMA_VERSION: &str = "0.3.0";
 /// Default `source` for `[repos.lez]`. Single field — `url` was dropped in
 /// the 0.2.0 schema after audit confirmed `LEZ_URL == lez.source` in every
 /// production code path.

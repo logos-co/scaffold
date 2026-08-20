@@ -1,4 +1,9 @@
-//! Pre-0.2.0 → v0.2.0 in-place migration of `scaffold.toml`.
+//! In-place migration of `scaffold.toml` to the current schema version.
+//!
+//! [`migrate`] is the entry point and chains one step per schema generation:
+//! the pre-0.2.0 → v0.2.0 structural rewrites, then the v0.2.0 → v0.3.0
+//! version stamp. A file already at 0.2.x skips the structural rewrites; a
+//! file already at the current version is not touched at all.
 //!
 //! `commands/init.rs` is the only caller. The migrator mutates a parsed
 //! `toml_edit::DocumentMut` so user comments, key ordering, and unrelated
@@ -23,35 +28,53 @@ pub(crate) struct MigrationReport {
     pub(crate) hand_edit_hint: Option<String>,
 }
 
-/// Mutate `doc` in place from any pre-0.2.0 schema to v0.2.0. Preserves
-/// comments, key ordering, and unrelated sections via toml_edit. Returns a
-/// report listing what changed; an empty report means "already migrated."
-///
-/// The input may be:
-/// - A pre-spel scaffold.toml (no `[repos.spel]` section). The original
-///   migration's job — append the section.
-/// - A 0.1.x-era scaffold.toml with `url` fields, `[basecamp].pin/.source/
-///   .lgpm_flake`, or `[basecamp.modules.*]`. Reshape all of those.
-/// - A mix of the above.
-pub(crate) fn migrate_to_v0_2_0(doc: &mut DocumentMut) -> DynResult<MigrationReport> {
-    let mut report = MigrationReport::default();
+impl MigrationReport {
+    /// Fold a later step's report into this one. The first hand-edit hint
+    /// wins — steps run oldest-first, so that is the earliest thing the user
+    /// has to fix by hand.
+    fn merge(&mut self, other: MigrationReport) {
+        self.changes.extend(other.changes);
+        if self.hand_edit_hint.is_none() {
+            self.hand_edit_hint = other.hand_edit_hint;
+        }
+    }
+}
+
+/// Mutate `doc` in place from any older schema to the current one, running
+/// every step the file still needs in a single call — the user never has to
+/// run `init` twice. Preserves comments, key ordering, and unrelated sections
+/// via toml_edit. Returns a report listing what changed; an empty report means
+/// "already at the current schema" and the document is untouched.
+pub(crate) fn migrate(doc: &mut DocumentMut) -> DynResult<MigrationReport> {
+    let from_version = scaffold_version(doc).unwrap_or_default().to_string();
 
     // Short-circuit when the file is already at the current schema version.
-    // The migrator's rewrites (lssa→lez drop, url strip, basecamp reshape, etc.)
-    // are pre-v0.2.0 fixups; running them against an already-current file can
-    // silently rewrite intentionally non-conformant content (e.g. a hand-kept
-    // `[repos.lssa]` for a fork).
-    if doc
-        .get("scaffold")
-        .and_then(Item::as_table)
-        .and_then(|t| t.get("version"))
-        .and_then(Item::as_str)
-        == Some(SCAFFOLD_TOML_SCHEMA_VERSION)
-    {
-        return Ok(report);
+    // The pre-0.2.0 rewrites (lssa→lez drop, url strip, basecamp reshape,
+    // etc.) are fixups for shapes a current file cannot have; running them
+    // against it can silently rewrite intentionally non-conformant content
+    // (e.g. a hand-kept `[repos.lssa]` for a fork).
+    if from_version == SCAFFOLD_TOML_SCHEMA_VERSION {
+        return Ok(MigrationReport::default());
     }
 
-    // Ensure [scaffold] exists; bump version.
+    let mut report = MigrationReport::default();
+    // A file already at 0.2.x carries none of the pre-0.2.0 shapes, so the
+    // structural rewrites are skipped and only the version stamp runs.
+    if !is_v0_2_x(&from_version) {
+        report.merge(migrate_to_v0_2_0(doc)?);
+    }
+    report.merge(migrate_to_v0_3_0(doc, &from_version)?);
+    Ok(report)
+}
+
+/// v0.2.0 → v0.3.0. The schema shape is unchanged between the two; the step
+/// is the version stamp alone. It also owns the stamp for the whole chain, so
+/// a pre-0.2.0 file reports one bump (`"0.1.0" -> "0.3.0"`) rather than one
+/// per generation it passed through.
+fn migrate_to_v0_3_0(doc: &mut DocumentMut, from_version: &str) -> DynResult<MigrationReport> {
+    let mut report = MigrationReport::default();
+
+    // Ensure [scaffold] exists; stamp the current version.
     let scaffold = doc.entry("scaffold").or_insert(Item::Table({
         let mut t = Table::new();
         t.set_implicit(false);
@@ -60,23 +83,61 @@ pub(crate) fn migrate_to_v0_2_0(doc: &mut DocumentMut) -> DynResult<MigrationRep
     let scaffold_table = scaffold
         .as_table_mut()
         .ok_or_else(|| anyhow!("[scaffold] is not a table"))?;
-    let current_version = scaffold_table
-        .get("version")
+    scaffold_table["version"] = value(SCAFFOLD_TOML_SCHEMA_VERSION);
+    report.changes.push(format!(
+        "bumped [scaffold].version: {:?} -> {:?}",
+        if from_version.is_empty() {
+            "<unset>"
+        } else {
+            from_version
+        },
+        SCAFFOLD_TOML_SCHEMA_VERSION,
+    ));
+
+    Ok(report)
+}
+
+/// `[scaffold].version` as written in the file, or `None` when the section or
+/// key is missing (or is not a string).
+fn scaffold_version(doc: &DocumentMut) -> Option<&str> {
+    doc.get("scaffold")
+        .and_then(Item::as_table)
+        .and_then(|t| t.get("version"))
         .and_then(Item::as_str)
-        .unwrap_or("")
-        .to_string();
-    if current_version != SCAFFOLD_TOML_SCHEMA_VERSION {
-        scaffold_table["version"] = value(SCAFFOLD_TOML_SCHEMA_VERSION);
-        report.changes.push(format!(
-            "bumped [scaffold].version: {:?} -> {:?}",
-            if current_version.is_empty() {
-                "<unset>"
-            } else {
-                current_version.as_str()
-            },
-            SCAFFOLD_TOML_SCHEMA_VERSION,
-        ));
-    }
+}
+
+/// Whether `version` is a 0.2 series stamp — the generation whose shape
+/// [`migrate_to_v0_2_0`] produces. Matched literally rather than against
+/// `SCAFFOLD_TOML_SCHEMA_VERSION`: that constant tracks the *current* schema
+/// and moves on every bump, while this waypoint is frozen.
+///
+/// Series match for the same reason `config::detect_old_schema_markers` uses
+/// one on 0.1: a hand-edited `0.2.1` is a 0.2-shaped file and must be gated
+/// the same way `0.2.0` is, in both places, or detection and migration
+/// disagree about it.
+fn is_v0_2_x(version: &str) -> bool {
+    version
+        .strip_prefix("0.2")
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+}
+
+/// Mutate `doc` in place from any pre-0.2.0 schema to the v0.2.0 shape.
+/// Structural rewrites only — the version stamp belongs to the last step in
+/// the chain ([`migrate_to_v0_3_0`]). Preserves comments, key ordering, and
+/// unrelated sections via toml_edit.
+///
+/// Private and unguarded: [`migrate`] decides whether the input is old enough
+/// to need this. Calling it on a 0.2.0-or-newer file would rewrite content
+/// that file is entitled to keep.
+///
+/// The input may be:
+/// - A pre-spel scaffold.toml (no `[repos.spel]` section). The original
+///   migration's job — append the section.
+/// - A 0.1.x-era scaffold.toml with `url` fields, `[basecamp].pin/.source/
+///   .lgpm_flake`, or `[basecamp.modules.*]`. Reshape all of those.
+/// - A mix of the above.
+fn migrate_to_v0_2_0(doc: &mut DocumentMut) -> DynResult<MigrationReport> {
+    let mut report = MigrationReport::default();
 
     // [repos.lssa] -> [repos.lez] alias rename. If both sections exist, the
     // stale `lssa` is dropped (lez wins) — config::detect_old_schema rejects
@@ -330,10 +391,11 @@ mod tests {
 
     #[test]
     fn migrator_short_circuits_on_current_version_and_preserves_stray_lssa() {
-        // A user keeps a hand-rolled [repos.lssa] in a v0.2.0 file (e.g. a fork
-        // that re-uses the old name). The migrator must not silently drop it.
+        // A user keeps a hand-rolled [repos.lssa] in a current-schema file
+        // (e.g. a fork that re-uses the old name). The migrator must not
+        // silently drop it.
         let seed = r#"[scaffold]
-version = "0.2.0"
+version = "0.3.0"
 
 [repos.lssa]
 source = "https://example.com/lssa.git"
@@ -348,11 +410,11 @@ source = "https://example.com/spel.git"
 pin = "feedfacefeedfacefeedfacefeedfacefeedface"
 "#;
         let mut doc: DocumentMut = seed.parse().expect("parse seed");
-        let report = migrate_to_v0_2_0(&mut doc).expect("migrate");
+        let report = migrate(&mut doc).expect("migrate");
 
         assert!(
             report.changes.is_empty(),
-            "no changes expected when already at v0.2.0, got: {:?}",
+            "no changes expected when already at the current schema, got: {:?}",
             report.changes,
         );
         let after = doc.to_string();
@@ -444,6 +506,159 @@ role = "project"
             .and_then(Item::as_str)
             .expect("modules.foo.flake preserved");
         assert_eq!(preserved, "path:./new-foo");
+    }
+
+    #[test]
+    fn migrates_v0_2_0_by_stamping_the_version_without_rerunning_v0_2_0_rewrites() {
+        // A valid 0.2.0 file already has the current section/field shape. Only
+        // the stamp is stale, so the pre-0.2.0 rewrites must not run: a stray
+        // [repos.lssa] survives, and no [repos.spel] is synthesized.
+        let seed = r#"# user comment
+[scaffold]
+version = "0.2.0"
+
+[repos.lez]
+source = "https://example.com/lez.git"
+pin = "abc123abc123abc123abc123abc123abc123abc1"
+
+[repos.lssa]
+source = "https://example.com/lssa.git"
+pin = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+"#;
+        let mut doc: DocumentMut = seed.parse().expect("parse seed");
+        let report = migrate(&mut doc).expect("migrate");
+
+        assert_eq!(
+            report.changes,
+            vec![r#"bumped [scaffold].version: "0.2.0" -> "0.3.0""#.to_string()],
+            "a 0.2.0 file needs the version stamp and nothing else",
+        );
+        let after = doc.to_string();
+        assert_eq!(
+            after,
+            seed.replace(r#"version = "0.2.0""#, r#"version = "0.3.0""#),
+            "the stamp must be the only edit; got:\n{after}"
+        );
+        assert!(
+            after.contains("[repos.lssa]"),
+            "stray [repos.lssa] must survive the 0.3.0 step; got:\n{after}"
+        );
+        assert!(
+            !after.contains("[repos.spel]"),
+            "the pre-0.2.0 spel backfill must not run on a 0.2.0 file; got:\n{after}"
+        );
+        assert!(report.hand_edit_hint.is_none());
+    }
+
+    #[test]
+    fn migrates_the_whole_0_2_series_without_rerunning_v0_2_0_rewrites() {
+        // Same gate as `config::detect_old_schema_markers`: any 0.2 stamp is a
+        // 0.2-shaped file, so a hand-edited 0.2.1 also skips the rewrites.
+        for stamp in ["0.2", "0.2.1"] {
+            let seed = format!(
+                r#"[scaffold]
+version = "{stamp}"
+
+[repos.lez]
+source = "https://example.com/lez.git"
+pin = "abc123abc123abc123abc123abc123abc123abc1"
+"#
+            );
+            let mut doc: DocumentMut = seed.parse().expect("parse seed");
+            let report = migrate(&mut doc).expect("migrate");
+            assert_eq!(
+                report.changes,
+                vec![format!(
+                    r#"bumped [scaffold].version: "{stamp}" -> "0.3.0""#
+                )],
+            );
+            let after = doc.to_string();
+            assert!(
+                !after.contains("[repos.spel]"),
+                "{stamp}: spel backfill must not run; got:\n{after}"
+            );
+        }
+    }
+
+    #[test]
+    fn migrates_pre_v0_2_0_to_current_schema_in_one_call() {
+        // One `init` must be enough: the 0.2.0 structural rewrites and the
+        // 0.3.0 stamp both run, and the report shows a single bump from the
+        // original version straight to the current one.
+        let seed = r#"# user comment
+[scaffold]
+version = "0.1.0"
+
+[repos.lssa]
+url = "https://example.com/lez.git"
+source = "https://example.com/lez.git"
+pin = "abc123abc123abc123abc123abc123abc123abc1"
+
+[basecamp]
+pin = "deadbeef"
+source = "https://example.com/basecamp"
+port_base = 60000
+
+[basecamp.modules.foo]
+flake = "path:./foo"
+role = "project"
+"#;
+        let mut doc: DocumentMut = seed.parse().expect("parse seed");
+        let report = migrate(&mut doc).expect("migrate");
+        let after = doc.to_string();
+
+        assert!(
+            after.contains(r#"version = "0.3.0""#),
+            "must land on the current schema in one call; got:\n{after}"
+        );
+        assert_eq!(
+            report
+                .changes
+                .iter()
+                .filter(|c| c.contains("bumped [scaffold].version"))
+                .count(),
+            1,
+            "one bump line, not one per generation: {:?}",
+            report.changes,
+        );
+        assert!(
+            report
+                .changes
+                .iter()
+                .any(|c| c == r#"bumped [scaffold].version: "0.1.0" -> "0.3.0""#),
+            "{:?}",
+            report.changes,
+        );
+        // The 0.2.0 rewrites ran too.
+        assert!(after.contains("# user comment"), "{after}");
+        assert!(after.contains("[repos.lez]"), "{after}");
+        assert!(!after.contains("[repos.lssa]"), "{after}");
+        assert!(!after.contains("url ="), "{after}");
+        assert!(after.contains("[repos.spel]"), "{after}");
+        assert!(after.contains("[repos.basecamp]"), "{after}");
+        assert!(after.contains("[modules.foo]"), "{after}");
+        assert!(!after.contains("[basecamp.modules"), "{after}");
+        // Unrelated runtime config survives.
+        assert!(after.contains("port_base = 60000"), "{after}");
+    }
+
+    #[test]
+    fn migration_stamps_the_version_when_scaffold_section_is_missing() {
+        let seed = r#"[repos.lez]
+source = "https://example.com/lez.git"
+pin = "abc123abc123abc123abc123abc123abc123abc1"
+"#;
+        let mut doc: DocumentMut = seed.parse().expect("parse seed");
+        let report = migrate(&mut doc).expect("migrate");
+        assert!(
+            report
+                .changes
+                .iter()
+                .any(|c| c == r#"bumped [scaffold].version: "<unset>" -> "0.3.0""#),
+            "{:?}",
+            report.changes,
+        );
+        assert!(doc.to_string().contains(r#"version = "0.3.0""#));
     }
 
     #[test]

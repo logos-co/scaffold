@@ -218,7 +218,8 @@ would fire on every invocation forever (`deploy`, `doctor`, `localnet`,
 machine-parseable outputs (`doctor --json`, `deploy --json`).
 
 The 0.2.0 schema migration generalizes that pattern. `init` is the
-single migration entry point for any pre-0.2.0 scaffold.toml shape:
+single migration entry point for any superseded scaffold.toml. Its
+pre-0.2.0 step rewrites these shapes:
 
 - pre-spel files (no `[repos.spel]`)
 - legacy `url` field on `[repos.{lez,spel}]`
@@ -228,22 +229,54 @@ single migration entry point for any pre-0.2.0 scaffold.toml shape:
 
 `init` walks the file via `toml_edit` so comments, key ordering, and
 unrelated sections survive the rewrite. It bumps `[scaffold].version`
-to `0.2.0`, prints a one-line summary of what changed, and refuses
-already-migrated files. Pre-0.2.0 lgpm flake refs of the form
+to the current schema, prints a one-line summary of what changed, and
+refuses already-migrated files. Pre-0.2.0 lgpm flake refs of the form
 `github:owner/repo/<sha>#attr` are split into `source`/`pin`/`attr`
 automatically; unparseable refs trigger a hand-edit hint with a
 default pin written in place so the file is at least valid.
 
 Every other command — `deploy`, `doctor`, `setup`, `localnet`,
-`wallet`, `spel`, `report`, `basecamp *` — refuses pre-0.2.0 files
+`wallet`, `spel`, `report`, `basecamp *` — refuses superseded files
 with a single line: *"scaffold.toml uses an old schema (...). Run
-`logos-scaffold init` to migrate to v0.2.0; existing settings are
+`logos-scaffold init` to migrate to v0.3.0; existing settings are
 preserved."* JSON consumers stay clean.
+
+### 0.3.0: One Migrator, One Step Per Generation
+
+0.3.0 changes no sections and no fields; it is a version stamp alone.
+That still makes it a migration, because the parser exact-matches the
+current schema and a 0.2.0 file must be routed through `init` rather
+than silently accepted — accepting two stamps is how a config format
+starts drifting.
+
+The migrator is therefore a chain, not a single rewrite pass: a
+dispatcher reads `[scaffold].version` once, runs the pre-0.2.0
+structural rewrites only when the file predates 0.2.0, then runs the
+0.3.0 stamp. One `init` takes a 0.1.x file all the way to 0.3.0, and
+the stamp — owned by the last step — reports a single bump
+(`"0.1.0" -> "0.3.0"`) rather than one line per generation crossed.
+
+The version gate is load-bearing in both directions. A file already at
+0.2.x must skip the pre-0.2.0 rewrites: those rewrites drop
+`[repos.lssa]`, strip `url`, and reshape `[basecamp]`, so running them
+against a current-shape file would silently rewrite content the user is
+entitled to keep (a fork that re-uses the `lssa` name, say). A file at
+the current version is not touched at all. Symmetrically,
+`detect_old_schema_markers` treats the whole 0.2 series as stale, so a
+0.2.0 file — which trips none of the shape markers — still gets the
+targeted "run `init`" line instead of falling through to the generic
+version-mismatch error.
+
+The schema version and the crate version are independent. Schema
+version lives in `SCAFFOLD_TOML_SCHEMA_VERSION` and `[scaffold].version`;
+the crate version lives in `Cargo.toml`. They happened to both read
+0.3.0 at this bump; nothing keys off that.
 
 ## scaffold.toml Schema: Three Namespaces
 
-Schema version 0.2.0 (`[scaffold].version = "0.2.0"`) factors the file
-into three orthogonal namespaces:
+Schema version 0.3.0 (`[scaffold].version = "0.3.0"`) factors the file
+into three orthogonal namespaces — the same factoring 0.2.0 introduced,
+carried forward unchanged:
 
 - **`[repos.<name>]`** — every pinned external git dependency. One
   schema for all four: `lez`, `spel`, `basecamp`, `lgpm`. Fields:
@@ -263,10 +296,10 @@ into three orthogonal namespaces:
 Earlier schemas (pre-0.2.0) mixed all three: `[basecamp]` carried
 pin / source / lgpm_flake / modules together with port_base, and
 `[repos.{lez,spel}]` carried both `url` and `source`. Migration is via
-`logos-scaffold init`, which detects any old-shape signal (pre-0.2.0
-version stamp, `url` field, `[basecamp].pin`/`.source`/`.lgpm_flake`,
-`[basecamp.modules.*]`) and rewrites in place via `toml_edit` so
-comments and key ordering survive.
+`logos-scaffold init`, which detects any stale signal (a superseded
+version stamp — 0.2.x included, `url` field,
+`[basecamp].pin`/`.source`/`.lgpm_flake`, `[basecamp.modules.*]`) and
+rewrites in place via `toml_edit` so comments and key ordering survive.
 
 ### Pin-Only Storage, Path Derived at Runtime
 
@@ -313,9 +346,10 @@ issue.
 
 ### Schema-Stale Files Are Hard-Failed
 
-The parser refuses to load any pre-0.2.0 file. The error names the
-specific stale shape (e.g. `[basecamp].lgpm_flake (moved to
-[repos.lgpm])`) and points at `init`. Re-running `init` migrates and
+The parser refuses to load any file below the current schema — a
+pre-0.2.0 shape, or a 0.2.x stamp on an otherwise-current file. The
+error names the specific stale shape (e.g. `[basecamp].lgpm_flake
+(moved to [repos.lgpm])`) and points at `init`. Re-running `init` migrates and
 the user proceeds. Default-filling the missing fields with a stderr
 warning was rejected because the warning would corrupt
 machine-parseable outputs (`doctor --json`, `deploy --json`) and

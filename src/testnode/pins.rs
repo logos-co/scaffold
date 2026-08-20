@@ -587,7 +587,7 @@ mod tests {
         Project {
             root: root.to_path_buf(),
             config: Config {
-                version: "0.2.0".into(),
+                version: "0.3.0".into(),
                 cache_root: ".scaffold/cache".into(),
                 lez,
                 spel: RepoRef::default(),

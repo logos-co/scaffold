@@ -267,7 +267,7 @@ mod tests {
         fs::write(
             root.join("scaffold.toml"),
             r#"[scaffold]
-version = "0.2.0"
+version = "0.3.0"
 cache_root = "cache"
 
 [repos.lez]

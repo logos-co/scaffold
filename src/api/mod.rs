@@ -726,12 +726,12 @@ mod tests {
     use super::*;
 
     /// Minimal valid scaffold.toml for fixture projects, mirroring what
-    /// `lgs new` writes (schema 0.2.0).
+    /// `lgs new` writes (schema 0.3.0).
     fn write_fixture_config(root: &Path) {
         fs::write(
             root.join("scaffold.toml"),
             r#"[scaffold]
-version = "0.2.0"
+version = "0.3.0"
 
 [repos.lez]
 source = "https://github.com/logos-blockchain/logos-execution-zone.git"

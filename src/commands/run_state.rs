@@ -372,7 +372,7 @@ mod tests {
         Project {
             root,
             config: Config {
-                version: "0.2.0".to_string(),
+                version: "0.3.0".to_string(),
                 cache_root: ".scaffold/cache".to_string(),
                 lez: RepoRef::default(),
                 spel: RepoRef::default(),

@@ -5765,7 +5765,7 @@ mod tests {
 
     fn seed_basecamp_project(root: &Path) -> Project {
         let scaffold_toml = r#"[scaffold]
-version = "0.2.0"
+version = "0.3.0"
 cache_root = "cache"
 
 [repos.lez]
@@ -5863,7 +5863,7 @@ attr = "app"
         // to a _different_ flake. Running modules against the local source
         // must NOT overwrite that entry (user intent wins).
         let scaffold_toml = r#"[scaffold]
-version = "0.2.0"
+version = "0.3.0"
 cache_root = "cache"
 
 [repos.lez]

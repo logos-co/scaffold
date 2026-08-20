@@ -1,6 +1,6 @@
 //! Parser and serializer for `scaffold.toml`.
 //!
-//! Schema version 0.2.0 (see `SCAFFOLD_TOML_SCHEMA_VERSION` in `constants.rs`)
+//! Schema version 0.3.0 (see `SCAFFOLD_TOML_SCHEMA_VERSION` in `constants.rs`)
 //! organizes the file into three orthogonal namespaces:
 //!
 //! - `[repos.<name>]` — pinned external git deps. One field shape:
@@ -15,10 +15,12 @@
 //!   `[framework]`, `[localnet]`, `[circuits]`, `[basecamp]`
 //!   (port allocation only).
 //!
-//! Pre-0.2.0 configs (with `[basecamp].pin` / `.source` / `.lgpm_flake`,
-//! `[basecamp.modules.*]`, or `[repos.{lez,spel}].url`) are rejected by
-//! `detect_old_schema` with a targeted error pointing at `init`. The
-//! corresponding rewrite lives in `crate::migrate`.
+//! Superseded configs are rejected by `detect_old_schema` with a targeted
+//! error pointing at `init` — both the 0.2.0 generation (same section/field
+//! shape, older version stamp) and pre-0.2.0 ones (with `[basecamp].pin` /
+//! `.source` / `.lgpm_flake`, `[basecamp.modules.*]`, or
+//! `[repos.{lez,spel}].url`). The corresponding rewrites live in
+//! `crate::migrate`, which chains them so one `init` lands on 0.3.0.
 
 use anyhow::{anyhow, bail, Context};
 use toml_edit::{value, DocumentMut, Item, Table};
@@ -35,8 +37,8 @@ use crate::model::{
 };
 use crate::DynResult;
 
-/// Parse a `scaffold.toml` text into a `Config`. Pre-0.2.0 schemas are
-/// rejected with a targeted error pointing at `init`.
+/// Parse a `scaffold.toml` text into a `Config`. Superseded schemas (0.2.0
+/// and earlier) are rejected with a targeted error pointing at `init`.
 pub(crate) fn parse_config(text: &str) -> DynResult<Config> {
     let doc: DocumentMut = text
         .parse()
@@ -276,19 +278,25 @@ impl OldSchemaMarkers {
     }
 }
 
-/// Pragmatic detection of pre-0.2.0 schemas. Returns a flag-per-shape so the
+/// Pragmatic detection of superseded schemas. Returns a flag-per-shape so the
 /// caller can decide what (if anything) to surface. `init`'s migrator handles
 /// every variant we detect here, so the user-facing error in
 /// `detect_old_schema` does not enumerate them.
 pub(crate) fn detect_old_schema_markers(doc: &DocumentMut, version: &str) -> OldSchemaMarkers {
     let mut m = OldSchemaMarkers::default();
 
-    // Old version stamp. Other version mismatches (prerelease tags, hand-edits)
-    // are caught downstream in `parse_config` with a more specific "this build
-    // expects X" message; `init`'s migrator bumps the version regardless of
-    // origin.
+    // Old version stamp — every schema generation `init` knows how to migrate
+    // from, including 0.2.x, whose section/field shape is identical to the
+    // current one but whose stamp is stale. Other version mismatches
+    // (prerelease tags, hand-edits) are caught downstream in `parse_config`
+    // with a more specific "this build expects X" message; `init`'s migrator
+    // bumps the version regardless of origin.
     m.version_stale = version != SCAFFOLD_TOML_SCHEMA_VERSION
-        && (version.starts_with("0.1.") || version == "0.1" || version == "0.0");
+        && (version.starts_with("0.2.")
+            || version == "0.2"
+            || version.starts_with("0.1.")
+            || version == "0.1"
+            || version == "0.0");
 
     let repos_table = doc.get("repos").and_then(Item::as_table);
     // [repos.lssa] — pre-spel-era alias for [repos.lez].
@@ -314,7 +322,7 @@ pub(crate) fn detect_old_schema_markers(doc: &DocumentMut, version: &str) -> Old
     m
 }
 
-/// Reject pre-0.2.0 schemas with a one-line, action-only error pointing at
+/// Reject superseded schemas with a one-line, action-only error pointing at
 /// `init`. The migrator handles every variant we detect, so the user only
 /// needs to know that a migration is required — not which specific shape
 /// tripped the check.
@@ -1179,13 +1187,13 @@ mod tests {
     };
 
     fn base_config() -> Config {
-        parse_config(&minimal_v0_2_0()).expect("parse minimal v0.2.0")
+        parse_config(&minimal_v0_3_0()).expect("parse minimal v0.3.0")
     }
 
-    fn minimal_v0_2_0() -> String {
+    fn minimal_v0_3_0() -> String {
         format!(
             r#"[scaffold]
-version = "0.2.0"
+version = "0.3.0"
 
 [repos.lez]
 source = "{lez_src}"
@@ -1218,8 +1226,8 @@ risc0_dev_mode = true
     }
 
     #[test]
-    fn parses_minimal_v0_2_0() {
-        let cfg = parse_config(&minimal_v0_2_0()).expect("parse");
+    fn parses_minimal_v0_3_0() {
+        let cfg = parse_config(&minimal_v0_3_0()).expect("parse");
         assert_eq!(cfg.version, SCAFFOLD_TOML_SCHEMA_VERSION);
         assert_eq!(cfg.lez.source, LEZ_SOURCE);
         assert_eq!(cfg.lez.pin, DEFAULT_LEZ.sha);
@@ -1237,7 +1245,7 @@ risc0_dev_mode = true
 
     #[test]
     fn parses_circuits_section() {
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + r#"
 [circuits]
 version = "9.9.9"
@@ -1257,7 +1265,7 @@ install_dir = "vendor/circuits"
     fn circuits_install_dir_rejects_parent_dir_traversal() {
         // `install_dir` is create_dir_all'd + extracted into; a `..` component
         // would escape the project root when joined.
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + r#"
 [circuits]
 version = "9.9.9"
@@ -1276,7 +1284,7 @@ install_dir = "../../etc/evil"
             "ftp://example.invalid/circuits-{version}-{triple}.tar.gz",
             "example.invalid/circuits-{version}-{triple}.tar.gz",
         ] {
-            let toml = minimal_v0_2_0()
+            let toml = minimal_v0_3_0()
                 + &format!("[circuits]\nversion = \"9.9.9\"\nurl_template = {template:?}\n");
             let err = parse_config(&toml).unwrap_err();
             let msg = err.to_string();
@@ -1291,7 +1299,7 @@ install_dir = "../../etc/evil"
             "http://example.invalid/circuits-{version}-{triple}.tar.gz",
             "HTTPS://example.invalid/circuits-{version}-{triple}.tar.gz",
         ] {
-            let toml = minimal_v0_2_0()
+            let toml = minimal_v0_3_0()
                 + &format!("[circuits]\nversion = \"9.9.9\"\nurl_template = {template:?}\n");
             parse_config(&toml).expect("http(s) template should parse");
         }
@@ -1299,14 +1307,14 @@ install_dir = "../../etc/evil"
 
     #[test]
     fn circuits_section_requires_version_when_present() {
-        let toml = minimal_v0_2_0() + "[circuits]\ninstall_dir = \"vendor/circuits\"\n";
+        let toml = minimal_v0_3_0() + "[circuits]\ninstall_dir = \"vendor/circuits\"\n";
         let err = parse_config(&toml).unwrap_err();
         assert!(err.to_string().contains("[circuits].version"), "{err}");
     }
 
     #[test]
     fn circuits_round_trips_through_serialize() {
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + r#"
 [circuits]
 version = "9.9.9"
@@ -1328,7 +1336,7 @@ install_dir = "vendor/circuits"
 
     #[test]
     fn parses_repos_basecamp_with_nix_flake() {
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + &format!(
                 r#"
 [repos.basecamp]
@@ -1356,7 +1364,7 @@ attr = "cli"
 
     #[test]
     fn repos_basecamp_attr_per_platform_map_parses_resolves_and_round_trips() {
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + &format!(
                 r#"
 [repos.basecamp]
@@ -1395,7 +1403,7 @@ x86_64-linux = "app"
     fn repos_basecamp_attr_map_rejects_control_char_system_key() {
         // A quoted TOML key carrying a control char must be rejected at parse
         // so it can't corrupt the line-oriented serializer on the next save.
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + &format!(
                 "\n[repos.basecamp]\nsource = \"{}\"\npin = \"{}\"\nbuild = \"nix-flake\"\n",
                 BASECAMP_SOURCE, DEFAULT_BASECAMP_PIN,
@@ -1407,7 +1415,7 @@ x86_64-linux = "app"
 
     #[test]
     fn parses_basecamp_launch_env_sections() {
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + r#"
 [basecamp.env]
 QT_DEBUG_PLUGINS = "1"
@@ -1457,7 +1465,7 @@ LOGOS_STORAGE_API_PORT = "8082"
     fn basecamp_env_append_drops_empty_lists() {
         // An empty list is a launch-time no-op; it must not be captured (so
         // `[basecamp]` stays empty here and nothing round-trips back).
-        let toml = minimal_v0_2_0() + "[basecamp.env_append]\nQT_PLUGIN_PATH = []\n";
+        let toml = minimal_v0_3_0() + "[basecamp.env_append]\nQT_PLUGIN_PATH = []\n";
         let cfg = parse_config(&toml).expect("parse");
         assert!(
             cfg.basecamp.is_none(),
@@ -1468,7 +1476,7 @@ LOGOS_STORAGE_API_PORT = "8082"
 
     #[test]
     fn basecamp_launch_env_round_trips_through_serialize() {
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + r#"
 [basecamp.env]
 QT_DEBUG_PLUGINS = "1"
@@ -1505,7 +1513,7 @@ LOGOS_STORAGE_API_PORT = "8081"
         // A custom profile name (not alice/bob) carrying `env` plus all three
         // per-profile scalars parses, exposes them, and survives serialize ->
         // parse so `save_project_config` never drops them.
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + r#"
 [basecamp.profiles.carol]
 env_file = ".scaffold/carol.env"
@@ -1548,7 +1556,7 @@ LOGOS_STORAGE_API_PORT = "8083"
         // Setting just [basecamp.env] (default ports) must NOT churn in
         // default port_base/port_stride, and must never serialize them as
         // dotted `basecamp.port_base = …` keys. Only [basecamp.env] renders.
-        let toml = minimal_v0_2_0() + "[basecamp.env]\nQT_DEBUG_PLUGINS = \"1\"\n";
+        let toml = minimal_v0_3_0() + "[basecamp.env]\nQT_DEBUG_PLUGINS = \"1\"\n";
         let cfg = parse_config(&toml).expect("parse");
         let serialized = serialize_config(&cfg).expect("serialize");
         assert!(
@@ -1573,7 +1581,7 @@ LOGOS_STORAGE_API_PORT = "8083"
     fn basecamp_non_default_ports_serialize_as_explicit_table() {
         // When a port differs from the default it is written under an explicit
         // [basecamp] header (not dotted), even alongside [basecamp.env].
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + "[basecamp]\nport_base = 50000\n\n[basecamp.env]\nQT_DEBUG_PLUGINS = \"1\"\n";
         let cfg = parse_config(&toml).expect("parse");
         let serialized = serialize_config(&cfg).expect("serialize");
@@ -1598,7 +1606,7 @@ LOGOS_STORAGE_API_PORT = "8083"
     fn basecamp_env_append_rejects_empty_string_entry() {
         // An empty path segment (`LD_LIBRARY_PATH=:`) silently injects CWD into
         // search paths — reject it at parse.
-        let toml = minimal_v0_2_0() + "[basecamp.env_append]\nLD_LIBRARY_PATH = [\"\"]\n";
+        let toml = minimal_v0_3_0() + "[basecamp.env_append]\nLD_LIBRARY_PATH = [\"\"]\n";
         let err = parse_config(&toml).unwrap_err();
         assert!(err.to_string().contains("must not be empty"), "{err}");
     }
@@ -1606,12 +1614,12 @@ LOGOS_STORAGE_API_PORT = "8083"
     #[test]
     fn basecamp_env_rejects_invalid_var_name() {
         // `=` in an env var name would only surface as an opaque exec failure.
-        let toml = minimal_v0_2_0() + "[basecamp.env]\n\"FOO=BAR\" = \"1\"\n";
+        let toml = minimal_v0_3_0() + "[basecamp.env]\n\"FOO=BAR\" = \"1\"\n";
         let err = parse_config(&toml).unwrap_err();
         assert!(err.to_string().contains("must not contain `=`"), "{err}");
 
         // Empty env var name is rejected too.
-        let toml2 = minimal_v0_2_0() + "[basecamp.profiles.alice.env]\n\"\" = \"1\"\n";
+        let toml2 = minimal_v0_3_0() + "[basecamp.profiles.alice.env]\n\"\" = \"1\"\n";
         let err2 = parse_config(&toml2).unwrap_err();
         assert!(err2.to_string().contains("must not be empty"), "{err2}");
     }
@@ -1621,7 +1629,7 @@ LOGOS_STORAGE_API_PORT = "8083"
         // Profile names aren't validated at parse, so a quoted key with a
         // control char parses — but it must be rejected before it can corrupt
         // the serializer, like every other emitted name key.
-        let toml = minimal_v0_2_0() + "[basecamp.profiles.\"bad\\nname\".env]\nFOO = \"1\"\n";
+        let toml = minimal_v0_3_0() + "[basecamp.profiles.\"bad\\nname\".env]\nFOO = \"1\"\n";
         let cfg = parse_config(&toml).expect("parse accepts the unchecked profile name");
         let err = serialize_config(&cfg).expect_err("serialize must reject the control-char name");
         assert!(
@@ -1632,7 +1640,7 @@ LOGOS_STORAGE_API_PORT = "8083"
 
     #[test]
     fn parses_modules_section() {
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + r#"
 [modules.tictactoe]
 flake = "path:./tictactoe"
@@ -1653,7 +1661,7 @@ role = "dependency"
 
     #[test]
     fn module_standalone_app_parses_and_round_trips() {
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + r#"
 [modules.swap_ui]
 flake = "path:./swap-ui#lgx"
@@ -1697,7 +1705,7 @@ role = "project"
 
     #[test]
     fn rejects_basecamp_pin_field_with_init_hint() {
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + r#"
 [basecamp]
 pin = "deadbeef"
@@ -1706,13 +1714,13 @@ source = "https://example/basecamp"
         let err = parse_config(&toml).unwrap_err();
         assert!(err.to_string().contains("logos-scaffold init"), "{err}");
         let doc: DocumentMut = toml.parse().expect("re-parse for markers");
-        let markers = detect_old_schema_markers(&doc, "0.2.0");
+        let markers = detect_old_schema_markers(&doc, "0.3.0");
         assert!(markers.has_old_basecamp_keys, "{markers:?}");
     }
 
     #[test]
     fn rejects_basecamp_modules_legacy_with_init_hint() {
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + r#"
 [basecamp.modules.foo]
 flake = "path:./foo"
@@ -1721,13 +1729,13 @@ role = "project"
         let err = parse_config(&toml).unwrap_err();
         assert!(err.to_string().contains("logos-scaffold init"), "{err}");
         let doc: DocumentMut = toml.parse().expect("re-parse for markers");
-        let markers = detect_old_schema_markers(&doc, "0.2.0");
+        let markers = detect_old_schema_markers(&doc, "0.3.0");
         assert!(markers.has_old_basecamp_modules, "{markers:?}");
     }
 
     #[test]
     fn rejects_repos_lez_url_field_with_init_hint() {
-        let mut toml = minimal_v0_2_0();
+        let mut toml = minimal_v0_3_0();
         // Inject `url = "..."` into [repos.lez].
         toml = toml.replace(
             "[repos.lez]\nsource",
@@ -1739,14 +1747,55 @@ role = "project"
 
     #[test]
     fn rejects_pre_v0_2_0_version() {
-        let toml = minimal_v0_2_0().replace("version = \"0.2.0\"", "version = \"0.1.1\"");
+        let toml = minimal_v0_3_0().replace("version = \"0.3.0\"", "version = \"0.1.1\"");
         let err = parse_config(&toml).unwrap_err();
         assert!(err.to_string().contains("logos-scaffold init"), "{err}");
     }
 
     #[test]
+    fn rejects_v0_2_0_version_as_stale_with_init_hint() {
+        // 0.2.0 carries the same section/field shape as the current schema, so
+        // none of the shape markers fire. It is still stale and must be routed
+        // to `init` by the version marker — not fall through to the generic
+        // "this build expects" bail.
+        let toml = minimal_v0_3_0().replace("version = \"0.3.0\"", "version = \"0.2.0\"");
+        let doc: DocumentMut = toml.parse().expect("parse for markers");
+        let markers = detect_old_schema_markers(&doc, "0.2.0");
+        assert!(markers.version_stale, "{markers:?}");
+        assert_eq!(
+            markers,
+            OldSchemaMarkers {
+                version_stale: true,
+                ..Default::default()
+            },
+            "a 0.2.0 file must trip the version marker and nothing else",
+        );
+        let err = parse_config(&toml).unwrap_err();
+        assert!(err.to_string().contains("old schema"), "{err}");
+        assert!(err.to_string().contains("logos-scaffold init"), "{err}");
+    }
+
+    #[test]
+    fn version_marker_matches_the_whole_0_2_series() {
+        // `migrate::is_v0_2_x` gates the pre-0.2.0 rewrites on the same prefix.
+        // If detection were exact-match on "0.2.0", a hand-edited "0.2.1" would
+        // be migrated as a 0.2-shaped file but reported as an unknown version.
+        let doc: DocumentMut = minimal_v0_3_0().parse().expect("parse");
+        for stale in ["0.2", "0.2.0", "0.2.1"] {
+            assert!(
+                detect_old_schema_markers(&doc, stale).version_stale,
+                "{stale} must be flagged stale",
+            );
+        }
+        assert!(
+            !detect_old_schema_markers(&doc, SCAFFOLD_TOML_SCHEMA_VERSION).version_stale,
+            "the current version must never be flagged stale",
+        );
+    }
+
+    #[test]
     fn round_trips_through_serialize() {
-        let cfg1 = parse_config(&minimal_v0_2_0()).expect("parse");
+        let cfg1 = parse_config(&minimal_v0_3_0()).expect("parse");
         let serialized = serialize_config(&cfg1).expect("serialize");
         let cfg2 = parse_config(&serialized).expect("re-parse");
         assert_eq!(cfg2.version, cfg1.version);
@@ -1757,7 +1806,7 @@ role = "project"
 
     #[test]
     fn serialize_omits_default_build_and_empty_optional_fields() {
-        let cfg = parse_config(&minimal_v0_2_0()).expect("parse");
+        let cfg = parse_config(&minimal_v0_3_0()).expect("parse");
         let serialized = serialize_config(&cfg).expect("serialize");
         // [repos.lez] is cargo-built with no attr/path; nothing besides
         // source and pin should appear.
@@ -1771,7 +1820,7 @@ role = "project"
 
     #[test]
     fn serialize_emits_path_when_set() {
-        let mut cfg = parse_config(&minimal_v0_2_0()).expect("parse");
+        let mut cfg = parse_config(&minimal_v0_3_0()).expect("parse");
         cfg.lez.path = "/abs/lez".to_string();
         let serialized = serialize_config(&cfg).expect("serialize");
         assert!(serialized.contains("path = \"/abs/lez\""), "{serialized}");
@@ -1779,11 +1828,11 @@ role = "project"
 
     #[test]
     fn serialize_emits_no_url_field_anywhere() {
-        let cfg = parse_config(&minimal_v0_2_0()).expect("parse");
+        let cfg = parse_config(&minimal_v0_3_0()).expect("parse");
         let serialized = serialize_config(&cfg).expect("serialize");
         assert!(
             !serialized.contains("url ="),
-            "url field should not be emitted in 0.2.0 schema:\n{serialized}"
+            "url field should not be emitted in the current schema:\n{serialized}"
         );
     }
 
@@ -1794,17 +1843,17 @@ role = "project"
 
     #[test]
     fn rejects_legacy_repos_lssa_section() {
-        let toml = minimal_v0_2_0().replace("[repos.lez]", "[repos.lssa]");
+        let toml = minimal_v0_3_0().replace("[repos.lez]", "[repos.lssa]");
         let err = parse_config(&toml).expect_err("lssa section should be rejected");
         assert!(err.to_string().contains("init"), "{err}");
         let doc: DocumentMut = toml.parse().expect("re-parse for markers");
-        let markers = detect_old_schema_markers(&doc, "0.2.0");
+        let markers = detect_old_schema_markers(&doc, "0.3.0");
         assert!(markers.has_lssa, "{markers:?}");
     }
 
     #[test]
     fn parse_localnet_port_out_of_range_errors() {
-        let toml = minimal_v0_2_0().replace("port = 3040", "port = 70000");
+        let toml = minimal_v0_3_0().replace("port = 3040", "port = 70000");
         let err = parse_config(&toml).unwrap_err();
         assert!(
             err.to_string().contains("70000") || err.to_string().contains("u16"),
@@ -1814,7 +1863,7 @@ role = "project"
 
     #[test]
     fn rejects_repo_source_starting_with_dash() {
-        let toml = minimal_v0_2_0().replace(
+        let toml = minimal_v0_3_0().replace(
             &format!("source = \"{}\"\npin = \"{}\"", LEZ_SOURCE, DEFAULT_LEZ.sha),
             &format!(
                 "source = \"-upload-pack=evil\"\npin = \"{}\"",
@@ -1829,7 +1878,7 @@ role = "project"
 
     #[test]
     fn rejects_repo_source_with_ext_transport() {
-        let toml = minimal_v0_2_0().replace(
+        let toml = minimal_v0_3_0().replace(
             &format!("source = \"{}\"\npin = \"{}\"", LEZ_SOURCE, DEFAULT_LEZ.sha),
             &format!("source = \"ext::sh -c id\"\npin = \"{}\"", DEFAULT_LEZ.sha),
         );
@@ -1841,7 +1890,7 @@ role = "project"
 
     #[test]
     fn rejects_repo_source_with_ext_transport_case_insensitive() {
-        let toml = minimal_v0_2_0().replace(
+        let toml = minimal_v0_3_0().replace(
             &format!("source = \"{}\"\npin = \"{}\"", LEZ_SOURCE, DEFAULT_LEZ.sha),
             &format!("source = \"EXT::sh -c id\"\npin = \"{}\"", DEFAULT_LEZ.sha),
         );
@@ -1851,7 +1900,7 @@ role = "project"
 
     #[test]
     fn rejects_repo_source_with_transport_helper_prefix() {
-        let toml = minimal_v0_2_0().replace(
+        let toml = minimal_v0_3_0().replace(
             &format!("source = \"{}\"\npin = \"{}\"", LEZ_SOURCE, DEFAULT_LEZ.sha),
             &format!(
                 "source = \"transport-helper::evil\"\npin = \"{}\"",
@@ -1876,7 +1925,7 @@ role = "project"
             "./relative/repo",
             "extender/repo",
         ] {
-            let toml = minimal_v0_2_0().replace(
+            let toml = minimal_v0_3_0().replace(
                 &format!("source = \"{}\"\npin = \"{}\"", LEZ_SOURCE, DEFAULT_LEZ.sha),
                 &format!("source = \"{}\"\npin = \"{}\"", source, DEFAULT_LEZ.sha),
             );
@@ -1887,7 +1936,7 @@ role = "project"
 
     #[test]
     fn parses_path_override_for_back_compat() {
-        let toml = minimal_v0_2_0().replace(
+        let toml = minimal_v0_3_0().replace(
             "[repos.lez]\nsource",
             "[repos.lez]\npath = \"/abs/lez\"\nsource",
         );
@@ -1897,7 +1946,7 @@ role = "project"
 
     #[test]
     fn parse_config_with_run_profile_subsection() {
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + "[run.profiles.e2e]\nreset = true\npost_deploy = [\"scripts/e2e.sh\"]\n";
         let cfg = parse_config(&toml).expect("parse");
         let prof = cfg.run.profiles.get("e2e").expect("e2e present");
@@ -1907,7 +1956,7 @@ role = "project"
 
     #[test]
     fn parse_config_with_run_watch_section() {
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + "[run.watch]\ninclude = [\"programs/**/guest/**\"]\nexclude = [\"**/*.md\", \"Cargo.lock\"]\ndebounce_ms = 1500\n";
         let cfg = parse_config(&toml).expect("parse");
         assert_eq!(
@@ -1925,21 +1974,21 @@ role = "project"
     fn parse_config_run_watch_rejects_empty_glob() {
         // An empty pattern normalizes to match-all; an empty `exclude` would
         // silently suppress every watch trigger, so it's rejected at parse.
-        let toml = minimal_v0_2_0() + "[run.watch]\nexclude = [\"\"]\n";
+        let toml = minimal_v0_3_0() + "[run.watch]\nexclude = [\"\"]\n";
         let err = parse_config(&toml).unwrap_err();
         assert!(err.to_string().contains("must not be empty"), "{err}");
     }
 
     #[test]
     fn parse_config_run_watch_rejects_negative_debounce() {
-        let toml = minimal_v0_2_0() + "[run.watch]\ndebounce_ms = -5\n";
+        let toml = minimal_v0_3_0() + "[run.watch]\ndebounce_ms = -5\n";
         let err = parse_config(&toml).unwrap_err();
         assert!(err.to_string().contains("debounce_ms"), "{err}");
     }
 
     #[test]
     fn run_watch_round_trips_through_parse_serialize() {
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + "[run.watch]\ninclude = [\"src/**\"]\nexclude = [\"**/target/**\"]\ndebounce_ms = 750\n";
         let cfg1 = parse_config(&toml).expect("parse");
         let serialized = serialize_config(&cfg1).expect("serialize");
@@ -1951,7 +2000,7 @@ role = "project"
 
     #[test]
     fn parse_config_default_profile_must_exist() {
-        let toml = minimal_v0_2_0() + "[run]\ndefault_profile = \"missing\"\n";
+        let toml = minimal_v0_3_0() + "[run]\ndefault_profile = \"missing\"\n";
         let err = parse_config(&toml).unwrap_err();
         assert!(
             err.to_string().contains("missing")
@@ -1962,7 +2011,7 @@ role = "project"
 
     #[test]
     fn parse_config_default_profile_resolves() {
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + "[run]\ndefault_profile = \"play\"\n[run.profiles.play]\npost_deploy = \"echo play\"\n";
         let cfg = parse_config(&toml).expect("parse");
         assert_eq!(cfg.run.default_profile.as_deref(), Some("play"));
@@ -1972,7 +2021,7 @@ role = "project"
 
     #[test]
     fn resolve_profile_explicit_selector_wins() {
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + "[run]\npost_deploy = [\"echo inline\"]\ndefault_profile = \"play\"\n[run.profiles.play]\npost_deploy = \"echo play\"\n[run.profiles.e2e]\npost_deploy = \"echo e2e\"\n";
         let cfg = parse_config(&toml).expect("parse");
         let r = cfg.run.resolve_profile(Some("e2e")).expect("resolve");
@@ -1981,7 +2030,7 @@ role = "project"
 
     #[test]
     fn resolve_profile_unknown_name_errors_with_known_list() {
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + "[run.profiles.play]\npost_deploy = \"echo play\"\n[run.profiles.e2e]\npost_deploy = \"echo e2e\"\n";
         let cfg = parse_config(&toml).expect("parse");
         let err = cfg.run.resolve_profile(Some("missing")).unwrap_err();
@@ -1992,7 +2041,7 @@ role = "project"
 
     #[test]
     fn resolve_profile_falls_back_to_inline_when_no_default() {
-        let toml = minimal_v0_2_0() + "[run]\nreset = true\n";
+        let toml = minimal_v0_3_0() + "[run]\nreset = true\n";
         let cfg = parse_config(&toml).expect("parse");
         let r = cfg.run.resolve_profile(None).expect("resolve");
         assert!(r.reset);
@@ -2005,7 +2054,7 @@ role = "project"
     /// semantics.
     #[test]
     fn resolve_profile_default_profile_fully_shadows_inline() {
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + "[run]\ndefault_profile = \"dev\"\npost_deploy = [\"echo inline\"]\nreset = true\n[run.profiles.dev]\npost_deploy = [\"echo dev\"]\n";
         let cfg = parse_config(&toml).expect("parse");
         let r = cfg.run.resolve_profile(None).expect("resolve");
@@ -2018,7 +2067,7 @@ role = "project"
 
     #[test]
     fn run_profiles_round_trip_through_parse_serialize() {
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + "[run]\ndefault_profile = \"dev\"\n[run.profiles.dev]\npost_deploy = [\"echo dev\"]\n[run.profiles.e2e]\nreset = true\npost_deploy = [\"echo e2e\"]\n";
         let cfg1 = parse_config(&toml).expect("parse");
         let serialized = serialize_config(&cfg1).expect("serialize");
@@ -2033,7 +2082,7 @@ role = "project"
     #[test]
     fn run_profile_deploy_defaults_to_true() {
         // Absent `deploy` key → deploy runs, preserving historical behavior.
-        let toml = minimal_v0_2_0() + "[run.profiles.demo]\npost_deploy = \"echo demo\"\n";
+        let toml = minimal_v0_3_0() + "[run.profiles.demo]\npost_deploy = \"echo demo\"\n";
         let cfg = parse_config(&toml).expect("parse");
         assert!(cfg.run.profiles.get("demo").expect("demo present").deploy);
         // The inline/default profile also defaults deploy to true.
@@ -2043,7 +2092,7 @@ role = "project"
 
     #[test]
     fn parse_config_run_profile_deploy_false() {
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + "[run.profiles.demo]\ndeploy = false\npost_deploy = [\"scripts/self-deploy.sh\"]\n";
         let cfg = parse_config(&toml).expect("parse");
         let demo = cfg.run.profiles.get("demo").expect("demo present");
@@ -2053,7 +2102,7 @@ role = "project"
 
     #[test]
     fn parse_config_inline_run_deploy_false() {
-        let toml = minimal_v0_2_0() + "[run]\ndeploy = false\n";
+        let toml = minimal_v0_3_0() + "[run]\ndeploy = false\n";
         let cfg = parse_config(&toml).expect("parse");
         assert!(!cfg.run.inline.deploy);
         let resolved = cfg.run.resolve_profile(None).expect("resolve");
@@ -2062,7 +2111,7 @@ role = "project"
 
     #[test]
     fn run_profile_deploy_round_trips_through_parse_serialize() {
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + "[run]\ndeploy = false\n[run.profiles.demo]\ndeploy = false\npost_deploy = [\"echo demo\"]\n";
         let cfg1 = parse_config(&toml).expect("parse");
         let serialized = serialize_config(&cfg1).expect("serialize");
@@ -2076,7 +2125,7 @@ role = "project"
     #[test]
     fn run_profile_deploy_true_is_not_serialized() {
         // The `true` default must not be emitted, to keep scaffold.toml minimal.
-        let toml = minimal_v0_2_0() + "[run.profiles.demo]\npost_deploy = [\"echo demo\"]\n";
+        let toml = minimal_v0_3_0() + "[run.profiles.demo]\npost_deploy = [\"echo demo\"]\n";
         let cfg = parse_config(&toml).expect("parse");
         let serialized = serialize_config(&cfg).expect("serialize");
         assert!(
@@ -2088,7 +2137,7 @@ role = "project"
     #[test]
     fn run_profile_topup_defaults_to_true() {
         // Absent `topup` key → topup runs, preserving historical behavior.
-        let toml = minimal_v0_2_0() + "[run.profiles.demo]\npost_deploy = \"echo demo\"\n";
+        let toml = minimal_v0_3_0() + "[run.profiles.demo]\npost_deploy = \"echo demo\"\n";
         let cfg = parse_config(&toml).expect("parse");
         assert!(cfg.run.profiles.get("demo").expect("demo present").topup);
         // The inline/default profile also defaults topup to true.
@@ -2098,7 +2147,7 @@ role = "project"
 
     #[test]
     fn parse_config_run_profile_topup_false() {
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + "[run.profiles.demo]\ntopup = false\npost_deploy = [\"cargo run --bin demo\"]\n";
         let cfg = parse_config(&toml).expect("parse");
         let demo = cfg.run.profiles.get("demo").expect("demo present");
@@ -2108,7 +2157,7 @@ role = "project"
 
     #[test]
     fn parse_config_inline_run_topup_false() {
-        let toml = minimal_v0_2_0() + "[run]\ntopup = false\n";
+        let toml = minimal_v0_3_0() + "[run]\ntopup = false\n";
         let cfg = parse_config(&toml).expect("parse");
         assert!(!cfg.run.inline.topup);
         let resolved = cfg.run.resolve_profile(None).expect("resolve");
@@ -2117,7 +2166,7 @@ role = "project"
 
     #[test]
     fn run_profile_topup_round_trips_through_parse_serialize() {
-        let toml = minimal_v0_2_0()
+        let toml = minimal_v0_3_0()
             + "[run]\ntopup = false\n[run.profiles.demo]\ntopup = false\npost_deploy = [\"echo demo\"]\n";
         let cfg1 = parse_config(&toml).expect("parse");
         let serialized = serialize_config(&cfg1).expect("serialize");
@@ -2131,7 +2180,7 @@ role = "project"
     #[test]
     fn run_profile_topup_true_is_not_serialized() {
         // The `true` default must not be emitted, to keep scaffold.toml minimal.
-        let toml = minimal_v0_2_0() + "[run.profiles.demo]\npost_deploy = [\"echo demo\"]\n";
+        let toml = minimal_v0_3_0() + "[run.profiles.demo]\npost_deploy = [\"echo demo\"]\n";
         let cfg = parse_config(&toml).expect("parse");
         let serialized = serialize_config(&cfg).expect("serialize");
         assert!(

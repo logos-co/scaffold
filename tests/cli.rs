@@ -35,7 +35,7 @@ const GUEST_BIN_REL_PATH: &str =
 /// context to exist (no basecamp section). Older tests in this file inline
 /// the same content; new tests should prefer this helper.
 const MINIMAL_SCAFFOLD_TOML: &str = r#"[scaffold]
-version = "0.2.0"
+version = "0.3.0"
 cache_root = "cache"
 
 [repos.lez]
@@ -3606,11 +3606,11 @@ fn write_scaffold_toml_with_localnet(
     risc0_dev_mode: Option<bool>,
 ) {
     let spel_path = project_root.join("spel");
-    // Schema 0.2.0: no url, no [basecamp] / [basecamp.modules.*],
+    // Current schema: no url, no [basecamp] / [basecamp.modules.*],
     // path is set on lez/spel for back-compat (tests need a literal path
     // to a local stub repo).
     let mut content = format!(
-        "[scaffold]\nversion = \"0.2.0\"\ncache_root = \"{}\"\n\n[repos.lez]\nsource = \"https://github.com/logos-blockchain/logos-execution-zone.git\"\npin = \"{}\"\npath = \"{}\"\n\n[repos.spel]\nsource = \"https://github.com/logos-co/spel.git\"\npin = \"{}\"\npath = \"{}\"\n\n[wallet]\nhome_dir = \".scaffold/wallet\"\n",
+        "[scaffold]\nversion = \"0.3.0\"\ncache_root = \"{}\"\n\n[repos.lez]\nsource = \"https://github.com/logos-blockchain/logos-execution-zone.git\"\npin = \"{}\"\npath = \"{}\"\n\n[repos.spel]\nsource = \"https://github.com/logos-co/spel.git\"\npin = \"{}\"\npath = \"{}\"\n\n[wallet]\nhome_dir = \".scaffold/wallet\"\n",
         project_root.join("cache").display(),
         TEST_PIN,
         lez_path.display(),
@@ -4289,10 +4289,10 @@ fn init_creates_scaffold_toml_and_dirs() {
 }
 
 #[test]
-fn init_refreshes_skills_when_already_at_v0_2_0_scaffold_toml() {
+fn init_refreshes_skills_when_already_at_current_schema_scaffold_toml() {
     let temp = tempdir().expect("tempdir");
     let scaffold_path = temp.path().join("scaffold.toml");
-    // First, run init to lay down a fresh v0.2.0 file plus the AI skill set.
+    // First, run init to lay down a fresh current-schema file plus the AI skill set.
     Command::new(assert_cmd::cargo::cargo_bin!("lgs"))
         .current_dir(temp.path())
         .arg("init")
@@ -4353,7 +4353,7 @@ fn init_migrates_pre_v0_2_0_scaffold_toml_in_place() {
         .arg("init")
         .assert()
         .success()
-        .stdout(predicate::str::contains("migrated to schema v0.2.0"));
+        .stdout(predicate::str::contains("migrated to schema v0.3.0"));
 
     let after = fs::read_to_string(&scaffold_path).expect("read scaffold.toml");
     assert!(
@@ -4361,7 +4361,7 @@ fn init_migrates_pre_v0_2_0_scaffold_toml_in_place() {
         "user comments must be preserved; got:\n{after}"
     );
     assert!(
-        after.contains("version = \"0.2.0\""),
+        after.contains("version = \"0.3.0\""),
         "[scaffold].version must be bumped; got:\n{after}"
     );
     assert!(
@@ -4371,6 +4371,87 @@ fn init_migrates_pre_v0_2_0_scaffold_toml_in_place() {
     assert!(
         !after.contains("url ="),
         "url field must be stripped; got:\n{after}"
+    );
+}
+
+#[test]
+fn init_migrates_v0_2_0_scaffold_toml_to_v0_3_0() {
+    // 0.2.0 and 0.3.0 share the same section/field shape, so the only edit is
+    // the version stamp — but it is `init`'s job to make it, and every other
+    // command stays hard-failed until it does.
+    let temp = tempdir().expect("tempdir");
+    let scaffold_path = temp.path().join("scaffold.toml");
+    let original = v0_2_0_scaffold_toml();
+    fs::write(&scaffold_path, &original).expect("seed scaffold.toml");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("lgs"))
+        .current_dir(temp.path())
+        .arg("init")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("migrated to schema v0.3.0"));
+
+    let after = fs::read_to_string(&scaffold_path).expect("read scaffold.toml");
+    assert_eq!(
+        after,
+        original.replace(r#"version = "0.2.0""#, r#"version = "0.3.0""#),
+        "the version stamp must be the only edit; got:\n{after}"
+    );
+
+    // Backup behavior is unchanged for this migration path.
+    let backup = fs::read_to_string(temp.path().join("scaffold.toml.bak")).expect("read backup");
+    assert_eq!(backup, original, "backup must hold the pre-migration file");
+
+    // A second init has nothing left to do.
+    Command::new(assert_cmd::cargo::cargo_bin!("lgs"))
+        .current_dir(temp.path())
+        .arg("init")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("already at schema v0.3.0"));
+}
+
+#[test]
+fn init_dry_run_on_v0_2_0_scaffold_toml_does_not_write() {
+    let temp = tempdir().expect("tempdir");
+    let scaffold_path = temp.path().join("scaffold.toml");
+    let original = v0_2_0_scaffold_toml();
+    fs::write(&scaffold_path, &original).expect("seed scaffold.toml");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("lgs"))
+        .current_dir(temp.path())
+        .args(["init", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dry-run"))
+        .stdout(predicate::str::contains("0.3.0"));
+
+    assert_eq!(
+        fs::read_to_string(&scaffold_path).expect("read scaffold.toml"),
+        original,
+        "dry-run must not mutate scaffold.toml"
+    );
+    assert!(
+        !temp.path().join("scaffold.toml.bak").exists(),
+        "dry-run must not write scaffold.toml.bak"
+    );
+}
+
+#[test]
+fn init_writes_current_schema_version_on_fresh_project() {
+    let temp = tempdir().expect("tempdir");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("lgs"))
+        .current_dir(temp.path())
+        .arg("init")
+        .assert()
+        .success();
+
+    let written =
+        fs::read_to_string(temp.path().join("scaffold.toml")).expect("read scaffold.toml");
+    assert!(
+        written.contains(r#"version = "0.3.0""#),
+        "fresh init must stamp the current schema version; got:\n{written}"
     );
 }
 
@@ -4576,10 +4657,29 @@ flake = "path:./foo"
 role = "project"
 "#;
 
+/// A valid 0.2.0 scaffold.toml: same section/field shape as the current
+/// schema, only the version stamp is stale. Derived from the current-schema
+/// fixture so the two cannot drift apart.
+fn v0_2_0_scaffold_toml() -> String {
+    let out = MINIMAL_SCAFFOLD_TOML.replace(r#"version = "0.3.0""#, r#"version = "0.2.0""#);
+    assert_ne!(
+        out, MINIMAL_SCAFFOLD_TOML,
+        "MINIMAL_SCAFFOLD_TOML must carry the current schema stamp"
+    );
+    out
+}
+
 fn assert_pre_v0_2_0_rejection(args: &[&str]) {
+    assert_stale_schema_rejection(PRE_V0_2_0_SCAFFOLD_TOML, "pre-0.2.0", args);
+}
+
+fn assert_v0_2_0_rejection(args: &[&str]) {
+    assert_stale_schema_rejection(&v0_2_0_scaffold_toml(), "0.2.0", args);
+}
+
+fn assert_stale_schema_rejection(seed: &str, label: &str, args: &[&str]) {
     let temp = tempdir().expect("tempdir");
-    fs::write(temp.path().join("scaffold.toml"), PRE_V0_2_0_SCAFFOLD_TOML)
-        .expect("seed pre-v0.2.0 scaffold.toml");
+    fs::write(temp.path().join("scaffold.toml"), seed).expect("seed stale scaffold.toml");
 
     let output = Command::new(assert_cmd::cargo::cargo_bin!("lgs"))
         .current_dir(temp.path())
@@ -4589,7 +4689,7 @@ fn assert_pre_v0_2_0_rejection(args: &[&str]) {
 
     assert!(
         !output.status.success(),
-        "lgs {args:?} must hard-fail on pre-0.2.0 scaffold.toml; got status {:?}, stdout:\n{}\nstderr:\n{}",
+        "lgs {args:?} must hard-fail on {label} scaffold.toml; got status {:?}, stdout:\n{}\nstderr:\n{}",
         output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
@@ -4603,14 +4703,55 @@ fn assert_pre_v0_2_0_rejection(args: &[&str]) {
     let after = fs::read_to_string(temp.path().join("scaffold.toml"))
         .expect("scaffold.toml still readable");
     assert_eq!(
-        after, PRE_V0_2_0_SCAFFOLD_TOML,
-        "lgs {args:?} must not mutate scaffold.toml when it rejects pre-0.2.0",
+        after, seed,
+        "lgs {args:?} must not mutate scaffold.toml when it rejects {label}",
     );
 }
 
 #[test]
 fn setup_hard_fails_on_pre_v0_2_0_scaffold_toml() {
     assert_pre_v0_2_0_rejection(&["setup"]);
+}
+
+/// A 0.2.0 file trips none of the shape markers — its sections and fields are
+/// already current — so only the version stamp routes it to `init`. Every
+/// non-init command must still hard-fail on it, JSON paths included, instead
+/// of default-filling or accepting two schema versions.
+#[test]
+fn non_init_commands_hard_fail_on_v0_2_0_scaffold_toml() {
+    for args in [
+        &["setup"][..],
+        &["build"][..],
+        &["deploy"][..],
+        &["doctor"][..],
+        &["report"][..],
+        &["basecamp", "setup"][..],
+        &["wallet", "list"][..],
+        &["deploy", "--json"][..],
+        &["doctor", "--json"][..],
+    ] {
+        assert_v0_2_0_rejection(args);
+    }
+}
+
+#[test]
+fn deploy_json_keeps_stdout_clean_on_v0_2_0_scaffold_toml() {
+    let temp = tempdir().expect("tempdir");
+    fs::write(temp.path().join("scaffold.toml"), v0_2_0_scaffold_toml())
+        .expect("seed v0.2.0 scaffold.toml");
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("lgs"))
+        .current_dir(temp.path())
+        .args(["deploy", "--json"])
+        .output()
+        .expect("run lgs deploy --json");
+
+    assert!(!output.status.success(), "deploy --json must fail");
+    assert!(
+        output.stdout.is_empty(),
+        "deploy --json must keep stdout clean on rejection; got: {}",
+        String::from_utf8_lossy(&output.stdout),
+    );
 }
 
 /// F1: `doctor` must surface the configured circuits install directory when
