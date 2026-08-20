@@ -1,11 +1,11 @@
 [package]
 name = "logos-scaffold"
 version = "0.3.0"
-description = "Rust CLI for bootstrapping LSSA program_deployment projects in standalone mode"
+description = "Command-line toolkit for building, running, and deploying Logos programs against a local execution zone"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
-repository = "https://github.com/logos-co/logos-scaffold"
+repository = "https://github.com/logos-co/scaffold"
 rust-version = "1.81"
 include = [
   "/src/**",

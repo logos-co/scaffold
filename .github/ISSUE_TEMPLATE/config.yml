@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security issue
+    url: https://github.com/logos-co/scaffold/blob/master/SECURITY.md
+    about: Read the security model before reporting anything involving wallets or keys.
+  - name: Command reference
+    url: https://github.com/logos-co/scaffold/blob/master/docs/commands.md
+    about: Full CLI surface and the exact semantics of each command.

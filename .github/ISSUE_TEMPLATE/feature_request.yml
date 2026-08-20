@@ -1,0 +1,49 @@
+name: Feature request
+description: Propose a change to the CLI or its templates
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read [CONTRIBUTING.md](https://github.com/logos-co/scaffold/blob/master/CONTRIBUTING.md) first. This
+        project prioritizes friction hit by people building real projects on
+        the Logos stack. Requests without that grounding are triaged last.
+
+  - type: textarea
+    id: friction
+    attributes:
+      label: What friction did you hit
+      description: |
+        Describe the problem in terms of what you were trying to build, not the
+        solution you have in mind.
+      placeholder: |
+        My project funds its own accounts, so scaffold's topup step ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What you do today
+      description: The workaround you currently use, or why there isn't one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: What you would like the CLI to do. Include the command shape if you have one in mind.
+    validations:
+      required: false
+
+  - type: input
+    id: project-link
+    attributes:
+      label: Project link
+      description: |
+        A link to the project that hit this, or to an issue or discussion showing
+        someone else did. Leave blank if neither exists.
+      placeholder: https://github.com/...
+    validations:
+      required: false

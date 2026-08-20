@@ -9,6 +9,21 @@
 
 Generic cleanups, cosmetic refactors, and "this would be nice" PRs from contributors with no connection to either of the above are the lowest triage priority and are likely to be closed.
 
+## Project Documents
+
+| Document | What it holds |
+|---|---|
+| [AGENTS.md](./AGENTS.md) | Repo orientation for AI coding agents |
+| [FURPS.md](./FURPS.md) | Functional and non-functional requirements |
+| [ADR.md](./ADR.md) | Architecture decision records |
+| [DOGFOODING.md](./DOGFOODING.md) | Canonical validation runbook (`D1`-`L4`) |
+| [docs/commands.md](./docs/commands.md) | Full CLI surface and command semantics |
+| [docs/configuration.md](./docs/configuration.md) | `[run]` profiles, hooks, watch mode |
+| [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) | Community standards |
+
+Add to `FURPS.md` and `ADR.md` rather than rewriting them. They are a record,
+not a description of the current state.
+
 ## Before You Open a PR
 
 You should have:
@@ -26,7 +41,7 @@ Plus:
 - **Scoped.** One concern per PR. No drive-by refactors.
 - **Green CI.**
 - **Verified.** Applicable DOGFOODING scenarios rerun. See [DOGFOODING.md](./DOGFOODING.md) — "Minimum Rerun Guidance for Future Changes".
-- **Documented.** If the change affects user-facing behavior, update `README.md` and `DOGFOODING.md` in the same PR.
+- **Documented.** If the change affects user-facing behavior, update `README.md` and `DOGFOODING.md` in the same PR. If it changes a command or a flag, update [`docs/commands.md`](./docs/commands.md) too; if it changes `[run]` config, update [`docs/configuration.md`](./docs/configuration.md).
 
 ## LLM-Assisted PRs
 
