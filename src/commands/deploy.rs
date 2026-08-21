@@ -13,9 +13,9 @@ use crate::project::{load_project, resolve_repo_path};
 use crate::DynResult;
 
 use super::wallet_support::{
-    default_sequencer_http_url_for_project, extract_tx_identifier, is_connectivity_failure,
-    load_wallet_runtime, rpc_get_last_block_id, sequencer_unreachable_hint, set_wallet_home_env,
-    summarize_command_failure, wallet_password, RpcReachabilityError,
+    default_sequencer_http_url_for_project, extract_tx_identifier, load_wallet_runtime,
+    rpc_get_last_block_id, sequencer_connectivity_failure, sequencer_unreachable_hint,
+    set_wallet_home_env, summarize_command_failure, wallet_password, RpcReachabilityError,
 };
 
 /// Roots searched (in order) for guest `.bin` artefacts. Both layouts exist in
@@ -236,7 +236,7 @@ pub(crate) fn deploy_for_project(
         if !output.status.success() {
             let summary = summarize_command_failure(&output.stdout, &output.stderr);
             let combined = format!("{}\n{}", output.stdout, output.stderr);
-            let connectivity_failure = is_connectivity_failure(&combined);
+            let connectivity_failure = sequencer_connectivity_failure(&combined, &sequencer_addr);
             if !json {
                 println!("FAIL {program} deployment failed");
                 println!("  Error: {summary}");

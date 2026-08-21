@@ -300,11 +300,57 @@ pub(crate) fn is_connectivity_failure(text: &str) -> bool {
         "network is unreachable",
         "error sending request",
         "http error",
-        "127.0.0.1:3040",
-        "localhost:3040",
     ]
     .iter()
     .any(|needle| lower.contains(needle))
+}
+
+/// Like [`is_connectivity_failure`], but also treats a *connect* timeout that
+/// names the sequencer we actually targeted as a connectivity failure.
+/// `sequencer_addr` is the resolved URL (it carries the configured
+/// `[localnet] port`, so this works on custom ports — the old hardcoded
+/// `127.0.0.1:3040` needle did not).
+///
+/// The address is only a co-signal, and the timeout phrase is deliberately
+/// connect-specific:
+/// - A bare URL mention is not enough — logical rejections (bad signature,
+///   uninitialised account) routinely echo the sequencer URL and must stay
+///   classified as non-connectivity failures.
+/// - A bare "timed out" is not enough either — it is ambiguous (a reachable but
+///   slow sequencer times out the same way), so the phrase must name the
+///   *connection* that timed out. Real connect failures that phrase it
+///   differently ("connection refused", "failed to connect", reqwest's
+///   "error sending request … operation timed out") are already caught by
+///   [`is_connectivity_failure`] above.
+/// - A confirmation timeout ("transaction not found in preconfigured amount of
+///   blocks") means the sequencer *was* reached but the tx did not settle in
+///   time; it is excluded so the caller's dedicated check still fires, even if
+///   that message is later reworded to mention a connection or the URL.
+pub(crate) fn sequencer_connectivity_failure(text: &str, sequencer_addr: &str) -> bool {
+    if is_connectivity_failure(text) {
+        return true;
+    }
+    if is_confirmation_timeout_failure(text) {
+        return false;
+    }
+    let lower = text.to_lowercase();
+    let host_port = sequencer_addr
+        .split_once("://")
+        .map_or(sequencer_addr, |(_, rest)| rest)
+        .trim_end_matches('/')
+        .to_lowercase();
+    if host_port.is_empty() || !lower.contains(&host_port) {
+        return false;
+    }
+    const CONNECT_TIMEOUT_PHRASES: &[&str] = &[
+        "connection timed out",
+        "connect timed out",
+        "connection timeout",
+        "connect timeout",
+    ];
+    CONNECT_TIMEOUT_PHRASES
+        .iter()
+        .any(|needle| lower.contains(needle))
 }
 
 pub(crate) fn is_uninitialized_account_output(text: &str) -> bool {
@@ -548,6 +594,78 @@ mod tests {
     };
     use crate::commands::test_support::drain_http_request;
     use crate::constants::WALLET_HOME_ENV_VARS;
+
+    use super::sequencer_connectivity_failure;
+
+    #[test]
+    fn sequencer_connectivity_failure_classification() {
+        let default_addr = "http://127.0.0.1:3040";
+        let custom_addr = "http://127.0.0.1:3050";
+
+        // False positive guard: a logical rejection that merely echoes the
+        // sequencer URL is NOT a connectivity failure.
+        let rejection =
+            "Error: transaction rejected: invalid signature (sequencer at http://127.0.0.1:3040)";
+        assert!(
+            !sequencer_connectivity_failure(rejection, default_addr),
+            "logical rejection echoing the URL must not be connectivity"
+        );
+
+        // False negative guard: a real connect timeout against a sequencer on a
+        // custom [localnet] port is a connectivity failure (the old hardcoded
+        // :3040 needle missed this).
+        let timeout =
+            "Error: request to http://127.0.0.1:3050 failed: Connection timed out (os error 110)";
+        assert!(
+            sequencer_connectivity_failure(timeout, custom_addr),
+            "connect timeout naming the configured sequencer must be connectivity"
+        );
+
+        // Boundary: a *bare* request timeout is ambiguous (reachable-but-slow
+        // looks identical), so naming the sequencer is not enough on its own.
+        // Real connect failures phrase it more specifically and are caught above.
+        let ambiguous = "Error: request to http://127.0.0.1:3050 timed out after 30s";
+        assert!(
+            !sequencer_connectivity_failure(ambiguous, custom_addr),
+            "bare request timeout must not classify without a connect-specific phrase"
+        );
+
+        // Control: an explicit transport error is connectivity on its own.
+        let refused =
+            "error sending request for url (http://127.0.0.1:3040/): Connection refused (os error 111)";
+        assert!(
+            sequencer_connectivity_failure(refused, default_addr),
+            "transport error must be connectivity"
+        );
+
+        // Regression: a transport token with no URL still classifies (matches
+        // the pre-change behaviour, so no true positive is lost).
+        assert!(
+            sequencer_connectivity_failure("tcp connect error: connection refused", default_addr),
+            "bare transport token must still classify"
+        );
+
+        // Collision guard, pinned independently of the confirmation-timeout
+        // wording: even when the message carries BOTH the connect-timeout phrase
+        // and the sequencer URL, a confirmation timeout must not be reclassified
+        // as connectivity — the caller's dedicated check owns it. This fails if
+        // someone drops the `is_confirmation_timeout_failure` early-return.
+        let confirmation = "transaction not found in preconfigured amount of blocks; \
+             connection timed out contacting http://127.0.0.1:3040";
+        assert!(
+            !sequencer_connectivity_failure(confirmation, default_addr),
+            "confirmation timeout must not be reclassified as connectivity"
+        );
+
+        // A success line that merely names the sequencer is not a failure.
+        assert!(
+            !sequencer_connectivity_failure(
+                "connected to sequencer http://127.0.0.1:3040",
+                default_addr
+            ),
+            "success line naming the URL must not be connectivity"
+        );
+    }
 
     const ACCOUNT_ID: &str = "6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV";
 

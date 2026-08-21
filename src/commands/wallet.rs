@@ -9,8 +9,8 @@ use crate::DynResult;
 
 use super::wallet_support::{
     default_sequencer_http_url_for_project, extract_tx_identifier, is_already_initialized_failure,
-    is_confirmation_timeout_failure, is_connectivity_failure, is_uninitialized_account_output,
-    load_wallet_runtime, read_default_wallet_address, resolve_wallet_address,
+    is_confirmation_timeout_failure, is_uninitialized_account_output, load_wallet_runtime,
+    read_default_wallet_address, resolve_wallet_address, sequencer_connectivity_failure,
     sequencer_unreachable_hint, set_wallet_home_env, summarize_command_failure, wallet_password,
     wallet_state_path, write_default_wallet_address,
 };
@@ -296,7 +296,7 @@ pub(crate) fn cmd_wallet_topup_inner(
     if !preflight_output.status.success() {
         let summary = summarize_command_failure(&preflight_output.stdout, &preflight_output.stderr);
         let combined = format!("{}\n{}", preflight_output.stdout, preflight_output.stderr);
-        if is_connectivity_failure(&combined) {
+        if sequencer_connectivity_failure(&combined, &sequencer_addr) {
             if json {
                 emit_topup_error_json(
                     "connectivity",
@@ -337,7 +337,7 @@ pub(crate) fn cmd_wallet_topup_inner(
         if !init_output.status.success() {
             let summary = summarize_command_failure(&init_output.stdout, &init_output.stderr);
             let combined = format!("{}\n{}", init_output.stdout, init_output.stderr);
-            if is_connectivity_failure(&combined) {
+            if sequencer_connectivity_failure(&combined, &sequencer_addr) {
                 if json {
                     emit_topup_error_json(
                         "connectivity",
@@ -377,7 +377,7 @@ pub(crate) fn cmd_wallet_topup_inner(
     if !output.status.success() {
         let summary = summarize_command_failure(&output.stdout, &output.stderr);
         let combined = format!("{}\n{}", output.stdout, output.stderr);
-        if is_connectivity_failure(&combined) {
+        if sequencer_connectivity_failure(&combined, &sequencer_addr) {
             if json {
                 emit_topup_error_json(
                     "connectivity",
