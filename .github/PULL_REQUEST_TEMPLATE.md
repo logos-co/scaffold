@@ -39,5 +39,5 @@ Generic "this would be nice" does not count.
 
 - [ ] CI is green
 - [ ] Relevant DOGFOODING scenarios rerun (listed above)
-- [ ] Docs updated (`README.md`, `DOGFOODING.md`, plus `docs/commands.md` for a command or flag change) if user-facing behavior changed
+- [ ] Docs updated (`README.md`, `DOGFOODING.md`, plus `docs/commands.md` for a command or flag change and `docs/configuration.md` for `[run]` config changes) if user-facing behavior changed
 - [ ] I have read [CONTRIBUTING.md](/CONTRIBUTING.md) and this PR fits within the weekly contribution cap
