@@ -50,7 +50,7 @@ nothing changed. If a step fails, `lgs doctor` reports what is missing.
 ## What you get
 
 - `lgs run` chains build, IDL, localnet, wallet topup, and deploy into one command. Add `--watch` to re-run it on every file change.
-- `lgs localnet` gives each project one long-lived sequencer. Its status tells a managed process apart from a stale one or a foreign listener.
+- `lgs localnet` gives each project one long-lived sequencer. It is daemonized, so closing the terminal does not kill it, and its status tells a managed process apart from a stale one or a foreign listener.
 - `lgs test-node` spins up throwaway sequencers for integration tests. Each gets its own port, database, and state, so tests run in parallel without colliding.
 - `lgs basecamp` builds your project's Logos modules and launches them in clean-slate desktop profiles.
 

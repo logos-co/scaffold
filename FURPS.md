@@ -96,7 +96,7 @@
 ### Supportability
 
 1. `[run]` round-trips cleanly through `parse_config` / `serialize_config`. Default values are omitted from the serialized output to keep diffs minimal.
-2. The hook env contract is documented in `README.md` and validated by unit and integration tests in `src/commands/run.rs::tests` and `tests/cli.rs`.
+2. The hook env contract is documented in `docs/configuration.md` and validated by unit and integration tests in `src/commands/run.rs::tests` and `tests/cli.rs`.
 3. Flag-conflict rejection messages list the conflicting flags and exit non-zero, matching clap's standard error format.
 
 ### + (Privacy, Anonymity, Censorship-Resistance)
