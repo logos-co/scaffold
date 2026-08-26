@@ -5080,3 +5080,51 @@ fn basecamp_paths_json_resolves_custom_profile_manifest() {
                 )),
         );
 }
+
+/// Basecamp 0.2.x keeps two more trees under its base directory —
+/// `module_data/` (per-module persisted state) and `logs/` (its own rotated
+/// session logs) — and both sit inside the tree `launch` scrubs, so a relaunch
+/// discards them. `paths` is where that becomes visible: without these fields a
+/// developer hunting for module state or an app log has no way to learn either
+/// where it lives or that it will not survive the next launch.
+#[test]
+fn basecamp_paths_json_lists_the_0_2_x_base_dir_children() {
+    let temp = tempdir().expect("tempdir");
+    let lez_path = temp.path().join("lez");
+    fs::create_dir_all(&lez_path).expect("create lez path");
+    write_scaffold_toml(temp.path(), &lez_path);
+
+    let out = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("basecamp")
+        .arg("paths")
+        .arg("alice")
+        .arg("--json")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    let module_root = parsed["module_root"].as_str().expect("module_root");
+    for (field, child) in [
+        ("modules_dir", "modules"),
+        ("plugins_dir", "plugins"),
+        ("module_data_dir", "module_data"),
+        ("app_logs_dir", "logs"),
+    ] {
+        let value = parsed[field]
+            .as_str()
+            .unwrap_or_else(|| panic!("{field} must be present"));
+        assert_eq!(
+            value,
+            format!("{module_root}/{child}"),
+            "{field} must be the `{child}` child of the module root"
+        );
+    }
+    // The module root is basecamp's own base directory, so everything under it
+    // is inside the scrubbed profile tree rather than a user-global location.
+    assert!(
+        module_root.contains(".scaffold/basecamp/profiles/alice/xdg-data"),
+        "module root must sit inside the profile's scrubbed tree, got: {module_root}"
+    );
+}

@@ -106,9 +106,18 @@ pub(crate) const DEFAULT_RUN_LOCALNET_TIMEOUT_SEC: u64 = 120;
 /// hence `BASECAMP_ATTR = "app"`.
 pub(crate) const BASECAMP_SOURCE: &str = "https://github.com/logos-co/logos-basecamp.git";
 pub(crate) const BASECAMP_ATTR: &str = "app";
-/// Basecamp commit pin — `logos-basecamp` tag `v0.1.1`.
+/// Basecamp commit pin — `logos-basecamp` tag `0.2.3` (upstream dropped the
+/// `v` prefix after `v0.1.1`).
 /// Projects can override via `[repos.basecamp].pin` in `scaffold.toml`.
-pub(crate) const DEFAULT_BASECAMP_PIN: &str = "a746cdbc521f72ee22c5a4856fd17a9802bb9d69";
+///
+/// Bumping this pin is never a one-line change: the basecamp release locks a
+/// `logos-package-manager` rev, and scaffold's `lgpm` CLI must match it (see
+/// [`DEFAULT_LGPM_PIN`]) because that same rev is the library the app uses to
+/// scan what `lgpm` installed. Companion pins in [`BASECAMP_DEPENDENCIES`] and
+/// the bundled-module list in [`BASECAMP_PREINSTALLED_MODULES`] are derived
+/// from the release too. ADR "Basecamp Pin Bumps Move as a Set" records the
+/// rule.
+pub(crate) const DEFAULT_BASECAMP_PIN: &str = "aa237766baf61404e12da86b7303cb41065464c9";
 pub(crate) const BASECAMP_PROFILE_ALICE: &str = "alice";
 pub(crate) const BASECAMP_PROFILE_BOB: &str = "bob";
 /// Relative path (under the project root) to the per-profile XDG tree root.
@@ -127,19 +136,66 @@ pub(crate) const BASECAMP_AUTODISCOVER_SKIP_SUBDIRS: &[&str] =
 pub(crate) const BASECAMP_XDG_APP_SUBPATH_DEV: &str = "Logos/LogosBasecampDev";
 pub(crate) const BASECAMP_XDG_APP_SUBPATH_PORTABLE: &str = "Logos/LogosBasecamp";
 
-/// Env vars naming basecamp's data-tree root, i.e. the directory it loads
-/// user modules and UI plugins from. Basecamp 0.2.x renamed the override to
-/// `LOGOS_USER_DIR` (`LogosBasecampPaths.h::baseDirectory()`) and dropped the
-/// 0.1.x `LOGOS_DATA_DIR` entirely, so `launch` sets both on the portable
-/// stack and the launch stays pin-agnostic — the two names are read by
-/// disjoint basecamp generations. Same two-generation compat shape as
-/// [`WALLET_HOME_ENV_VARS`], and the same rule on the next rename: add the
-/// new name, keep the old, never swap.
+/// The 0.1.x dev (`#app`) launcher and the binary it `exec`s.
 ///
-/// Each name is resolved independently (see
-/// `set_absolute_basecamp_data_dirs`), so a caller may override one without
-/// disturbing the other; the order of this list is not significant.
-pub(crate) const BASECAMP_MODULE_ROOT_ENV_VARS: &[&str] = &["LOGOS_DATA_DIR", "LOGOS_USER_DIR"];
+/// Neither basecamp generation wraps its Qt binary in place (`wrapQtApps` is
+/// skipped so the process name stays `LogosBasecamp` for the macOS Dock), so a
+/// `/bin/sh` launcher is what exports `QT_PLUGIN_PATH` / `QML2_IMPORT_PATH` /
+/// `LD_LIBRARY_PATH`. The generations disagree on which *name* is the launcher:
+/// 0.1.x installs `bin/logos-basecamp` next to the raw `bin/LogosBasecamp`,
+/// while 0.2.x installs no `logos-basecamp` at all and makes `bin/LogosBasecamp`
+/// itself the launcher (over a hidden `bin/.LogosBasecamp`).
+///
+/// Two call sites depend on that pair and must not drift apart:
+/// `resolve_basecamp_binary` probes the launcher first so a 0.1.x pin is never
+/// started as an unwrapped binary, and `basecamp_comm_candidates` maps the
+/// launcher name onto the name the live process actually reports.
+pub(crate) const BASECAMP_BIN_LAUNCHER_V01: &str = "logos-basecamp";
+pub(crate) const BASECAMP_BIN_V01_TARGET: &str = "LogosBasecamp";
+
+/// Env vars naming basecamp's data-tree root, i.e. the directory it loads user
+/// modules and UI plugins from. Basecamp 0.2.x renamed the override to
+/// `LOGOS_USER_DIR` (`LogosBasecampPaths.h::baseDirectory()`) and dropped the
+/// 0.1.x `LOGOS_DATA_DIR` entirely, so `launch` writes both names and stays
+/// pin-agnostic — they are read by disjoint basecamp generations. Same
+/// two-generation compat shape as [`WALLET_HOME_ENV_VARS`], and the same rule
+/// on the next rename: add the new name, keep the old, never swap.
+///
+/// The two keys are resolved independently (see `set_absolute_module_root_var`),
+/// so a caller may override one without disturbing the other — and they are
+/// *not* written under the same conditions, which is why they are separate
+/// constants rather than one list.
+///
+/// The 0.2.x override. Set on **every** host and stack by `launch`, unlike
+/// `LOGOS_DATA_DIR` below.
+///
+/// Why unconditional: 0.2.x resolves its base directory from
+/// `QStandardPaths::AppDataLocation` unless this variable is set, and on macOS
+/// that location ignores `XDG_DATA_HOME` entirely. Under v0.1.1 the dev `#app`
+/// output exposed no CLI-invocable binary on macOS, so only the portable stack
+/// could hit that path; 0.2.x installs a launcher for every platform, so a
+/// macOS dev-stack user would otherwise see `alice` and `bob` collapse onto the
+/// shared `~/Library/Application Support/Logos/LogosBasecampDev` tree. On Linux
+/// the value written is the same path `XDG_DATA_HOME` already implies, so
+/// setting it there is a no-op that keeps one code path for both platforms.
+pub(crate) const BASECAMP_MODULE_ROOT_ENV_VAR_USER_DIR: &str = "LOGOS_USER_DIR";
+
+/// The 0.1.x data-tree override, superseded by
+/// [`BASECAMP_MODULE_ROOT_ENV_VAR_USER_DIR`]. Only written on the macOS
+/// portable stack — the one place a 0.1.x basecamp was observed to ignore
+/// `XDG_DATA_HOME`.
+pub(crate) const BASECAMP_MODULE_ROOT_ENV_VAR_DATA_DIR: &str = "LOGOS_DATA_DIR";
+
+/// Subdirectories basecamp 0.2.x creates under its base directory
+/// (`LogosBasecampPaths.h`). `modules` / `plugins` hold what `lgpm` installs;
+/// `module_data` (per-module persisted state) and `logs` (rotated app logs)
+/// are new in 0.2.x. All four live inside the tree `launch` scrubs, so none of
+/// them survive a relaunch — that is the clean-slate contract, surfaced by
+/// `basecamp paths` so it is visible rather than surprising.
+pub(crate) const BASECAMP_BASE_DIR_MODULES: &str = "modules";
+pub(crate) const BASECAMP_BASE_DIR_PLUGINS: &str = "plugins";
+pub(crate) const BASECAMP_BASE_DIR_MODULE_DATA: &str = "module_data";
+pub(crate) const BASECAMP_BASE_DIR_LOGS: &str = "logs";
 
 /// `[repos.basecamp].attr` values that select the portable distribution stack.
 /// Anything else (including unrecognised attrs) is treated as dev.
@@ -151,22 +207,30 @@ pub(crate) const BASECAMP_PORTABLE_ATTRS: &[&str] =
 /// alongside basecamp so dogfooding is reproducible. Built via
 /// `nix build <source>/<pin>#<attr>`.
 ///
-/// Pinned to `logos-package-manager` tag `tutorial-v1` (the last pre-validation
-/// commit). PR #8 introduced content-hash validation in the manifest; later
-/// lgpm commits tightened it further. Neither is compatible today with the
-/// `.lgx` files emitted by `logos-module-builder` tag `tutorial-v1`, which
-/// does not populate content hashes. Revisit when module-builder starts
-/// emitting hashes (or lgpm gains a compatibility mode).
+/// Pinned to the exact `logos-package-manager` rev that
+/// [`DEFAULT_BASECAMP_PIN`] locks. That is not a stylistic choice: basecamp
+/// embeds `logos-package-manager-module`, which builds against the same rev
+/// and is what scans and loads the modules our `lgpm` CLI wrote into the
+/// profile. Pinning both sides to one rev keeps the writer and the reader
+/// byte-identical, so a bump on either side must move this too.
+///
+/// This rev also validates `.lgx` structure and Merkle content hashes on
+/// install (the CLI's default signature policy is `warn`, which still runs
+/// package validation — only `--allow-unsigned` disables it). Packages built
+/// by `logos-module-builder` 0.2.x / `nix-bundle-lgx` carry those hashes;
+/// tutorial-era packages do not and are rejected with
+/// `Missing content hashes in manifest`. `basecamp install` turns that failure
+/// into a targeted hint rather than silently disabling validation.
 pub(crate) const LGPM_SOURCE: &str = "github:logos-co/logos-package-manager";
-pub(crate) const DEFAULT_LGPM_PIN: &str = "e5c25989861f4487c3dc8c7b3bc0062bcbc3221f";
+pub(crate) const DEFAULT_LGPM_PIN: &str = "202af6fa0f0f4493bc59c8a609dff9326f78a18d";
 /// Dev stack (accepts `<host>-dev` `.lgx` variants).
 pub(crate) const LGPM_ATTR: &str = "cli";
 /// Portable stack (accepts bare `<host>` `.lgx` variants).
 pub(crate) const LGPM_ATTR_PORTABLE: &str = "cli-portable";
 
 /// Scaffold-level default pins for runtime companion modules that basecamp
-/// v0.1.1 does NOT preinstall (listed in the Package Manager UI catalog but
-/// shipped as portable-only, so dev basecamp can't load them). When
+/// does NOT bundle (listed in the Package Manager UI catalog but shipped as
+/// portable-only, so dev basecamp can't load them). When
 /// `basecamp modules` auto-discovery walks a project's `metadata.json` and
 /// finds a dep in this table, it captures the pinned flake ref into
 /// `[modules]` so `install` builds and installs the dev variant.
@@ -181,38 +245,47 @@ pub(crate) const LGPM_ATTR_PORTABLE: &str = "cli-portable";
 /// scaffold can derive this table from basecamp's own manifest rather than
 /// carrying an opinion.
 pub(crate) const BASECAMP_DEPENDENCIES: &[(&str, &str)] = &[
-    // `logos-delivery-module/1.0.0` (tutorial-v1 era) predates the `#lgx`
-    // flake-output convention and does NOT expose `packages.<sys>.lgx` — a
-    // cold `basecamp install` against that pin fails at the resolver.
+    // `logos-delivery-module` tag `v0.2.0` (commit `3258cdb0…`, 2026-07-31).
     //
-    // Pin to the head of `tutorial-v1-compat` on logos-delivery-module
-    // (commit `1fde1566…`, 2026-04-22) — the rev that both `tictactoe` and
-    // `yolo-board-module` use in their own flakes. This is the known-good
-    // default; per-project overrides in `[basecamp.dependencies]` in
-    // `scaffold.toml` take precedence, and `basecamp modules` auto-discovery
-    // prefers any matching input found in the project's own `flake.lock`
-    // over this table (so a project's own pin always wins).
+    // Two constraints pick this rev. It must expose `packages.<sys>.lgx` (the
+    // resolver's contract) — it does, via `logos-module-builder` 0.2.5 — and
+    // its `.lgx` must carry the Merkle content hashes that the `lgpm` rev in
+    // [`DEFAULT_LGPM_PIN`] validates on install. The previous default (the
+    // `tutorial-v1-compat` head, `1fde1566…`) predates hashes and is now
+    // rejected with `Missing content hashes in manifest`, so this pin moves in
+    // lock-step with the basecamp/lgpm pair rather than independently.
+    //
+    // Per-project overrides in `[modules.<name>]` take precedence, and
+    // `basecamp modules` auto-discovery prefers any matching input found in the
+    // project's own `flake.lock` over this table (so a project's own pin
+    // always wins).
     (
         "delivery_module",
-        "github:logos-co/logos-delivery-module/1fde1566291fe062b98255003b9166b0261c6081#lgx",
+        "github:logos-co/logos-delivery-module/3258cdb0132e37228aa2519e0c01c0e7429a20dd#lgx",
     ),
     // Additional companions (storage_module, etc.) added on demand as real
     // projects declare them. Keeping the starter set small avoids surprising
     // users with unnecessary companion builds.
 ];
 
-/// Modules that basecamp v0.1.1 preinstalls on first launch (from its
-/// `preinstall/` dir). These must NEVER be captured as dependencies by the
-/// auto-discovery walk — basecamp provides them itself.
+/// Modules basecamp ships itself. These must NEVER be captured as dependencies
+/// by the auto-discovery walk — basecamp provides them, so a project that
+/// declares one as a dep needs no flake ref for it.
 ///
-/// Kept in sync with `<basecamp>/preinstall/*.lgx` manually. Inspect the nix
-/// build output to verify this list stays accurate when bumping the basecamp pin.
+/// Basecamp 0.2.x installs these at *build* time into `$out/modules` and
+/// `$out/plugins` next to the binary and reads them through
+/// `setEmbeddedModulesDirectory()` / `setEmbeddedUiPluginsDirectory()`; v0.1.x
+/// instead pushed a `preinstall/` set into the user's data dir on first launch.
+/// Either way they are basecamp's, not the project's. The names are the
+/// `metadata.json` `name` of each bundled package, not the repo or flake name.
+///
+/// Kept in sync manually with the release's `installedDev` list in
+/// `<basecamp>/flake.nix`. When bumping [`DEFAULT_BASECAMP_PIN`], diff that
+/// list and confirm against the built `$out/modules` + `$out/plugins`.
 pub(crate) const BASECAMP_PREINSTALLED_MODULES: &[&str] = &[
     "capability_module",
+    "main_ui",
+    "package_downloader",
     "package_manager",
     "package_manager_ui",
-    "counter",
-    "counter_qml",
-    "webview_app",
-    "basecamp_main_ui",
 ];

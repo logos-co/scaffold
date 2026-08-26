@@ -122,6 +122,47 @@ captured module set becomes reviewable in version control and diff tooling
 lookups become deterministic key matches — the "is this dep covered by
 something I already captured?" question has an unambiguous answer.
 
+## Basecamp Pin Bumps Move as a Set
+
+`[repos.basecamp]`, `[repos.lgpm]`, `BASECAMP_DEPENDENCIES` and
+`BASECAMP_PREINSTALLED_MODULES` look like four independent knobs. They are one.
+
+Scaffold installs modules by shelling out to the `lgpm` CLI it builds from
+`[repos.lgpm]`, and basecamp then scans and loads what landed in the profile
+using `logos-package-manager-module` — which is built from the *same*
+`logos-package-manager` source, at whatever rev the basecamp release locks. The
+writer and the reader are two builds of one library. Letting the two pins drift
+means the installer and the app disagree about package format, validation and
+install layout, and the failure mode is a profile that comes up with zero
+modules rather than an error at install time.
+
+The rule, therefore: **scaffold's default `lgpm` pin is the rev the default
+basecamp pin locks**, read out of that release's `flake.lock` rather than chosen
+independently. Two corollaries follow from the same coupling:
+
+- **Companion pins are release-scoped too.** The pinned `lgpm` validates
+  package structure and Merkle content hashes on install, so a companion module
+  whose `.lgx` predates that tooling stops installing. `BASECAMP_DEPENDENCIES`
+  entries move with the pair.
+- **The bundled-module list is read off the release.** Which modules basecamp
+  ships itself changed between 0.1.x and 0.2.x (`counter`, `counter_qml`,
+  `webview_app` left; `package_downloader` arrived), and dep resolution skips
+  exactly those names. A stale list either sends `basecamp modules` hunting for
+  a flake that does not exist, or captures a module basecamp already provides.
+
+Rejected alternative: pinning `lgpm` to the last pre-validation rev so older
+`.lgx` files keep installing. It buys nothing — the validating library is inside
+the basecamp binary either way, so a package that fails validation at install
+time would fail to load at runtime instead, with less signal. For the same
+reason scaffold does not pass `--allow-unsigned`: silencing the installer's copy
+of a check the app also performs converts a clear error into a mystery. `install`
+turns the validation failure into a hint naming the rebuild instead.
+
+Cost: a basecamp bump is never a one-line change, and the pins cannot be updated
+by a dependency bot that treats each repo separately. That is the honest shape of
+the dependency, and `DOGFOODING.md` re-opens the whole `B` series when any member
+of the set changes.
+
 ## Sibling `--override-input` Resolves By Declared Input Name
 
 Multi-sub-flake projects rely on `--override-input <input> path:<sibling-abs>` so a sub-flake's `path:../<sibling>` inputs resolve to the developer's working tree instead of whatever `github:` ref is in its lock. The first implementation keyed overrides by the **sibling directory name on disk** — a convention where input names are expected to match directory names. Two problems:

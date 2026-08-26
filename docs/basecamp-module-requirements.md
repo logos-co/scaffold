@@ -12,9 +12,15 @@
    - Either at the project root, or
    - In one or more immediate sub-directories (one per sub-flake).
 
-4. **Each such flake must expose `packages.<system>.lgx`** — this is the convention established by `logos-module-builder` (tag `tutorial-v1`).
+4. **Each such flake must expose `packages.<system>.lgx`** — the convention `logos-module-builder` has established since `tutorial-v1` and still emits in its 0.2.x releases (where it is implemented on top of [`nix-bundle-lgx`](https://github.com/logos-co/nix-bundle-lgx)).
    - If a flake only exposes `packages.<system>.lgx-portable`, the resolver fails explicitly with a hint — it will not silently fall back. Expose `lgx` or pass `--flake <ref>#lgx-portable` on the command line to opt in.
    - If no flake exposes any `.lgx` attribute, the resolver fails with a generic hint pointing at `--path` / `--flake`.
+
+5. **The `.lgx` must be built by 0.2.x-era module tooling** — `logos-module-builder` 0.2.x, or `nix-bundle-lgx` applied to your `#lib` output directly. Scaffold's pinned `lgpm` validates package structure and Merkle content hashes on install (its default `warn` signature policy still runs the validation; only `--allow-unsigned` disables it), and packages from tutorial-era tooling carry no hashes at all. Installing one fails with `Missing content hashes in manifest`, and `basecamp install` adds a hint naming the rebuild. Downgrading `[repos.lgpm].pin` is not a workaround: the basecamp the pin builds embeds the same validating library.
+
+   Two packaging rules come with that tooling and are worth knowing before you hit them:
+   - a `ui_qml` package must ship a **256×256 PNG icon** (bundled to `assets/icon.png` at the package root), and
+   - `main` / `view` entries in `metadata.json` must point at files that actually exist in the built variant — validation now rejects a manifest that names a missing entry point rather than failing later at load time.
 
 ## The captured module set — `[modules]` in scaffold.toml
 
@@ -53,7 +59,7 @@ On every `basecamp modules` run (explicit `--flake` / `--path` args or auto-disc
 Then for each project source's declared `dependencies`, scaffold resolves a flake ref for any name not already in `[modules]`:
 
 1. **Already keyed in `[modules]`** (any role) → no-op. Whatever you have wins.
-2. **Basecamp preinstalls** (`capability_module`, `package_manager`, `package_manager_ui`, `counter`, `counter_qml`, `webview_app`, `basecamp_main_ui`; see `BASECAMP_PREINSTALLED_MODULES` in `src/constants.rs` for the authoritative list) → silent skip, basecamp ships them.
+2. **Modules basecamp bundles itself** (`capability_module`, `main_ui`, `package_downloader`, `package_manager`, `package_manager_ui`; see `BASECAMP_PREINSTALLED_MODULES` in `src/constants.rs` for the authoritative list) → silent skip, basecamp ships them. Basecamp 0.2.x installs these at build time next to its binary and loads them from there, so they never appear in a profile's `modules/` directory — a profile listing only your own modules is expected, not a failed install.
 3. **Declaring source's own `flake.lock`** → if the project source declares an input with the same name, scaffold reads the locked `github:<owner>/<repo>/<rev>` and rewrites to `#lgx`. Preferred path for most projects: whatever rev the module is already building against is, by definition, the rev its IPC clients expect at runtime.
 4. **Scaffold-default `BASECAMP_DEPENDENCIES`** → a hardcoded table keyed by module name (currently only `delivery_module`). Last-resort safety net for projects that don't carry the dep as a flake input.
 5. **Unresolved** → `basecamp modules` **fails with a targeted error** naming the dep and both user-side fixes (capture as a project source, or add an explicit `[modules.<name>]` entry with `role = "dependency"`). No silent drop.
@@ -85,7 +91,7 @@ The flake.nix parse is line-level and recognizes `<name>.url = "path:../<sibling
 
 Multi-sub-flake projects that pull in modules which themselves depend on `logos-module-builder` (e.g. `delivery_module` → `logos-module-builder`) **must** unify that transitive reference onto the project's top-level pin using a `follows` entry.
 
-Without it, your sub-flake's `flake.lock` ends up with two `logos-module-builder` entries: the one you pinned and a second one pulled in transitively (typically off the upstream's `main` branch, which may be incompatible with the `basecamp v0.1.1` wire format or with the tutorial-sanctioned contract). When scaffold then runs `nix build path:<sibling> --override-input <input-name> path:<this-sub-flake>`, nix resolves transitive inputs through **this sub-flake's lock**, and the stale second entry silently wins — builds that work with a direct `nix build .#lgx` fail with opaque errors when invoked through scaffold.
+Without it, your sub-flake's `flake.lock` ends up with two `logos-module-builder` entries: the one you pinned and a second one pulled in transitively (typically off the upstream's `main` branch, which may package modules differently than the release your project builds against). When scaffold then runs `nix build path:<sibling> --override-input <input-name> path:<this-sub-flake>`, nix resolves transitive inputs through **this sub-flake's lock**, and the stale second entry silently wins — builds that work with a direct `nix build .#lgx` fail with opaque errors when invoked through scaffold.
 
 Concrete fix: in each sub-flake that declares both `logos-module-builder` and a module with its own `logos-module-builder` input, add the `follows`:
 
@@ -93,15 +99,13 @@ Concrete fix: in each sub-flake that declares both `logos-module-builder` and a 
 # tictactoe/flake.nix (example)
 {
   inputs = {
-    logos-module-builder.url = "github:logos-co/logos-module-builder/tutorial-v1";
+    logos-module-builder.url = "github:logos-co/logos-module-builder/0.2.6";
     delivery_module.url = "github:logos-co/logos-delivery-module/<pinned-rev>";
 
     # Force delivery_module's transitive `logos-module-builder` to follow our
-    # tutorial-v1 pin. Without this, delivery_module drags in its own
-    # master-branch module-builder (newer, incompatible with basecamp v0.1.1's
-    # bundled delivery_module wire format) as a second entry in flake.lock.
-    # That extra entry silently wins when a UI flake does
-    # `--override-input tictactoe path:...` and breaks the tutorial-sanctioned
+    # pin. Without this, delivery_module drags in its own module-builder as a
+    # second entry in flake.lock. That extra entry silently wins when a UI
+    # flake does `--override-input tictactoe path:...` and breaks the
     # local-dev workflow.
     delivery_module.inputs.logos-module-builder.follows = "logos-module-builder";
   };
@@ -111,12 +115,12 @@ Concrete fix: in each sub-flake that declares both `logos-module-builder` and a 
 
 Symptoms when this is missing:
 
-- `lgs basecamp install` fails inside `nix build` with errors from a newer `logos-module-builder` (e.g. `no 'main' field in metadata.json`).
+- `lgs basecamp install` fails inside `nix build` with errors from the other `logos-module-builder` (e.g. `no 'main' field in metadata.json`).
 - `cd <sub-flake> && nix build .#lgx` works directly, because the direct build uses the sub-flake's own lock and never dereferences the extra entry.
 
 Apply the same `follows` wiring to every transitive input that *also* pulls in `logos-module-builder`. After adding it, re-run `nix flake update` in that sub-flake and verify `flake.lock` now contains exactly one `logos-module-builder` node (or `logos-module-builder_N` aliases all resolving to the same rev).
 
-This is a limitation of the current tutorial-era `logos-module-builder` scaffolding and is expected to be handled automatically upstream in a later release.
+This is a limitation of the `logos-module-builder` scaffolding rather than of scaffold, and is expected to be handled automatically upstream in a later release. Whether a given module-builder release still needs it is worth re-checking after a pin bump: the check is the same either way — one `logos-module-builder` node in `flake.lock`.
 
 ## Explicit escape hatch
 
@@ -173,7 +177,7 @@ logos-scaffold basecamp build-portable
 
 `build-portable` does not touch profiles, `basecamp.state`, or the AppImage itself — it only produces artefacts. Load them into your AppImage in the printed order via its "install lgx" button; scaffold is intentionally unaware of the AppImage's install path.
 
-If you launch a portable basecamp build by hand with `--user-dir <path>` (basecamp 0.2.x; `LOGOS_USER_DIR` is its env equivalent), the app stores its installed-modules + identity state at `<path>` rather than at its default data root. `build-portable` never sets that — it only produces artefacts — but `launch` does: on the macOS portable stack it exports an absolute per-profile `LOGOS_USER_DIR` (and `LOGOS_DATA_DIR`, the 0.1.x name for the same override) pointing at that profile's own module root, because the portable bundle does not honor `XDG_DATA_HOME` on macOS and would otherwise collapse every profile onto the shared `~/Library/Application Support/Logos/LogosBasecamp`. So hand-launching with `--user-dir` and `launch`-ing a profile are the same data-tree redirect reached from two entry points, not independent mechanisms: the flag isolates one ad-hoc launch, while `launch` wires the env equivalent per profile so scaffold's isolation under `.scaffold/basecamp/profiles/{alice,bob}/` actually reaches the app. A non-empty `LOGOS_USER_DIR` / `LOGOS_DATA_DIR` you declare yourself in `[basecamp.env]` or `[basecamp.profiles.<name>.env]` is honored rather than overwritten — `launch` only rewrites it to absolute against the project root when it is relative. An empty or whitespace-only value is the exception: it counts as unset and is replaced by the profile default (see "Env exported to the basecamp process" below).
+If you launch a portable basecamp build by hand with `--user-dir <path>` (basecamp 0.2.x; `LOGOS_USER_DIR` is its env equivalent), the app stores its installed-modules + identity state at `<path>` rather than at its default data root. `build-portable` never sets that — it only produces artefacts — but `launch` does: it exports an absolute per-profile `LOGOS_USER_DIR` pointing at that profile's own module root on every host and stack (plus `LOGOS_DATA_DIR`, the 0.1.x name for the same override, on the macOS portable stack), because basecamp does not always honor `XDG_DATA_HOME` — on macOS it would otherwise collapse every profile onto the shared `~/Library/Application Support/Logos/LogosBasecamp[Dev]`. So hand-launching with `--user-dir` and `launch`-ing a profile are the same data-tree redirect reached from two entry points, not independent mechanisms: the flag isolates one ad-hoc launch, while `launch` wires the env equivalent per profile so scaffold's isolation under `.scaffold/basecamp/profiles/{alice,bob}/` actually reaches the app. A non-empty `LOGOS_USER_DIR` / `LOGOS_DATA_DIR` you declare yourself in `[basecamp.env]` or `[basecamp.profiles.<name>.env]` is honored rather than overwritten — `launch` only rewrites it to absolute against the project root when it is relative. An empty or whitespace-only value is the exception: it counts as unset and is replaced by the profile default (see "Env exported to the basecamp process" below).
 
 The `.scaffold/basecamp/portable/` directory is wiped and recreated on every `build-portable` run, so re-running after you've removed a module via `basecamp modules` doesn't leave stale symlinks behind.
 
@@ -197,7 +201,9 @@ env         = { SWAP_UI_AUTO_ROLE = "taker" }
 
 - **Env layering** (last writer wins): `[basecamp.env_append]` path joins first, then the per-profile **`env_file`**, then `[basecamp.env]` globals, then the profile's inline **`env`**.
 - **`launch --log-file[=PATH]`** tees basecamp's stdout/stderr to the terminal *and* a file (bare `--log-file` → `.scaffold/basecamp/profiles/<profile>/basecamp.log`; overrides `log_file`). Without it, `launch` `exec`s as before.
-- **`lgs basecamp paths <profile> [--json]`** prints the resolved per-profile path manifest (xdg dirs, runtime dir, module/plugin dirs, `launch.state`, log file, env file) without building or mutating anything.
+- **`lgs basecamp paths <profile> [--json]`** prints the resolved per-profile path manifest (xdg dirs, runtime dir, basecamp's `module_root` and its `modules` / `plugins` / `module_data` / `logs` children, `launch.state`, log file, env file) without building or mutating anything.
+
+Everything under `module_root` lives inside the tree `launch` scrubs, so **basecamp 0.2.x's `module_data/` (per-module persisted state) and `logs/` (its own rotated session logs) do not survive a relaunch**. That is the clean-slate contract working as intended — a module that needs state across launches must not keep it there — but it is new surface in 0.2.x, so `paths` names both directories rather than leaving you to find them.
 
 A project that ships more than one basecamp variant can map the flake attr per host instead of hard-coding one:
 
@@ -219,12 +225,14 @@ aarch64-linux  = "bin-appimage"
 | `TMPDIR` | the resolved `runtime_dir`, else `<profile-dir>/xdg-tmp` | always |
 | `XDG_RUNTIME_DIR` | the resolved `runtime_dir` | only when one resolves — a configured `runtime_dir`, or the `/tmp/lgs-<profile>` macOS default |
 | `LOGOS_PROFILE` | the profile name | always |
-| `LOGOS_DATA_DIR` | `<profile-dir>/xdg-data/Logos/LogosBasecamp` | macOS **and** a portable `[repos.basecamp].attr` (`bin-macos-app`, `bin-appimage`, `bin-bundle-dir`) |
-| `LOGOS_USER_DIR` | same default as `LOGOS_DATA_DIR`, resolved independently of it | as above |
+| `LOGOS_USER_DIR` | `<profile-dir>/xdg-data/Logos/LogosBasecamp[Dev]` — basecamp's base directory for this profile | always |
+| `LOGOS_DATA_DIR` | same default as `LOGOS_USER_DIR`, resolved independently of it | macOS **and** a portable `[repos.basecamp].attr` (`bin-macos-app`, `bin-appimage`, `bin-bundle-dir`) |
 
 Module-owned port-override variables are not in this list: no module has published a name yet, so scaffold exports none.
 
-The last two rows are finalized *after* the env layering, so they are the one place a declared value is post-processed rather than simply taken as-is: an absolute value you declared is kept, a relative one is rewritten to absolute against the project root, and an empty (or whitespace-only) one is treated as unset and replaced by the profile default. Each of the two keys goes through that on its own, so declaring only one of them leaves the other at the profile default and the two can end up pointing at different trees. Both keys are written because basecamp 0.1.x reads `LOGOS_DATA_DIR` while 0.2.x reads `LOGOS_USER_DIR`, so setting both keeps `launch` agnostic to the pinned generation.
+The last two rows are finalized *after* the env layering, so they are the one place a declared value is post-processed rather than simply taken as-is: an absolute value you declared is kept, a relative one is rewritten to absolute against the project root, and an empty (or whitespace-only) one is treated as unset and replaced by the profile default. Each key goes through that on its own, so declaring only one of them leaves the other at the profile default and the two can end up pointing at different trees.
+
+Both names exist because basecamp 0.1.x reads `LOGOS_DATA_DIR` while 0.2.x reads `LOGOS_USER_DIR` (and its `--user-dir` flag), so writing both keeps `launch` agnostic to the pinned generation. They are written under different conditions, though. `LOGOS_USER_DIR` is set **always**: 0.2.x otherwise resolves its base directory from Qt's `AppDataLocation`, which on macOS ignores `XDG_DATA_HOME` entirely and would collapse every profile onto one shared tree — and unlike 0.1.x, whose dev build had no macOS-invocable binary, 0.2.x ships a launcher for every platform, so the dev stack is exposed to that too. On hosts that honor XDG the exported value is the same directory `XDG_DATA_HOME` already implies, so it changes nothing there. `LOGOS_DATA_DIR` stays on the macOS-portable gate where the 0.1.x behaviour was actually observed.
 
 ### The macOS `sun_path == 104` socket-path budget
 
@@ -247,6 +255,7 @@ If you override `runtime_dir` on macOS, keep it short (a `/tmp/…` root is safe
 - [ ] `scaffold.toml` exists at the project root.
 - [ ] `logos-scaffold basecamp setup` has been run.
 - [ ] Each sub-flake exposes `packages.<system>.lgx`.
+- [ ] The `.lgx` is built by `logos-module-builder` 0.2.x (or `nix-bundle-lgx`), so it carries the content hashes `lgpm` validates on install.
 - [ ] Sibling sub-flake URLs use the `path:../<sibling-dir>` form, declared on a single `<name>.url = "…"` line (not split across multiple lines inside a nested attrset — parser limitation).
 - [ ] Transitive `logos-module-builder` references are unified with a `follows` onto the top-level pin (see "Transitive inputs must `follows` …" above).
 - [ ] No project relies on `lgx-portable` as the only output without passing `--flake` explicitly.

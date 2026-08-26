@@ -79,7 +79,7 @@ Scaffold is also consumable as a Rust library (`logos_scaffold::api`): the same 
 - Network access available for setup/build flows that fetch dependencies.
 - No preinstalled `wallet` binary is required. If one exists on `PATH`, do not treat it as the runtime under test for scaffold wallet scenarios.
 - Optional but supported: `LOGOS_SCAFFOLD_WALLET_PASSWORD` when validating password override behavior.
-- For `B`-series (basecamp) scenarios: Nix with flakes enabled, plus a module project on disk whose `flake.nix` exposes a `packages.<system>.lgx` output (e.g., a `tictactoe`-style project built against the `logos-module-builder` `tutorial-v1` convention). `docs/basecamp-module-requirements.md` (also reachable via `"$SCAFFOLD_BIN" basecamp docs`) is the canonical contract.
+- For `B`-series (basecamp) scenarios: Nix with flakes enabled, plus a module project on disk whose `flake.nix` exposes a `packages.<system>.lgx` output built with `logos-module-builder` 0.2.x (a `tictactoe`-style project, or that repo's `templates/minimal-module`). Tutorial-era packages no longer install: scaffold's pinned `lgpm` validates content hashes they don't carry. `docs/basecamp-module-requirements.md` (also reachable via `"$SCAFFOLD_BIN" basecamp docs`) is the canonical contract.
 
 The `lgs` binary is a short alias for `logos-scaffold` produced by the same crate; `"$SCAFFOLD_BIN"` and `lgs` are interchangeable in the commands below.
 
@@ -182,6 +182,7 @@ If any of these is missing, do not "skip the real run" — go back and fix the s
 | B4 | external module project | Advanced | Clean-slate and profile safety on relaunch | `basecamp launch <profile>` (×2), custom profile names |
 | B5 | external module project | Advanced | Module artefact builds by variant | `basecamp build`, `basecamp build-portable`, `--variant`, `--module` |
 | B6 | external module project | Advanced | Captured module run loop | `basecamp run <module>`, `--host standalone` |
+| B7 | external module project | Core | Pin-set contract checks that need no basecamp app build | `nix build` of `[repos.lgpm]` + `.#lgx`, real `lgpm install`, resolved-binary check |
 | A1 | N/A | Advanced | Public Rust API surface for embedding scaffold in tests/tooling | `logos_scaffold::api::Project`, `cargo doc`, doctests |
 | T1 | `default` | Advanced | Isolated test-node lifecycle and caller-project pins | `test-node pins`, `test-node prepare`, `test-node doctor`, `test-node start`, `test-node status`, `test-node stop`, `test-node run` |
 | T2 | `default` | Advanced | Typed RPC reads against a running test node | `test-node tx submit-and-wait`, `test-node blocks head/range/wait`, `test-node clock read/wait-stable`, `test-node account get/batch-get`, `test-node proof get`, `test-node snapshot accounts` |
@@ -1037,9 +1038,10 @@ Validate that a module project can fetch the pinned basecamp + `lgpm` binaries, 
 
 ### Preconditions
 
-- Nix with flakes enabled — **and unrestricted GitHub access for Nix specifically**. This is a stricter requirement than the rest of this runbook and the usual reason a `B`-series run stalls in an agent container, so check it before installing anything. Nix resolves `github:` flake inputs over `https://api.github.com/repos/…/commits/HEAD` and `https://github.com/…/archive/<rev>.tar.gz`; a proxy that allowlists GitHub per repository answers `403` on both, and the basecamp closure pulls ~25 repos across `logos-co`, `NixOS/nixpkgs` and `oxalica/rust-overlay`. Neither `git clone` working nor `nix --version` working proves this — probe it directly with `curl -sS -o /dev/null -w '%{http_code}\n' https://api.github.com/repos/NixOS/nixpkgs/commits/HEAD` (expect `200`) before starting. Rewriting the project's own input to `git+https://` does not help: the transitive inputs are already locked as `github:` inside each dependency's own `flake.lock`. If the probe fails, `B1`–`B6` are out of reach in that environment and the honest result is to record the blocker — the scaffold-side surface that needs no Nix (`basecamp --help`, `basecamp docs`, the missing-Nix hint, `basecamp doctor`, out-of-project errors) is still worth exercising and reporting as partial coverage.
+- Nix with flakes enabled — **and unrestricted GitHub access for Nix specifically**. This is a stricter requirement than the rest of this runbook and the usual reason a `B`-series run stalls in an agent container, so check it before installing anything. Nix resolves `github:` flake inputs over `https://api.github.com/repos/…/commits/HEAD` and `https://github.com/…/archive/<rev>.tar.gz`; a proxy that allowlists GitHub per repository answers `403` on both, and the basecamp closure is large — its `flake.lock` carries ~10k nodes across `logos-co`, `NixOS/nixpkgs` and `oxalica/rust-overlay` (it was ~250 at the v0.1.1 pin, so budget accordingly for a cold run). Neither `git clone` working nor `nix --version` working proves this — probe it directly with `curl -sS -o /dev/null -w '%{http_code}\n' https://api.github.com/repos/NixOS/nixpkgs/commits/HEAD` (expect `200`) before starting. Rewriting the project's own input to `git+https://` does not help: the transitive inputs are already locked as `github:` inside each dependency's own `flake.lock`. If the probe fails, `B1`–`B6` are out of reach in that environment and the honest result is to record the blocker — the scaffold-side surface that needs no Nix (`basecamp --help`, `basecamp docs`, the missing-Nix hint, `basecamp doctor`, out-of-project errors) is still worth exercising and reporting as partial coverage.
 - Latest scaffold binary built from the repo root (`"$SCAFFOLD_BIN"`).
-- A module project on disk whose `flake.nix` exposes `packages.<system>.lgx` (see `"$SCAFFOLD_BIN" basecamp docs`). Reachable as `$MODULE_PROJECT`. `logos-module-builder`'s `templates/minimal-module` is the smallest one that satisfies the contract.
+- A module project on disk whose `flake.nix` exposes `packages.<system>.lgx`, built with `logos-module-builder` 0.2.x (see `"$SCAFFOLD_BIN" basecamp docs`). Reachable as `$MODULE_PROJECT`. That repo's `templates/minimal-module` is the smallest one that satisfies the contract.
+- Optional but strongly recommended for a cold run: basecamp's own binary cache. The pinned flake declares `extra-substituters = https://cache.nix.logos.co/public`, but scaffold invokes a plain `nix build`, and a flake-declared substituter is only honored for a trusted user who accepts it. Without it, a cold `basecamp setup` builds a Qt-heavy closure from source. Add the substituter and its key to `~/.config/nix/nix.conf` (as a `trusted-users` member) before timing anything, and say which mode a reported duration was measured in.
 - `scaffold.toml` is present at the project root; if not, run `"$SCAFFOLD_BIN" init` once.
 
 ### Commands / Actions
@@ -1066,6 +1068,8 @@ ls .scaffold/basecamp/profiles
 - First `basecamp setup` clones the pinned basecamp repo into a pin-isolated cache path, builds `basecamp` and `lgpm` via Nix, seeds `.scaffold/basecamp/profiles/alice/` and `.scaffold/basecamp/profiles/bob/`, and reports completion.
 - If `[repos.basecamp.attr]` is a per-platform map, setup uses the current host's attr and preserves the map plus scalar fallback on serialize.
 - `basecamp doctor` reports the basecamp + lgpm binaries as present and both profiles as seeded; `--json` returns parseable JSON with the same checks. Immediately after a green first `setup` (before `basecamp modules`) that is four PASS rows — `basecamp binary`, `lgpm binary`, `basecamp profile alice`, `basecamp profile bob`. A doctor that summarizes `0 PASS` there is the regression: it leaves the user with no confirmation that `setup` actually landed.
+- `basecamp doctor` shows a `basecamp pin set` row. On a project using scaffold's defaults it passes and names both pins. It warns only when *one* of the pair is at the default and the other is not — that split is what silently breaks module loading, since the app embeds the same package-manager library the CLI installs with. A project deliberately pinned away from both defaults passes with a note, not a warning.
+- On a fresh `setup` against the default pin, the built basecamp carries its own bundled modules inside the nix output (`result/modules`, `result/plugins`) rather than pushing them into the profile — so a freshly seeded profile's `modules/` holding only the project's own modules is correct.
 - Second `basecamp setup` is idempotent: pin unchanged → no rebuild reported, exit 0.
 - All commands run only inside the project; running them from outside the project must fail with the existing scaffold "not a logos-scaffold project" message.
 
@@ -1146,7 +1150,7 @@ If your project does not auto-discover correctly, capture explicit sources:
 ### Expected Success Signals
 
 - `basecamp modules` either auto-discovers project sub-flakes exposing `.#lgx` or accepts explicit `--path` / `--flake` sources and writes one `[modules.<name>]` sub-section per source into `scaffold.toml`. The file remains human-editable; re-runs are byte-identical and never overwrite existing keys.
-- For each captured project source, scaffold also resolves declared `dependencies` and inserts `role = "dependency"` entries unless the dep is already keyed, is a basecamp preinstall (`capability_module`, `package_manager`, `package_manager_ui`, `counter`, `counter_qml`, `webview_app`, `basecamp_main_ui`; see `BASECAMP_PREINSTALLED_MODULES` in `src/constants.rs` for the authoritative list), or is resolvable via the source's own `flake.lock` / the scaffold-default table.
+- For each captured project source, scaffold also resolves declared `dependencies` and inserts `role = "dependency"` entries unless the dep is already keyed, is a module basecamp bundles itself (`capability_module`, `main_ui`, `package_downloader`, `package_manager`, `package_manager_ui`; see `BASECAMP_PREINSTALLED_MODULES` in `src/constants.rs` for the authoritative list — basecamp 0.2.x installs these next to its own binary, so they never appear in a profile's `modules/`), or is resolvable via the source's own `flake.lock` / the scaffold-default table.
 - An unresolvable dep fails fast with a targeted error naming the dep and the two user-side fixes (capture as a project source, or add `[modules.<name>]` with `role = "dependency"`); no silent drop.
 - `basecamp modules --show` prints the captured set without mutating state.
 - `basecamp install` builds each project source (sibling `--override-input` rewrites apply for `path:../<sibling>` inputs in multi-flake projects) and shells out to `lgpm` to install into both `alice` and `bob`. By default it logs to `.scaffold/logs/<ts>-install.log` and prints a one-line status; `--print-output` (or `LOGOS_SCAFFOLD_PRINT_OUTPUT=1`) streams nix output directly.
@@ -1155,7 +1159,7 @@ If your project does not auto-discover correctly, capture explicit sources:
 - Custom profile names launch like default profiles when they are a single safe path component; `env_file` is sourced before global/profile inline env, `runtime_dir` is exported as both `TMPDIR` and `XDG_RUNTIME_DIR`, and `--log-file` overrides the configured `log_file`.
 - `launch` prepares the runtime dir before it scrubs or reinstalls anything, and refuses to use one that is a symlink, is not a directory, or is owned by another user; it creates it `0700` and tightens loose permissions on an existing one. The default sits in world-writable `/tmp` under a name derived from the project path, so a local attacker can claim it first — and whatever lands there holds the modules' `logos_token_*` sockets. A launch that follows a pre-planted symlink, or that scrubs the profile before discovering the runtime dir is unusable, is the regression.
 - With no configured `runtime_dir`, every profile still gets one: `basecamp paths <profile> --json` reports `tmpdir` == `xdg_runtime_dir` == `/tmp/lgs-<project-hash>-<profile>` (the hash scopes it to the project root, so two checkouts never share a temp root). This path is deliberately **outside** the project tree — `launch` leaves live `logos_token_*` Unix sockets in it, and `nix build path:<project-root>#lgx` refuses to copy a socket (`file ... has an unsupported type`). An in-project temp root therefore broke every `basecamp install` / `basecamp launch` after the first launch, and made concurrent `alice` / `bob` launches fail against each other's live sockets. A `tmpdir` that resolves under `<project>/.scaffold/` by default is that regression; so is any socket found by `find .scaffold -type s` after a launch.
-- `basecamp launch alice` kills any prior `logos_host` / `logos-basecamp` descendants for that profile, scrubs the profile's XDG dirs under `.scaffold/basecamp/profiles/alice/`, reinstalls each captured source for that profile, sets `XDG_{CONFIG,DATA,CACHE}_HOME` plus `LOGOS_PROFILE=alice`, and `exec`s basecamp.
+- `basecamp launch alice` kills any prior `logos_host` / `LogosBasecamp` descendants for that profile, scrubs the profile's XDG dirs under `.scaffold/basecamp/profiles/alice/`, reinstalls each captured source for that profile, sets `XDG_{CONFIG,DATA,CACHE}_HOME` plus `LOGOS_PROFILE=alice` and `LOGOS_USER_DIR`, and `exec`s basecamp.
 
 ### Failure Signals / Common Pitfalls
 
@@ -1221,14 +1225,14 @@ Within the running UIs, exercise whatever p2p surface the module exposes (chat e
 - Custom profile pairs open against their own profile dirs under `.scaffold/basecamp/profiles/<profile>/` and their configured runtime/log/env paths.
 - Each window shows the project's `.lgx` modules installed and ready.
 - `LOGOS_PROFILE=alice` and `LOGOS_PROFILE=bob` are visible in each respective process environment (helpful for debugging).
-- On the macOS portable stack, each process environment carries an absolute `LOGOS_DATA_DIR` *and* an absolute `LOGOS_USER_DIR`, both pointing at that profile's own module root (`.scaffold/basecamp/profiles/<profile>/xdg-data/Logos/LogosBasecamp`) — set automatically by `launch`, no manual export needed. Basecamp 0.1.x reads the first and 0.2.x the second, so which one the app actually honors depends on the `[repos.basecamp]` pin; `launch` sets both so the check is the same either way.
+- Every process environment carries an absolute `LOGOS_USER_DIR` pointing at that profile's own module root (`.scaffold/basecamp/profiles/<profile>/xdg-data/Logos/LogosBasecamp` on a portable stack, `…/LogosBasecampDev` on the dev stack) — set automatically by `launch` on every host and stack, no manual export needed. On the macOS portable stack an absolute `LOGOS_DATA_DIR` accompanies it: that is the 0.1.x name for the same override, kept so a project pinned to a 0.1.x basecamp behaves identically. Which one the app honors depends on the `[repos.basecamp]` pin; `launch` writes both there, so the check is the same either way.
 - The two instances do not collide on Qt remote-objects or any non-module port. Do not go hunting for per-module port-override env vars in the process environment: the registry they would flow in through is empty in v1 (no module has published a name yet), so `launch` exports none. A module-level port collision between `alice` and `bob` is therefore still possible, and belongs to the owning module rather than to scaffold.
 - A p2p interaction triggered from `alice` is observable in `bob` (and vice versa) within the module's expected latency window.
 
 ### Failure Signals / Common Pitfalls
 
 - Two windows opening but sharing identity keys, profile state, or message history is a clean-slate / XDG-isolation regression.
-- On the macOS portable stack, both windows showing only basecamp's bundled modules — none of the project's `.lgx` modules — while their logs report a base data directory under the shared `~/Library/Application Support/Logos/LogosBasecamp` is the profile-collapse signature: the app is not reading the per-profile module root at all. Check that both `LOGOS_DATA_DIR` and `LOGOS_USER_DIR` are present, absolute, and distinct per profile in each process environment.
+- On macOS — either stack, since 0.2.x ships a runnable dev build there too — both windows showing only basecamp's bundled modules and none of the project's `.lgx` modules, while their logs report a base data directory under the shared `~/Library/Application Support/Logos/LogosBasecamp[Dev]`, is the profile-collapse signature: the app is not reading the per-profile module root at all. Check that `LOGOS_USER_DIR` (plus `LOGOS_DATA_DIR` on the portable stack) is present, absolute, and distinct per profile in each process environment.
 - A non-module port collision (Qt remote objects, etc.) is a real finding — file upstream against the affected component, do not patch around it inside scaffold.
 - A module that hardcodes its port is a known gap pending an upstream fix on that module. Scaffold exports no override for it to honor (see the signal above), so capture the module name and the observed collision — not a missing env var.
 - One window crashing while the other survives is recordable evidence; capture the crashing instance's logs from `.scaffold/basecamp/profiles/<name>/` before relaunching.
@@ -1280,6 +1284,8 @@ test -e .scaffold/basecamp/profiles/alice/.scaffold-xdg-data/scratch/marker.txt 
 - `rm -rf` on `launch` is bounded to `<project>/.scaffold/basecamp/profiles/<profile>/`. Never any path outside that root.
 - A `launch` that finds no modules in `[modules]` bails before scrubbing (the empty-install + scrubbed profile combination is the regression we're guarding against).
 - `basecamp paths` rejects the same unsafe profile names as `launch` and remains non-mutating for valid profiles.
+- A second `launch alice` while the first is still running terminates the first, leaving no orphan behind. Check with `pgrep -fl LogosBasecamp` (or `ps -o comm=`) before and after. The reported process name is never simply the file `launch` execed, because both generations start through a Qt-env launcher script: **0.2.x's dev build reports `.LogosBasecamp`** (`bin/LogosBasecamp` wraps the hidden real binary), **0.1.x reports `LogosBasecamp` even though `launch` execs `bin/logos-basecamp`** (that launcher execs its differently-named sibling), and the portable stacks report `LogosBasecamp` directly. All three are expected — a surviving process of any of those names after the second launch is the regression, and it is a silent one: the kill is skipped rather than failing loudly.
+- `module_data/` and basecamp's own `logs/` under the profile's module root are gone after a relaunch, like every other child of that root. That is clean-slate working as designed, not data loss: `basecamp paths <profile>` names both directories so their lifetime is discoverable before a module puts anything there.
 
 ### Failure Signals / Common Pitfalls
 
@@ -1393,6 +1399,76 @@ For one negative-path check, capture or hand-edit a module entry that points at 
 - Command output for standalone/default-host/basecamp-host paths.
 - The `[modules.<name>]` excerpt showing `flake`, `role`, optional `standalone_app`, and whether the source is a flake or `.lgx` path.
 - Any rejected `.lgx` path-source error verbatim.
+
+## B7. Pin-Set Contract Checks Without a Basecamp App Build
+
+### Goal
+
+Validate the half of the basecamp pin set that does not require building basecamp itself: that `[repos.lgpm]` builds, that the project's `.lgx` carries what that `lgpm` validates, that a real `lgpm install` succeeds with the exact flags scaffold passes, and that the launcher scaffold would exec is the one that actually starts.
+
+This exists because `B1`'s Nix precondition is the heaviest in this runbook and fails for a second reason beyond network policy: **memory**. Evaluating the basecamp `0.2.3` flake (~10k lock nodes) needs more RAM than a small container has, and the failure is a bare `SIGKILL` with no error text. `B1` is then out of reach while most of the pin set is still verifiable — this scenario is what to run instead of reporting "no coverage".
+
+### Preconditions
+
+- Nix with flakes enabled and the GitHub access `B1` describes.
+- A module project built with `logos-module-builder` 0.2.x, reachable as `$MODULE_PROJECT`.
+- No basecamp build required. If you have one, prefer `B1`–`B6`.
+
+### Commands / Actions
+
+```bash
+# Is this an eval-memory failure rather than a build failure?
+# --dry-run only evaluates. If this is SIGKILLed, B1 is blocked on RAM.
+cd "$MODULE_PROJECT" && nix build .#app --dry-run   # only when diagnosing a B1 SIGKILL
+
+# 1. The pinned lgpm builds, both stacks.
+LGPM=$(grep -A2 '^\[repos.lgpm\]' scaffold.toml | sed -n 's/^pin = "\(.*\)"/\1/p')
+nix build "github:logos-co/logos-package-manager/$LGPM#cli"          --out-link /tmp/lgpm-dev
+nix build "github:logos-co/logos-package-manager/$LGPM#cli-portable" --out-link /tmp/lgpm-portable
+
+# 2. The project's .lgx builds and carries content hashes.
+nix build .#lgx --out-link /tmp/mod-lgx
+tar xzf /tmp/mod-lgx/*.lgx -C "$(mktemp -d)" && jq '.hashes.root, .name' <manifest.json
+
+# 3. A real install with scaffold's exact argument shape.
+mkdir -p /tmp/p/modules /tmp/p/plugins
+/tmp/lgpm-dev/bin/lgpm --modules-dir /tmp/p/modules --ui-plugins-dir /tmp/p/plugins \
+  install --file /tmp/mod-lgx/*.lgx
+
+# 4. Negative: the two failures `basecamp install` turns into hints.
+#    (a) strip `hashes` from manifest.json, repack, install -> missing-hash path
+#    (b) install the dev .lgx with the *portable* lgpm  -> variant-mismatch path
+/tmp/lgpm-portable/bin/lgpm --modules-dir /tmp/p/modules --ui-plugins-dir /tmp/p/plugins \
+  install --file /tmp/mod-lgx/*.lgx
+
+# 5. If any basecamp `#app` output is on hand (store path or an old result link),
+#    check which entry point scaffold would exec, and that it actually starts.
+ls "$APP"/bin
+env -i HOME=/tmp PATH=/usr/bin:/bin QT_QPA_PLATFORM=offscreen "$APP"/bin/<entry> --version
+```
+
+### Expected Success Signals
+
+- Both `lgpm` attrs build (or substitute) and expose `bin/lgpm`.
+- The `.lgx` manifest has a non-empty `hashes.root`, and its variant directory is `<host>-dev` for `#lgx`.
+- The real install prints `Installed to: <modules-dir>` and exits 0, creating `<modules-dir>/<module_name>/`. `Warning: Package is unsigned` is expected and not a failure — the default signature policy is `warn`, and validation still runs underneath it.
+- Repacking matters: `tar czf out.lgx .` produces `./`-prefixed members and lgpm rejects the package for an unrelated reason. Pack member names exactly as the original (`tar czf out.lgx manifest.json variants`) or the negative test proves nothing.
+- Hash-stripped install fails with **`Package validation failed: Missing content hashes in manifest`** — the string `basecamp install` maps to its rebuild hint.
+- Dev `.lgx` under the portable `lgpm` fails with **`Package does not contain variant for platform: <host> (package provides: <host>-dev)`** — the string mapped to the stack-mismatch hint.
+- **Not every `Package validation failed:` is a hash problem.** The same banner covers malformed manifests (e.g. `Manifest: 'name' field is empty`). A hint that answers those with "rebuild with newer tooling" is a regression — the raw stderr is the better message there.
+- The entry point scaffold resolves is a **launcher**, not a raw binary. Both generations ship a `/bin/sh` script that exports `QT_PLUGIN_PATH` / `QML2_IMPORT_PATH` / `LD_LIBRARY_PATH` and then execs the real binary, but they name it differently: 0.1.x uses `bin/logos-basecamp` (its `bin/LogosBasecamp` is the raw ELF), while 0.2.x has no `bin/logos-basecamp` and makes `bin/LogosBasecamp` the launcher over a hidden `bin/.LogosBasecamp`. Launching the raw binary dies at exec with `libQt6RemoteObjects.so.6: cannot open shared object file`; the launcher reaches `Logos Core started successfully!`. That one-line difference is the whole check.
+
+### Failure Signals / Common Pitfalls
+
+- A `SIGKILL` with a log ending mid-`copying path` or right after an `evaluation warning:` is out-of-memory, not a broken pin. Confirm with `--dry-run` before filing anything against the pin.
+- An `lgpm` pin that does not build at all means the pin set is wrong at the source — stop and fix `DEFAULT_LGPM_PIN` before running anything else.
+- A `.lgx` with no `hashes.root` means the module was built by tutorial-era tooling; that is the module's pin to fix, not scaffold's.
+
+### Evidence to Capture
+
+- The two `lgpm` build result paths and the `.lgx` manifest `hashes.root`.
+- Full stdout/stderr of the successful install and of both negative installs.
+- `ls <app>/bin` plus the launcher-vs-raw-binary startup comparison.
 
 ## A1. Public Rust API Surface
 
@@ -1726,6 +1802,8 @@ HEAD0=$("$SCAFFOLD_BIN" test-node blocks head --url "$URL" --json | jq -r .block
 - Changes to clean-slate scrub semantics, profile-name validation, path-root bounds, or the empty `[modules]` guard on `launch`: rerun `B4`.
 - Changes to `basecamp build`, `basecamp build-portable`, variant normalization, `--module` filtering, or build attr selection: rerun `B5`.
 - Changes to `basecamp run`, `standalone_app`, or module source validation for run: rerun `B6`.
+- Changes to `resolve_basecamp_binary`, `basecamp_comm_candidates`, or `lgpm_install_hint`: rerun `B7` (and `B4` for the relaunch kill path). These are the pieces that silently do the wrong thing rather than failing — a wrong entry point starts an app with no Qt environment, an unmatched `comm` skips the kill, and an over-broad hint misdirects.
+- Changes to the basecamp/`lgpm`/companion pin set (`DEFAULT_BASECAMP_PIN`, `DEFAULT_LGPM_PIN`, `BASECAMP_DEPENDENCIES`, `BASECAMP_PREINSTALLED_MODULES`): rerun the whole `B` series on both a Linux and a macOS host, and on macOS cover both `attr = "app"` and `attr = "bin-macos-app"`. The three pins are one set — the app embeds the same package-manager library the CLI installs with — so a change to any of them re-opens every basecamp scenario. Confirm from the built `$out` what the release actually bundles (`$out/modules`, `$out/plugins`) rather than trusting the constant. Where the basecamp app build is out of reach (a container without the RAM to evaluate the flake), run `B7` and report it as the partial coverage it is — it still exercises the `lgpm` pin, the `.lgx` contract, both install-hint paths, and the launcher selection.
 - Changes to the public `logos_scaffold::api` surface (entry points, typed result models, categorized errors, `CommandFailed`, or the documented examples/doctests): rerun `A1`, and rerun the matching CLI scenario for any command whose `*_for_project` core changed.
 - Changes to `test-node` lifecycle, pin resolution, prepare/doctor, run-slot concurrency, or caller-checkout validation: rerun `T1` (and `A1` if the `api::testnode` lifecycle types changed).
 - Changes to the `test-node` RPC client (transaction outcomes, block/clock parsing, account/proof reads, or their JSON shapes): rerun `T2`.

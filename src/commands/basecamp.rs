@@ -11,17 +11,22 @@ use anyhow::{anyhow, bail, Context};
 
 use crate::config::{default_basecamp_repo, default_lgpm_repo};
 use crate::constants::{
-    BASECAMP_ATTR, BASECAMP_AUTODISCOVER_SKIP_SUBDIRS, BASECAMP_DEPENDENCIES,
-    BASECAMP_MODULE_ROOT_ENV_VARS, BASECAMP_PORTABLE_ATTRS, BASECAMP_PREINSTALLED_MODULES,
-    BASECAMP_PROFILES_REL, BASECAMP_PROFILE_ALICE, BASECAMP_PROFILE_BOB, BASECAMP_SOURCE,
-    BASECAMP_XDG_APP_SUBPATH_DEV, BASECAMP_XDG_APP_SUBPATH_PORTABLE, DEFAULT_BASECAMP_PIN,
-    DEFAULT_LGPM_PIN, LGPM_ATTR, LGPM_ATTR_PORTABLE, LGPM_SOURCE,
+    BASECAMP_ATTR, BASECAMP_AUTODISCOVER_SKIP_SUBDIRS, BASECAMP_BASE_DIR_LOGS,
+    BASECAMP_BASE_DIR_MODULES, BASECAMP_BASE_DIR_MODULE_DATA, BASECAMP_BASE_DIR_PLUGINS,
+    BASECAMP_BIN_LAUNCHER_V01, BASECAMP_BIN_V01_TARGET, BASECAMP_DEPENDENCIES,
+    BASECAMP_MODULE_ROOT_ENV_VAR_DATA_DIR, BASECAMP_MODULE_ROOT_ENV_VAR_USER_DIR,
+    BASECAMP_PORTABLE_ATTRS, BASECAMP_PREINSTALLED_MODULES, BASECAMP_PROFILES_REL,
+    BASECAMP_PROFILE_ALICE, BASECAMP_PROFILE_BOB, BASECAMP_SOURCE, BASECAMP_XDG_APP_SUBPATH_DEV,
+    BASECAMP_XDG_APP_SUBPATH_PORTABLE, DEFAULT_BASECAMP_PIN, DEFAULT_LGPM_PIN, LGPM_ATTR,
+    LGPM_ATTR_PORTABLE, LGPM_SOURCE,
 };
 use crate::model::{
     BasecampConfig, BasecampSource, BasecampState, ModuleEntry, ModuleRole, Project, RepoBuild,
     RepoRef,
 };
-use crate::process::{derive_log_path, run_checked, run_logged, set_print_output};
+use crate::process::{
+    derive_log_path, print_output_enabled, run_capture, run_logged, set_print_output,
+};
 use crate::project::{load_project, resolve_cache_root, save_project_config};
 use crate::repo::{sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
 use crate::state::{read_basecamp_state, write_basecamp_state};
@@ -337,15 +342,35 @@ fn build_lgpm(project_root: &Path, out_dir: &Path, flake_ref: &str) -> DynResult
 }
 
 fn resolve_basecamp_binary(app_link: &Path) -> DynResult<PathBuf> {
-    // Dev (`#app`) layout: bin/logos-basecamp (Linux).
-    // Portable bundle layouts:
+    // Both generations ship a `/bin/sh` launcher that exports `QT_PLUGIN_PATH`,
+    // `QML2_IMPORT_PATH` and `LD_LIBRARY_PATH` before exec'ing the real binary —
+    // neither build wraps the Qt app itself (`wrapQtApps` is skipped so the
+    // process name stays `LogosBasecamp` for the macOS Dock). Launching the raw
+    // binary instead of its launcher starts an app that cannot find its Qt
+    // platform plugin or QML imports, so which name we pick is not cosmetic.
+    //
+    // The catch is that the two generations give the launcher *different* names,
+    // and each generation's launcher name is the other's raw binary:
+    //
+    //   path                  | 0.1.x `#app`     | 0.2.x dev `#app`    | 0.2.x portable
+    //   ----------------------|------------------|---------------------|----------------
+    //   bin/logos-basecamp    | launcher         | absent              | absent
+    //   bin/LogosBasecamp     | raw binary       | launcher (execs     | raw binary
+    //                         |                  | bin/.LogosBasecamp) | (bundle sets Qt)
+    //
+    // `bin/logos-basecamp` therefore goes first: it exists *only* on 0.1.x, so
+    // it can never shadow a 0.2.x build, and when it does exist it is the only
+    // correct entry point. Probing `bin/LogosBasecamp` ahead of it would silently
+    // pick 0.1.x's unwrapped binary — the app comes up with no Qt environment.
+    //
+    // Portable bundle layouts (no launcher; the bundle supplies Qt paths):
     //   - bin/LogosBasecamp (Linux portable / AppImage internals, bin-bundle-dir)
     //   - LogosBasecamp.app/Contents/MacOS/LogosBasecamp (macOS bin-macos-app)
     for rel in [
-        "bin/logos-basecamp",
-        "bin/LogosBasecamp",
+        &format!("bin/{BASECAMP_BIN_LAUNCHER_V01}"),
+        &format!("bin/{BASECAMP_BIN_V01_TARGET}"),
+        &format!("{BASECAMP_BIN_V01_TARGET}.app/Contents/MacOS/{BASECAMP_BIN_V01_TARGET}"),
         "bin/basecamp",
-        "LogosBasecamp.app/Contents/MacOS/LogosBasecamp",
     ] {
         let candidate = app_link.join(rel);
         if candidate.exists() {
@@ -353,8 +378,9 @@ fn resolve_basecamp_binary(app_link: &Path) -> DynResult<PathBuf> {
         }
     }
     let platform_hint = if cfg!(target_os = "macos") {
-        "\nNote: on macOS the dev `.#app` build does not expose a CLI-invocable binary; \
-         set `[repos.basecamp].attr = \"bin-macos-app\"` to build the portable app bundle."
+        "\nNote: on macOS a basecamp pin older than 0.2.0 does not expose a CLI-invocable \
+         binary from the dev `.#app` build; set `[repos.basecamp].attr = \"bin-macos-app\"` \
+         to build the portable app bundle."
     } else {
         ""
     };
@@ -430,7 +456,7 @@ fn cmd_basecamp_launch(
     };
 
     let launch_state_path = profile_dir.join("launch.state");
-    let expected_comm = basecamp_comm_name(&state.basecamp_bin);
+    let expected_comm = basecamp_comm_candidates(&state.basecamp_bin);
     if let Some(pid) = read_launch_pid(&launch_state_path) {
         // PID reuse means we can't be sure the recorded PID still maps to basecamp.
         // Only issue signals if the PID's current comm matches; `kill_process_tree`
@@ -517,29 +543,16 @@ fn cmd_basecamp_launch(
             std::env::var_os(k)
         });
     }
-    // macOS `bin-macos-app` Basecamp ignores XDG and loads its modules from
-    // `LOGOS_DATA_DIR` (0.1.x) / `LOGOS_USER_DIR` (0.2.x) — see
-    // `set_absolute_basecamp_data_dirs`. Apply this after the scaffold.toml env
-    // layering so a user-supplied relative value is absolutized too.
-    //
-    // Why the gate is this narrow: `is_portable_basecamp` matches every attr in
-    // `BASECAMP_PORTABLE_ATTRS` — `bin-macos-app`, `bin-appimage` and
-    // `bin-bundle-dir` — but the XDG-ignoring behaviour that makes this override
-    // necessary has only been observed on `bin-macos-app`, so the
-    // `cfg!(target_os = "macos")` conjunct keeps the write to that stack and
-    // makes it a no-op everywhere else. The Linux portable stacks are *untested*
-    // here rather than known-good: whether basecamp resolves its data tree from
-    // an `XDG_DATA_HOME`-backed location on Linux (in which case `launch_env`'s
-    // isolation already covers them) has not been verified for either
-    // generation. If a Linux AppImage or bundle-dir turns out to ignore XDG too,
-    // the fix is to drop the `cfg!` conjunct: for an unset key the value written
-    // is the same `<profile>/xdg-data/<subpath>` root `XDG_DATA_HOME` already
-    // implies. Note that widening it is not purely additive — it would also
-    // start rewriting relative `LOGOS_*_DIR` values declared in
-    // `[basecamp.env]` on Linux — so it needs a live check, not a guess.
-    if cfg!(target_os = "macos") && is_portable_basecamp(basecamp_repo) {
-        set_absolute_basecamp_data_dirs(&mut env, &project.root, &profile_dir, basecamp_repo);
-    }
+    // Point basecamp's data-tree override(s) at this profile. Runs after the
+    // scaffold.toml env layering so a user-supplied relative value is
+    // absolutized too.
+    set_module_root_env(
+        &mut env,
+        &project.root,
+        &profile_dir,
+        basecamp_repo,
+        cfg!(target_os = "macos"),
+    );
     println!("launching basecamp for profile {profile}");
     let mut cmd = Command::new(&state.basecamp_bin);
     for (k, v) in &env {
@@ -658,8 +671,18 @@ struct BasecampProfilePaths {
     /// `XDG_RUNTIME_DIR` launch would export. Always resolves; see
     /// [`resolve_profile_runtime_dir`].
     xdg_runtime_dir: String,
+    /// Basecamp's own data-tree root for this profile — the value `launch`
+    /// exports as `LOGOS_USER_DIR` (and, on the macOS portable stack, as the
+    /// 0.1.x `LOGOS_DATA_DIR`). Every directory below is a child of it.
+    module_root: String,
     modules_dir: String,
     plugins_dir: String,
+    /// Where basecamp 0.2.x persists per-module state. Inside the scrubbed
+    /// tree, so a relaunch discards it — see `scrub_profile_data_and_cache`.
+    module_data_dir: String,
+    /// Where basecamp 0.2.x writes its own rotated session logs (distinct from
+    /// scaffold's `--log-file` tee below). Also scrubbed on relaunch.
+    app_logs_dir: String,
     launch_state: String,
     /// Where logs go when logging is enabled (configured `log_file`, else the
     /// path a bare `--log-file` would use).
@@ -679,6 +702,7 @@ fn cmd_basecamp_paths(project: Project, profile: String, json: bool) -> DynResul
     let profile_dir = profiles_root.join(&profile);
     let (modules_dir, plugins_dir) =
         profile_modules_and_plugins(&profiles_root, &profile, basecamp_repo);
+    let module_root = profile_module_root(&profile_dir, basecamp_repo);
     let runtime_dir = resolve_profile_runtime_dir(&project.root, &profile, bc);
     let tmpdir = runtime_dir.clone();
     let profile_cfg = bc.and_then(|c| c.profiles.get(&profile));
@@ -698,8 +722,17 @@ fn cmd_basecamp_paths(project: Project, profile: String, json: bool) -> DynResul
         xdg_cache_home: profile_dir.join("xdg-cache").display().to_string(),
         tmpdir: tmpdir.display().to_string(),
         xdg_runtime_dir: runtime_dir.display().to_string(),
+        module_root: module_root.display().to_string(),
         modules_dir: modules_dir.display().to_string(),
         plugins_dir: plugins_dir.display().to_string(),
+        module_data_dir: module_root
+            .join(BASECAMP_BASE_DIR_MODULE_DATA)
+            .display()
+            .to_string(),
+        app_logs_dir: module_root
+            .join(BASECAMP_BASE_DIR_LOGS)
+            .display()
+            .to_string(),
         launch_state: profile_dir.join("launch.state").display().to_string(),
         log_file: log_file.display().to_string(),
         env_file: env_file.as_ref().map(|p| p.display().to_string()),
@@ -715,8 +748,11 @@ fn cmd_basecamp_paths(project: Project, profile: String, json: bool) -> DynResul
         println!("  xdg_cache_home:   {}", paths.xdg_cache_home);
         println!("  tmpdir:           {}", paths.tmpdir);
         println!("  xdg_runtime_dir:  {}", paths.xdg_runtime_dir);
+        println!("  module_root:      {}", paths.module_root);
         println!("  modules_dir:      {}", paths.modules_dir);
         println!("  plugins_dir:      {}", paths.plugins_dir);
+        println!("  module_data_dir:  {}", paths.module_data_dir);
+        println!("  app_logs_dir:     {}", paths.app_logs_dir);
         println!("  launch_state:     {}", paths.launch_state);
         println!("  log_file:         {}", paths.log_file);
         println!(
@@ -766,17 +802,68 @@ fn launch_env(
     env
 }
 
-/// Ensure `LOGOS_DATA_DIR` (Basecamp 0.1.x) and `LOGOS_USER_DIR` (Basecamp
-/// 0.2.x) are each set to an **absolute** path pointing at the profile's
-/// installed module/plugin root.
+/// Write the data-tree override key(s) `launch` exports for a profile.
 ///
-/// The macOS `bin-macos-app` Basecamp bundle does **not** honor
-/// `XDG_DATA_HOME` on macOS: it loads its modules/plugins from its data-tree
-/// override env var, falling back to
-/// `~/Library/Application Support/Logos/LogosBasecamp/` when that is unset. So
-/// although `launch_env` isolates the profile via `XDG_DATA_HOME` and scaffold
-/// installs the profile's modules under `<profile>/xdg-data/<subpath>`, the app
-/// never sees them unless the override points there.
+/// Basecamp loads its modules and UI plugins from a base directory that XDG
+/// does not always reach, and which key names that directory depends on the
+/// pinned generation: 0.2.x reads `LOGOS_USER_DIR`, 0.1.x read `LOGOS_DATA_DIR`.
+/// The keys are read by disjoint generations, so writing both keeps `launch`
+/// pin-agnostic — but they are *not* written under the same conditions:
+///
+///   * `LOGOS_USER_DIR` — always. 0.2.x otherwise resolves its base directory
+///     from `QStandardPaths::AppDataLocation`, which on macOS ignores
+///     `XDG_DATA_HOME` entirely and collapses every profile onto one shared
+///     tree. Under 0.1.x only the portable stack could reach that path (the dev
+///     `.#app` build exposed no macOS-invocable binary); 0.2.x installs a
+///     launcher for every platform, so the dev stack needs it too. On hosts
+///     that do honor XDG the value written is the same root `XDG_DATA_HOME`
+///     already implies, so writing it unconditionally costs nothing and keeps
+///     one code path.
+///   * `LOGOS_DATA_DIR` — macOS portable only. The key is 0.1.x-only and that
+///     is the one stack where a 0.1.x basecamp was observed to ignore
+///     `XDG_DATA_HOME`. Widening it is not purely additive: it would also start
+///     rewriting relative `LOGOS_DATA_DIR` values declared in `[basecamp.env]`
+///     on hosts where the key does nothing at all.
+///
+/// `host_is_macos` is a parameter rather than a `cfg!` so both branches stay
+/// testable from either host.
+fn set_module_root_env(
+    env: &mut BTreeMap<String, OsString>,
+    project_root: &Path,
+    profile_dir: &Path,
+    basecamp_repo: Option<&RepoRef>,
+    host_is_macos: bool,
+) {
+    set_absolute_module_root_var(
+        env,
+        BASECAMP_MODULE_ROOT_ENV_VAR_USER_DIR,
+        project_root,
+        profile_dir,
+        basecamp_repo,
+    );
+    if host_is_macos && is_portable_basecamp(basecamp_repo) {
+        set_absolute_module_root_var(
+            env,
+            BASECAMP_MODULE_ROOT_ENV_VAR_DATA_DIR,
+            project_root,
+            profile_dir,
+            basecamp_repo,
+        );
+    }
+}
+
+/// Ensure one basecamp data-tree override key
+/// ([`BASECAMP_MODULE_ROOT_ENV_VAR_USER_DIR`] for 0.2.x,
+/// [`BASECAMP_MODULE_ROOT_ENV_VAR_DATA_DIR`] for 0.1.x) holds an **absolute**
+/// path pointing at the profile's installed module/plugin root.
+///
+/// Basecamp does not always honor `XDG_DATA_HOME`: it loads its
+/// modules/plugins from the data-tree override env var, falling back to a
+/// `QStandardPaths::AppDataLocation` path (on macOS
+/// `~/Library/Application Support/Logos/LogosBasecamp[Dev]/`) when that is
+/// unset. So although `launch_env` isolates the profile via `XDG_DATA_HOME` and
+/// scaffold installs the profile's modules under `<profile>/xdg-data/<subpath>`,
+/// the app never sees them unless the override points there.
 ///
 /// Which env var *is* the override depends on the Basecamp generation: 0.1.x
 /// reads `LOGOS_DATA_DIR`; 0.2.x renamed it to `LOGOS_USER_DIR` / `--user-dir`
@@ -784,10 +871,10 @@ fn launch_env(
 /// drops `LOGOS_DATA_DIR` entirely — with only the old key set, every 0.2.x
 /// profile silently collapses onto the shared fallback dir and none of the
 /// project's modules appear. The two keys are read by disjoint basecamp
-/// versions, so this sets both (from [`BASECAMP_MODULE_ROOT_ENV_VARS`]) and
-/// stays pin-agnostic.
+/// versions, so `launch` writes both and stays pin-agnostic; only the
+/// *condition* differs (see the call site).
 ///
-/// The values **must be absolute**, for a different reason per generation:
+/// The value **must be absolute**, for a different reason per generation:
 ///   * 0.1.x: with a *relative* `LOGOS_DATA_DIR` the app loads the backend
 ///     modules but the dlopen'd `main_ui` / `package_manager_ui` dylibs fail
 ///     `@rpath` resolution ("shared library was not found") and the shell UI
@@ -796,8 +883,8 @@ fn launch_env(
 ///     `LOGOS_USER_DIR` *env var* verbatim, so a relative value scatters the
 ///     app's state under whatever cwd it was launched from.
 ///
-/// This finalizer therefore, for each key independently:
-///   * defaults it to the profile's absolute module root
+/// This finalizer therefore:
+///   * defaults the key to the profile's absolute module root
 ///     (`<profile>/xdg-data/<basecamp_xdg_subpath>`, e.g.
 ///     `.../Logos/LogosBasecamp` for the portable stack) when unset, and
 ///   * rewrites any caller-supplied relative value (from `[basecamp.env]` /
@@ -806,21 +893,8 @@ fn launch_env(
 ///   * treats an empty (or whitespace-only) caller value as unset — absolutizing
 ///     `""` would collapse to the project root, which is not a module root.
 ///
-/// The caller gates this to the macOS portable stack; the transform itself is
-/// platform-independent so it stays unit-testable on any host.
-fn set_absolute_basecamp_data_dirs(
-    env: &mut BTreeMap<String, OsString>,
-    project_root: &Path,
-    profile_dir: &Path,
-    basecamp_repo: Option<&RepoRef>,
-) {
-    for key in BASECAMP_MODULE_ROOT_ENV_VARS {
-        set_absolute_module_root_var(env, key, project_root, profile_dir, basecamp_repo);
-    }
-}
-
-/// Per-key transform behind `set_absolute_basecamp_data_dirs`; see its doc
-/// comment for the semantics.
+/// The transform is platform-independent (the caller owns the gating), so it
+/// stays unit-testable on any host.
 fn set_absolute_module_root_var(
     env: &mut BTreeMap<String, OsString>,
     key: &str,
@@ -1299,18 +1373,59 @@ fn write_launch_pid(path: &Path, pid: u32) -> DynResult<()> {
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
 }
 
-/// `basename(basecamp_bin)` truncated to 15 bytes — matches `/proc/<pid>/comm`
-/// semantics on Linux so [`pid_comm_matches`] can compare directly.
-fn basecamp_comm_name(basecamp_bin: &str) -> String {
+/// Process names the launched basecamp may report, each truncated to 15 bytes
+/// to match `/proc/<pid>/comm` semantics on Linux so [`pid_comm_matches`] can
+/// compare directly.
+///
+/// Two names, because what scaffold execs is not always what ends up running.
+/// Every stack we support installs its entry point under a launcher name, and
+/// some of those launchers are shell wrappers that set Qt env and then `exec`
+/// a hidden sibling binary:
+///
+///   * basecamp 0.2.x dev (`.#app`): `bin/LogosBasecamp` is the wrapper,
+///     `bin/.LogosBasecamp` is the real binary — the live process reports
+///     `.LogosBasecamp`.
+///   * basecamp 0.1.x dev: `bin/logos-basecamp` is the wrapper and it execs
+///     `bin/LogosBasecamp`, which is also a probe candidate in its own right.
+///   * portable stacks: no wrapper, the resolved path is the process.
+///
+/// Matching only the resolved basename therefore misses the wrapper cases, and
+/// the miss is silent: `launch` skips the kill and the previous instance keeps
+/// the profile's sockets and ports while a second one starts. So the candidate
+/// set is the basename plus every name a launcher of that basename is known to
+/// `exec` — the two hide-the-real-binary conventions upstream uses — rather
+/// than loosening the comparison to a prefix match.
+fn basecamp_comm_candidates(basecamp_bin: &str) -> Vec<String> {
     let base = Path::new(basecamp_bin)
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("basecamp");
-    base.chars().take(15).collect()
+    let truncate = |s: &str| -> String { s.chars().take(15).collect() };
+    let mut candidates = vec![truncate(base)];
+    let mut add = |name: String| {
+        if !name.is_empty() && !candidates.contains(&name) {
+            candidates.push(name);
+        }
+    };
+    // A dotted resolved name (we execed the hidden binary directly) needs the
+    // undotted twin instead; anything else needs the dotted one added.
+    match base.strip_prefix('.') {
+        Some(undotted) => add(truncate(undotted)),
+        None => add(truncate(&format!(".{base}"))),
+    }
+    // The 0.1.x indirection is a *rename*, not a dot: `bin/logos-basecamp`
+    // execs its sibling `bin/LogosBasecamp`, so the live process reports a name
+    // that shares no prefix with what we execed. Without this the kill path
+    // silently no-ops on every 0.1.x-pinned project — the same defect the
+    // dotted twin fixes for 0.2.x, which the dot rule alone does not cover.
+    if base == BASECAMP_BIN_LAUNCHER_V01 {
+        add(truncate(BASECAMP_BIN_V01_TARGET));
+    }
+    candidates
 }
 
-/// True if the running process at `pid` has a comm matching `expected`. Uses
-/// portable `ps -p` so this works on Linux and macOS. Returns false if `ps`
+/// True if the running process at `pid` has a comm matching any of `expected`.
+/// Uses portable `ps -p` so this works on Linux and macOS. Returns false if `ps`
 /// fails (process gone, PID reused by a process we can't inspect, etc.) — fail
 /// closed: the caller skips the kill on a mismatch.
 ///
@@ -1318,7 +1433,7 @@ fn basecamp_comm_name(basecamp_bin: &str) -> String {
 /// before comparison, so a 20-byte binary name like `logos-basecamp-dev` still
 /// matches a `comm` of `logos-basecamp-`. Equality is strict after truncation —
 /// a prefix like `logos-bas` does not match `logos-basecamp-`.
-fn pid_comm_matches(pid: u32, expected: &str) -> bool {
+fn pid_comm_matches(pid: u32, expected: &[String]) -> bool {
     let out = Command::new("ps")
         .arg("-p")
         .arg(pid.to_string())
@@ -1340,8 +1455,12 @@ fn pid_comm_matches(pid: u32, expected: &str) -> bool {
         .and_then(|s| s.to_str())
         .unwrap_or(&comm);
     let comm_trunc: String = comm_base.chars().take(15).collect();
-    let expected_trunc: String = expected.chars().take(15).collect();
-    !comm_trunc.is_empty() && comm_trunc == expected_trunc
+    if comm_trunc.is_empty() {
+        return false;
+    }
+    expected
+        .iter()
+        .any(|candidate| candidate.chars().take(15).collect::<String>() == comm_trunc)
 }
 
 /// Kill the process tree rooted at `pid`. Enumerates descendants via `/proc`
@@ -1351,7 +1470,7 @@ fn pid_comm_matches(pid: u32, expected: &str) -> bool {
 /// doesn't get signalled at all. Descendants are always KILLed after the grace
 /// period — the parent may exit before its children, leaving them orphaned to
 /// init while still bound to profile ports.
-fn kill_process_tree(pid: u32, expected_comm: &str) {
+fn kill_process_tree(pid: u32, expected_comm: &[String]) {
     // Snapshot descendants *before* TERM — once the parent starts exiting, its
     // children get reparented to init and we lose the ppid linkage.
     let descendants = collect_descendant_pids(pid);
@@ -2658,6 +2777,25 @@ fn sibling_overrides_for(target: &BasecampSource, all: &[BasecampSource]) -> Vec
     out
 }
 
+/// Basecamp's data-tree root for a profile: the directory it reads
+/// `modules/`, `plugins/`, `module_data/` and `logs/` from. Under
+/// `XDG_DATA_HOME` so the XDG isolation in `launch_env` covers it on hosts that
+/// honor XDG; `launch` additionally exports it verbatim as `LOGOS_USER_DIR` for
+/// the hosts that don't.
+///
+/// This is the *reader* side of the layout — install targets, module counts and
+/// manifest checks all resolve through here so the knowledge lives in one
+/// place. `set_absolute_module_root_var` deliberately builds the exported value
+/// through its own join chain instead of calling this: keeping the exporter and
+/// the reader independent is what lets
+/// `set_absolute_basecamp_data_dirs_defaults_to_the_dir_install_writes_into`
+/// catch a depth change on either side.
+fn profile_module_root(profile_dir: &Path, basecamp_repo: Option<&RepoRef>) -> PathBuf {
+    profile_dir
+        .join("xdg-data")
+        .join(basecamp_xdg_subpath(basecamp_repo))
+}
+
 /// `(modules_dir, plugins_dir)` under a profile's `XDG_DATA_HOME`. Pinning this
 /// to one place keeps the layout knowledge from drifting between install/launch.
 fn profile_modules_and_plugins(
@@ -2665,11 +2803,11 @@ fn profile_modules_and_plugins(
     name: &str,
     basecamp_repo: Option<&RepoRef>,
 ) -> (PathBuf, PathBuf) {
-    let xdg_app = profiles_root
-        .join(name)
-        .join("xdg-data")
-        .join(basecamp_xdg_subpath(basecamp_repo));
-    (xdg_app.join("modules"), xdg_app.join("plugins"))
+    let xdg_app = profile_module_root(&profiles_root.join(name), basecamp_repo);
+    (
+        xdg_app.join(BASECAMP_BASE_DIR_MODULES),
+        xdg_app.join(BASECAMP_BASE_DIR_PLUGINS),
+    )
 }
 
 /// Install every lgx file into every target profile via lgpm. `announce = true`
@@ -2694,10 +2832,23 @@ fn run_lgpm_install(
                 println!("installing {} into {}", lgx.display(), name);
             }
             let args = lgpm_install_args(&modules_dir, &plugins_dir, lgx);
-            run_checked(
-                Command::new(lgpm_bin).args(&args),
-                &format!("lgpm install {} into {}", lgx.display(), name),
-            )?;
+            let label = format!("lgpm install {} into {}", lgx.display(), name);
+            // Captured rather than streamed: `lgpm install` prints a couple of
+            // lines, and having them in hand is what lets a known upstream
+            // failure become a targeted hint instead of a bare exit status.
+            // `--print-output` still gets the raw lines, so nothing a CI log
+            // used to carry is lost.
+            let captured =
+                run_capture(Command::new(lgpm_bin).args(&args), &label).map_err(|err| {
+                    match lgpm_install_hint(&err) {
+                        Some(hint) => err.context(hint),
+                        None => err,
+                    }
+                })?;
+            if print_output_enabled() {
+                print!("{}", captured.stdout);
+                eprint!("{}", captured.stderr);
+            }
         }
     }
     Ok(())
@@ -2749,6 +2900,55 @@ fn lgpm_install_args(
         "--file".into(),
         lgx.as_os_str().to_owned(),
     ]
+}
+
+/// Map a known `lgpm install` failure onto an actionable hint, or `None` when
+/// the failure isn't one scaffold can say anything useful about (then the
+/// captured stderr speaks for itself).
+///
+/// Both cases below are contract mismatches between the `.lgx` and the pinned
+/// `lgpm`, not bugs in the module — and neither error names the fix, so the
+/// raw message sends people looking in the wrong place.
+fn lgpm_install_hint(err: &anyhow::Error) -> Option<&'static str> {
+    let text = err
+        .downcast_ref::<crate::error::CommandFailed>()
+        .map(|failed| format!("{}\n{}", failed.stderr, failed.stdout))
+        .unwrap_or_else(|| err.to_string());
+
+    // Match the hash signal specifically, not the `Package validation failed:`
+    // prefix it happens to arrive under. That prefix is liblgx's banner for
+    // *every* structural rejection — a truncated archive, a bad variant tree,
+    // `Manifest: 'name' field is empty` — and answering all of them with "your
+    // package predates content hashes" points people at a rebuild that fixes
+    // nothing. Observed verbatim from the pinned `lgpm`:
+    //   Package validation failed: Missing content hashes in manifest
+    //   Package validation failed: Manifest: 'name' field is empty
+    // Only the first is a pin-set mismatch scaffold can explain; the rest are
+    // package bugs whose own stderr is already the better message.
+    if text.contains("content hashes") {
+        // liblgx validates structure + Merkle content hashes on install, and
+        // the CLI's default `warn` signature policy still runs that check.
+        // Packages from pre-0.2 module tooling carry no hashes at all.
+        return Some(
+            "this `.lgx` predates the content hashes the pinned `lgpm` validates on install. \
+             Rebuild the module with `logos-module-builder` 0.2.x (or bundle it with \
+             `nix-bundle-lgx`), or pin an `[modules.<name>].flake` rev that does. \
+             Overriding `[repos.lgpm].pin` to a pre-validation rev is not a fix: basecamp \
+             0.2.x embeds the validating library too.",
+        );
+    }
+    if text.contains("does not contain variant") {
+        // The dev stack accepts `<host>-dev` variants, the portable stack bare
+        // `<host>` ones; a mismatch here means the module was built for the
+        // other stack.
+        return Some(
+            "the `.lgx` has no variant for this stack — a dev basecamp loads `<host>-dev` \
+             variants and a portable one loads bare `<host>` variants. Rebuild with the \
+             matching flake output (`#lgx` for dev, `#lgx-portable` for portable) or align \
+             `[repos.basecamp].attr`.",
+        );
+    }
+    None
 }
 
 /// Produce the list of `.lgx` files referenced by a given source.
@@ -2898,10 +3098,8 @@ pub(crate) fn count_installed_modules(
     profile_dir: &Path,
     basecamp_repo: Option<&RepoRef>,
 ) -> usize {
-    let modules_root = profile_dir
-        .join("xdg-data")
-        .join(basecamp_xdg_subpath(basecamp_repo))
-        .join("modules");
+    let modules_root =
+        profile_module_root(profile_dir, basecamp_repo).join(BASECAMP_BASE_DIR_MODULES);
     let Ok(entries) = fs::read_dir(&modules_root) else {
         return 0;
     };
@@ -2918,10 +3116,8 @@ pub(crate) fn check_manifest_variants(
     expected_variant: &str,
     basecamp_repo: Option<&RepoRef>,
 ) -> Vec<ManifestVariantIssue> {
-    let modules_root = profile_dir
-        .join("xdg-data")
-        .join(basecamp_xdg_subpath(basecamp_repo))
-        .join("modules");
+    let modules_root =
+        profile_module_root(profile_dir, basecamp_repo).join(BASECAMP_BASE_DIR_MODULES);
     let Ok(entries) = fs::read_dir(&modules_root) else {
         return Vec::new();
     };
@@ -3093,7 +3289,6 @@ fn push_basecamp_doctor_rows(project: &Project, rows: &mut Vec<crate::model::Che
 
     let profiles_root = project.root.join(BASECAMP_PROFILES_REL);
     let basecamp_repo = project.config.basecamp_repo.as_ref();
-
     // Setup-level rows: the two binaries `basecamp setup` builds and the two
     // profiles it seeds. Without these a green `setup` produced a doctor with
     // no PASS rows at all, so a user had no way to confirm setup actually
@@ -3144,11 +3339,9 @@ fn push_basecamp_doctor_rows(project: &Project, rows: &mut Vec<crate::model::Che
             });
         }
     }
-    let alice_modules = profiles_root
-        .join(BASECAMP_PROFILE_ALICE)
-        .join("xdg-data")
-        .join(basecamp_xdg_subpath(basecamp_repo))
-        .join("modules");
+    let alice_modules =
+        profile_module_root(&profiles_root.join(BASECAMP_PROFILE_ALICE), basecamp_repo)
+            .join(BASECAMP_BASE_DIR_MODULES);
 
     {
         let mut entries: Vec<(&String, &ModuleEntry)> = project.config.modules.iter().collect();
@@ -3161,6 +3354,23 @@ fn push_basecamp_doctor_rows(project: &Project, rows: &mut Vec<crate::model::Che
             let src = module_entry_to_source(&project.root, entry);
             rows.push(captured_source_row(label, &src, &alice_modules));
         }
+    }
+
+    {
+        let basecamp_pin = basecamp_repo.map(|r| r.pin.as_str()).unwrap_or_default();
+        let lgpm_pin = project
+            .config
+            .lgpm_repo
+            .as_ref()
+            .map(|r| r.pin.as_str())
+            .unwrap_or_default();
+        let (status, detail, remediation) = describe_pin_set(basecamp_pin, lgpm_pin);
+        rows.push(CheckRow {
+            status,
+            name: "basecamp pin set".to_string(),
+            detail,
+            remediation,
+        });
     }
 
     // Dep-pin drift: captured `role = Dependency` entry rev differs from the
@@ -3238,6 +3448,83 @@ fn push_basecamp_doctor_rows(project: &Project, rows: &mut Vec<crate::model::Che
                     "run `logos-scaffold basecamp modules` to refresh capture".to_string(),
                 ),
             });
+        }
+    }
+}
+
+/// Report on the `[repos.basecamp]` / `[repos.lgpm]` pin pair.
+///
+/// The two are one decision, not two: basecamp embeds the same
+/// `logos-package-manager` library that the `lgpm` CLI is built from, so
+/// scaffold's default `lgpm` pin is whatever rev the default basecamp pin
+/// locks (see ADR "Basecamp Pin Bumps Move as a Set"). That makes exactly one
+/// state worth warning about — a project that moved one pin and left the other
+/// where it was, which is how an installer and an app end up disagreeing about
+/// package format with no error at install time.
+///
+/// Deliberately *not* a warning: a project pinned away from both defaults. That
+/// is a supported choice (an older basecamp, a fork, a release scaffold has not
+/// caught up with yet), and warning on it every run would train people to
+/// ignore the row that matters. It still gets a line, so which pins are in play
+/// is visible in the report.
+fn describe_pin_set(
+    basecamp_pin: &str,
+    lgpm_pin: &str,
+) -> (crate::model::CheckStatus, String, Option<String>) {
+    use crate::model::CheckStatus;
+
+    // An empty pin is not a third state: `setup` fills an unset or blank pin
+    // with the scaffold default (see `cmd_basecamp_setup`), so the *effective*
+    // pin of a project missing `[repos.lgpm]` is `DEFAULT_LGPM_PIN`. Reading
+    // blank as "not at the default" would warn about a split pair on a project
+    // whose two effective pins are exactly the matched defaults — the row is
+    // meant to catch a half-finished bump, not a section a user never wrote.
+    let basecamp_default = basecamp_pin.is_empty() || basecamp_pin == DEFAULT_BASECAMP_PIN;
+    let lgpm_default = lgpm_pin.is_empty() || lgpm_pin == DEFAULT_LGPM_PIN;
+    let short = |pin: &str| -> String {
+        if pin.is_empty() {
+            "(unset)".to_string()
+        } else {
+            pin.chars().take(12).collect()
+        }
+    };
+    let summary = format!(
+        "basecamp {} / lgpm {}",
+        short(basecamp_pin),
+        short(lgpm_pin)
+    );
+
+    match (basecamp_default, lgpm_default) {
+        (true, true) => (
+            CheckStatus::Pass,
+            format!("{summary} — scaffold defaults"),
+            None,
+        ),
+        (false, false) => (
+            CheckStatus::Pass,
+            format!("{summary} — both pinned away from the scaffold defaults"),
+            None,
+        ),
+        (matched_basecamp, _) => {
+            let (moved, stale) = if matched_basecamp {
+                ("basecamp", "lgpm")
+            } else {
+                ("lgpm", "basecamp")
+            };
+            (
+                CheckStatus::Warn,
+                format!(
+                    "{summary} — {moved} is at the scaffold default but {stale} is not; the two \
+                     pins are read as one set"
+                ),
+                Some(format!(
+                    "basecamp embeds the same package-manager library `lgpm` is built from, so a \
+                     split pair can install modules the app then cannot read. Set both \
+                     `[repos.basecamp].pin` and `[repos.lgpm].pin` to one release's set (the \
+                     scaffold defaults are `{DEFAULT_BASECAMP_PIN}` and `{DEFAULT_LGPM_PIN}`), \
+                     then re-run `logos-scaffold basecamp setup`."
+                )),
+            )
         }
     }
 }
@@ -3917,6 +4204,158 @@ mod tests {
         );
     }
 
+    fn lgpm_failure(stderr: &str) -> anyhow::Error {
+        crate::error::CommandFailed {
+            command: "lgpm install".to_string(),
+            label: "lgpm install".to_string(),
+            exit_code: Some(1),
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+            log_path: None,
+            message: "lgpm install failed".to_string(),
+        }
+        .into()
+    }
+
+    /// The pinned `lgpm` validates package structure and Merkle content hashes
+    /// on install — its default `warn` signature policy still runs that check.
+    /// A `.lgx` from pre-0.2 module tooling has no hashes at all, and upstream's
+    /// message names neither the cause nor the fix, so scaffold has to.
+    #[test]
+    fn lgpm_install_hint_explains_a_package_missing_content_hashes() {
+        let err = lgpm_failure("Package validation failed: Missing content hashes in manifest");
+        let hint = lgpm_install_hint(&err).expect("hash failures must carry a hint");
+        assert!(
+            hint.contains("logos-module-builder") && hint.contains("nix-bundle-lgx"),
+            "hint must name the rebuild path, got: {hint}"
+        );
+        assert!(
+            hint.contains("[repos.lgpm].pin"),
+            "hint must close off the wrong fix (downgrading lgpm), got: {hint}"
+        );
+    }
+
+    /// The dev stack loads `<host>-dev` variants and the portable stack bare
+    /// `<host>` ones; installing across that line fails at extraction.
+    #[test]
+    fn lgpm_install_hint_explains_a_dev_portable_variant_mismatch() {
+        let err = lgpm_failure(
+            "Package does not contain variant for platform: linux-amd64-dev \
+             (package provides: linux-amd64)",
+        );
+        let hint = lgpm_install_hint(&err).expect("variant failures must carry a hint");
+        assert!(
+            hint.contains("#lgx-portable") && hint.contains("[repos.basecamp].attr"),
+            "hint must name both sides of the mismatch, got: {hint}"
+        );
+    }
+
+    /// Anything else must stay silent: a hint that fires on every failure
+    /// teaches people to ignore hints, and lgpm's own stderr is already
+    /// surfaced by `CommandFailed`.
+    #[test]
+    fn lgpm_install_hint_is_silent_on_unrecognised_failures() {
+        assert!(lgpm_install_hint(&lgpm_failure("Permission denied")).is_none());
+        assert!(lgpm_install_hint(&anyhow!("no such file or directory")).is_none());
+    }
+
+    /// `Package validation failed:` is liblgx's banner for every structural
+    /// rejection, not a hash-specific signal — the pinned `lgpm` emits it
+    /// verbatim for a malformed manifest too. Keying the hash hint on the
+    /// banner told the author of a broken package to rebuild with newer
+    /// tooling, which fixes nothing and buries the real message.
+    #[test]
+    fn lgpm_install_hint_does_not_blame_hashes_for_other_validation_failures() {
+        // Both strings observed from the pinned lgpm rev against a real `.lgx`.
+        let unrelated = lgpm_failure("Package validation failed: Manifest: 'name' field is empty");
+        assert!(
+            lgpm_install_hint(&unrelated).is_none(),
+            "a non-hash validation failure must fall through to lgpm's own stderr"
+        );
+
+        let hashes = lgpm_failure("Package validation failed: Missing content hashes in manifest");
+        assert!(
+            lgpm_install_hint(&hashes).is_some_and(|h| h.contains("logos-module-builder")),
+            "the hash failure must still be recognised"
+        );
+    }
+
+    /// A split pin pair is the one state that silently breaks: the CLI writes
+    /// packages in one library's format and the app reads them with another.
+    #[test]
+    fn describe_pin_set_warns_only_when_exactly_one_pin_is_at_the_default() {
+        use crate::model::CheckStatus;
+
+        let other = "0123456789012345678901234567890123456789";
+
+        let (status, _, remediation) = describe_pin_set(DEFAULT_BASECAMP_PIN, DEFAULT_LGPM_PIN);
+        assert_eq!(status, CheckStatus::Pass, "matching defaults must not warn");
+        assert!(remediation.is_none());
+
+        let (status, _, _) = describe_pin_set(other, other);
+        assert_eq!(
+            status,
+            CheckStatus::Pass,
+            "a deliberate joint pin away from the defaults is supported, not a warning"
+        );
+
+        for (basecamp, lgpm) in [(DEFAULT_BASECAMP_PIN, other), (other, DEFAULT_LGPM_PIN)] {
+            let (status, detail, remediation) = describe_pin_set(basecamp, lgpm);
+            assert_eq!(
+                status,
+                CheckStatus::Warn,
+                "a split pair must warn (basecamp={basecamp}, lgpm={lgpm})"
+            );
+            assert!(
+                detail.contains("one set"),
+                "detail must say why it matters, got: {detail}"
+            );
+            assert!(
+                remediation.is_some_and(|r| r.contains("basecamp setup")),
+                "remediation must name the command that re-pins"
+            );
+        }
+    }
+
+    /// An unpinned project (no `[repos.*]` sections yet) reads as "at the
+    /// defaults" rather than as a split pair — `setup` fills both in.
+    #[test]
+    fn describe_pin_set_does_not_warn_before_setup_has_filled_the_pins() {
+        use crate::model::CheckStatus;
+        let (status, detail, _) = describe_pin_set("", "");
+        assert_eq!(status, CheckStatus::Pass);
+        assert!(detail.contains("(unset)"), "got: {detail}");
+    }
+
+    /// One pin written and the other absent is the *same* pin set as both
+    /// written, because `setup` resolves a blank pin to the scaffold default.
+    /// Warning here sent a user to "fix" a split that does not exist — and the
+    /// remediation told them to re-run `setup`, which would change nothing.
+    #[test]
+    fn describe_pin_set_treats_a_missing_section_as_the_default_not_a_split() {
+        use crate::model::CheckStatus;
+
+        for (basecamp, lgpm) in [(DEFAULT_BASECAMP_PIN, ""), ("", DEFAULT_LGPM_PIN)] {
+            let (status, detail, remediation) = describe_pin_set(basecamp, lgpm);
+            assert_eq!(
+                status,
+                CheckStatus::Pass,
+                "an unwritten section is not a split pair (basecamp={basecamp:?}, lgpm={lgpm:?}), \
+                 got: {detail}"
+            );
+            assert!(
+                remediation.is_none(),
+                "nothing to remediate: {remediation:?}"
+            );
+        }
+
+        // ...but a pin explicitly moved to some *other* rev still warns: that
+        // is the half-finished bump the row exists to catch.
+        let other = "0123456789012345678901234567890123456789";
+        let (status, _, _) = describe_pin_set(DEFAULT_BASECAMP_PIN, other);
+        assert_eq!(status, CheckStatus::Warn, "a real split must still warn");
+    }
+
     #[test]
     fn lgpm_install_args_pins_global_flags_before_subcommand() {
         let args = lgpm_install_args(
@@ -3951,6 +4390,30 @@ mod tests {
             attr: attr.to_string(),
             attr_platform: std::collections::BTreeMap::new(),
             path: String::new(),
+        }
+    }
+
+    /// Both data-tree override keys, in the order `launch` writes them. Only
+    /// the macOS portable stack gets both; every other host/stack gets
+    /// `LOGOS_USER_DIR` alone (see the `launch` call site).
+    const MODULE_ROOT_KEYS: &[&str] = &[
+        BASECAMP_MODULE_ROOT_ENV_VAR_USER_DIR,
+        BASECAMP_MODULE_ROOT_ENV_VAR_DATA_DIR,
+    ];
+
+    /// Test-only mirror of `launch`'s macOS-portable branch: apply the per-key
+    /// finalizer to both generations' keys. The keys are deliberately gated
+    /// separately in production, so this helper exists to keep the transform's
+    /// own contract (defaulting, absolutizing, empty-as-unset, no cross-key
+    /// leakage) under test independently of that gating.
+    fn set_absolute_basecamp_data_dirs(
+        env: &mut BTreeMap<String, OsString>,
+        project_root: &Path,
+        profile_dir: &Path,
+        basecamp_repo: Option<&RepoRef>,
+    ) {
+        for key in MODULE_ROOT_KEYS {
+            set_absolute_module_root_var(env, key, project_root, profile_dir, basecamp_repo);
         }
     }
 
@@ -4100,6 +4563,76 @@ mod tests {
         );
     }
 
+    /// `LOGOS_USER_DIR` is basecamp 0.2.x's only data-tree override, and it is
+    /// what makes per-profile isolation work on a host whose
+    /// `QStandardPaths::AppDataLocation` ignores `XDG_DATA_HOME`. It therefore
+    /// has to be written for every stack, not just the portable one: 0.2.x
+    /// installs a CLI-invocable launcher for the dev `.#app` build on macOS
+    /// too, and without the key `alice` and `bob` both load
+    /// `~/Library/Application Support/Logos/LogosBasecampDev`.
+    #[test]
+    fn set_module_root_env_always_exports_user_dir_whatever_the_stack_or_host() {
+        let project_root = Path::new("/abs/project");
+        let profile_dir = project_root.join("profiles/alice");
+        for host_is_macos in [true, false] {
+            for attr in ["app", "bin-macos-app", "bin-appimage", ""] {
+                let repo = repo_with_attr(attr);
+                let mut env: BTreeMap<String, OsString> = BTreeMap::new();
+                set_module_root_env(
+                    &mut env,
+                    project_root,
+                    &profile_dir,
+                    Some(&repo),
+                    host_is_macos,
+                );
+                let exported = env
+                    .get(BASECAMP_MODULE_ROOT_ENV_VAR_USER_DIR)
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| {
+                        panic!("LOGOS_USER_DIR must be set (macos={host_is_macos}, attr={attr})")
+                    });
+                assert_eq!(
+                    exported,
+                    profile_module_root(&profile_dir, Some(&repo)),
+                    "LOGOS_USER_DIR must point at this profile's module root \
+                     (macos={host_is_macos}, attr={attr})"
+                );
+            }
+        }
+    }
+
+    /// `LOGOS_DATA_DIR` is the 0.1.x name and stays on the narrow gate it was
+    /// introduced for. Writing it elsewhere is not free: it would also start
+    /// absolutizing relative `LOGOS_DATA_DIR` values from `[basecamp.env]` on
+    /// hosts where the key is inert.
+    #[test]
+    fn set_module_root_env_exports_data_dir_only_on_the_macos_portable_stack() {
+        let project_root = Path::new("/abs/project");
+        let profile_dir = project_root.join("profiles/alice");
+        let cases = [
+            (true, "bin-macos-app", true),
+            (true, "app", false),
+            (false, "bin-appimage", false),
+            (false, "app", false),
+        ];
+        for (host_is_macos, attr, expected) in cases {
+            let repo = repo_with_attr(attr);
+            let mut env: BTreeMap<String, OsString> = BTreeMap::new();
+            set_module_root_env(
+                &mut env,
+                project_root,
+                &profile_dir,
+                Some(&repo),
+                host_is_macos,
+            );
+            assert_eq!(
+                env.contains_key(BASECAMP_MODULE_ROOT_ENV_VAR_DATA_DIR),
+                expected,
+                "LOGOS_DATA_DIR presence wrong for macos={host_is_macos}, attr={attr}"
+            );
+        }
+    }
+
     /// Basecamp 0.2.x consumes `LOGOS_USER_DIR` as the *base* directory and
     /// appends `modules/` and `plugins/` to it — so the exported value has to
     /// sit at exactly the depth `basecamp install` writes into, not one level
@@ -4133,7 +4666,7 @@ mod tests {
 
         let (modules_dir, plugins_dir) =
             profile_modules_and_plugins(&profiles_root, BASECAMP_PROFILE_ALICE, Some(&portable));
-        for key in BASECAMP_MODULE_ROOT_ENV_VARS {
+        for key in MODULE_ROOT_KEYS {
             let exported = env
                 .get(*key)
                 .map(PathBuf::from)
@@ -4848,15 +5381,148 @@ mod tests {
     }
 
     #[test]
-    fn basecamp_comm_name_truncates_to_15_bytes_like_proc_comm() {
+    fn basecamp_comm_candidates_truncate_to_15_bytes_like_proc_comm() {
         assert_eq!(
-            basecamp_comm_name("/nix/store/xyz/bin/basecamp"),
-            "basecamp"
+            basecamp_comm_candidates("/nix/store/xyz/bin/basecamp"),
+            vec!["basecamp".to_string(), ".basecamp".to_string()]
         );
+        // Both the name and its dotted twin are truncated independently, so the
+        // dot costs one character of the 15-byte budget exactly like the kernel
+        // would charge it.
         assert_eq!(
-            basecamp_comm_name("/x/extremely-long-binary-name"),
-            "extremely-long-"
+            basecamp_comm_candidates("/x/extremely-long-binary-name"),
+            vec!["extremely-long-".to_string(), ".extremely-long".to_string()]
         );
+    }
+
+    fn touch_exe(root: &Path, rel: &str) {
+        let p = root.join(rel);
+        fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+        fs::write(&p, "#!/bin/sh\n").expect("write");
+    }
+
+    /// Neither generation wraps the Qt app itself, so the launcher script is
+    /// what exports `QT_PLUGIN_PATH` / `QML2_IMPORT_PATH` / `LD_LIBRARY_PATH`.
+    /// The generations disagree on its *name*, and each one's launcher name is
+    /// the other one's raw binary:
+    ///
+    ///   * 0.1.x `#app` ships `bin/logos-basecamp` (launcher) **and**
+    ///     `bin/LogosBasecamp` (the unwrapped binary).
+    ///   * 0.2.x `#app` ships no `bin/logos-basecamp` at all; there
+    ///     `bin/LogosBasecamp` *is* the launcher.
+    ///
+    /// So `bin/logos-basecamp` has to be probed first. It cannot shadow a 0.2.x
+    /// build (it does not exist there), and demoting it silently picks 0.1.x's
+    /// unwrapped binary — an app launched with no Qt environment, which fails
+    /// to find its platform plugin rather than failing here where we could say
+    /// why.
+    #[test]
+    fn resolve_basecamp_binary_prefers_each_generations_qt_launcher() {
+        // 0.1.x: both names present, launcher must win.
+        let v01 = tempdir().expect("tempdir");
+        touch_exe(v01.path(), "bin/logos-basecamp");
+        touch_exe(v01.path(), "bin/LogosBasecamp");
+        assert_eq!(
+            resolve_basecamp_binary(v01.path()).expect("0.1.x resolves"),
+            v01.path().join("bin/logos-basecamp"),
+            "0.1.x must launch through its `logos-basecamp` launcher, not the raw binary"
+        );
+
+        // 0.2.x dev: no `logos-basecamp`; `LogosBasecamp` is itself the wrapper
+        // and the hidden `.LogosBasecamp` must never be selected directly.
+        let v02 = tempdir().expect("tempdir");
+        touch_exe(v02.path(), "bin/LogosBasecamp");
+        touch_exe(v02.path(), "bin/.LogosBasecamp");
+        assert_eq!(
+            resolve_basecamp_binary(v02.path()).expect("0.2.x resolves"),
+            v02.path().join("bin/LogosBasecamp"),
+            "0.2.x must launch the wrapper that execs the hidden binary"
+        );
+
+        // macOS portable bundle: only the `.app` payload exists.
+        let mac = tempdir().expect("tempdir");
+        touch_exe(mac.path(), "LogosBasecamp.app/Contents/MacOS/LogosBasecamp");
+        assert_eq!(
+            resolve_basecamp_binary(mac.path()).expect("bundle resolves"),
+            mac.path()
+                .join("LogosBasecamp.app/Contents/MacOS/LogosBasecamp"),
+        );
+
+        // Nothing recognisable: a named error, not a silent empty path.
+        let empty = tempdir().expect("tempdir");
+        assert!(resolve_basecamp_binary(empty.path()).is_err());
+    }
+
+    /// Basecamp 0.2.x's dev build installs `bin/LogosBasecamp` as a shell
+    /// wrapper that `exec`s the hidden `bin/.LogosBasecamp`, so the process
+    /// `launch` records reports the dotted name even though we execed the
+    /// undotted path. Matching only the resolved basename makes
+    /// `pid_comm_matches` fail, `launch` skips `kill_process_tree`, and the
+    /// previous instance survives holding the profile's sockets — silently.
+    #[test]
+    fn basecamp_comm_candidates_cover_the_dev_wrapper_indirection() {
+        let candidates = basecamp_comm_candidates("/nix/store/xyz/bin/LogosBasecamp");
+        assert!(
+            candidates.iter().any(|c| c == ".LogosBasecamp"),
+            "the wrapper's real binary must be a candidate, got: {candidates:?}"
+        );
+        // And the reverse: pointed straight at the hidden binary, the launcher
+        // name is still a candidate.
+        let from_hidden = basecamp_comm_candidates("/nix/store/xyz/bin/.LogosBasecamp");
+        assert!(
+            from_hidden.iter().any(|c| c == "LogosBasecamp"),
+            "the launcher name must be a candidate, got: {from_hidden:?}"
+        );
+    }
+
+    /// The 0.1.x launcher renames rather than dot-hides: `bin/logos-basecamp`
+    /// execs `bin/LogosBasecamp`, so the live process reports a name sharing no
+    /// prefix with the path `launch` execed. The dotted-twin rule cannot reach
+    /// it, and without the mapping `pid_comm_matches` never matches — `launch`
+    /// skips the kill and a 0.1.x-pinned project silently accumulates a second
+    /// instance on the same profile.
+    #[test]
+    fn basecamp_comm_candidates_cover_the_0_1_x_launcher_rename() {
+        let candidates = basecamp_comm_candidates("/nix/store/xyz/bin/logos-basecamp");
+        assert!(
+            candidates.iter().any(|c| c == "LogosBasecamp"),
+            "the 0.1.x launcher's exec target must be a candidate, got: {candidates:?}"
+        );
+        assert!(
+            candidates.iter().any(|c| c == "logos-basecamp"),
+            "the launcher's own name must stay a candidate, got: {candidates:?}"
+        );
+        // The mapping is one-directional and name-specific: an unrelated binary
+        // must not inherit basecamp's exec target.
+        let unrelated = basecamp_comm_candidates("/x/some-other-app");
+        assert!(
+            !unrelated.iter().any(|c| c == "LogosBasecamp"),
+            "mapping must not leak onto unrelated names, got: {unrelated:?}"
+        );
+    }
+
+    #[test]
+    fn basecamp_comm_candidates_stay_distinct_after_truncation() {
+        // The dot is what separates the two candidates, and truncation keeps
+        // the leading character, so they cannot collapse into one — but a
+        // duplicate would silently make the "any candidate matches" check do
+        // redundant work, so the invariant is worth pinning.
+        for bin in [
+            "/x/LogosBasecamp",
+            "/x/.LogosBasecamp",
+            "/x/.aaaaaaaaaaaaaaaaaaaaaa",
+            "/x/a",
+        ] {
+            let candidates = basecamp_comm_candidates(bin);
+            let mut deduped = candidates.clone();
+            deduped.sort();
+            deduped.dedup();
+            assert_eq!(
+                candidates.len(),
+                deduped.len(),
+                "candidates for {bin} must be distinct, got {candidates:?}"
+            );
+        }
     }
 
     #[test]
@@ -4864,7 +5530,14 @@ mod tests {
         // PID 0 is reserved and `ps -p 0` reliably fails, standing in for any PID
         // where we can't recover a comm — the helper must fail closed so the kill
         // path is skipped rather than firing at a wrong target.
-        assert!(!pid_comm_matches(0, "basecamp"));
+        assert!(!pid_comm_matches(0, &["basecamp".to_string()]));
+    }
+
+    #[test]
+    fn pid_comm_matches_is_false_for_an_empty_candidate_set() {
+        // Defensive: an empty set must never match the live process, or a
+        // resolution bug upstream of here would turn into an unguarded kill.
+        assert!(!pid_comm_matches(std::process::id(), &[]));
     }
 
     #[test]
@@ -5638,6 +6311,57 @@ mod tests {
         assert!(
             new_entries.is_empty(),
             "preinstalled modules must not be captured"
+        );
+    }
+
+    /// The bundled set is basecamp's, and it changed with the 0.2.x pin:
+    /// `package_downloader` joined it (`main_ui` declares it as a dependency,
+    /// so every project that pulls the shell UI in transitively meets it), and
+    /// `main_ui` itself is the upstream `metadata.json` name — scaffold's list
+    /// carried `basecamp_main_ui`, which never matched anything. Both names
+    /// have to be skipped or `basecamp modules` goes hunting for a flake ref
+    /// that does not exist and fails the capture.
+    #[test]
+    fn resolve_manifest_dependencies_skips_the_0_2_x_bundled_module_names() {
+        let tmp = tempdir().expect("tempdir");
+        seed_module_metadata(tmp.path(), "mymod", &["package_downloader", "main_ui"]);
+        let project = BasecampSource::Flake(format!("path:{}#lgx", tmp.path().display()));
+        let new_entries =
+            resolve_manifest_dependencies(&[project], &std::collections::BTreeMap::new())
+                .expect("ok");
+        assert!(
+            new_entries.is_empty(),
+            "modules basecamp bundles must not be captured, got: {:?}",
+            new_entries.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// The default companion pin is not free to float: the `lgpm` rev in
+    /// `DEFAULT_LGPM_PIN` validates Merkle content hashes on install, which
+    /// only packages built by `logos-module-builder` 0.2.x / `nix-bundle-lgx`
+    /// carry. A ref without the `#lgx` fragment would also break the resolver,
+    /// which builds the attr as given.
+    #[test]
+    fn default_delivery_module_ref_targets_the_lgx_output_at_a_pinned_rev() {
+        let (_, flake) = BASECAMP_DEPENDENCIES
+            .iter()
+            .find(|(name, _)| *name == "delivery_module")
+            .expect("delivery_module default");
+        assert!(
+            flake.ends_with("#lgx"),
+            "default must build the dev `.lgx` output, got {flake}"
+        );
+        let rev = flake
+            .trim_start_matches("github:logos-co/logos-delivery-module/")
+            .trim_end_matches("#lgx");
+        assert_eq!(
+            rev.len(),
+            40,
+            "default must pin a full commit sha, got {rev}"
+        );
+        assert!(
+            rev.chars().all(|c| c.is_ascii_hexdigit()),
+            "default must pin a commit sha, not a branch or tag, got {rev}"
         );
     }
 
