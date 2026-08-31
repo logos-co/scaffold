@@ -701,6 +701,13 @@ cp /tmp/d8-scaffold.toml.bak scaffold.toml
 ls target/riscv-guest-docker 2>&1
 ```
 
+Steps 3 and 4 are also run in CI by
+[`.github/workflows/guest-reproducibility.yml`](.github/workflows/guest-reproducibility.yml)
+(path-gated to `src/commands/build.rs` and `src/constants.rs`, plus manual
+dispatch), which renders a project, builds the guests through the container
+twice, and diffs the digests. Run them by hand when changing the pinned tag or
+when a host disagrees with CI; otherwise CI is the standing check.
+
 Steps 1, 2, 5, and 6 need no Docker beyond the `docker`/`cargo-risczero`
 binaries; only 3 and 4 run a container. On a host that cannot build containers
 at all, run 1, 2, 5, and 6 and additionally check the discovery ranking by
@@ -1883,7 +1890,7 @@ HEAD0=$("$SCAFFOLD_BIN" test-node blocks head --url "$URL" --json | jq -r .block
 - Changes to example runner binaries or template `src/bin/*` code: rerun `D6`.
 - Changes to `run` step ordering, the `deploy = false` deploy-skip branch, the `topup = false` topup-skip branch, post-deploy env vars, post-deploy CLI override flag handling, or `[run]` config parsing: rerun `D7`.
 - Changes to how `localnet start` spawns the sequencer (the `--port` flag, `prepare_sequencer_config`, or `[localnet].port` handling): rerun `D1` and `D2` **on a machine where another project's localnet already holds 3040**. That is the only configuration where a dropped `--port` is visible — at the default port the flag and the clap default agree, so the bug hides.
-- Changes to guest build strategy (`[build]` config, `--guest`, `build_methods_guests`, `DEFAULT_RISC0_DOCKER_TAG`, `GUEST_DOCKER_TARGET_DIR`) or to deploy-side binary discovery/ranking (`GUEST_BIN_SEARCH_ROOTS`, `discover_program_binaries`): rerun `D8`, plus `D1` and `D3` — `D1` covers the default path's note, `D3` covers the artefact `deploy` actually submits. Bumping `DEFAULT_RISC0_DOCKER_TAG` changes every `program_id`, so record the before/after values.
+- Changes to guest build strategy (`[build]` config, `--guest`, `build_methods_guests`, `DEFAULT_RISC0_DOCKER_TAG`, `GUEST_DOCKER_TARGET_DIR`) or to deploy-side binary discovery/ranking (`GUEST_BIN_SEARCH_ROOTS`, `discover_program_binaries`): rerun `D8` (its container steps also run in CI — see the Guest Build Reproducibility workflow), plus `D1` and `D3` — `D1` covers the default path's note, `D3` covers the artefact `deploy` actually submits. Bumping `DEFAULT_RISC0_DOCKER_TAG` changes every `program_id`, so record the before/after values.
 - Changes to LEZ template scaffolding or generated outputs: rerun `L1`, `L2`, `L3`, and `L4`.
 - Changes to CLI argument parsing, help text, or error messages: rerun `E1`.
 - Changes to `create`/`new` flags or template selection logic: rerun `E2`.

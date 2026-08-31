@@ -515,3 +515,11 @@ leave a deterministic `.bin` on disk that outranks the fresh local one and would
 deployed; without the ranking, the reverse. The pin itself (`DEFAULT_RISC0_DOCKER_TAG`) is a
 scaffold constant, not risc0's default, so the emitted ELF never depends on which
 `cargo-risczero` version happens to be installed.
+
+Reproducibility is a claim, so CI checks it rather than asserting it: the Guest Build
+Reproducibility workflow renders a project, builds its guests through the container
+twice from a clean tree, and fails on any digest difference. This mirrors what `lssa`
+does by rebuilding and diffing its committed `artifacts/`. Without it, the pinned tag
+could drift or a future risc0 release could reintroduce nondeterminism and nothing
+would notice — the unit tests only pin the invocation, and Template E2E exercises the
+host-toolchain path.

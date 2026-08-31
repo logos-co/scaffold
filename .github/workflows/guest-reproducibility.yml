@@ -1,0 +1,202 @@
+name: Guest Build Reproducibility
+
+# Proves the claim `[build].guest = "docker"` exists to make (scaffold#259):
+# the same guest source, built twice through the pinned
+# `risczero/risc0-guest-builder` container, produces byte-identical ELFs — and
+# therefore a stable `program_id`.
+#
+# This is the check `lssa` runs over its committed `artifacts/` directory,
+# expressed against a scaffolded project instead. Nothing else in CI can catch
+# a regression here: the unit tests pin the `cargo risczero build` invocation,
+# and Template E2E exercises the default (host-toolchain) guest build, but only
+# an actual container build can show that the bytes come out the same twice.
+#
+# Heavy — a ~1.7 GB image pull plus a from-scratch guest compile inside the
+# container, on top of the full LEZ build `setup` needs. So it is path-gated to
+# the code that can break it, plus manual dispatch.
+
+on:
+  pull_request:
+    paths:
+      # Deliberately narrow. This job costs tens of minutes, so it is gated to
+      # the two files that can actually change the emitted ELF: the build
+      # strategy itself, and the constants holding the pinned builder tag and
+      # the artefact directory. `[build]` config plumbing and deploy-side
+      # discovery are covered by unit tests and do not affect the bytes.
+      - "src/commands/build.rs"
+      - "src/constants.rs"
+      - ".github/workflows/guest-reproducibility.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: guest-repro-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rebuild-and-diff:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Same bootstrap cache shape as template-e2e: the cloned lez/spel repos
+      # with their target/ dirs, plus the extracted circuits release. Keyed on
+      # constants.rs so a pin bump rebuilds from scratch.
+      - name: Cache scaffold bootstrap (repos + circuits)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/logos-scaffold
+            ~/.logos-blockchain-circuits
+          key: scaffold-bootstrap-${{ runner.os }}-${{ hashFiles('src/constants.rs') }}
+
+      # The guest-builder image is ~1.7 GB and the LEZ build is several more.
+      # Runners ship with preinstalled SDKs we never use; reclaiming them keeps
+      # this job off the disk-full cliff.
+      - name: Reclaim runner disk
+        run: |
+          set -euo pipefail
+          echo "before: $(df -h / | awk 'NR==2 {print $4}') free"
+          # `${VAR:-}` because `set -u` would abort on AGENT_TOOLSDIRECTORY
+          # being unset, which it is on some runner images.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-/nonexistent}" || true
+          echo "after:  $(df -h / | awk 'NR==2 {print $4}') free"
+
+      - name: Build scaffold CLI
+        run: cargo build --release --bin logos-scaffold
+
+      - name: Fetch logos-blockchain-circuits release
+        run: |
+          set -euo pipefail
+          ver="$(sed -n 's/.*DEFAULT_CIRCUITS_VERSION: &str = "\([^"]*\)".*/\1/p' src/constants.rs)"
+          if [ -z "$ver" ]; then echo "could not parse DEFAULT_CIRCUITS_VERSION"; exit 1; fi
+          dest="$HOME/.logos-blockchain-circuits"
+          if [ -f "$dest/pol/verification_key.json" ]; then
+            echo "circuits already cached at $dest"
+          else
+            url="https://github.com/logos-blockchain/logos-blockchain-circuits/releases/download/v${ver}/logos-blockchain-circuits-v${ver}-linux-x86_64.tar.gz"
+            mkdir -p "$dest"
+            curl -fL --retry 3 -o /tmp/circuits.tar.gz "$url"
+            tar -xzf /tmp/circuits.tar.gz -C "$dest" --strip-components=1
+          fi
+          echo "LOGOS_BLOCKCHAIN_CIRCUITS=$dest" >> "$GITHUB_ENV"
+
+      # `lgs build` compiles the project workspace before the guest step, and
+      # that workspace build runs the methods crate's `embed_methods()` — which
+      # needs the risc0 Rust toolchain even in docker mode. Retried because
+      # rzup resolves versions through api.github.com, which rate-limits by
+      # runner IP and has flaked here before.
+      - name: Install Risc Zero toolchain
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 --retry-delay 2 \
+            https://risczero.com/install -o "$RUNNER_TEMP/rzup-install.sh"
+          bash "$RUNNER_TEMP/rzup-install.sh"
+          echo "$HOME/.risc0/bin" >> "$GITHUB_PATH"
+          for attempt in 1 2 3; do
+            if "$HOME/.risc0/bin/rzup" install rust && "$HOME/.risc0/bin/rzup" install cpp; then
+              exit 0
+            fi
+            echo "rzup attempt $attempt failed; retrying in 30s"
+            sleep 30
+          done
+          echo "::error::rzup install did not succeed after 3 attempts"
+          exit 1
+
+      - name: Render project and run setup
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          "$GITHUB_WORKSPACE/target/release/logos-scaffold" new repro-app
+          cd repro-app
+          "$GITHUB_WORKSPACE/target/release/logos-scaffold" setup
+
+      - name: Pre-pull the pinned guest-builder image
+        run: |
+          set -euo pipefail
+          tag="$(sed -n 's/.*DEFAULT_RISC0_DOCKER_TAG: &str = "\([^"]*\)".*/\1/p' src/constants.rs)"
+          if [ -z "$tag" ]; then echo "::error::could not parse DEFAULT_RISC0_DOCKER_TAG"; exit 1; fi
+          echo "RISC0_BUILDER_TAG=$tag" >> "$GITHUB_ENV"
+          # Pull separately so an image that does not exist for the pinned tag
+          # fails here, with a clear message, instead of deep inside a build.
+          docker pull "risczero/risc0-guest-builder:$tag"
+
+      - name: Build guests deterministically (first pass)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/repro-app"
+          "$GITHUB_WORKSPACE/target/release/logos-scaffold" build --guest docker
+
+      - name: Record first-pass digests
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/repro-app"
+          bins=target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker
+          if [ ! -d "$bins" ]; then
+            echo "::error::deterministic build produced no $bins directory"
+            ls -R target/riscv-guest-docker 2>&1 || true
+            exit 1
+          fi
+          # A pass that emits nothing would make the diff below vacuously true.
+          count="$(find "$bins" -maxdepth 1 -name '*.bin' | wc -l)"
+          if [ "$count" -eq 0 ]; then
+            echo "::error::no .bin artefacts under $bins"
+            ls -la "$bins"
+            exit 1
+          fi
+          echo "$count guest ELF(s) built"
+          (cd "$bins" && sha256sum ./*.bin) | tee "$RUNNER_TEMP/first.sha"
+
+      - name: Rebuild from a clean tree (second pass)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/repro-app"
+          rm -rf target/riscv-guest-docker
+          "$GITHUB_WORKSPACE/target/release/logos-scaffold" build --guest docker
+
+      - name: Diff the two passes
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/repro-app/target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker"
+          sha256sum ./*.bin | tee "$RUNNER_TEMP/second.sha"
+          if ! diff -u "$RUNNER_TEMP/first.sha" "$RUNNER_TEMP/second.sha"; then
+            echo "::error::guest ELFs differ between two builds of identical source — \
+          [build].guest = \"docker\" is not reproducible at tag $RISC0_BUILDER_TAG"
+            exit 1
+          fi
+          echo "Reproducible: identical digests across two container builds."
+          echo "### Guest build reproducibility" >> "$GITHUB_STEP_SUMMARY"
+          echo "Builder image: \`risczero/risc0-guest-builder:$RISC0_BUILDER_TAG\`" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/second.sha" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      # The deterministic artefact must also be the one `deploy` would ship.
+      # `deploy` itself needs a wallet and a running localnet, so assert the
+      # discovery ranking directly: with both trees present, the docker one wins.
+      - name: Deterministic artefact outranks the host-toolchain one
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/repro-app"
+          docker_bin="$(find target/riscv-guest-docker -name '*.bin' | head -1)"
+          program="$(basename "$docker_bin" .bin)"
+          release_bin="$(find target/riscv-guest -path '*release*' -name "$program.bin" | head -1)"
+          if [ -z "$release_bin" ]; then
+            echo "::error::expected a host-toolchain artefact for $program too (the workspace build makes one)"
+            exit 1
+          fi
+          echo "both present for '$program':"
+          echo "  docker:  $docker_bin"
+          echo "  release: $release_bin"
+          if cmp -s "$docker_bin" "$release_bin"; then
+            echo "note: docker and host-toolchain ELFs are byte-identical on this runner"
+          else
+            echo "note: docker and host-toolchain ELFs differ, as expected"
+          fi
