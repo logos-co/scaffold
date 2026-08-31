@@ -27,8 +27,8 @@ pub mod runner_support {
 
 // Host-side program definition for IDL extraction and testing.
 // The guest binary (methods/guest) handles zkvm execution.
+use nssa_core::account::{AccountWithMetadata, Data};
 use spel_framework::prelude::*;
-use nssa_core::account::AccountWithMetadata;
 
 #[lez_program]
 mod lez_counter {
@@ -38,10 +38,16 @@ mod lez_counter {
     #[instruction]
     pub fn initialize(
         #[account(init, pda = literal("counter"))]
-        counter: AccountWithMetadata,
+        mut counter: AccountWithMetadata,
         #[account(signer)]
         authority: AccountWithMetadata,
     ) -> SpelResult {
+        // Keep this body in step with methods/guest/src/bin/lez_counter.rs: this
+        // copy is what `build idl` extracts the IDL from, the guest is what the
+        // sequencer executes, and they must describe the same program.
+        counter.account.data = Data::try_from(0u64.to_le_bytes().to_vec())
+            .expect("an 8-byte counter always fits in Data");
+
         Ok(SpelOutput::execute(vec![counter, authority], vec![]))
     }
 
@@ -53,7 +59,19 @@ mod lez_counter {
         authority: AccountWithMetadata,
         amount: u64,
     ) -> SpelResult {
-        counter.account.balance += amount as u128;
+        // The counter lives in `data`, not `balance`. LEZ enforces conservation of
+        // total balance across a transaction, so `balance += amount` minted tokens
+        // and every `increment` was rejected at the execution check with
+        // `InvalidProgramBehavior(ExecutionValidationFailed(MismatchedTotalBalance …))`.
+        let current = counter
+            .account
+            .data
+            .get(..8)
+            .and_then(|head| <[u8; 8]>::try_from(head).ok())
+            .map_or(0u64, u64::from_le_bytes);
+
+        counter.account.data = Data::try_from(current.wrapping_add(amount).to_le_bytes().to_vec())
+            .expect("an 8-byte counter always fits in Data");
 
         Ok(SpelOutput::execute(vec![counter, authority], vec![]))
     }
