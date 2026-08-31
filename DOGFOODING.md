@@ -668,6 +668,9 @@ Validate that `program_id` is a stable identifier when the project asks for it: 
 From the generated project root:
 
 ```bash
+# sha256sum is coreutils; on macOS use `shasum -a 256` throughout.
+DOCKER_BINS=target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker
+
 # 1. Default (local) mode: baseline program_id.
 "$SCAFFOLD_BIN" build
 "$SCAFFOLD_BIN" deploy --json | tee /tmp/d8-local.json
@@ -678,24 +681,32 @@ From the generated project root:
 
 # 3. Deterministic mode, one-off.
 "$SCAFFOLD_BIN" build --guest docker
-ls target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/
+ls "$DOCKER_BINS"
 
 # 4. Same build again from a clean artefact tree — bytes must be identical.
-sha256sum target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/*.bin > /tmp/d8-first.sha
+sha256sum "$DOCKER_BINS"/*.bin > /tmp/d8-first.sha
 rm -rf target/riscv-guest-docker
 "$SCAFFOLD_BIN" build --guest docker
 sha256sum -c /tmp/d8-first.sha
 
 # 5. Make it the project default and confirm doctor + deploy agree.
+cp scaffold.toml /tmp/d8-scaffold.toml.bak
 printf '\n[build]\nguest = "docker"\n' >> scaffold.toml
 "$SCAFFOLD_BIN" doctor | grep "guest build"
 "$SCAFFOLD_BIN" deploy --json | tee /tmp/d8-docker.json
 
 # 6. Switch back and confirm the deterministic tree is cleared.
-sed -i.bak '/^\[build\]/,+1d' scaffold.toml
+cp /tmp/d8-scaffold.toml.bak scaffold.toml
 "$SCAFFOLD_BIN" build
 ls target/riscv-guest-docker 2>&1
 ```
+
+Steps 1, 2, 5, and 6 need no Docker beyond the `docker`/`cargo-risczero`
+binaries; only 3 and 4 run a container. On a host that cannot build containers
+at all, run 1, 2, 5, and 6 and additionally check the discovery ranking by
+hand: copy the `release/` `.bin` into `$DOCKER_BINS/` and confirm the next
+`deploy` echoes `wallet deploy-program <…/docker/…>` rather than the
+`release/` path. That covers everything except reproducibility itself.
 
 ### Expected Success Signals
 
