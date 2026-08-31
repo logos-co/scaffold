@@ -714,7 +714,7 @@ hand: copy the `release/` `.bin` into `$DOCKER_BINS/` and confirm the next
 - Step 2 fails *before* pulling anything, with a message naming the missing piece (`cargo-risczero`, `docker`, or a daemon that is not running) and offering `[build].guest = "local"` as the alternative. A raw `docker build` error or a hung pull is a regression.
 - Step 3 prints `Building guest methods (deterministic, risc0-guest-builder:<tag>)...`, then risc0's own `ELFs ready at: ImageID: <hex> - <path>` lines, and leaves one `<program>.bin` per program under `target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/`.
 - Step 4's `sha256sum -c` passes. This is the whole point of the scenario: a differing hash between two builds of unchanged source means the deterministic path is not deterministic, and is the single most important thing to report from D8.
-- Step 5's `doctor` row reads `PASS | guest build | docker — reproducible via risczero/risc0-guest-builder:<tag>`. The `program_id` in `/tmp/d8-docker.json` matches the `ImageID` risc0 printed in step 3 and is **different** from the one in `/tmp/d8-local.json` (different toolchains, different bytes) — record both values.
+- Step 5's `doctor` row names the mode and the pin either way: `PASS | guest build | docker — reproducible via risczero/risc0-guest-builder:<tag>` when the toolchain is installed, `FAIL | guest build | docker (risczero/risc0-guest-builder:<tag>) — … not found on PATH` when it is not. A `docker` row that does not mention the tag at all is a regression — the tag is what makes the ID reproducible. The `program_id` in `/tmp/d8-docker.json` matches the `ImageID` risc0 printed in step 3 and is **different** from the one in `/tmp/d8-local.json` (different toolchains, different bytes) — record both values.
 - Step 6 prints `Clearing deterministic guest artefacts in ...` and `target/riscv-guest-docker` no longer exists, so a later `deploy` cannot ship a stale deterministic ELF.
 
 ### Failure Signals / Common Pitfalls
@@ -728,7 +728,7 @@ hand: copy the `release/` `.bin` into `$DOCKER_BINS/` and confirm the next
 
 ### Evidence to Capture
 
-- Both `deploy --json` outputs, with the `program_id` and binary path from each.
+- Both `deploy --json` outputs and the `program_id` from each. `--json` does not carry the binary path; for that, run one `deploy <program>` without `--json` in each mode and capture the echoed `$ … wallet deploy-program <path>` line. That line is the only direct evidence of which artefact was shipped.
 - The `sha256sum -c` result from step 4 and the `ImageID` lines from step 3.
 - The `doctor` `guest build` row in both modes.
 - The exact failure text from step 2.
