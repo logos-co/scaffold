@@ -66,14 +66,21 @@ mod lez_counter {
         // total balance across a transaction, so `balance += amount` minted tokens
         // and every `increment` was rejected at the execution check with
         // `InvalidProgramBehavior(ExecutionValidationFailed(MismatchedTotalBalance …))`.
-        // `initialize` seeds exactly 8 bytes, so any other length means the account
-        // was never initialized or its layout drifted. Convert the whole buffer
-        // rather than its first 8 bytes: a prefix decode would accept a longer,
-        // drifted account and silently ignore the trailing bytes, and treating a
-        // short one as zero would restart the count and hide the corruption.
-        let current = <[u8; 8]>::try_from(&counter.account.data[..])
-            .map(u64::from_le_bytes)
-            .map_err(|_| SpelError::AccountNotInitialized { account_index: 0 })?;
+        // `initialize` seeds exactly 8 bytes, so any other length is a fault worth
+        // reporting rather than papering over: treating a short buffer as zero
+        // would silently restart the count. Empty means the account was never
+        // initialized, which is the likely mistake (calling `increment` first);
+        // any other length is a corrupt or drifted layout, so keep the two
+        // distinguishable. Convert the whole buffer, not its first 8 bytes — a
+        // prefix decode would accept a longer account and drop the trailing bytes.
+        let current = match &counter.account.data[..] {
+            [] => return Err(SpelError::AccountNotInitialized { account_index: 0 }),
+            bytes => <[u8; 8]>::try_from(bytes).map(u64::from_le_bytes).map_err(|_| {
+                SpelError::SerializationError {
+                    message: "counter must be an 8-byte little-endian u64".to_string(),
+                }
+            })?,
+        };
 
         let next = current
             .checked_add(amount)
