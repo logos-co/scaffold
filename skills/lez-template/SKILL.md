@@ -65,11 +65,27 @@ The `EXAMPLE_PROGRAMS_BUILD_DIR` env var conventionally captures this absolute p
 lgs build              # runs `setup` first, then cargo build --workspace
                        # auto-compiles methods/Cargo.toml if present
 lgs build my-project   # explicit project path
+lgs build --guest docker   # reproducible guest ELFs (needs Docker)
 ```
 
 Key behavior (FURPS Functionality #5): `build` auto-compiles `methods/Cargo.toml` even when the parent workspace excludes the guest crate. No manual `cargo build --manifest-path methods/Cargo.toml` needed.
 
 Success criteria: `target/riscv-guest/<methods-crate>/<guest-crate>/riscv32im-risc0-zkvm-elf/release/<program>.bin` artefacts exist for every guest in `methods/guest/src/bin/`. `methods/target/...` remains supported for sub-crate workspace layouts, but it is not the default template output.
+
+### Reproducible `program_id` (FURPS Functionality #10)
+
+The default guest build uses the host risc0 toolchain, so the ELF — and the `program_id` derived from it — can differ across machines, OS versions, and Rust/clang versions. `build` prints a one-time note saying so.
+
+Before a `program_id` matters (publishing it, deploying beyond your own localnet, asserting it in CI), switch to the pinned-container build:
+
+```toml
+# scaffold.toml
+[build]
+guest = "docker"                  # needs Docker + cargo-risczero
+risc0_docker_tag = "r0.1.97.0"    # optional; scaffold's pin is the default
+```
+
+Deterministic output lands in `target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/<program>.bin` and `lgs deploy` prefers it over `release/` artefacts. Each `lgs build` clears the other mode's tree, so the last build is always what deploy ships. `lgs doctor`'s `guest build` row reports the active strategy. Changing `risc0_docker_tag` changes every `program_id`.
 
 ## Deploy Pipeline
 

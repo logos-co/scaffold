@@ -3,7 +3,8 @@
 `lgs run` is the inner loop: it chains build (which chains setup), IDL build,
 localnet start, wallet topup, and deploy into one command. It works with no
 configuration at all. This page covers the `[run]` section of `scaffold.toml`
-for projects that need to change what the pipeline does.
+for projects that need to change what the pipeline does, plus the `[build]`
+section that decides how the pipeline compiles guest programs.
 
 For the command surface itself, see [commands.md](./commands.md).
 
@@ -157,3 +158,68 @@ these filters. Override the debounce per invocation with
 To check what a configured run actually did, `lgs localnet status` reports the
 sequencer and `lgs doctor` reports the project.
 
+## `[build]` — guest program build strategy
+
+`lgs build` compiles the risc0 guest programs under `methods/` one of two
+ways. The choice decides whether the guest ELF — and therefore the
+`program_id` the sequencer stores for it — is reproducible.
+
+```toml
+[build]
+guest = "docker"                  # "local" (default) | "docker"
+risc0_docker_tag = "r0.1.97.0"    # optional; scaffold's pin is the default
+```
+
+| `guest` | How | Needs | `program_id` |
+|---|---|---|---|
+| `local` (default) | `cargo build --release --manifest-path methods/Cargo.toml`, i.e. the guest crate's own `risc0_build::embed_methods()` | nothing beyond the host Rust toolchain | **Not reproducible.** Depends on the host's Rust and clang versions, so two developers — or a developer and CI — can produce different bytes from the same source |
+| `docker` | `cargo risczero build` inside `risczero/risc0-guest-builder:<tag>` | Docker daemon running, `cargo-risczero` on `PATH` | **Reproducible.** Same source plus same tag gives the same bytes, and therefore the same `program_id`, on any machine |
+
+Use `local` while you are iterating: it is much faster and needs no container
+runtime. Switch to `docker` before a `program_id` starts to matter — anything
+you publish, deploy somewhere other than your own localnet, or verify in CI.
+`lgs build --guest <local|docker>` overrides the setting for one invocation,
+which is the quickest way to check what a program's reproducible `program_id`
+actually is.
+
+`risc0_docker_tag` pins the guest Rust toolchain. **Changing it changes every
+`program_id` the project produces**, so treat a bump the same way you would
+treat a dependency bump: deliberate, and re-verified downstream.
+
+### What each mode writes, and what `deploy` picks up
+
+- `local` → `target/riscv-guest/<methods>/<guest>/riscv32im-risc0-zkvm-elf/release/<program>.bin`
+- `docker` → `target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/<program>.bin`
+
+`lgs deploy` prefers a `docker` artefact over a `release` one, and each `lgs
+build` deletes the other mode's tree before it runs. The invariant is that the
+last `lgs build` decides what `lgs deploy` ships — you never have to reason
+about which of two `.bin` files on disk is current.
+
+`lgs doctor` reports the active strategy as a `guest build` check, and fails
+when `guest = "docker"` but Docker or `cargo-risczero` is missing.
+
+### Costs of the deterministic path
+
+- The whole project directory is the Docker build context (risc0 excludes
+  `.git`, `target`, `node_modules`, and `tmp`, but nothing else). A project
+  root holding large generated data — extracted circuits under
+  `.scaffold/circuits`, vendored dependency checkouts — makes each build's
+  context transfer slower.
+- The builder image is ~1.7 GB on first pull, and the container rebuilds the
+  guest from scratch rather than reusing your local cargo cache.
+- The guest is still compiled twice: `cargo build --workspace` runs the
+  `methods` crate's `embed_methods()` build script (that is where the crate's
+  `*_ELF` / `*_ID` constants come from), and the container build then produces
+  the artefact `deploy` ships. Only the container output is deployed.
+- The published builder images are `linux/amd64`; on Apple silicon the build
+  runs under emulation.
+- The container build runs `cargo build --locked`, so the workspace
+  `Cargo.lock` must exist and be up to date with `Cargo.toml`. That is part of
+  what makes the build reproducible, and it is also the most common way this
+  mode fails after a dependency edit — run a normal `lgs build` first to
+  refresh the lockfile.
+- risc0 prints `Cargo.lock not found in path .../methods/guest/Cargo.lock`
+  before it starts. It is looking next to the guest manifest; scaffold projects
+  keep one lockfile at the workspace root, which the container does use. The
+  message is informational and the build proceeds.

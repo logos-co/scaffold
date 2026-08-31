@@ -12,7 +12,7 @@
 //!   they aren't basecamp's property — moved out from `[basecamp.modules.*]`
 //!   in 0.2.0.
 //! - `[<feature>]` — runtime config per feature: `[scaffold]`, `[wallet]`,
-//!   `[framework]`, `[localnet]`, `[circuits]`, `[basecamp]`
+//!   `[framework]`, `[build]`, `[localnet]`, `[circuits]`, `[basecamp]`
 //!   (port allocation only).
 //!
 //! Pre-0.2.0 configs (with `[basecamp].pin` / `.source` / `.lgpm_flake`,
@@ -29,9 +29,9 @@ use crate::constants::{
     SCAFFOLD_TOML_SCHEMA_VERSION, SPEL_SOURCE,
 };
 use crate::model::{
-    BasecampConfig, BasecampProfile, CircuitsConfig, Config, FrameworkConfig, FrameworkIdlConfig,
-    LocalnetConfig, ModuleEntry, ModuleRole, RepoBuild, RepoRef, RunConfig, RunProfile,
-    WatchConfig,
+    BasecampConfig, BasecampProfile, BuildConfig, CircuitsConfig, Config, FrameworkConfig,
+    FrameworkIdlConfig, GuestBuildMode, LocalnetConfig, ModuleEntry, ModuleRole, RepoBuild,
+    RepoRef, RunConfig, RunProfile, WatchConfig,
 };
 use crate::DynResult;
 
@@ -72,6 +72,7 @@ pub(crate) fn parse_config(text: &str) -> DynResult<Config> {
     let basecamp = parse_basecamp_runtime(&doc)?;
     let run = parse_run(&doc)?;
     let framework = parse_framework(&doc);
+    let build = parse_build(&doc)?;
     let localnet = parse_localnet(&doc)?;
     let circuits = parse_circuits(&doc)?;
     let wallet_home_dir = doc
@@ -90,6 +91,7 @@ pub(crate) fn parse_config(text: &str) -> DynResult<Config> {
         wallet_home_dir,
         circuits,
         framework,
+        build,
         localnet,
         modules,
         basecamp,
@@ -642,6 +644,42 @@ fn parse_framework(doc: &DocumentMut) -> FrameworkConfig {
     }
 }
 
+/// `[build]` is optional and every key has a default, so a config written
+/// before this section existed parses to `BuildConfig::default()` (the
+/// pre-existing `local` behaviour) rather than failing. That is why adding it
+/// did not need a `[scaffold].version` bump.
+fn parse_build(doc: &DocumentMut) -> DynResult<BuildConfig> {
+    let mut cfg = BuildConfig::default();
+    let Some(table) = doc.get("build").and_then(Item::as_table) else {
+        return Ok(cfg);
+    };
+    if let Some(raw) = table.get("guest").and_then(Item::as_str) {
+        cfg.guest = GuestBuildMode::parse(raw).ok_or_else(|| {
+            anyhow!(
+                "invalid scaffold.toml: [build].guest must be \"local\" or \"docker\", got {raw:?}"
+            )
+        })?;
+    }
+    if let Some(tag) = read_string(table, "risc0_docker_tag") {
+        check_toml_value("build.risc0_docker_tag", &tag)?;
+        // The tag is interpolated into a docker image reference and exported
+        // as `RISC0_DOCKER_CONTAINER_TAG`; keep it to the character set docker
+        // actually allows for a tag so a typo fails here rather than as an
+        // opaque `docker build` error.
+        if !tag
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        {
+            bail!(
+                "invalid scaffold.toml: [build].risc0_docker_tag must be a docker tag \
+                 (alphanumerics, `.`, `-`, `_`): {tag:?}"
+            );
+        }
+        cfg.risc0_docker_tag = tag;
+    }
+    Ok(cfg)
+}
+
 fn parse_localnet(doc: &DocumentMut) -> DynResult<LocalnetConfig> {
     let mut cfg = LocalnetConfig::default();
     let Some(table) = doc.get("localnet").and_then(Item::as_table) else {
@@ -789,6 +827,19 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
     let idl_table = idl.as_table_mut().expect("idl table");
     idl_table["spec"] = value(&cfg.framework.idl.spec);
     idl_table["path"] = value(&cfg.framework.idl.path);
+
+    // [build] — omitted entirely at defaults so existing files and freshly
+    // created projects stay byte-identical to what they were before the
+    // section existed. `lgs build` prints the snippet to add when it matters.
+    if cfg.build != BuildConfig::default() {
+        check_toml_value("build.risc0_docker_tag", &cfg.build.risc0_docker_tag)?;
+        let build = doc.entry("build").or_insert(Item::Table(Table::new()));
+        let build_table = build.as_table_mut().expect("build table");
+        build_table["guest"] = value(cfg.build.guest.as_str());
+        if cfg.build.risc0_docker_tag != BuildConfig::default().risc0_docker_tag {
+            build_table["risc0_docker_tag"] = value(&cfg.build.risc0_docker_tag);
+        }
+    }
 
     // [localnet]
     let localnet = doc.entry("localnet").or_insert(Item::Table(Table::new()));
@@ -1233,6 +1284,96 @@ risc0_dev_mode = true
         assert_eq!(cfg.circuits.version, DEFAULT_CIRCUITS_VERSION);
         assert_eq!(cfg.circuits.install_dir, ".scaffold/circuits");
         assert_eq!(cfg.circuits.url_template, None);
+    }
+
+    /// A config written before `[build]` existed must keep working and land
+    /// on the pre-existing behaviour (host toolchain), not fail to parse.
+    #[test]
+    fn build_section_is_optional_and_defaults_to_local() {
+        let cfg = parse_config(&minimal_v0_2_0()).expect("parse");
+        assert_eq!(cfg.build, BuildConfig::default());
+        assert_eq!(cfg.build.guest, GuestBuildMode::Local);
+        assert_eq!(
+            cfg.build.risc0_docker_tag,
+            crate::constants::DEFAULT_RISC0_DOCKER_TAG
+        );
+    }
+
+    #[test]
+    fn parses_build_section() {
+        let toml = minimal_v0_2_0()
+            + r#"
+[build]
+guest = "docker"
+risc0_docker_tag = "r0.1.91.1"
+"#;
+        let cfg = parse_config(&toml).expect("parse");
+        assert_eq!(cfg.build.guest, GuestBuildMode::Docker);
+        assert_eq!(cfg.build.risc0_docker_tag, "r0.1.91.1");
+    }
+
+    #[test]
+    fn build_guest_rejects_unknown_mode() {
+        let toml = minimal_v0_2_0()
+            + r#"
+[build]
+guest = "podman"
+"#;
+        let err = parse_config(&toml).expect_err("unknown mode must fail");
+        assert!(
+            format!("{err:#}").contains("[build].guest"),
+            "expected a [build].guest error; got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn build_docker_tag_rejects_non_tag_characters() {
+        let toml = minimal_v0_2_0()
+            + r#"
+[build]
+risc0_docker_tag = "r0.1.91.1 && rm -rf /"
+"#;
+        let err = parse_config(&toml).expect_err("invalid tag must fail");
+        assert!(
+            format!("{err:#}").contains("risc0_docker_tag"),
+            "expected a risc0_docker_tag error; got: {err:#}"
+        );
+    }
+
+    /// Defaults must not appear in serialized output: freshly created
+    /// projects keep the same `scaffold.toml` they had before `[build]`
+    /// existed.
+    #[test]
+    fn build_defaults_are_omitted_from_serialized_output() {
+        let text = serialize_config(&base_config()).expect("serialize");
+        assert!(
+            !text.contains("[build]"),
+            "default [build] should not be emitted; got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn build_round_trips_through_serialize() {
+        let mut cfg = base_config();
+        cfg.build = BuildConfig {
+            guest: GuestBuildMode::Docker,
+            risc0_docker_tag: "r0.1.91.1".to_string(),
+        };
+        let text = serialize_config(&cfg).expect("serialize");
+        let parsed = parse_config(&text).expect("reparse");
+        assert_eq!(parsed.build, cfg.build);
+    }
+
+    /// A non-default mode with the default tag still round-trips: the tag key
+    /// is omitted, and reparsing fills it from the constant.
+    #[test]
+    fn build_mode_round_trips_without_an_explicit_tag() {
+        let mut cfg = base_config();
+        cfg.build.guest = GuestBuildMode::Docker;
+        let text = serialize_config(&cfg).expect("serialize");
+        assert!(!text.contains("risc0_docker_tag"), "got:\n{text}");
+        let parsed = parse_config(&text).expect("reparse");
+        assert_eq!(parsed.build, cfg.build);
     }
 
     #[test]

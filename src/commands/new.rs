@@ -190,6 +190,7 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
                 path: DEFAULT_FRAMEWORK_IDL_PATH.to_string(),
             },
         },
+        build: crate::model::BuildConfig::default(),
         localnet: LocalnetConfig::default(),
         modules: std::collections::BTreeMap::new(),
         basecamp: None,
