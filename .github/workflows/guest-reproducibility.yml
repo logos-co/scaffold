@@ -219,3 +219,18 @@ jobs:
           else
             echo "note: docker and host-toolchain ELFs differ, as expected"
           fi
+
+          # Report the host-toolchain digests too. They are the control: the
+          # deterministic digests above must match everywhere, while these are
+          # free to differ from another machine's — which is the whole reason
+          # `[build].guest = "docker"` exists (scaffold#259). Having both in
+          # every run means a maintainer can compare against their own box
+          # without re-deriving anything.
+          {
+            echo "### Host-toolchain digests (NOT expected to be portable)"
+            echo '```'
+            (cd "$(dirname "$release_bin")" && sha256sum ./*.bin)
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "host-toolchain digests:"
+          (cd "$(dirname "$release_bin")" && sha256sum ./*.bin)
