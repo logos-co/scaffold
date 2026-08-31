@@ -160,20 +160,18 @@ pub(crate) fn resolve_cache_root(project: &Project) -> DynResult<(PathBuf, Cache
 /// project created under `LOGOS_SCAFFOLD_CACHE_ROOT` bootstrapped into the default
 /// cache and then resolved the env one for every later command — cloning the
 /// pinned LEZ twice and reporting a cache root that creation never used.
-pub(crate) fn bootstrap_cache_root(
-    cli_override: Option<&Path>,
-) -> DynResult<(PathBuf, CacheRootSource)> {
+pub(crate) fn bootstrap_cache_root(cli_override: Option<&Path>) -> DynResult<PathBuf> {
     if let Some(path) = cli_override {
-        return Ok((path.to_path_buf(), CacheRootSource::Config));
+        return Ok(path.to_path_buf());
     }
 
     if let Ok(val) = env::var("LOGOS_SCAFFOLD_CACHE_ROOT") {
         if !val.is_empty() {
-            return Ok((PathBuf::from(val), CacheRootSource::Env));
+            return Ok(PathBuf::from(val));
         }
     }
 
-    default_cache_root()
+    default_cache_root().map(|(path, _)| path)
 }
 
 /// Platform-default cache root when neither env nor `scaffold.toml` set one.
@@ -391,10 +389,8 @@ mod tests {
         env::set_var("LOGOS_SCAFFOLD_CACHE_ROOT", "/tmp/from-env");
         let resolved = bootstrap_cache_root(None);
         env::remove_var("LOGOS_SCAFFOLD_CACHE_ROOT");
-        let (path, source) = resolved.expect("resolve");
 
-        assert_eq!(path, PathBuf::from("/tmp/from-env"));
-        assert_eq!(source, CacheRootSource::Env);
+        assert_eq!(resolved.expect("resolve"), PathBuf::from("/tmp/from-env"));
     }
 
     #[test]
@@ -403,9 +399,8 @@ mod tests {
         env::set_var("LOGOS_SCAFFOLD_CACHE_ROOT", "/tmp/from-env");
         let resolved = bootstrap_cache_root(Some(Path::new("/tmp/from-flag")));
         env::remove_var("LOGOS_SCAFFOLD_CACHE_ROOT");
-        let (path, _) = resolved.expect("resolve");
 
-        assert_eq!(path, PathBuf::from("/tmp/from-flag"));
+        assert_eq!(resolved.expect("resolve"), PathBuf::from("/tmp/from-flag"));
     }
 
     #[test]
@@ -413,10 +408,10 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         env::set_var("LOGOS_SCAFFOLD_CACHE_ROOT", "");
         let resolved = bootstrap_cache_root(None);
+        let expected = default_cache_root().expect("default").0;
         env::remove_var("LOGOS_SCAFFOLD_CACHE_ROOT");
-        let (_, source) = resolved.expect("resolve");
 
-        assert_ne!(source, CacheRootSource::Env);
+        assert_eq!(resolved.expect("resolve"), expected);
     }
 
     #[test]

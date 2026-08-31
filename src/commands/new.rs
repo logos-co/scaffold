@@ -87,7 +87,7 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
     fs::create_dir_all(target.join(".scaffold/state"))?;
     fs::create_dir_all(target.join(".scaffold/logs"))?;
 
-    let (bootstrap_cache, _) = bootstrap_cache_root(cmd.cache_root.as_deref())?;
+    let bootstrap_cache = bootstrap_cache_root(cmd.cache_root.as_deref())?;
     fs::create_dir_all(bootstrap_cache.join("repos"))?;
     fs::create_dir_all(bootstrap_cache.join("state"))?;
     fs::create_dir_all(bootstrap_cache.join("logs"))?;
