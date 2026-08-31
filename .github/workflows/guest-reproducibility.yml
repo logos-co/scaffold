@@ -88,11 +88,15 @@ jobs:
           fi
           echo "LOGOS_BLOCKCHAIN_CIRCUITS=$dest" >> "$GITHUB_ENV"
 
-      # `lgs build` compiles the project workspace before the guest step, and
-      # that workspace build runs the methods crate's `embed_methods()` — which
-      # needs the risc0 Rust toolchain even in docker mode. Retried because
-      # rzup resolves versions through api.github.com, which rate-limits by
-      # runner IP and has flaked here before.
+      # Three separate rzup components, all required:
+      #   rust/cpp — `lgs build` compiles the project workspace before the
+      #     guest step, and that runs the methods crate's `embed_methods()`,
+      #     which cross-compiles on the host even in docker mode.
+      #   cargo-risczero — the `cargo risczero build` subcommand itself. It is
+      #     NOT pulled in by `rzup install rust`; leaving it out is what made
+      #     the first run of this workflow fail its preflight.
+      # Retried because rzup resolves versions through api.github.com, which
+      # rate-limits by runner IP and has flaked here before.
       - name: Install Risc Zero toolchain
         run: |
           set -euo pipefail
@@ -100,15 +104,30 @@ jobs:
             https://risczero.com/install -o "$RUNNER_TEMP/rzup-install.sh"
           bash "$RUNNER_TEMP/rzup-install.sh"
           echo "$HOME/.risc0/bin" >> "$GITHUB_PATH"
+          installed=false
           for attempt in 1 2 3; do
-            if "$HOME/.risc0/bin/rzup" install rust && "$HOME/.risc0/bin/rzup" install cpp; then
-              exit 0
+            if "$HOME/.risc0/bin/rzup" install rust \
+              && "$HOME/.risc0/bin/rzup" install cpp \
+              && "$HOME/.risc0/bin/rzup" install cargo-risczero; then
+              installed=true
+              break
             fi
             echo "rzup attempt $attempt failed; retrying in 30s"
             sleep 30
           done
-          echo "::error::rzup install did not succeed after 3 attempts"
-          exit 1
+          if [ "$installed" != true ]; then
+            echo "::error::rzup install did not succeed after 3 attempts"
+            exit 1
+          fi
+          # Fail here, with the component name, rather than inside scaffold's
+          # preflight several minutes later.
+          export PATH="$HOME/.risc0/bin:$PATH"
+          command -v cargo-risczero >/dev/null || {
+            echo "::error::cargo-risczero not on PATH after rzup install"
+            ls -la "$HOME/.risc0/bin" || true
+            exit 1
+          }
+          cargo risczero --version
 
       - name: Render project and run setup
         run: |

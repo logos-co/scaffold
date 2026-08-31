@@ -305,10 +305,15 @@ fn risc0_guest_manifests(cwd: &Path, methods_manifest: &Path) -> DynResult<Vec<P
 /// cannot possibly work, with the fix rather than a raw docker/cargo error.
 fn preflight_deterministic_toolchain() -> DynResult<()> {
     if which("cargo-risczero").is_none() {
+        // `rzup install rust` — the command people actually run to get a
+        // risc0 setup — does NOT install this; it is a separate component.
+        // Naming the exact command matters: someone with a working guest
+        // toolchain will otherwise assume they already have it.
         bail!(
             "[build].guest = \"docker\" needs `cargo-risczero` on PATH, which was not found.\n\
-             Install it with `cargo install cargo-risczero` (or `rzup install cargo-risczero`), \
-             or set [build].guest = \"local\" in scaffold.toml to build guests with the host \
+             Install it with `rzup install cargo-risczero` (a separate component from \
+             `rzup install rust`), or `cargo install cargo-risczero`. Or set \
+             [build].guest = \"local\" in scaffold.toml to build guests with the host \
              toolchain (non-reproducible `program_id`)."
         );
     }

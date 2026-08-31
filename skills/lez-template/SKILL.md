@@ -81,7 +81,7 @@ Before a `program_id` matters (publishing it, deploying beyond your own localnet
 ```toml
 # scaffold.toml
 [build]
-guest = "docker"                  # needs Docker + cargo-risczero
+guest = "docker"                  # needs Docker + `rzup install cargo-risczero`
 risc0_docker_tag = "r0.1.97.0"    # optional; scaffold's pin is the default
 ```
 

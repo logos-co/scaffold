@@ -173,7 +173,14 @@ risc0_docker_tag = "r0.1.97.0"    # optional; scaffold's pin is the default
 | `guest` | How | Needs | `program_id` |
 |---|---|---|---|
 | `local` (default) | `cargo build --release --manifest-path methods/Cargo.toml`, i.e. the guest crate's own `risc0_build::embed_methods()` | nothing beyond the host Rust toolchain | **Not reproducible.** Depends on the host's Rust and clang versions, so two developers — or a developer and CI — can produce different bytes from the same source |
-| `docker` | `cargo risczero build` inside `risczero/risc0-guest-builder:<tag>` | Docker daemon running, `cargo-risczero` on `PATH` | **Reproducible.** Same source plus same tag gives the same bytes, and therefore the same `program_id`, on any machine |
+| `docker` | `cargo risczero build` inside `risczero/risc0-guest-builder:<tag>` | Docker daemon running, `cargo-risczero` on `PATH` (see below) | **Reproducible.** Same source plus same tag gives the same bytes, and therefore the same `program_id`, on any machine |
+
+`cargo-risczero` is a **separate rzup component** — `rzup install rust`, which is
+what you need for the default build, does not provide it:
+
+```bash
+rzup install cargo-risczero      # or: cargo install cargo-risczero
+```
 
 Use `local` while you are iterating: it is much faster and needs no container
 runtime. Switch to `docker` before a `program_id` starts to matter — anything

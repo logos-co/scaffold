@@ -661,7 +661,7 @@ Validate that `program_id` is a stable identifier when the project asks for it: 
 ### Preconditions
 
 - D1 completed in `dogfood-default` (localnet running, wallet seeded).
-- Docker daemon running and `cargo-risczero` on `PATH`. If either is missing, run only the `local`-mode steps and the negative check below, and report the partial coverage — do not skip the scenario silently.
+- Docker daemon running and `cargo-risczero` on `PATH`. `cargo-risczero` is a separate rzup component — `rzup install rust` does **not** provide it; run `rzup install cargo-risczero`. If either is missing, run only the `local`-mode steps and the negative check below, and report the partial coverage — do not skip the scenario silently.
 
 ### Commands / Actions
 

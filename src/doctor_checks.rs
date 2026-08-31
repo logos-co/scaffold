@@ -113,8 +113,9 @@ fn guest_build_row(build: &BuildConfig, missing: &[&str]) -> CheckRow {
                 missing.join(" and ")
             ),
             remediation: Some(
-                "Install Docker and `cargo install cargo-risczero`, or set \
-                 [build].guest = \"local\" in scaffold.toml (non-reproducible program_id)"
+                "Install Docker and run `rzup install cargo-risczero` (a separate component \
+                 from `rzup install rust`), or set [build].guest = \"local\" in scaffold.toml \
+                 (non-reproducible program_id)"
                     .to_string(),
             ),
         }
