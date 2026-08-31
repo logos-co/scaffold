@@ -14,7 +14,7 @@ use crate::constants::{
     FRAMEWORK_KIND_LEZ_FRAMEWORK, LEZ_SOURCE, SCAFFOLD_TOML_SCHEMA_VERSION,
 };
 use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RunConfig};
-use crate::project::default_cache_root;
+use crate::project::bootstrap_cache_root;
 use crate::repo::{sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
 use crate::state::write_text;
 use crate::template::copy::{copy_dir_contents, patch_simple_tail_call_program_id};
@@ -87,13 +87,7 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
     fs::create_dir_all(target.join(".scaffold/state"))?;
     fs::create_dir_all(target.join(".scaffold/logs"))?;
 
-    let (bootstrap_cache, _) = match &cmd.cache_root {
-        Some(p) => (p.clone(), ()),
-        None => {
-            let (path, _) = default_cache_root()?;
-            (path, ())
-        }
-    };
+    let (bootstrap_cache, _) = bootstrap_cache_root(cmd.cache_root.as_deref())?;
     fs::create_dir_all(bootstrap_cache.join("repos"))?;
     fs::create_dir_all(bootstrap_cache.join("state"))?;
     fs::create_dir_all(bootstrap_cache.join("logs"))?;

@@ -149,6 +149,33 @@ pub(crate) fn resolve_cache_root(project: &Project) -> DynResult<(PathBuf, Cache
     default_cache_root()
 }
 
+/// Resolves the cache root for `create` / `new`, which run *before* a project
+/// (and therefore a `scaffold.toml`) exists. Order:
+/// 1. `--cache-root` when the caller passed one,
+/// 2. `LOGOS_SCAFFOLD_CACHE_ROOT` env var (non-empty),
+/// 3. `default_cache_root()` — XDG / HOME / platform fallback.
+///
+/// This is `resolve_cache_root` minus the `scaffold.toml` layer. Keeping the two
+/// side by side is deliberate: creation used to skip the env layer entirely, so a
+/// project created under `LOGOS_SCAFFOLD_CACHE_ROOT` bootstrapped into the default
+/// cache and then resolved the env one for every later command — cloning the
+/// pinned LEZ twice and reporting a cache root that creation never used.
+pub(crate) fn bootstrap_cache_root(
+    cli_override: Option<&Path>,
+) -> DynResult<(PathBuf, CacheRootSource)> {
+    if let Some(path) = cli_override {
+        return Ok((path.to_path_buf(), CacheRootSource::Config));
+    }
+
+    if let Ok(val) = env::var("LOGOS_SCAFFOLD_CACHE_ROOT") {
+        if !val.is_empty() {
+            return Ok((PathBuf::from(val), CacheRootSource::Env));
+        }
+    }
+
+    default_cache_root()
+}
+
 /// Platform-default cache root when neither env nor `scaffold.toml` set one.
 /// Returns the source layer alongside the path.
 pub(crate) fn default_cache_root() -> DynResult<(PathBuf, CacheRootSource)> {
@@ -352,6 +379,44 @@ mod tests {
         // both lez.path and lez.pin are empty in fixture
         let err = resolve_repo_path(&project, &project.config.lez, "lez").unwrap_err();
         assert!(err.to_string().contains("lez"), "{err}");
+    }
+
+    // Creation (`create` / `new`) has no scaffold.toml yet, so it resolves the
+    // cache root through `bootstrap_cache_root`. It previously skipped the env
+    // layer, bootstrapping into the default cache while every later command in
+    // the created project used the env one.
+    #[test]
+    fn bootstrap_env_layer_wins_when_no_cli_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        env::set_var("LOGOS_SCAFFOLD_CACHE_ROOT", "/tmp/from-env");
+        let resolved = bootstrap_cache_root(None);
+        env::remove_var("LOGOS_SCAFFOLD_CACHE_ROOT");
+        let (path, source) = resolved.expect("resolve");
+
+        assert_eq!(path, PathBuf::from("/tmp/from-env"));
+        assert_eq!(source, CacheRootSource::Env);
+    }
+
+    #[test]
+    fn bootstrap_cli_override_wins_over_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        env::set_var("LOGOS_SCAFFOLD_CACHE_ROOT", "/tmp/from-env");
+        let resolved = bootstrap_cache_root(Some(Path::new("/tmp/from-flag")));
+        env::remove_var("LOGOS_SCAFFOLD_CACHE_ROOT");
+        let (path, _) = resolved.expect("resolve");
+
+        assert_eq!(path, PathBuf::from("/tmp/from-flag"));
+    }
+
+    #[test]
+    fn bootstrap_empty_env_falls_through_to_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        env::set_var("LOGOS_SCAFFOLD_CACHE_ROOT", "");
+        let resolved = bootstrap_cache_root(None);
+        env::remove_var("LOGOS_SCAFFOLD_CACHE_ROOT");
+        let (_, source) = resolved.expect("resolve");
+
+        assert_ne!(source, CacheRootSource::Env);
     }
 
     #[test]
