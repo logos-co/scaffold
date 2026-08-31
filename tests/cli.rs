@@ -1193,10 +1193,24 @@ fn localnet_start_patches_config_and_uses_configured_port() {
         patched_path.display()
     );
 
-    // Verify --port was NOT passed as a CLI arg
-    assert!(
-        !args.contains("--port"),
-        "expected --port NOT to appear in sequencer args, got: {args}"
+    // The port must ALSO be passed as `--port`. This assertion used to be
+    // inverted, which locked in a bug: the sequencer takes its RPC port from
+    // clap (`--port`, default 3040) and binds that in `run_server` — it never
+    // reads the `port` key patched into the config above. Observed rerunning
+    // `D1` with `[localnet].port = 3141`: the sequencer bound 3040 anyway and
+    // died with "Address already in use" against another project's localnet,
+    // while scaffold waited for readiness on 3141. `test-node` has always
+    // passed the flag. Patching the config stays, so both agree if a future
+    // LEZ starts reading it.
+    let port_flag_value = args
+        .lines()
+        .skip_while(|line| *line != "--port")
+        .nth(1)
+        .unwrap_or_default();
+    assert_eq!(
+        port_flag_value,
+        localnet_port.to_string(),
+        "expected `--port {localnet_port}` in sequencer args, got: {args}"
     );
 
     let env = fs::read_to_string(&env_log).expect("read env log");

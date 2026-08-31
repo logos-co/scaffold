@@ -341,18 +341,8 @@ fn start_localnet(
     })?;
     let patched_config_path = prepare_sequencer_config(lez, state_dir, localnet_port)?;
 
-    // Use a path relative to lez (the child's cwd), not relative to the
-    // parent's cwd.  `current_dir(lez)` applies before exec, so a parent-
-    // relative path like `.scaffold/cache/repos/lez/target/release/…`
-    // would be resolved inside lez and fail with ENOENT. The patched config
-    // path is absolute (under the project's `.scaffold/state/`), so it is
-    // unaffected by the cwd switch.
-    let mut sequencer_cmd = Command::new(format!("./{SEQUENCER_BIN_REL_PATH}"));
-    sequencer_cmd
-        .current_dir(lez)
-        .arg(&patched_config_path)
-        .env("RUST_LOG", "info")
-        .env("RISC0_DEV_MODE", if risc0_dev_mode { "1" } else { "0" });
+    let mut sequencer_cmd =
+        sequencer_command(lez, &patched_config_path, localnet_port, risc0_dev_mode);
 
     // Auto-detect r0vm path from rzup installation if RISC0_SERVER_PATH is not set.
     // On macOS, rzup installs r0vm under ~/.risc0/extensions/<version>/r0vm but does
@@ -715,6 +705,33 @@ fn build_status_report(
 /// rather than carrying the deferred tx forward. Until LEZ stops aborting on
 /// deferral, scaffold widens the limit so the documented first-success path
 /// fits in a single block.
+/// Build the `sequencer_service` invocation for `localnet start`.
+///
+/// `--port` is not optional. The sequencer takes its RPC port from that flag,
+/// whose clap default is 3040, and binds it in `run_server` — it never reads
+/// the `port` key `prepare_sequencer_config` patches into the JSON. Omitting
+/// the flag therefore made `[localnet].port` a no-op: correct by coincidence
+/// at the default, and on any other value the sequencer bound 3040 while
+/// scaffold waited for readiness on a port nothing was listening on (or, with
+/// another project's localnet already on 3040, died with a bare "Address
+/// already in use"). `test-node` has always passed it.
+fn sequencer_command(lez: &Path, config_path: &Path, port: u16, risc0_dev_mode: bool) -> Command {
+    // Use a path relative to lez (the child's cwd), not relative to the
+    // parent's cwd. `current_dir(lez)` applies before exec, so a parent-
+    // relative path like `.scaffold/cache/repos/lez/target/release/…`
+    // would be resolved inside lez and fail with ENOENT. The patched config
+    // path is absolute (under the project's `.scaffold/state/`), so it is
+    // unaffected by the cwd switch.
+    let mut cmd = Command::new(format!("./{SEQUENCER_BIN_REL_PATH}"));
+    cmd.current_dir(lez)
+        .arg(config_path)
+        .arg("--port")
+        .arg(port.to_string())
+        .env("RUST_LOG", "info")
+        .env("RISC0_DEV_MODE", if risc0_dev_mode { "1" } else { "0" });
+    cmd
+}
+
 fn prepare_sequencer_config(lez: &Path, dest_dir: &Path, port: u16) -> DynResult<PathBuf> {
     let (dest_path, _) = patch_runtime_sequencer_config(lez, dest_dir, |obj| {
         apply_common_runtime_overrides(obj, port);
@@ -1103,8 +1120,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        prepare_sequencer_config, reset_cleanup, verify_block_production, wait_for_pid_exit,
-        wait_for_port_free,
+        prepare_sequencer_config, reset_cleanup, sequencer_command, verify_block_production,
+        wait_for_pid_exit, wait_for_port_free, Path,
     };
     use crate::commands::wallet_support::wallet_state_path;
     use crate::constants::SEQUENCER_CONFIG_REL_PATH;
@@ -1242,6 +1259,50 @@ mod tests {
         let err = wait_for_port_free(&addr, Duration::from_millis(300));
         drop(listener);
         assert!(err.is_err(), "expected timeout while listener was open");
+    }
+
+    /// The sequencer reads its RPC port from `--port` (clap default 3040),
+    /// never from the config JSON. Dropping the flag made `[localnet].port` a
+    /// silent no-op: the sequencer bound 3040 while `localnet start` waited
+    /// for readiness on the configured port. Found rerunning `D1` on a box
+    /// where another project's localnet already held 3040.
+    #[test]
+    fn sequencer_command_passes_the_configured_port_as_a_flag() {
+        let cmd = sequencer_command(
+            Path::new("/lez"),
+            Path::new("/proj/.scaffold/state/sequencer_config.json"),
+            3141,
+            true,
+        );
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "/proj/.scaffold/state/sequencer_config.json".to_string(),
+                "--port".to_string(),
+                "3141".to_string(),
+            ],
+            "the configured port must reach the sequencer as a CLI flag"
+        );
+        assert_eq!(cmd.get_current_dir(), Some(Path::new("/lez")));
+    }
+
+    #[test]
+    fn sequencer_command_maps_risc0_dev_mode_to_the_env_flag() {
+        for (dev_mode, expected) in [(true, "1"), (false, "0")] {
+            let cmd = sequencer_command(Path::new("/lez"), Path::new("/c.json"), 3040, dev_mode);
+            let envs: Vec<(String, String)> = cmd
+                .get_envs()
+                .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
+                .collect();
+            assert!(
+                envs.contains(&("RISC0_DEV_MODE".to_string(), expected.to_string())),
+                "dev_mode={dev_mode} should map to {expected}; got {envs:?}"
+            );
+        }
     }
 
     /// Regression test for #114. `prepare_sequencer_config` must write the
