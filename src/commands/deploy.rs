@@ -793,15 +793,20 @@ fn is_valid_program_name(program: &str) -> bool {
 ///
 /// Ranking, highest first:
 ///
-/// 1. a `docker` component — the deterministic `cargo risczero build` output;
+/// 1. a `docker` component *directly under* the `riscv32im*` one — the
+///    deterministic `cargo risczero build` output, whose layout is always
+///    `<target-dir>/riscv32im-risc0-zkvm-elf/docker/`;
 /// 2. a `release` component — the host-toolchain `embed_methods()` output;
 /// 3. anything else (a `debug` build) as a last-resort fallback.
 ///
 /// Docker outranks release because a `docker/` artefact only exists when a
 /// deterministic build produced it, and `lgs build` deletes that tree whenever
 /// it runs in `local` mode — so if both are present, docker is the one the
-/// last build meant (scaffold#259). Within a rank the shallowest path wins,
-/// preferring the canonical risc0 layout over nested workspace duplicates.
+/// last build meant (scaffold#259). The adjacency requirement keeps a guest
+/// crate (or any other directory) that happens to be named `docker` from
+/// being promoted: `embed_methods()` puts package names *above* the target
+/// triple, never below it. Within a rank the shallowest path wins, preferring
+/// the canonical risc0 layout over nested workspace duplicates.
 pub(crate) fn discover_program_binaries(
     project_root: &Path,
     programs: &[String],
@@ -841,20 +846,23 @@ pub(crate) fn discover_program_binaries(
             let mut has_release = false;
             let mut has_docker = false;
             let mut depth = 0usize;
+            let mut prev_was_riscv32im = false;
             for component in path.components() {
                 if let std::path::Component::Normal(name) = component {
                     depth += 1;
+                    let is_riscv32im = name
+                        .to_str()
+                        .is_some_and(|name| name.starts_with("riscv32im"));
                     if let Some(name) = name.to_str() {
-                        if name.starts_with("riscv32im") {
-                            has_riscv32im = true;
-                        }
                         if name == "release" {
                             has_release = true;
                         }
-                        if name == "docker" {
+                        if name == "docker" && prev_was_riscv32im {
                             has_docker = true;
                         }
                     }
+                    has_riscv32im |= is_riscv32im;
+                    prev_was_riscv32im = is_riscv32im;
                 }
             }
             if !has_riscv32im {
@@ -1109,6 +1117,35 @@ mod tests {
         assert!(
             result.components().any(|c| c.as_os_str() == "docker"),
             "expected the docker artefact, got {}",
+            result.display()
+        );
+    }
+
+    /// A guest package named `docker` lives *above* the target triple in the
+    /// `embed_methods()` layout, so it must not be mistaken for deterministic
+    /// output and promoted over a real one.
+    #[test]
+    fn docker_named_crate_is_not_mistaken_for_deterministic_output() {
+        let tmp = TempDir::new().unwrap();
+        let release_dir = tmp
+            .path()
+            .join("target/riscv-guest/docker/docker/riscv32im-risc0-zkvm-elf/release");
+        fs::create_dir_all(&release_dir).unwrap();
+        fs::write(release_dir.join("my_program.bin"), b"local").unwrap();
+
+        let docker_dir = tmp
+            .path()
+            .join(crate::constants::GUEST_DOCKER_TARGET_DIR)
+            .join("riscv32im-risc0-zkvm-elf/docker");
+        fs::create_dir_all(&docker_dir).unwrap();
+        fs::write(docker_dir.join("my_program.bin"), b"deterministic").unwrap();
+
+        let result = lookup(tmp.path(), "my_program").unwrap();
+        assert_eq!(
+            fs::read(&result).unwrap(),
+            b"deterministic",
+            "a crate named `docker` must not outrank the real deterministic \
+             artefact; got {}",
             result.display()
         );
     }

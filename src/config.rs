@@ -662,22 +662,38 @@ fn parse_build(doc: &DocumentMut) -> DynResult<BuildConfig> {
     }
     if let Some(tag) = read_string(table, "risc0_docker_tag") {
         check_toml_value("build.risc0_docker_tag", &tag)?;
-        // The tag is interpolated into a docker image reference and exported
-        // as `RISC0_DOCKER_CONTAINER_TAG`; keep it to the character set docker
-        // actually allows for a tag so a typo fails here rather than as an
-        // opaque `docker build` error.
-        if !tag
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
-        {
-            bail!(
-                "invalid scaffold.toml: [build].risc0_docker_tag must be a docker tag \
-                 (alphanumerics, `.`, `-`, `_`): {tag:?}"
-            );
-        }
+        check_docker_tag(&tag)?;
         cfg.risc0_docker_tag = tag;
     }
     Ok(cfg)
+}
+
+/// Enforce docker's own tag grammar: `[A-Za-z0-9_][A-Za-z0-9._-]{0,127}`.
+///
+/// The value is interpolated into an image reference and exported as
+/// `RISC0_DOCKER_CONTAINER_TAG`, so a typo that docker would reject should
+/// fail here — with the key that caused it — rather than surfacing minutes
+/// later as an opaque `docker build` error. Matching docker's rule exactly
+/// (rather than approximating it) is what makes that promise true: a leading
+/// `.` or `-`, or a tag past 128 characters, is invalid to docker even though
+/// every character in it is otherwise legal.
+fn check_docker_tag(tag: &str) -> DynResult<()> {
+    const MAX_TAG_LEN: usize = 128;
+    let valid_body = tag
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+    let valid_first = tag
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !valid_body || !valid_first || tag.len() > MAX_TAG_LEN {
+        bail!(
+            "invalid scaffold.toml: [build].risc0_docker_tag must be a docker tag — up to \
+             {MAX_TAG_LEN} characters of alphanumerics, `.`, `-`, `_`, starting with an \
+             alphanumeric or `_`: {tag:?}"
+        );
+    }
+    Ok(())
 }
 
 fn parse_localnet(doc: &DocumentMut) -> DynResult<LocalnetConfig> {
@@ -1338,6 +1354,32 @@ risc0_docker_tag = "r0.1.91.1 && rm -rf /"
             format!("{err:#}").contains("risc0_docker_tag"),
             "expected a risc0_docker_tag error; got: {err:#}"
         );
+    }
+
+    /// Docker's tag grammar, not an approximation of it — the point of
+    /// validating here is that anything accepted will actually be accepted by
+    /// `docker build` minutes later.
+    #[test]
+    fn build_docker_tag_matches_dockers_own_grammar() {
+        for ok in [
+            "r0.1.97.0",
+            "latest",
+            "_leading-underscore",
+            "a",
+            &"x".repeat(128),
+        ] {
+            check_docker_tag(ok).unwrap_or_else(|e| panic!("{ok:?} should be valid: {e:#}"));
+        }
+        for bad in [
+            ".leading-dot",
+            "-leading-dash",
+            &"x".repeat(129),
+            "with space",
+            "a/b",
+            "",
+        ] {
+            assert!(check_docker_tag(bad).is_err(), "{bad:?} should be rejected");
+        }
     }
 
     /// Defaults must not appear in serialized output: freshly created

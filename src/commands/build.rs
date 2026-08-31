@@ -153,6 +153,9 @@ fn build_methods_guests_docker(
     docker_tag: &str,
 ) -> DynResult<()> {
     let guests = risc0_guest_manifests(cwd, methods_manifest)?;
+    // Deliberately re-checked here even though `cmd_build_shortcut` already
+    // ran it: `setup` in between can take minutes, and this is the function's
+    // own precondition rather than the caller's.
     preflight_deterministic_toolchain()?;
 
     // One `CARGO_TARGET_DIR` is shared by every guest package, so clear it
