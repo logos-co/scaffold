@@ -90,6 +90,9 @@ fn guest_build_row(build: &BuildConfig, missing: &[&str]) -> CheckRow {
         };
     }
 
+    // The pinned tag is reported on both branches: it is the value that makes
+    // `program_id` reproducible, so it belongs in the diagnostic whether or
+    // not this machine can currently run the build.
     if missing.is_empty() {
         CheckRow {
             status: CheckStatus::Pass,
@@ -105,7 +108,8 @@ fn guest_build_row(build: &BuildConfig, missing: &[&str]) -> CheckRow {
             status: CheckStatus::Fail,
             name: "guest build".to_string(),
             detail: format!(
-                "docker — [build].guest = \"docker\" but {} not found on PATH",
+                "docker (risczero/risc0-guest-builder:{}) — {} not found on PATH",
+                build.risc0_docker_tag,
                 missing.join(" and ")
             ),
             remediation: Some(
@@ -455,6 +459,16 @@ mod tests {
         let row = guest_build_row(&build, &["cargo-risczero", "docker"]);
         assert_eq!(row.status, CheckStatus::Fail);
         assert!(row.detail.contains("cargo-risczero and docker"));
+        // The pin is reported even when the build cannot run — see the
+        // comment in `guest_build_row`.
+        assert!(
+            row.detail.contains(&format!(
+                "risc0-guest-builder:{}",
+                crate::constants::DEFAULT_RISC0_DOCKER_TAG
+            )),
+            "got: {}",
+            row.detail
+        );
         assert!(row.remediation.is_some());
     }
 

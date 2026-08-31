@@ -4855,7 +4855,8 @@ fn doctor_reports_the_guest_build_strategy() {
 
 /// scaffold#259: a project pinned to deterministic guest builds must say so
 /// in doctor, tag included — that tag is part of what makes `program_id`
-/// reproducible.
+/// reproducible. Asserted independently of whether this machine happens to
+/// have `cargo-risczero`/`docker` installed, which only changes PASS vs FAIL.
 #[test]
 fn doctor_reports_the_pinned_risc0_docker_tag_in_deterministic_mode() {
     let temp = tempdir().expect("tempdir");
