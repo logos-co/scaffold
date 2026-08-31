@@ -66,16 +66,14 @@ mod lez_counter {
         // total balance across a transaction, so `balance += amount` minted tokens
         // and every `increment` was rejected at the execution check with
         // `InvalidProgramBehavior(ExecutionValidationFailed(MismatchedTotalBalance …))`.
-        // `initialize` seeds exactly 8 bytes, so anything else means the account was
-        // never initialized or its layout drifted. Surface that instead of treating
-        // it as zero, which would silently restart the count and hide the corruption.
-        let current = counter
-            .account
-            .data
-            .get(..8)
-            .and_then(|head| <[u8; 8]>::try_from(head).ok())
+        // `initialize` seeds exactly 8 bytes, so any other length means the account
+        // was never initialized or its layout drifted. Convert the whole buffer
+        // rather than its first 8 bytes: a prefix decode would accept a longer,
+        // drifted account and silently ignore the trailing bytes, and treating a
+        // short one as zero would restart the count and hide the corruption.
+        let current = <[u8; 8]>::try_from(&counter.account.data[..])
             .map(u64::from_le_bytes)
-            .ok_or(SpelError::AccountNotInitialized { account_index: 0 })?;
+            .map_err(|_| SpelError::AccountNotInitialized { account_index: 0 })?;
 
         let next = current
             .checked_add(amount)
