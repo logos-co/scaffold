@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use clap::{CommandFactory, Parser, Subcommand};
 
 use crate::cli_help::{
@@ -1290,6 +1290,16 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
         }),
         Some(Commands::Setup(args)) => cmd_setup(args.prebuilt),
         Some(Commands::Build(args)) => match args.subcommand {
+            // `build idl` / `build client` regenerate artefacts from source
+            // and never compile a guest, so `--guest` has nothing to act on.
+            // Rejecting it beats accepting and ignoring it: someone who typed
+            // `lgs build --guest docker idl` expecting a deterministic guest
+            // would otherwise get a silent local build.
+            Some(_) if args.guest.is_some() => bail!(
+                "`--guest` applies to `logos-scaffold build`, which compiles the guest programs. \
+                 `build idl` and `build client` only regenerate IDL/client code from source. \
+                 Run `logos-scaffold build --guest <MODE>` on its own."
+            ),
             Some(BuildSubcommand::Idl(sub)) => cmd_idl(
                 &sub.project_path
                     .map(|p| vec!["build".to_string(), p.to_string_lossy().to_string()])

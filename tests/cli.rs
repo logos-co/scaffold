@@ -4905,6 +4905,23 @@ fn build_guest_flag_rejects_unknown_modes() {
         .stderr(predicate::str::contains("local").and(predicate::str::contains("docker")));
 }
 
+/// `--guest` only means something for the guest-compiling `build`; on
+/// `build idl` / `build client` it had no effect, so accepting it silently
+/// would hand back a local build to someone who asked for a deterministic one.
+#[test]
+fn build_guest_flag_is_rejected_on_subcommands_rather_than_ignored() {
+    for sub in ["idl", "client"] {
+        Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+            .arg("build")
+            .arg("--guest")
+            .arg("docker")
+            .arg(sub)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("`--guest` applies to"));
+    }
+}
+
 #[test]
 fn build_help_documents_the_guest_build_modes() {
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
