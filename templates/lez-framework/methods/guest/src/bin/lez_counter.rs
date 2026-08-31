@@ -20,8 +20,11 @@ mod lez_counter {
     ) -> SpelResult {
         // Start the counter at an explicit zero so `increment` always has a
         // well-formed 8-byte little-endian value to read back.
-        counter.account.data = Data::try_from(0u64.to_le_bytes().to_vec())
-            .expect("an 8-byte counter always fits in Data");
+        counter.account.data = Data::try_from(0u64.to_le_bytes().to_vec()).map_err(|_| {
+            SpelError::SerializationError {
+                message: "counter must be an 8-byte little-endian u64".to_string(),
+            }
+        })?;
 
         Ok(SpelOutput::execute(vec![counter, authority], vec![]))
     }
@@ -38,15 +41,28 @@ mod lez_counter {
         // total balance across a transaction, so `balance += amount` minted tokens
         // and every `increment` was rejected at the execution check with
         // `InvalidProgramBehavior(ExecutionValidationFailed(MismatchedTotalBalance …))`.
+        // `initialize` seeds exactly 8 bytes, so anything else means the account was
+        // never initialized or its layout drifted. Surface that instead of treating
+        // it as zero, which would silently restart the count and hide the corruption.
         let current = counter
             .account
             .data
             .get(..8)
             .and_then(|head| <[u8; 8]>::try_from(head).ok())
-            .map_or(0u64, u64::from_le_bytes);
+            .map(u64::from_le_bytes)
+            .ok_or(SpelError::AccountNotInitialized { account_index: 0 })?;
 
-        counter.account.data = Data::try_from(current.wrapping_add(amount).to_le_bytes().to_vec())
-            .expect("an 8-byte counter always fits in Data");
+        let next = current
+            .checked_add(amount)
+            .ok_or_else(|| SpelError::Overflow {
+                operation: format!("counter {current} + {amount}"),
+            })?;
+
+        counter.account.data = Data::try_from(next.to_le_bytes().to_vec()).map_err(|_| {
+            SpelError::SerializationError {
+                message: "counter must be an 8-byte little-endian u64".to_string(),
+            }
+        })?;
 
         Ok(SpelOutput::execute(vec![counter, authority], vec![]))
     }
