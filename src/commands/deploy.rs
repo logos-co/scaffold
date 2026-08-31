@@ -850,18 +850,13 @@ pub(crate) fn discover_program_binaries(
             for component in path.components() {
                 if let std::path::Component::Normal(name) = component {
                     depth += 1;
-                    let is_riscv32im = name
-                        .to_str()
-                        .is_some_and(|name| name.starts_with("riscv32im"));
-                    if let Some(name) = name.to_str() {
-                        if name == "release" {
-                            has_release = true;
-                        }
-                        if name == "docker" && prev_was_riscv32im {
-                            has_docker = true;
-                        }
-                    }
+                    let name = name.to_str().unwrap_or_default();
+                    let is_riscv32im = name.starts_with("riscv32im");
                     has_riscv32im |= is_riscv32im;
+                    has_release |= name == "release";
+                    // Only the segment immediately below the target triple —
+                    // see the ranking notes on this function.
+                    has_docker |= name == "docker" && prev_was_riscv32im;
                     prev_was_riscv32im = is_riscv32im;
                 }
             }
