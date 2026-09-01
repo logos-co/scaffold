@@ -182,6 +182,17 @@ what you need for the default build, does not provide it:
 rzup install cargo-risczero      # or: cargo install cargo-risczero
 ```
 
+If you invoke `cargo risczero build` **by hand**, export the tag as well.
+risc0's own default is `r0.1.88.0`, whose rustc is too old for the template's
+dependencies, and the resulting MSRV error looks like a scaffold bug:
+
+```bash
+RISC0_DOCKER_CONTAINER_TAG=r0.1.97.0 cargo risczero build --manifest-path methods/guest/Cargo.toml
+```
+
+`lgs build --guest docker` always sets it for you; this only bites when
+reaching past scaffold to the underlying tool.
+
 Use `local` while you are iterating: it is much faster and needs no container
 runtime. Switch to `docker` before a `program_id` starts to matter — anything
 you publish, deploy somewhere other than your own localnet, or verify in CI.
@@ -221,11 +232,23 @@ when `guest = "docker"` but Docker or `cargo-risczero` is missing.
   the artefact `deploy` ships. Only the container output is deployed.
 - The published builder images are `linux/amd64`; on Apple silicon the build
   runs under emulation.
-- The container build runs `cargo build --locked`, so the workspace
-  `Cargo.lock` must exist and be up to date with `Cargo.toml`. That is part of
-  what makes the build reproducible, and it is also the most common way this
-  mode fails after a dependency edit — run a normal `lgs build` first to
-  refresh the lockfile.
+### Commit `Cargo.lock` — it is part of the input
+
+The container build runs `cargo build --locked`, so the workspace `Cargo.lock`
+must exist and match `Cargo.toml`. More importantly: **the lockfile is an input
+to the `program_id`, exactly like the source and the builder tag.** Same source
+plus same tag plus *a different lockfile* is a different ELF.
+
+That is not hypothetical. Cargo's MSRV-aware resolver picks dependency versions
+based on the host toolchain, so two developers who run `lgs build` on machines
+with different Rust versions get different lockfiles from identical source —
+measured here as `ruint 1.17.2`/`enum-ordinalize 4.3.2` on one machine and
+`1.20.0`/`4.4.2` on another. Both build fine, and both produce a *different*
+`program_id`.
+
+So commit `Cargo.lock` (the generated `.gitignore` does not exclude it) and
+treat a lockfile change as a `program_id` change. Refresh it with a plain
+`lgs build` when a dependency edit makes `--locked` fail.
 - risc0 prints `Cargo.lock not found in path .../methods/guest/Cargo.lock`
   before it starts. It is looking next to the guest manifest; scaffold projects
   keep one lockfile at the workspace root, which the container does use. The

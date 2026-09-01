@@ -99,13 +99,18 @@ pub(crate) const DEFAULT_RISC0_METHODS_ENTRY: &str = "guest";
 /// toolchain, so it is part of what makes the emitted ELF — and therefore the
 /// `program_id` derived from it — reproducible across machines.
 ///
-/// **This is a risc0 release tag, not a Rust version.** `r0.1.97.0` names the
-/// risc0 toolchain release; the `rustc` inside the image is a different, older
-/// number, and the same tag on rzup's toolchain tarball and on this image are
-/// not built from the same compiler. Do not reason about which dependencies
-/// will compile from the tag string — the Guest Build Reproducibility workflow
-/// prints the image's actual `rustc --version` on every run, and that is the
-/// number that decides whether the template's dependency graph builds.
+/// Verified in CI: this image reports `rustc 1.97.0-dev (e638c6cfe 2026-07-15)`,
+/// the same compiler build as rzup's `v1.97.0` toolchain, so the container and
+/// a local `rzup install rust` agree. The Guest Build Reproducibility workflow
+/// re-prints the image's `rustc --version` on every run rather than leaving
+/// anyone to infer it from the tag string.
+///
+/// **Passing this explicitly is the whole point.** `risc0-build`'s own
+/// `DEFAULT_DOCKER_TAG` is `r0.1.88.0`, whose rustc is 1.88 — too old for the
+/// template's dependency graph. Anyone running `cargo risczero build` by hand
+/// without exporting `RISC0_DOCKER_CONTAINER_TAG` silently gets that image and
+/// an MSRV error that reads like a scaffold bug. Scaffold always sets the
+/// variable (`deterministic_guest_command`), which is what keeps the pin real.
 ///
 /// Bumping this changes every `program_id` the project produces. Projects
 /// override it with `[build].risc0_docker_tag` in `scaffold.toml`; the same
