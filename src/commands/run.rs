@@ -20,7 +20,9 @@ use crate::commands::run_state::{
 };
 use crate::commands::setup::ensure_default_wallet_seeded;
 use crate::commands::wallet::{cmd_wallet_topup_inner, TopupOutcome};
-use crate::commands::wallet_support::set_wallet_home_env;
+use crate::commands::wallet_support::{
+    default_sequencer_http_url_for_project, set_wallet_home_env,
+};
 use crate::constants::{
     DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, FRAMEWORK_KIND_LEZ_FRAMEWORK, SPEL_BIN_REL_PATH,
     WALLET_BIN_REL_PATH,
@@ -548,7 +550,11 @@ fn segment_match(pat: &[u8], seg: &[u8]) -> bool {
 fn reseed_after_wipe(project: &Project) -> DynResult<()> {
     let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
     let wallet_home = project.root.join(&project.config.wallet_home_dir);
-    prepare_wallet_home(&lez, &wallet_home)?;
+    prepare_wallet_home(
+        &lez,
+        &wallet_home,
+        &default_sequencer_http_url_for_project(project),
+    )?;
     ensure_default_wallet_seeded(&project.root, &wallet_home, &lez.join(WALLET_BIN_REL_PATH))
 }
 
@@ -1708,7 +1714,10 @@ mod tests {
         {
             let lez = baseline.path().join("lez");
             let wallet_home = baseline.path().join(".scaffold/wallet");
-            prepare_wallet_home(&lez, &wallet_home).expect("baseline prepare");
+            // Matches make_test_project's default localnet.port (3040) below,
+            // so this stays byte-equivalent to the post-reset path.
+            prepare_wallet_home(&lez, &wallet_home, "http://127.0.0.1:3040")
+                .expect("baseline prepare");
             ensure_default_wallet_seeded(
                 baseline.path(),
                 &wallet_home,

@@ -351,6 +351,8 @@ fn start_localnet(
     sequencer_cmd
         .current_dir(lez)
         .arg(&patched_config_path)
+        .arg("--port")
+        .arg(localnet_port.to_string())
         .env("RUST_LOG", "info")
         .env("RISC0_DEV_MODE", if risc0_dev_mode { "1" } else { "0" });
 
@@ -693,8 +695,14 @@ fn build_status_report(
 /// Produce a sequencer config patched for scaffold's localnet — port set to
 /// the project's configured port and `max_block_size` widened so the bundled
 /// deploy flow fits in a single block — and return the absolute path to the
-/// patched file. The pinned LEZ version does not accept `--port` as a CLI flag
-/// — it reads everything from the config file passed as its first argument.
+/// patched file.
+///
+/// The pinned sequencer binary ignores this file's `port` key for RPC
+/// binding: it always binds the `--port` CLI flag (clap default `3040`),
+/// which `start_localnet` also passes explicitly so it matches this
+/// patched config's port. The `port` key is still written here for any
+/// tooling that inspects the config file directly, and so the file stays
+/// internally consistent with the port the sequencer is actually bound to.
 ///
 /// The patched copy is written under `dest_dir` (the project's
 /// `.scaffold/state/`), **not** back into the vendored LEZ checkout. Writing
