@@ -1147,6 +1147,7 @@ mod tests {
                     path: String::new(),
                 },
             },
+            build: crate::model::BuildConfig::default(),
             localnet: LocalnetConfig {
                 port: 3040,
                 risc0_dev_mode: false,

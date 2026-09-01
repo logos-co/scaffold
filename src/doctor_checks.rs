@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::circuits::{circuits_install_dir, version_eq};
 use crate::constants::{DEFAULT_CIRCUITS_VERSION, DEFAULT_LEZ, LOGOS_BLOCKCHAIN_CIRCUITS_ENV};
-use crate::model::{CheckRow, CheckStatus, CircuitsConfig};
+use crate::model::{BuildConfig, CheckRow, CheckStatus, CircuitsConfig};
 use crate::process::{port_open, which};
 use crate::repo::{git_clean, git_head_sha};
 
@@ -60,6 +60,65 @@ fn container_runtime_row(docker: Option<PathBuf>, podman: Option<PathBuf>) -> Ch
                     .to_string(),
             ),
         },
+    }
+}
+
+/// Report the guest-build strategy, and — in `docker` mode — whether the
+/// toolchain that mode needs is actually present. A project pinned to
+/// deterministic builds that cannot run them is a FAIL, not a WARN: `lgs
+/// build` will refuse, and the fix is a one-line install.
+pub(crate) fn check_guest_build(build: &BuildConfig) -> CheckRow {
+    let missing: Vec<&str> = ["cargo-risczero", "docker"]
+        .into_iter()
+        .filter(|tool| which(tool).is_none())
+        .collect();
+    guest_build_row(build, &missing)
+}
+
+/// Split from [`check_guest_build`] so the row shape is testable without
+/// depending on what happens to be installed on the test machine.
+fn guest_build_row(build: &BuildConfig, missing: &[&str]) -> CheckRow {
+    if !build.guest.is_deterministic() {
+        return CheckRow {
+            status: CheckStatus::Pass,
+            name: "guest build".to_string(),
+            detail: "local — host risc0 toolchain; program_id is not reproducible across \
+                     machines. Set [build].guest = \"docker\" in scaffold.toml for \
+                     reproducible builds."
+                .to_string(),
+            remediation: None,
+        };
+    }
+
+    // The pinned tag is reported on both branches: it is the value that makes
+    // `program_id` reproducible, so it belongs in the diagnostic whether or
+    // not this machine can currently run the build.
+    if missing.is_empty() {
+        CheckRow {
+            status: CheckStatus::Pass,
+            name: "guest build".to_string(),
+            detail: format!(
+                "docker — reproducible via risczero/risc0-guest-builder:{}",
+                build.risc0_docker_tag
+            ),
+            remediation: None,
+        }
+    } else {
+        CheckRow {
+            status: CheckStatus::Fail,
+            name: "guest build".to_string(),
+            detail: format!(
+                "docker (risczero/risc0-guest-builder:{}) — {} not found on PATH",
+                build.risc0_docker_tag,
+                missing.join(" and ")
+            ),
+            remediation: Some(
+                "Install Docker and run `rzup install cargo-risczero` (a separate component \
+                 from `rzup install rust`), or set [build].guest = \"local\" in scaffold.toml \
+                 (non-reproducible program_id)"
+                    .to_string(),
+            ),
+        }
     }
 }
 
@@ -358,7 +417,61 @@ mod tests {
 
     use super::{
         check_logos_blockchain_circuits_with, check_standalone_support, container_runtime_row,
+        guest_build_row,
     };
+    use crate::model::{BuildConfig, GuestBuildMode};
+
+    #[test]
+    fn guest_build_row_reports_local_mode_as_pass_and_says_why_it_is_not_reproducible() {
+        let row = guest_build_row(&BuildConfig::default(), &[]);
+        assert_eq!(row.status, CheckStatus::Pass);
+        assert!(row.detail.starts_with("local"), "got: {}", row.detail);
+        assert!(
+            row.detail.contains("not reproducible"),
+            "the local row is the only place doctor can say this; got: {}",
+            row.detail
+        );
+    }
+
+    #[test]
+    fn guest_build_row_reports_the_pinned_tag_in_docker_mode() {
+        let build = BuildConfig {
+            guest: GuestBuildMode::Docker,
+            risc0_docker_tag: "r0.1.91.1".to_string(),
+        };
+        let row = guest_build_row(&build, &[]);
+        assert_eq!(row.status, CheckStatus::Pass);
+        assert!(
+            row.detail.contains("risc0-guest-builder:r0.1.91.1"),
+            "got: {}",
+            row.detail
+        );
+    }
+
+    /// A project pinned to deterministic builds on a machine that cannot run
+    /// them fails, not warns: `lgs build` refuses outright, so a WARN would
+    /// under-report.
+    #[test]
+    fn guest_build_row_fails_when_docker_mode_lacks_its_toolchain() {
+        let build = BuildConfig {
+            guest: GuestBuildMode::Docker,
+            ..BuildConfig::default()
+        };
+        let row = guest_build_row(&build, &["cargo-risczero", "docker"]);
+        assert_eq!(row.status, CheckStatus::Fail);
+        assert!(row.detail.contains("cargo-risczero and docker"));
+        // The pin is reported even when the build cannot run — see the
+        // comment in `guest_build_row`.
+        assert!(
+            row.detail.contains(&format!(
+                "risc0-guest-builder:{}",
+                crate::constants::DEFAULT_RISC0_DOCKER_TAG
+            )),
+            "got: {}",
+            row.detail
+        );
+        assert!(row.remediation.is_some());
+    }
 
     #[test]
     fn container_runtime_row_prefers_docker() {

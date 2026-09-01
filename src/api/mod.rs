@@ -214,7 +214,12 @@ impl Project {
     /// internally, mirroring `lgs build`). Temporarily changes the process
     /// working directory to the project root.
     pub fn build(&self, options: &BuildOptions) -> Result<()> {
-        cmd_build_shortcut(Some(self.inner.root.clone()), options.prebuilt).map_err(error::classify)
+        cmd_build_shortcut(
+            Some(self.inner.root.clone()),
+            options.prebuilt,
+            options.guest.map(Into::into),
+        )
+        .map_err(error::classify)
     }
 
     /// Build IDL files for the current project (framework projects only).
@@ -518,6 +523,35 @@ pub struct SetupOptions {
 pub struct BuildOptions {
     /// See [`SetupOptions::prebuilt`].
     pub prebuilt: bool,
+    /// Override the project's `[build].guest` setting for this build.
+    /// `None` (the default) uses `scaffold.toml`.
+    pub guest: Option<GuestBuild>,
+}
+
+/// How guest programs are compiled — the API mirror of `[build].guest` in
+/// `scaffold.toml`.
+///
+/// [`GuestBuild::Local`] uses the host risc0 toolchain via
+/// `risc0_build::embed_methods()`: fast, no Docker, but the emitted ELF (and
+/// the `program_id` derived from it) can differ across machines.
+/// [`GuestBuild::Docker`] runs `cargo risczero build` inside the pinned
+/// `risczero/risc0-guest-builder` container, so the same source yields the
+/// same `program_id` everywhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuestBuild {
+    /// Host toolchain. Non-reproducible `program_id`.
+    Local,
+    /// Pinned Docker container. Reproducible `program_id`.
+    Docker,
+}
+
+impl From<GuestBuild> for crate::model::GuestBuildMode {
+    fn from(value: GuestBuild) -> Self {
+        match value {
+            GuestBuild::Local => Self::Local,
+            GuestBuild::Docker => Self::Docker,
+        }
+    }
 }
 
 /// Options for [`Project::deploy`].
