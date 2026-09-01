@@ -97,9 +97,15 @@ pub(crate) const DEFAULT_RISC0_METHODS_ENTRY: &str = "guest";
 /// Docker image tag scaffold pins for the deterministic guest build
 /// (`risczero/risc0-guest-builder:<tag>`). The tag fixes the guest Rust
 /// toolchain, so it is part of what makes the emitted ELF — and therefore the
-/// `program_id` derived from it — reproducible across machines. `r0.1.97.0` is
-/// the risc0 Rust 1.97.0 builder, matching the guest toolchain the local
-/// (`embed_methods`) path uses at the pinned `risc0-zkvm` 3.0.5.
+/// `program_id` derived from it — reproducible across machines.
+///
+/// **This is a risc0 release tag, not a Rust version.** `r0.1.97.0` names the
+/// risc0 toolchain release; the `rustc` inside the image is a different, older
+/// number, and the same tag on rzup's toolchain tarball and on this image are
+/// not built from the same compiler. Do not reason about which dependencies
+/// will compile from the tag string — the Guest Build Reproducibility workflow
+/// prints the image's actual `rustc --version` on every run, and that is the
+/// number that decides whether the template's dependency graph builds.
 ///
 /// Bumping this changes every `program_id` the project produces. Projects
 /// override it with `[build].risc0_docker_tag` in `scaffold.toml`; the same

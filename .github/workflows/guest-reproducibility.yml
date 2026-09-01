@@ -18,14 +18,23 @@ name: Guest Build Reproducibility
 on:
   pull_request:
     paths:
-      # Deliberately narrow. This job costs tens of minutes, so it is gated to
-      # the two files that can actually change the emitted ELF: the build
-      # strategy itself, and the constants holding the pinned builder tag and
-      # the artefact directory. `[build]` config plumbing and deploy-side
-      # discovery are covered by unit tests and do not affect the bytes.
+      # The container compiles the *template's* dependency graph, so anything
+      # that changes what gets resolved has to be gated in — not just the
+      # build strategy. `templates/**` and `src/template/**` change the
+      # manifests; `src/constants.rs` carries the pinned builder tag and the
+      # LEZ/spel pins the guest depends on.
       - "src/commands/build.rs"
       - "src/constants.rs"
+      - "templates/**"
+      - "src/template/**"
       - ".github/workflows/guest-reproducibility.yml"
+  # Path gating cannot catch this job's main failure mode: the guest build
+  # resolves dependencies from crates.io at build time, so a newly published
+  # version whose MSRV exceeds the builder image's rustc breaks it with no
+  # change to this repository at all. A weekly run turns that from "the next
+  # contributor discovers it" into a dated CI failure.
+  schedule:
+    - cron: "17 6 * * 1"
   workflow_dispatch:
 
 concurrency:
@@ -147,6 +156,21 @@ jobs:
           # fails here, with a clear message, instead of deep inside a build.
           docker pull "risczero/risc0-guest-builder:$tag"
 
+          # The tag is a risc0 release name, not a Rust version, and the rustc
+          # inside is a different (older) number than the tag suggests. That
+          # number is what decides whether the template's dependency graph
+          # compiles, so record it in every run rather than leaving people to
+          # infer it from the tag string.
+          image_rustc="$(docker run --rm --entrypoint rustc \
+            "risczero/risc0-guest-builder:$tag" +risc0 --version 2>/dev/null \
+            || docker run --rm --entrypoint bash "risczero/risc0-guest-builder:$tag" \
+                 -lc 'rustc --version' 2>/dev/null || echo 'unknown')"
+          echo "builder image rustc: $image_rustc"
+          {
+            echo "### Builder image"
+            echo "\`risczero/risc0-guest-builder:$tag\` — rustc: \`$image_rustc\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Build guests deterministically (first pass)
         run: |
           set -euo pipefail
@@ -197,10 +221,17 @@ jobs:
           cat "$RUNNER_TEMP/second.sha" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
-      # The deterministic artefact must also be the one `deploy` would ship.
-      # `deploy` itself needs a wallet and a running localnet, so assert the
-      # discovery ranking directly: with both trees present, the docker one wins.
-      - name: Deterministic artefact outranks the host-toolchain one
+      # NOTE ON SCOPE: this step checks that both artefact trees exist side by
+      # side and hold different bytes — the precondition that makes deploy's
+      # ranking matter. It does NOT exercise `discover_program_binaries`; it
+      # re-derives the layout with `find`, so a ranking regression would not
+      # fail it. The ranking itself is covered by unit tests in
+      # `src/commands/deploy.rs` (`prefers_deterministic_docker_output_over_local_release`,
+      # `docker_named_crate_is_not_mistaken_for_deterministic_output`), and
+      # end-to-end by DOGFOODING D8. Observing it from the CLI needs a running
+      # localnet and a funded wallet, which is not worth wiring into a job
+      # whose subject is reproducibility.
+      - name: Both artefact trees present and distinct
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/repro-app"
@@ -211,7 +242,7 @@ jobs:
             echo "::error::expected a host-toolchain artefact for $program too (the workspace build makes one)"
             exit 1
           fi
-          echo "both present for '$program':"
+          echo "both artefact trees present for '$program':"
           echo "  docker:  $docker_bin"
           echo "  release: $release_bin"
           if cmp -s "$docker_bin" "$release_bin"; then
