@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context};
 
-use crate::config::{parse_config, serialize_config};
+use crate::config::{parse_config, update_config};
 use crate::model::{Project, RepoRef};
 use crate::state::write_text_atomic;
 use crate::DynResult;
@@ -75,18 +75,21 @@ pub(crate) fn run_in_project_dir(
     result
 }
 
-/// Rewrite `scaffold.toml` from scratch using the current `project.config`.
+/// Write the current `project.config` back to `scaffold.toml`.
 ///
-/// This is a destructive serialization: user comments, key ordering, and any
-/// hand-formatting are lost. Callers should only invoke it when the config
-/// has actually changed and the rewrite carries meaningful state. The
-/// comment-preserving path is `init`'s in-place `toml_edit` migration —
-/// not this function.
+/// Rewrites in place through `toml_edit`, so user comments, key ordering, and
+/// sections scaffold doesn't model survive the write — only the keys scaffold
+/// owns are reassigned. Callers should still invoke it only when the config
+/// has actually changed and the rewrite carries meaningful state.
+///
+/// Comments here are routinely load-bearing (why a `runtime_dir` override
+/// exists, why a pin is held back), so dropping them silently re-opens the
+/// bugs they document. If the file is missing or unparseable, this falls back
+/// to a from-scratch render.
 pub(crate) fn save_project_config(project: &Project) -> DynResult<()> {
-    write_text_atomic(
-        &project.root.join("scaffold.toml"),
-        &serialize_config(&project.config)?,
-    )
+    let path = project.root.join("scaffold.toml");
+    let existing = fs::read_to_string(&path).unwrap_or_default();
+    write_text_atomic(&path, &update_config(&existing, &project.config)?)
 }
 
 pub(crate) fn find_project_root(mut dir: PathBuf) -> Option<PathBuf> {
@@ -264,6 +267,73 @@ mod tests {
 
     // Tests in this module mutate process-wide env vars; run them under one lock.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// The full disk round trip `save_project_config` performs: read the
+    /// existing file, merge the config over it, write it back atomically.
+    /// The unit tests in `config` cover `update_config` in isolation; only
+    /// this covers the read-back, which is where a missing or unreadable file
+    /// silently degrades to a from-scratch render.
+    #[test]
+    fn save_project_config_preserves_comments_through_the_disk_round_trip() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("scaffold.toml");
+        let original = "\
+# LOAD-BEARING: runtime_dir must be the session's real runtime dir;
+# the 108-byte sun_path cap makes every module segfault otherwise.
+[scaffold]
+version = \"0.2.0\"
+
+[repos.lez]
+source = \"https://github.com/logos-blockchain/logos-execution-zone.git\"
+pin = \"cf3639d8252040d13b3d4e933feb19b42c76e14a\"
+
+[repos.spel]
+source = \"https://github.com/logos-co/spel.git\"
+pin = \"73fc462eb8f0a4d00f1a846437c627ec2e523f83\"
+
+[wallet]
+home_dir = \".scaffold/wallet\"
+
+[framework]
+kind = \"default\"
+version = \"0.1.0\"
+
+[framework.idl]
+spec = \"lssa-idl/0.1.0\"
+path = \"idl\"
+
+[localnet]
+port = 3040
+risc0_dev_mode = true
+"
+        .to_string();
+        fs::write(&path, &original).expect("seed scaffold.toml");
+
+        // Load, change something scaffold owns, save.
+        let mut project = load_project_at(temp.path()).expect("load");
+        project.config.lez.pin = "2222222222222222222222222222222222222222".to_string();
+        save_project_config(&project).expect("save");
+
+        let written = fs::read_to_string(&path).expect("read back");
+        assert!(
+            written.contains("# LOAD-BEARING: runtime_dir must be the session's real runtime dir;"),
+            "comment dropped by save_project_config:\n{written}"
+        );
+        assert!(
+            written.contains("# the 108-byte sun_path cap makes every module segfault otherwise."),
+            "second comment line dropped:\n{written}"
+        );
+        assert!(
+            written.contains("2222222222222222222222222222222222222222"),
+            "the edit itself was not written:\n{written}"
+        );
+        // And the result must still load.
+        let reloaded = load_project_at(temp.path()).expect("reload");
+        assert_eq!(
+            reloaded.config.lez.pin,
+            "2222222222222222222222222222222222222222"
+        );
+    }
 
     fn fixture_project(root: PathBuf, cache_root: &str) -> Project {
         Project {
