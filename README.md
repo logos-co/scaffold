@@ -187,9 +187,16 @@ Two things follow from that:
   deleting a line is a real edit, not one that gets undone on the next run.
 - If the file cannot be parsed as TOML — a stray bracket from a hand-edit —
   scaffold cannot merge into it, so it writes a fresh one instead. It warns on
-  stderr when it does this and saves your original next to it as
-  `scaffold.toml.bak`, so nothing is lost quietly. (An existing `.bak` is never
-  overwritten; move it aside first if you want the newer copy kept too.)
+  stderr when it does this and first saves your original next to it as
+  `scaffold.toml.bak-YYYY-MM-DD-HHMMSS.NNN`, so nothing is lost quietly. The
+  name is timestamped, so each such rewrite keeps its own copy and they sort
+  oldest-first in a directory listing. (Two rewrites inside the same
+  millisecond get a `-2`, `-3`, … suffix so neither is lost.)
+
+  This is fail-closed: **if the backup cannot be written, scaffold aborts and
+  leaves your `scaffold.toml` alone.** Re-running a command is recoverable;
+  your comments are not. If that happens, the error names the backup path that
+  blocked it — move that file aside and re-run.
 
 ## Configuration
 

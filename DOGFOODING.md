@@ -1083,17 +1083,36 @@ printf '\n[basecamp]\nport_base = 41000\n' >> scaffold.toml
 "$SCAFFOLD_BIN" basecamp setup
 grep -n '^port_base' scaffold.toml            # expect: present, 41000
 # Now remove it by hand and re-run; the rewrite must not resurrect it.
-sed -i.bak '/^port_base = 41000$/d' scaffold.toml && rm -f scaffold.toml.bak
+sed -i.sedtmp '/^port_base = 41000$/d' scaffold.toml && rm -f scaffold.toml.sedtmp
 "$SCAFFOLD_BIN" basecamp setup
 grep -n '^port_base' scaffold.toml || echo "OK: default port_base is absent"
 
-# Negative path: an unparseable scaffold.toml must warn and leave a backup,
-# never be replaced in silence.
+# Negative path: an unparseable scaffold.toml must warn and leave a timestamped
+# backup, never be replaced in silence.
 cp scaffold.toml /tmp/scaffold.good.toml
 printf '\n[[[ broken\n' >> scaffold.toml
 "$SCAFFOLD_BIN" basecamp setup            # expect a "could not be parsed" warning on stderr
-ls -l scaffold.toml.bak
-cp /tmp/scaffold.good.toml scaffold.toml && rm -f scaffold.toml.bak
+ls -l scaffold.toml.bak-*                 # expect exactly one, named .bak-YYYY-MM-DD-HHMMSS.NNN
+
+# Break it a second time: each rewrite keeps its OWN backup, so the second one
+# must not be blocked by the first.
+cp /tmp/scaffold.good.toml scaffold.toml
+printf '\n[[[ broken again\n' >> scaffold.toml
+"$SCAFFOLD_BIN" basecamp setup
+ls -l scaffold.toml.bak-*                 # expect two now, sorting oldest-first
+
+# Fail-closed: if the backup cannot be written, the rewrite must ABORT and
+# leave scaffold.toml untouched. Simulate by making the directory read-only so
+# the backup cannot be created. (Skip on a root shell, where the mode is moot.)
+cp /tmp/scaffold.good.toml scaffold.toml
+printf '\n[[[ broken once more\n' >> scaffold.toml
+cp scaffold.toml /tmp/scaffold.broken.toml
+chmod a-w .
+"$SCAFFOLD_BIN" basecamp setup; echo "exit=$?"   # expect NON-zero
+chmod u+w .
+diff /tmp/scaffold.broken.toml scaffold.toml && echo "OK: aborted without touching scaffold.toml"
+
+cp /tmp/scaffold.good.toml scaffold.toml && rm -f scaffold.toml.bak-*
 ```
 
 ### Expected Success Signals
@@ -1108,7 +1127,9 @@ cp /tmp/scaffold.good.toml scaffold.toml && rm -f scaffold.toml.bak
 - Second `basecamp setup` is idempotent: pin unchanged → no rebuild reported, exit 0.
 - **`scaffold.toml` comments and unmodelled sections survive every rewrite.** `basecamp setup` rewrites the file, and the planted `# LOAD-BEARING: …` comment and `[team.notes]` section must both still be present after two `setup` runs. Comments in this file record *why* a pin is held back or a `runtime_dir` override exists; dropping them silently re-opens the bug they were written to prevent.
 - **A value reset to its default is actually gone from the file.** After removing `port_base = 41000` by hand, a `setup` re-run must not resurrect it. The rewrite merges over the existing document, so a key that is only ever assigned and never removed keeps whatever the file already said — the two halves of that contract fail in opposite directions and only checking both catches either.
-- **An unparseable `scaffold.toml` is never replaced in silence.** `setup` on a broken file warns on stderr that the file could not be parsed and is being rewritten from scratch, and leaves the original at `scaffold.toml.bak`. Nothing scaffold does to a config file it cannot read should be quiet.
+- **An unparseable `scaffold.toml` is never replaced in silence.** `setup` on a broken file warns on stderr that the file could not be parsed and is being rewritten from scratch, and leaves the original at `scaffold.toml.bak-YYYY-MM-DD-HHMMSS.NNN`. Nothing scaffold does to a config file it cannot read should be quiet.
+- **Each destructive rewrite keeps its own backup.** The timestamp is what makes that work: a second broken-file rewrite writes a second `.bak-*` rather than colliding with the first. The names are zero-padded and date-before-time, so `ls` lists them oldest-first.
+- **The backup is fail-closed.** With the backup unwritable (directory read-only), `setup` exits non-zero and `scaffold.toml` is byte-identical to what it was. Scaffold must never destroy a file it could not first preserve — the rewrite is recoverable by re-running, the user's comments are not. The error names both the config file and the backup path that blocked it.
 - All commands run only inside the project; running them from outside the project must fail with the existing scaffold "not a logos-scaffold project" message.
 
 ### Failure Signals / Common Pitfalls
@@ -1117,7 +1138,8 @@ cp /tmp/scaffold.good.toml scaffold.toml && rm -f scaffold.toml.bak
 - **A Rust panic and backtrace from any command that persists config is a UX regression, and `scaffold.toml` content must never be able to cause one.** A hand-written but perfectly valid file — a section given as an inline table (`wallet = { home_dir = "…" }`), say — is exactly the input that used to abort `setup` with `thread 'main' panicked`. Anything scaffold cannot represent belongs in an error message or a documented fallback, not an abort.
 - A `setup` re-run that rebuilds when the pin has not changed is a regression in idempotency.
 - A comment or unmodelled section that disappears from `scaffold.toml` after `setup` is a fail, and a silent one — the write reports success either way. So is the inverse: a `port_base` the user deleted reappearing on the next run.
-- An unparseable `scaffold.toml` being overwritten with no warning and no `scaffold.toml.bak` is a fail. That is the exact loss this path exists to prevent, and the user gets no signal it happened.
+- An unparseable `scaffold.toml` being overwritten with no warning and no `scaffold.toml.bak-*` is a fail. That is the exact loss this path exists to prevent, and the user gets no signal it happened.
+- An overwrite that proceeds *despite* the backup failing is a worse fail than the abort it replaced: it destroys the one copy of the file while reporting success. A second broken-file rewrite silently reusing or clobbering the first backup is the same bug wearing a different hat.
 - Profile directories under `.scaffold/basecamp/profiles/` missing after first `setup` is a fail.
 - If `basecamp` commands write to the user's global `~/.local/share/Logos/` or `~/Library/Application Support/Logos/`, that is a severe regression — basecamp state is project-local under `.scaffold/basecamp/`.
 - If the basecamp binary lands on `PATH`, that is a contract violation.
@@ -1130,7 +1152,8 @@ cp /tmp/scaffold.good.toml scaffold.toml && rm -f scaffold.toml.bak
 - Listing of `.scaffold/basecamp/profiles/`.
 - Relevant `scaffold.toml` excerpt for `[repos.basecamp.attr]` and `[basecamp.profiles.*]` when present.
 - `diff /tmp/scaffold.before.toml scaffold.toml` after the two `setup` runs, showing that only keys scaffold owns moved and the planted comment and `[team.notes]` are untouched.
-- The stderr warning and `ls -l scaffold.toml.bak` from the unparseable-file run.
+- The stderr warning and `ls -l scaffold.toml.bak-*` from the unparseable-file runs, showing two distinct timestamped backups after the second one.
+- The non-zero exit and the unchanged `scaffold.toml` from the read-only-directory (fail-closed) run.
 
 ### Execution Notes
 

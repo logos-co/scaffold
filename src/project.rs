@@ -1,6 +1,8 @@
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context};
 
@@ -97,16 +99,25 @@ pub(crate) fn run_in_project_dir(
 /// silent. Refusing outright would wedge every command that persists config on
 /// a file one stray bracket from valid, so the from-scratch render stands — but
 /// it discards every comment and unmodelled section the file held. So before
-/// overwriting, copy the original to `scaffold.toml.bak` and say so on stderr.
-/// That is the same recovery `init`'s migration already offers, and for the
-/// same reason: the user should be able to get their comments back.
+/// overwriting, the original is copied to a timestamped sibling
+/// `scaffold.toml.bak-YYYY-MM-DD-HHMMSS.NNN` and the fallback is announced on
+/// stderr. That is the same recovery `init`'s migration offers, with a
+/// distinct name per rewrite so a second destructive write keeps its own copy
+/// instead of finding the first one in the way.
 ///
-/// The backup is best-effort and never blocks the write. `init` can refuse to
-/// clobber an existing `.bak` because the user asked for a migration and can
-/// re-run it; here the rewrite is incidental to some other command (`basecamp
-/// setup`), and failing it because a stale `.bak` is in the way would be a
-/// worse outcome than not having the backup. Collisions are reported, not
-/// fatal.
+/// **This is fail-closed.** If the backup cannot be written — an IO error, a
+/// read-only directory, no free name — the whole write aborts with an error
+/// and `scaffold.toml` is left untouched. A file we could
+/// not preserve is a file we do not destroy. The alternative, proceeding with
+/// a warning, trades the user's comments for the convenience of not having to
+/// re-run a command, which is the wrong way round: the rewrite is recoverable,
+/// the comments are not.
+///
+/// Two rewrites *can* land in the same millisecond — that is observable, not
+/// theoretical — so a same-millisecond name is disambiguated with a `-2`,
+/// `-3`, … suffix. Past a handful of those the clock is not merely coarse and
+/// the write aborts: quietly continuing past an unexplained state is exactly
+/// what this path exists to stop.
 pub(crate) fn save_project_config(project: &Project) -> DynResult<()> {
     let path = project.root.join("scaffold.toml");
     let existing = match fs::read_to_string(&path) {
@@ -124,7 +135,8 @@ pub(crate) fn save_project_config(project: &Project) -> DynResult<()> {
     };
     let (rendered, outcome) = update_config_reporting(&existing, &project.config)?;
     if let Some(reason) = outcome.discarded_reason() {
-        warn_unparseable_rewrite(&path, &existing, reason);
+        // `?`: a failed backup must stop the write, not merely warn about it.
+        back_up_before_discarding(&path, &existing, reason)?;
     }
     write_text_atomic(&path, &rendered)
 }
@@ -132,41 +144,206 @@ pub(crate) fn save_project_config(project: &Project) -> DynResult<()> {
 /// Tell the user their `scaffold.toml` could not be parsed and is about to be
 /// replaced by a from-scratch render, and preserve the original next to it.
 ///
-/// Split out from `save_project_config` so the message and the backup stay one
-/// unit: a warning with no recovery path would be the smaller half of what the
-/// user needs here.
-fn warn_unparseable_rewrite(path: &Path, existing: &str, reason: &str) {
+/// Returns an error — which aborts the rewrite — if the original could not be
+/// preserved. Split out from `save_project_config` so the message and the
+/// backup stay one unit: a warning with no recovery path would be the smaller
+/// half of what the user needs here.
+fn back_up_before_discarding(path: &Path, existing: &str, reason: &str) -> DynResult<()> {
     eprintln!(
         "warning: {} could not be parsed as TOML, so it is being rewritten from \
          scratch. Comments and any sections scaffold does not model will be lost.\n\
          warning:   parse error: {reason}",
         path.display(),
     );
-    // Nothing on disk to preserve — the read returned NotFound.
+    // Nothing on disk to preserve — the read returned NotFound, so the
+    // "from-scratch render" is just a first write and destroys nothing.
     if existing.is_empty() {
-        return;
+        return Ok(());
     }
-    let backup = path.with_extension("toml.bak");
-    if backup.exists() {
-        eprintln!(
-            "warning:   not writing a backup: {} already exists and will not be \
-             overwritten. Move it aside to keep a copy of the current file.",
-            backup.display(),
-        );
-        return;
-    }
-    // Copy the bytes we already read rather than re-reading, so the backup is
-    // exactly the content being discarded even if the file changed underneath.
-    match fs::write(&backup, existing) {
-        Ok(()) => eprintln!(
-            "warning:   a copy of the original was saved to {}",
+
+    let (backup, mut file) = create_backup_file(path)?;
+
+    // Write the bytes already read rather than re-reading, so the backup is
+    // exactly what is discarded even if the file changed underneath us.
+    file.write_all(existing.as_bytes()).with_context(|| {
+        format!(
+            "refusing to rewrite {}: could not write its backup to {}",
+            path.display(),
             backup.display()
-        ),
-        Err(e) => eprintln!(
-            "warning:   could not write a backup to {}: {e}",
+        )
+    })?;
+    // Without this an IO error surfacing only at close would be swallowed, and
+    // we would report a backup that is short or empty as a success.
+    file.sync_all().with_context(|| {
+        format!(
+            "refusing to rewrite {}: could not flush its backup to {}",
+            path.display(),
             backup.display()
-        ),
+        )
+    })?;
+
+    eprintln!(
+        "warning:   a copy of the original was saved to {}",
+        backup.display()
+    );
+    Ok(())
+}
+
+/// Create the backup file, returning it and the path it landed on.
+///
+/// Uses `create_new`, so the file is claimed atomically — never a check
+/// followed by an open that could clobber something that appeared in between.
+///
+/// Two `save_project_config` calls in one run can land in the same
+/// millisecond (a real occurrence, not a theoretical one — it showed up under
+/// test load), so a same-millisecond collision is disambiguated with a `-2`,
+/// `-3`, … suffix rather than failing. That keeps the abort meaningful: past a
+/// handful of attempts the clock is not merely coarse, something is wrong, and
+/// we stop rather than spin.
+fn create_backup_file(path: &Path) -> DynResult<(PathBuf, fs::File)> {
+    const MAX_ATTEMPTS: u32 = 16;
+    let stamp = local_timestamp_for_filename()?;
+    let mut last_err = None;
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        let suffix = if attempt == 1 {
+            String::new()
+        } else {
+            format!("-{attempt}")
+        };
+        let candidate = backup_path_for(path, &format!("{stamp}{suffix}"))?;
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => return Ok((candidate, file)),
+            // Only a name collision is worth another attempt; anything else
+            // (no permission, read-only filesystem, missing directory) will
+            // fail identically next time, so surface it now.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_err = Some((candidate, e));
+            }
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "refusing to rewrite {}: could not create its backup at {}",
+                        path.display(),
+                        candidate.display()
+                    )
+                })
+            }
+        }
     }
+
+    let (candidate, _) = last_err.expect("loop runs at least once and only exits via return");
+    bail!(
+        "refusing to rewrite {}: could not claim a backup name — {} and its \
+         numbered variants all already exist.\n\
+         The name carries a millisecond timestamp, so this many collisions \
+         means something unexpected (a clock stepping backwards, for \
+         instance). Move those files aside and re-run.",
+        path.display(),
+        candidate.display(),
+    )
+}
+
+/// `<path>.bak-<stamp>`, where `stamp` is `YYYY-MM-DD-HHMMSS.NNN` in local
+/// time, plus a disambiguating suffix if that name was already taken.
+///
+/// One backup per destructive rewrite, rather than a single fixed
+/// `scaffold.toml.bak` that the second one would find occupied. The format is
+/// zero-padded throughout and orders date-before-time, so a plain lexical sort
+/// of a directory listing is also chronological — which is the only thing
+/// anyone does with these files.
+fn backup_path_for(path: &Path, stamp: &str) -> DynResult<PathBuf> {
+    let mut name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("cannot derive a backup name for {}", path.display()))?
+        .to_os_string();
+    name.push(format!(".bak-{stamp}"));
+    Ok(path.with_file_name(name))
+}
+
+/// Now, as `YYYY-MM-DD-HHMMSS.NNN` in the machine's local time.
+///
+/// Hand-rolled rather than pulled from a date crate: this is the only calendar
+/// formatting in the codebase, and it exists to name a file a human will read
+/// in a directory listing. Adding a dependency to the CLI's tree for one
+/// filename is a poor trade.
+fn local_timestamp_for_filename() -> DynResult<String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| anyhow!("system clock is before the unix epoch: {e}"))?;
+    let millis = now.subsec_millis();
+    let local = i64::try_from(now.as_secs())
+        .map_err(|_| anyhow!("system clock is too far in the future to format"))?
+        + local_utc_offset_seconds();
+
+    // Days since epoch, and the seconds within that day. `div_euclid` /
+    // `rem_euclid` rather than `/` and `%` so a pre-1970 local time (possible
+    // once the offset is applied near the epoch) floors instead of truncating
+    // toward zero, which would land the time in the wrong day.
+    let days = local.div_euclid(86_400);
+    let secs_of_day = local.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let (hour, minute, second) = (
+        secs_of_day / 3600,
+        (secs_of_day % 3600) / 60,
+        secs_of_day % 60,
+    );
+    Ok(format!(
+        "{year:04}-{month:02}-{day:02}-{hour:02}{minute:02}{second:02}.{millis:03}"
+    ))
+}
+
+/// The machine's current UTC offset in seconds, or 0 if it cannot be read.
+///
+/// Falling back to UTC is deliberate: the timestamp names a backup file, so a
+/// wrong-by-hours name is a cosmetic problem, while failing the backup — and
+/// therefore, now, the whole write — over an unreadable timezone would not be.
+/// This is the one part of the path allowed to degrade rather than abort.
+fn local_utc_offset_seconds() -> i64 {
+    #[cfg(unix)]
+    {
+        // SAFETY: `localtime_r` writes into a caller-provided `tm` and, unlike
+        // `localtime`, keeps no shared static — so it is sound to call from
+        // any thread. A null return means the conversion failed, in which case
+        // `out` is untouched and we do not read it.
+        unsafe {
+            let now = libc::time(std::ptr::null_mut());
+            let mut out: libc::tm = std::mem::zeroed();
+            if libc::localtime_r(&now, &mut out).is_null() {
+                return 0;
+            }
+            out.tm_gmtoff as i64
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
+
+/// Days since the Unix epoch → `(year, month, day)`.
+///
+/// Howard Hinnant's `civil_from_days`, the algorithm the C++20 `<chrono>`
+/// calendar is specified in terms of. It shifts the era to start in March so
+/// the leap day falls at the end of the year, which is what removes every
+/// special case from the month arithmetic. Correct for any date in the
+/// proleptic Gregorian calendar; pinned by tests against known dates,
+/// leap-year boundaries, and epoch-adjacent days.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097); // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11], March-based
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 pub(crate) fn find_project_root(mut dir: PathBuf) -> Option<PathBuf> {
@@ -487,31 +664,50 @@ risc0_dev_mode = true
         assert!(path.exists(), "fresh write did not happen");
     }
 
+    /// Every `scaffold.toml.bak-*` sitting next to `path`.
+    fn backups_beside(dir: &Path) -> Vec<PathBuf> {
+        let mut found: Vec<PathBuf> = fs::read_dir(dir)
+            .expect("read_dir")
+            .map(|e| e.expect("dir entry").path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("scaffold.toml.bak-"))
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// A `scaffold.toml` broken the way a hand-edit breaks one: a stray
+    /// bracket, plus a load-bearing comment and an unmodelled section that the
+    /// from-scratch render cannot reproduce.
+    fn broken_scaffold_toml() -> String {
+        format!(
+            "# LOAD-BEARING: do not bump this pin, see issue 412\n\
+             [[[oops\n{}\n[team.notes]\nowner = \"alice\"\n",
+            minimal_scaffold_toml()
+        )
+    }
+
     /// Regression for weboko's review finding 3 (second half).
     ///
     /// An unparseable `scaffold.toml` is still rewritten from scratch — that
     /// fallback is deliberate — but it discards every comment and unmodelled
     /// section the file held, which is precisely the loss this whole path
     /// exists to prevent. The user must get both a diagnostic and a way back:
-    /// the original is copied to `scaffold.toml.bak` before the overwrite.
+    /// the original is copied to a timestamped sibling before the overwrite.
     #[test]
     fn save_project_config_backs_up_an_unparseable_file_before_overwriting_it() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("scaffold.toml");
-        let backup = temp.path().join("scaffold.toml.bak");
 
         // Load from a good file so we have a Project to write back...
         fs::write(&path, minimal_scaffold_toml()).expect("seed");
         let project = load_project_at(temp.path()).expect("load");
 
-        // ...then break the file on disk, the way a hand-edit would: one stray
-        // bracket, with a load-bearing comment and an unmodelled section that
-        // the from-scratch render cannot reproduce.
-        let broken = format!(
-            "# LOAD-BEARING: do not bump this pin, see issue 412\n\
-             [[[oops\n{}\n[team.notes]\nowner = \"alice\"\n",
-            minimal_scaffold_toml()
-        );
+        // ...then break the file on disk.
+        let broken = broken_scaffold_toml();
         fs::write(&path, &broken).expect("break it");
 
         save_project_config(&project).expect("a broken file must not wedge the write");
@@ -520,11 +716,13 @@ risc0_dev_mode = true
         load_project_at(temp.path()).expect("rewritten file must load");
 
         // And the discarded original is recoverable, byte for byte.
-        assert!(
-            backup.exists(),
-            "no scaffold.toml.bak written before discarding an unparseable file"
+        let backups = backups_beside(temp.path());
+        assert_eq!(
+            backups.len(),
+            1,
+            "expected exactly one timestamped backup, got {backups:?}"
         );
-        let saved = fs::read_to_string(&backup).expect("read backup");
+        let saved = fs::read_to_string(&backups[0]).expect("read backup");
         assert_eq!(
             saved, broken,
             "the backup must be the exact content that was discarded"
@@ -539,8 +737,50 @@ risc0_dev_mode = true
         );
     }
 
+    /// The point of timestamping: a *second* destructive rewrite keeps its own
+    /// copy rather than finding the first one in the way. With a fixed
+    /// `scaffold.toml.bak` this either clobbered the older original or (in the
+    /// fail-closed design) wedged every subsequent write.
+    #[test]
+    fn save_project_config_keeps_a_separate_backup_per_rewrite() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("scaffold.toml");
+
+        fs::write(&path, minimal_scaffold_toml()).expect("seed");
+        let project = load_project_at(temp.path()).expect("load");
+
+        let first = format!("# first original\n[[[oops\n{}", minimal_scaffold_toml());
+        fs::write(&path, &first).expect("break it");
+        save_project_config(&project).expect("first rewrite");
+
+        // Break it again, with different content.
+        let second = format!("# second original\n[[[oops\n{}", minimal_scaffold_toml());
+        fs::write(&path, &second).expect("break it again");
+        save_project_config(&project)
+            .expect("second rewrite must not be blocked by the first .bak");
+
+        let backups = backups_beside(temp.path());
+        assert_eq!(
+            backups.len(),
+            2,
+            "each destructive rewrite must keep its own backup, got {backups:?}"
+        );
+        let contents: Vec<String> = backups
+            .iter()
+            .map(|p| fs::read_to_string(p).expect("read backup"))
+            .collect();
+        assert!(
+            contents.iter().any(|c| c == &first),
+            "the first original was lost:\n{contents:?}"
+        );
+        assert!(
+            contents.iter().any(|c| c == &second),
+            "the second original was lost:\n{contents:?}"
+        );
+    }
+
     /// A parseable file takes the merge path, so there is nothing being
-    /// discarded and no backup to write. Without this, a `.bak` written on
+    /// discarded and no backup to write. Without this, a backup written on
     /// every save would look like a passing test above while quietly
     /// littering every project directory.
     #[test]
@@ -553,39 +793,182 @@ risc0_dev_mode = true
         save_project_config(&project).expect("save");
 
         assert!(
-            !temp.path().join("scaffold.toml.bak").exists(),
+            backups_beside(temp.path()).is_empty(),
             "a successful merge must not leave a backup behind"
         );
         let after = fs::read_to_string(&path).expect("read back");
         assert!(after.contains("# keep me"), "comment lost:\n{after}");
     }
 
-    /// An existing `scaffold.toml.bak` is someone else's copy — `init`'s
-    /// migration, or a hand-curated one. Clobbering it would lose an older
-    /// original to save a newer one. Unlike `init`, this path does not abort:
-    /// the rewrite is incidental to whatever command the user actually ran, so
-    /// a stale `.bak` must not fail it.
+    /// Fail-closed: if the original cannot be preserved, it is not destroyed.
+    ///
+    /// The name carries a millisecond timestamp, so a collision means
+    /// something unexpected happened. Rather than retry or press on, the write
+    /// aborts and `scaffold.toml` is left exactly as the user left it — the
+    /// rewrite is recoverable by re-running a command, the comments are not.
     #[test]
-    fn save_project_config_does_not_clobber_an_existing_backup() {
+    fn save_project_config_aborts_rather_than_overwrite_a_file_it_cannot_back_up() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("scaffold.toml");
-        let backup = temp.path().join("scaffold.toml.bak");
 
         fs::write(&path, minimal_scaffold_toml()).expect("seed");
         let project = load_project_at(temp.path()).expect("load");
 
-        let prior = "# an older backup nobody should lose\n";
-        fs::write(&backup, prior).expect("seed backup");
-        fs::write(&path, "[[[ still broken").expect("break it");
+        let broken = broken_scaffold_toml();
+        fs::write(&path, &broken).expect("break it");
 
-        save_project_config(&project).expect("a stale .bak must not fail the write");
+        // Make the backup impossible to create by taking write permission off
+        // the directory. This is the realistic form of the failure (a
+        // read-only checkout, a permissions mistake) and, unlike a name
+        // collision, it cannot be retried around.
+        let mut perms = fs::metadata(temp.path()).expect("metadata").permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(temp.path(), perms).expect("chmod");
 
-        assert_eq!(
-            fs::read_to_string(&backup).expect("read backup"),
-            prior,
-            "the pre-existing backup was overwritten"
+        // Running as root defeats the permission bit; assert nothing about the
+        // environment in that case, just restore and skip.
+        let blocked = fs::write(temp.path().join(".probe"), "x").is_err();
+        if blocked {
+            let err = save_project_config(&project)
+                .expect_err("a backup that cannot be written must abort the rewrite");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("scaffold.toml"),
+                "error must name the file it refused to rewrite: {msg}"
+            );
+            assert!(
+                msg.contains("backup"),
+                "error must say the backup is what blocked it: {msg}"
+            );
+        }
+
+        let mut perms = fs::metadata(temp.path()).expect("metadata").permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        fs::set_permissions(temp.path(), perms).expect("restore");
+
+        if blocked {
+            // The whole point: the unparseable original is still on disk.
+            assert_eq!(
+                fs::read_to_string(&path).expect("read back"),
+                broken,
+                "scaffold.toml was overwritten despite the backup failing"
+            );
+            assert!(
+                backups_beside(temp.path()).is_empty(),
+                "no backup should exist when the backup write failed"
+            );
+        }
+    }
+
+    /// Two rewrites inside one millisecond must each keep their backup.
+    ///
+    /// This is not hypothetical: the first version of this code aborted the
+    /// second write, and the failure showed up under normal test-suite load.
+    /// Consecutive `save_project_config` calls are fast enough to share a
+    /// millisecond, so the disambiguating suffix is load-bearing, not defensive
+    /// decoration. Driving `create_backup_file` directly pins it without
+    /// depending on how fast the machine running the test happens to be.
+    #[test]
+    fn same_millisecond_backups_do_not_collide() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("scaffold.toml");
+        fs::write(&path, "irrelevant").expect("seed");
+
+        let mut claimed = Vec::new();
+        for _ in 0..5 {
+            let (p, _file) = create_backup_file(&path).expect("claim a backup name");
+            assert!(
+                !claimed.contains(&p),
+                "handed out the same name twice: {p:?}"
+            );
+            claimed.push(p);
+        }
+        assert_eq!(claimed.len(), 5);
+        // All five exist on disk simultaneously — none clobbered another.
+        for p in &claimed {
+            assert!(p.exists(), "backup vanished: {p:?}");
+        }
+    }
+
+    /// The backup name is user-facing — people find these in a directory
+    /// listing — so its shape is a contract, not an implementation detail.
+    #[test]
+    fn backup_name_is_timestamped_and_sorts_chronologically() {
+        let path = Path::new("/tmp/proj/scaffold.toml");
+        let stamp = local_timestamp_for_filename().expect("stamp");
+        let name = backup_path_for(path, &stamp)
+            .expect("derive")
+            .file_name()
+            .expect("file name")
+            .to_string_lossy()
+            .into_owned();
+
+        let stamp = name
+            .strip_prefix("scaffold.toml.bak-")
+            .unwrap_or_else(|| panic!("unexpected backup name: {name}"));
+        // YYYY-MM-DD-HHMMSS.NNN
+        assert_eq!(stamp.len(), 21, "unexpected stamp width: {stamp}");
+        let (date, rest) = stamp.split_at(10);
+        let mut date_parts = date.split('-');
+        let year: i64 = date_parts.next().expect("year").parse().expect("year int");
+        let month: u32 = date_parts
+            .next()
+            .expect("month")
+            .parse()
+            .expect("month int");
+        let day: u32 = date_parts.next().expect("day").parse().expect("day int");
+        assert!((2020..=2100).contains(&year), "implausible year: {stamp}");
+        assert!((1..=12).contains(&month), "bad month: {stamp}");
+        assert!((1..=31).contains(&day), "bad day: {stamp}");
+        assert!(rest.starts_with('-'), "expected -HHMMSS.NNN: {stamp}");
+        assert_eq!(rest.as_bytes()[7], b'.', "expected .NNN: {stamp}");
+        assert!(
+            rest[1..].chars().all(|c| c.is_ascii_digit() || c == '.'),
+            "time part must be digits: {stamp}"
         );
-        load_project_at(temp.path()).expect("rewritten file must still load");
+
+        // Zero-padded and date-before-time, so lexical order is chronological.
+        // Two stamps a second apart must compare the way the clock does.
+        let earlier = "2026-09-04-090000.000";
+        let later = "2026-09-04-090001.000";
+        assert!(earlier < later, "stamps must sort chronologically");
+        assert!("2026-09-04-000000.000" < "2026-09-14-000000.000");
+        assert!("2026-09-30-235959.999" < "2026-10-01-000000.000");
+    }
+
+    /// `civil_from_days` is the one piece of hand-rolled calendar arithmetic
+    /// here, so it is pinned against dates picked to break a wrong
+    /// implementation: the epoch, both sides of a leap day, a century
+    /// non-leap-year (1900) and a 400-year leap year (2000), and days before
+    /// the epoch, which a truncating division would land in the wrong day.
+    #[test]
+    fn civil_from_days_matches_known_dates() {
+        for (days, expected) in [
+            (0_i64, (1970, 1, 1)),
+            (1, (1970, 1, 2)),
+            (-1, (1969, 12, 31)),
+            (-719_468, (0, 3, 1)),
+            (59, (1970, 3, 1)),
+            (365, (1971, 1, 1)),
+            // 2000 is a leap year (divisible by 400): Feb 29 exists.
+            (11_015, (2000, 2, 28)),
+            (11_016, (2000, 2, 29)),
+            (11_017, (2000, 3, 1)),
+            // 1900 is NOT a leap year (divisible by 100, not 400), so Feb 28
+            // is followed directly by Mar 1.
+            (-25_509, (1900, 2, 28)),
+            (-25_508, (1900, 3, 1)),
+            (20_335, (2025, 9, 4)),
+            (19_723, (2024, 1, 1)),
+            (19_782, (2024, 2, 29)),
+        ] {
+            assert_eq!(
+                civil_from_days(days),
+                expected,
+                "civil_from_days({days}) should be {expected:?}"
+            );
+        }
     }
 
     fn fixture_project(root: PathBuf, cache_root: &str) -> Project {
