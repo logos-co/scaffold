@@ -752,9 +752,58 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
 ///
 /// Falls back to a from-scratch render if `existing` doesn't parse: a
 /// hand-edit that broke the file shouldn't block writing a valid one.
+///
+/// That fallback is *lossy* — it is exactly the comment-and-unmodelled-section
+/// loss this function exists to prevent — so it must never happen quietly.
+/// Production code therefore calls [`update_config_reporting`] and acts on the
+/// [`RewriteOutcome`] it returns; this wrapper discards that signal and is
+/// test-only so no disk-writing path can pick it up by accident.
+#[cfg(test)]
 pub(crate) fn update_config(existing: &str, cfg: &Config) -> DynResult<String> {
-    let doc = existing.parse::<DocumentMut>().unwrap_or_default();
-    write_config_into(doc, cfg)
+    Ok(update_config_reporting(existing, cfg)?.0)
+}
+
+/// How [`update_config_reporting`] produced its output.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RewriteOutcome {
+    /// `existing` parsed; the rewrite merged into it and kept its comments.
+    Merged,
+    /// `existing` did not parse as TOML, so the output is a from-scratch
+    /// render. Every comment and every unmodelled section in `existing` is
+    /// absent from it. `reason` is the parse error, for the diagnostic.
+    RenderedFresh { reason: String },
+}
+
+impl RewriteOutcome {
+    pub(crate) fn discarded_reason(&self) -> Option<&str> {
+        match self {
+            Self::Merged => None,
+            Self::RenderedFresh { reason } => Some(reason),
+        }
+    }
+}
+
+/// [`update_config`], but reporting whether the comment-preserving merge
+/// actually happened.
+///
+/// The fallback is deliberate — a file one stray bracket from valid should not
+/// wedge every command that persists config — but it replaces the user's file
+/// wholesale, so a caller writing the result to disk owes them a warning and,
+/// where it can, a copy of what it is about to discard.
+pub(crate) fn update_config_reporting(
+    existing: &str,
+    cfg: &Config,
+) -> DynResult<(String, RewriteOutcome)> {
+    let (doc, outcome) = match existing.parse::<DocumentMut>() {
+        Ok(doc) => (doc, RewriteOutcome::Merged),
+        Err(e) => (
+            DocumentMut::new(),
+            RewriteOutcome::RenderedFresh {
+                reason: e.to_string(),
+            },
+        ),
+    };
+    Ok((write_config_into(doc, cfg)?, outcome))
 }
 
 /// Render `cfg` into `doc`, which may be empty ([`serialize_config`]) or the
@@ -801,8 +850,13 @@ pub(crate) fn update_config(existing: &str, cfg: &Config) -> DynResult<String> {
 /// therefore *is* total.
 fn write_config_into(mut doc: DocumentMut, cfg: &Config) -> DynResult<String> {
     // [scaffold]
+    // Every `.entry(...).or_insert(...)` here goes through `coerce_to_table`
+    // rather than `.as_table_mut().expect(...)`: `or_insert` hands back the
+    // *occupied* item when the key already exists, and a root key the reader
+    // tolerated as a non-table (an inline table, most plausibly) would
+    // otherwise abort the process. See `coerce_to_table`.
     let scaffold = doc.entry("scaffold").or_insert(Item::Table(Table::new()));
-    let scaffold_table = scaffold.as_table_mut().expect("scaffold is a table");
+    let scaffold_table = coerce_to_table(scaffold);
     scaffold_table["version"] = value(&cfg.version);
     if !cfg.cache_root.is_empty() {
         check_toml_value("cache_root", &cfg.cache_root)?;
@@ -867,7 +921,7 @@ fn write_config_into(mut doc: DocumentMut, cfg: &Config) -> DynResult<String> {
     // [wallet]
     check_toml_value("wallet.home_dir", &cfg.wallet_home_dir)?;
     let wallet = doc.entry("wallet").or_insert(Item::Table(Table::new()));
-    wallet.as_table_mut().expect("wallet table")["home_dir"] = value(&cfg.wallet_home_dir);
+    coerce_to_table(wallet)["home_dir"] = value(&cfg.wallet_home_dir);
 
     // [framework] / [framework.idl]
     check_toml_value("framework.kind", &cfg.framework.kind)?;
@@ -875,19 +929,16 @@ fn write_config_into(mut doc: DocumentMut, cfg: &Config) -> DynResult<String> {
     check_toml_value("framework.idl.spec", &cfg.framework.idl.spec)?;
     check_toml_value("framework.idl.path", &cfg.framework.idl.path)?;
     let framework = doc.entry("framework").or_insert(Item::Table(Table::new()));
-    let framework_table = framework.as_table_mut().expect("framework table");
+    let framework_table = coerce_to_table(framework);
     framework_table["kind"] = value(&cfg.framework.kind);
     framework_table["version"] = value(&cfg.framework.version);
-    let idl = framework_table
-        .entry("idl")
-        .or_insert(Item::Table(Table::new()));
-    let idl_table = idl.as_table_mut().expect("idl table");
+    let idl_table = child_table(framework_table, "idl");
     idl_table["spec"] = value(&cfg.framework.idl.spec);
     idl_table["path"] = value(&cfg.framework.idl.path);
 
     // [localnet]
     let localnet = doc.entry("localnet").or_insert(Item::Table(Table::new()));
-    let localnet_table = localnet.as_table_mut().expect("localnet table");
+    let localnet_table = coerce_to_table(localnet);
     localnet_table["port"] = value(i64::from(cfg.localnet.port));
     localnet_table["risc0_dev_mode"] = value(cfg.localnet.risc0_dev_mode);
 
@@ -899,7 +950,7 @@ fn write_config_into(mut doc: DocumentMut, cfg: &Config) -> DynResult<String> {
     }
     check_toml_value("circuits.install_dir", &cfg.circuits.install_dir)?;
     let circuits = doc.entry("circuits").or_insert(Item::Table(Table::new()));
-    let circuits_table = circuits.as_table_mut().expect("circuits table");
+    let circuits_table = coerce_to_table(circuits);
     circuits_table["version"] = value(&cfg.circuits.version);
     if let Some(template) = &cfg.circuits.url_template {
         circuits_table["url_template"] = value(template);
@@ -944,7 +995,7 @@ fn write_config_into(mut doc: DocumentMut, cfg: &Config) -> DynResult<String> {
         }
 
         let basecamp = doc.entry("basecamp").or_insert(Item::Table(Table::new()));
-        let basecamp_table = basecamp.as_table_mut().expect("basecamp table");
+        let basecamp_table = coerce_to_table(basecamp);
         // Only emit port keys when they differ from the defaults, so setting
         // just `[basecamp.env]` doesn't churn a user's scaffold.toml with
         // default `port_base`/`port_stride` on the next `save_project_config`.
@@ -1144,7 +1195,7 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
     }
 
     let run_item = doc.entry("run").or_insert(Item::Table(Table::new()));
-    let run_table = run_item.as_table_mut().expect("run table");
+    let run_table = coerce_to_table(run_item);
     if let Some(name) = &run.default_profile {
         check_toml_value("run.default_profile", name)?;
         run_table["default_profile"] = value(name);
@@ -1192,11 +1243,7 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
             // ensure_subtable returns the `profiles` table; we need a
             // sub-sub-table keyed by `name`.
             table.set_implicit(true);
-            let profile_table = table
-                .entry(name)
-                .or_insert(Item::Table(Table::new()))
-                .as_table_mut()
-                .expect("profile table");
+            let profile_table = child_table(table, name);
             if profile.reset {
                 profile_table["reset"] = value(true);
             } else {
@@ -1452,15 +1499,85 @@ fn clear_owned_basecamp_keys(doc: &mut DocumentMut) {
     }
 }
 
+/// Coerce `item` into a real `Item::Table` in place, and hand back a mutable
+/// borrow of it.
+///
+/// **Why this exists.** Every parser in this module reads its section through
+/// [`Item::as_table`], which is `None` for an *inline* table
+/// (`wallet = { home_dir = "…" }`) and for any non-table value. So a file
+/// holding `wallet = { … }` parses perfectly well — the reader just falls back
+/// to the default — and the writer then reached the same key expecting a
+/// `Table`. `entry(...).or_insert(...)` returns the *occupied* item in that
+/// case, not a freshly inserted table, so `.as_table_mut()` was `None` and the
+/// old `.expect("wallet table")` aborted the process with a backtrace on a
+/// `scaffold.toml` that is entirely valid TOML. `DOGFOODING.md` B1 calls a raw
+/// panic on file content a UX regression, and weboko's review asked for a
+/// returned error or an explicit fallback instead. This is the fallback, and it
+/// is the data-preserving one:
+///
+/// - An **inline table** carries the user's own keys, so convert it rather than
+///   discarding it: every key moves into a real `Table`, unmodelled ones
+///   included. The section merely changes syntax — `wallet = { a = 1 }` becomes
+///   `[wallet]\na = 1` — and the writer's own keys are then assigned over the
+///   top exactly as they would have been. Nothing the user wrote is lost.
+/// - A **non-table value** (`wallet = 3`, `wallet = "x"`) has no keys to keep
+///   and cannot become a table without inventing structure. The parser already
+///   ignored it, so the model never carried it and the config being written is
+///   authoritative; replace it with an empty table. This is the "treat a
+///   modelled key that isn't a table as unrepresentable" branch — the same
+///   outcome the from-scratch fallback would give for that one section, but
+///   scoped to it rather than to the whole file.
+///
+/// Either way the result is a `Table` and no path here can panic on file
+/// content.
+fn coerce_to_table(item: &mut Item) -> &mut Table {
+    if item.as_table().is_none() {
+        let replacement = match item.as_inline_table() {
+            // `into_table` preserves every key, unmodelled ones included.
+            Some(inline) => {
+                let mut inline = inline.clone();
+                // An inline table's decor is the whitespace *around the value*
+                // on its `key = { … }` line. A real table's decor is the
+                // whitespace around its `[header]`. Carrying the former into
+                // the latter renders headers like "[\nframework.idl ]", which
+                // is not the section the user wrote. The keys are what we are
+                // preserving here; the punctuation around them is not worth
+                // corrupting the file for, so reset it and let toml_edit lay
+                // the promoted table out fresh.
+                inline.decor_mut().clear();
+                let mut table = inline.into_table();
+                table.decor_mut().clear();
+                table
+            }
+            None => Table::new(),
+        };
+        *item = Item::Table(replacement);
+    }
+    item.as_table_mut()
+        .expect("coerce_to_table just installed an Item::Table")
+}
+
 /// Get or create a child `Table` under an existing `Table` without touching the
 /// parent's implicit flag — unlike `ensure_subtable`, which marks its parent
 /// implicit (wrong when the parent has real keys, e.g. `[basecamp]`).
+///
+/// Coerces rather than asserting, for the reasons in [`coerce_to_table`]: a
+/// child key can be an inline table (`env = { FOO = "1" }`) just as easily as a
+/// root one.
 fn child_table<'a>(parent: &'a mut Table, name: &str) -> &'a mut Table {
-    parent
-        .entry(name)
-        .or_insert(Item::Table(Table::new()))
-        .as_table_mut()
-        .expect("child is a table")
+    // A child written as `idl = { … }` carries decor on the *key* too, and for
+    // a real table that decor is the whitespace inside the `[framework.idl]`
+    // header. Carrying an inline key's decor across renders "[\nframework.idl ]"
+    // — not the section the user wrote, and not even the same file. So reset
+    // the key's decor alongside the item's own (which `coerce_to_table` does),
+    // and only when we are actually about to promote.
+    if !matches!(parent.get(name), Some(Item::Table(_))) {
+        if let Some(mut key) = parent.key_mut(name) {
+            key.leaf_decor_mut().clear();
+            key.dotted_decor_mut().clear();
+        }
+    }
+    coerce_to_table(parent.entry(name).or_insert(Item::Table(Table::new())))
 }
 
 fn ensure_subtable<'a>(doc: &'a mut DocumentMut, parent: &str, child: &str) -> &'a mut Table {
@@ -1469,13 +1586,12 @@ fn ensure_subtable<'a>(doc: &'a mut DocumentMut, parent: &str, child: &str) -> &
         t.set_implicit(true);
         t
     }));
-    let parent_table = parent_item.as_table_mut().expect("parent is a table");
+    // `repos = { … }` / `modules = { … }` reach here the same way `[wallet]`
+    // does — via a parser that reads them with `as_table` and shrugs at an
+    // inline one. Coerce instead of asserting.
+    let parent_table = coerce_to_table(parent_item);
     parent_table.set_implicit(true);
-    parent_table
-        .entry(child)
-        .or_insert(Item::Table(Table::new()))
-        .as_table_mut()
-        .expect("child is a table")
+    child_table(parent_table, child)
 }
 
 /// Reject any value containing a newline, CR, tab, or other C0 control
@@ -2183,6 +2299,157 @@ role = "project"
         );
         // And the result must still round-trip as valid config.
         parse_config(&rewritten).expect("rewritten config must parse");
+    }
+
+    /// Build a fixture where one modelled section is written as a root-level
+    /// *inline* table instead of a `[header]`, dropping the header form so the
+    /// inline one is the only definition of that key.
+    fn with_inline_section(header: &str, inline: &str) -> String {
+        let base = minimal_v0_2_0();
+        let original = if header.is_empty() {
+            format!("{inline}\n{base}")
+        } else {
+            assert!(
+                base.contains(header),
+                "minimal_v0_2_0 fixture drifted; no such block:\n{header}"
+            );
+            base.replace(header, &format!("{inline}\n"))
+        };
+        assert!(
+            original.parse::<DocumentMut>().is_ok(),
+            "fixture itself must be valid TOML:\n{original}"
+        );
+        original
+    }
+
+    /// Regression for weboko's review finding 1.
+    ///
+    /// `parse_config` reads every section through `Item::as_table`, which is
+    /// `None` for an inline table — so `wallet = { home_dir = "…" }` is a
+    /// perfectly valid `scaffold.toml` that parses fine and falls back to the
+    /// default. The writer then reached the same key via
+    /// `entry(...).or_insert(...)`, which returns the *occupied* item, and the
+    /// old `.as_table_mut().expect("wallet table")` aborted the process with a
+    /// backtrace. Every modelled root section was reachable that way; this
+    /// covers each of them, plus the nested `ensure_subtable` /`child_table`
+    /// paths (`repos`, `modules`, `run.profiles`, `framework.idl`,
+    /// `basecamp.env`), which had the same `expect`.
+    ///
+    /// The contract asserted per case: the write must not panic, the result
+    /// must still be valid TOML, it must still parse as a config, and the
+    /// user's own keys inside the inline table must survive the coercion.
+    #[test]
+    fn update_config_survives_an_inline_table_for_every_modelled_section() {
+        // (label, header block to drop, inline replacement, a key the user
+        // wrote inside it that must survive).
+        let cases = [
+            (
+                "wallet",
+                "[wallet]\nhome_dir = \".scaffold/wallet\"\n",
+                "wallet = { home_dir = \".scaffold/wallet\", note = \"keep me\" }",
+                "keep me",
+            ),
+            (
+                "framework",
+                "[framework]\nkind = \"default\"\nversion = \"0.1.0\"\n",
+                "framework = { kind = \"default\", version = \"0.1.0\", note = \"keep me\" }",
+                "keep me",
+            ),
+            (
+                "localnet",
+                "[localnet]\nport = 3040\nrisc0_dev_mode = true\n",
+                "localnet = { port = 3040, risc0_dev_mode = true, note = \"keep me\" }",
+                "keep me",
+            ),
+            (
+                "framework.idl",
+                "[framework.idl]\nspec = \"lssa-idl/0.1.0\"\npath = \"idl\"\n",
+                "idl = { spec = \"lssa-idl/0.1.0\", path = \"idl\", note = \"keep me\" }",
+                "keep me",
+            ),
+            (
+                "circuits",
+                "",
+                "circuits = { version = \"0.1.0\", note = \"keep me\" }",
+                "keep me",
+            ),
+            (
+                "run",
+                "",
+                "run = { reset = true, note = \"keep me\" }",
+                "keep me",
+            ),
+            ("modules", "", "modules = { note = \"keep me\" }", "keep me"),
+            (
+                "basecamp",
+                "",
+                "basecamp = { port_base = 41000, note = \"keep me\" }",
+                "keep me",
+            ),
+        ];
+
+        for (label, header, inline, survivor) in cases {
+            let original = with_inline_section(header, inline);
+            // The whole point: this file is *valid* and the reader accepts it.
+            let cfg = parse_config(&original)
+                .unwrap_or_else(|e| panic!("{label}: fixture must parse, got {e}"));
+            // Before the fix this aborted the process rather than returning.
+            let rewritten = update_config(&original, &cfg)
+                .unwrap_or_else(|e| panic!("{label}: update must not fail, got {e}"));
+            assert!(
+                rewritten.parse::<DocumentMut>().is_ok(),
+                "{label}: rewrite is not valid TOML:\n{rewritten}"
+            );
+            parse_config(&rewritten)
+                .unwrap_or_else(|e| panic!("{label}: rewrite must reparse, got {e}\n{rewritten}"));
+            assert!(
+                rewritten.contains(survivor),
+                "{label}: the user's own key inside the inline table was dropped:\n{rewritten}"
+            );
+        }
+    }
+
+    /// `framework.idl` written inline *under* a real `[framework]` header —
+    /// the `child_table` path rather than the root one.
+    #[test]
+    fn update_config_survives_an_inline_child_table() {
+        let original = minimal_v0_2_0().replace(
+            "[framework.idl]\nspec = \"lssa-idl/0.1.0\"\npath = \"idl\"\n",
+            "",
+        );
+        let original = original.replace(
+            "[framework]\nkind = \"default\"\nversion = \"0.1.0\"\n",
+            "[framework]\nkind = \"default\"\nversion = \"0.1.0\"\n\
+             idl = { spec = \"lssa-idl/0.1.0\", path = \"idl\", note = \"keep me\" }\n",
+        );
+        let cfg = parse_config(&original).expect("fixture must parse");
+        let rewritten = update_config(&original, &cfg).expect("update must not panic");
+        parse_config(&rewritten).expect("rewrite must reparse");
+        assert!(
+            rewritten.contains("keep me"),
+            "unmodelled key inside the inline child table was dropped:\n{rewritten}"
+        );
+    }
+
+    /// A modelled key that is not a table at all and has no keys to keep:
+    /// there is nothing to coerce, so the section is replaced with the config's
+    /// own rendering. It must not panic and must leave a parseable file.
+    #[test]
+    fn update_config_replaces_a_modelled_key_that_is_a_scalar() {
+        for scalar in ["wallet = 3", "localnet = \"nope\"", "circuits = [1, 2]"] {
+            let original = format!(
+                "{scalar}\n{}",
+                minimal_v0_2_0()
+                    .replace("[wallet]\nhome_dir = \".scaffold/wallet\"\n", "")
+                    .replace("[localnet]\nport = 3040\nrisc0_dev_mode = true\n", "")
+            );
+            let cfg = parse_config(&original)
+                .unwrap_or_else(|e| panic!("{scalar}: fixture must parse, got {e}"));
+            let rewritten = update_config(&original, &cfg)
+                .unwrap_or_else(|e| panic!("{scalar}: update must not fail, got {e}"));
+            parse_config(&rewritten)
+                .unwrap_or_else(|e| panic!("{scalar}: rewrite must reparse, got {e}\n{rewritten}"));
+        }
     }
 
     /// A hand-edit that broke the file must not block writing a valid one.

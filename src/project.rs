@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context};
 
-use crate::config::{parse_config, update_config};
+use crate::config::{parse_config, update_config_reporting};
 use crate::model::{Project, RepoRef};
 use crate::state::write_text_atomic;
 use crate::DynResult;
@@ -92,6 +92,21 @@ pub(crate) fn run_in_project_dir(
 /// comments are still on disk and we simply could not see them, so rendering
 /// fresh would delete them — the exact bug this function exists to fix, and
 /// silently, since the write would otherwise succeed. Fail instead.
+///
+/// An *unparseable* file is the third case, and the one that must not be
+/// silent. Refusing outright would wedge every command that persists config on
+/// a file one stray bracket from valid, so the from-scratch render stands — but
+/// it discards every comment and unmodelled section the file held. So before
+/// overwriting, copy the original to `scaffold.toml.bak` and say so on stderr.
+/// That is the same recovery `init`'s migration already offers, and for the
+/// same reason: the user should be able to get their comments back.
+///
+/// The backup is best-effort and never blocks the write. `init` can refuse to
+/// clobber an existing `.bak` because the user asked for a migration and can
+/// re-run it; here the rewrite is incidental to some other command (`basecamp
+/// setup`), and failing it because a stale `.bak` is in the way would be a
+/// worse outcome than not having the backup. Collisions are reported, not
+/// fatal.
 pub(crate) fn save_project_config(project: &Project) -> DynResult<()> {
     let path = project.root.join("scaffold.toml");
     let existing = match fs::read_to_string(&path) {
@@ -107,7 +122,51 @@ pub(crate) fn save_project_config(project: &Project) -> DynResult<()> {
             })
         }
     };
-    write_text_atomic(&path, &update_config(&existing, &project.config)?)
+    let (rendered, outcome) = update_config_reporting(&existing, &project.config)?;
+    if let Some(reason) = outcome.discarded_reason() {
+        warn_unparseable_rewrite(&path, &existing, reason);
+    }
+    write_text_atomic(&path, &rendered)
+}
+
+/// Tell the user their `scaffold.toml` could not be parsed and is about to be
+/// replaced by a from-scratch render, and preserve the original next to it.
+///
+/// Split out from `save_project_config` so the message and the backup stay one
+/// unit: a warning with no recovery path would be the smaller half of what the
+/// user needs here.
+fn warn_unparseable_rewrite(path: &Path, existing: &str, reason: &str) {
+    eprintln!(
+        "warning: {} could not be parsed as TOML, so it is being rewritten from \
+         scratch. Comments and any sections scaffold does not model will be lost.\n\
+         warning:   parse error: {reason}",
+        path.display(),
+    );
+    // Nothing on disk to preserve — the read returned NotFound.
+    if existing.is_empty() {
+        return;
+    }
+    let backup = path.with_extension("toml.bak");
+    if backup.exists() {
+        eprintln!(
+            "warning:   not writing a backup: {} already exists and will not be \
+             overwritten. Move it aside to keep a copy of the current file.",
+            backup.display(),
+        );
+        return;
+    }
+    // Copy the bytes we already read rather than re-reading, so the backup is
+    // exactly the content being discarded even if the file changed underneath.
+    match fs::write(&backup, existing) {
+        Ok(()) => eprintln!(
+            "warning:   a copy of the original was saved to {}",
+            backup.display()
+        ),
+        Err(e) => eprintln!(
+            "warning:   could not write a backup to {}: {e}",
+            backup.display()
+        ),
+    }
 }
 
 pub(crate) fn find_project_root(mut dir: PathBuf) -> Option<PathBuf> {
@@ -426,6 +485,107 @@ risc0_dev_mode = true
         fs::remove_file(&path).expect("remove");
         save_project_config(&project).expect("a missing file is a legitimate fresh write");
         assert!(path.exists(), "fresh write did not happen");
+    }
+
+    /// Regression for weboko's review finding 3 (second half).
+    ///
+    /// An unparseable `scaffold.toml` is still rewritten from scratch — that
+    /// fallback is deliberate — but it discards every comment and unmodelled
+    /// section the file held, which is precisely the loss this whole path
+    /// exists to prevent. The user must get both a diagnostic and a way back:
+    /// the original is copied to `scaffold.toml.bak` before the overwrite.
+    #[test]
+    fn save_project_config_backs_up_an_unparseable_file_before_overwriting_it() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("scaffold.toml");
+        let backup = temp.path().join("scaffold.toml.bak");
+
+        // Load from a good file so we have a Project to write back...
+        fs::write(&path, minimal_scaffold_toml()).expect("seed");
+        let project = load_project_at(temp.path()).expect("load");
+
+        // ...then break the file on disk, the way a hand-edit would: one stray
+        // bracket, with a load-bearing comment and an unmodelled section that
+        // the from-scratch render cannot reproduce.
+        let broken = format!(
+            "# LOAD-BEARING: do not bump this pin, see issue 412\n\
+             [[[oops\n{}\n[team.notes]\nowner = \"alice\"\n",
+            minimal_scaffold_toml()
+        );
+        fs::write(&path, &broken).expect("break it");
+
+        save_project_config(&project).expect("a broken file must not wedge the write");
+
+        // The write happened and produced something loadable.
+        load_project_at(temp.path()).expect("rewritten file must load");
+
+        // And the discarded original is recoverable, byte for byte.
+        assert!(
+            backup.exists(),
+            "no scaffold.toml.bak written before discarding an unparseable file"
+        );
+        let saved = fs::read_to_string(&backup).expect("read backup");
+        assert_eq!(
+            saved, broken,
+            "the backup must be the exact content that was discarded"
+        );
+        assert!(
+            saved.contains("# LOAD-BEARING: do not bump this pin, see issue 412"),
+            "backup lost the comment it exists to preserve:\n{saved}"
+        );
+        assert!(
+            saved.contains("[team.notes]"),
+            "backup lost the unmodelled section:\n{saved}"
+        );
+    }
+
+    /// A parseable file takes the merge path, so there is nothing being
+    /// discarded and no backup to write. Without this, a `.bak` written on
+    /// every save would look like a passing test above while quietly
+    /// littering every project directory.
+    #[test]
+    fn save_project_config_writes_no_backup_when_the_file_parses() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("scaffold.toml");
+        fs::write(&path, format!("# keep me\n{}", minimal_scaffold_toml())).expect("seed");
+
+        let project = load_project_at(temp.path()).expect("load");
+        save_project_config(&project).expect("save");
+
+        assert!(
+            !temp.path().join("scaffold.toml.bak").exists(),
+            "a successful merge must not leave a backup behind"
+        );
+        let after = fs::read_to_string(&path).expect("read back");
+        assert!(after.contains("# keep me"), "comment lost:\n{after}");
+    }
+
+    /// An existing `scaffold.toml.bak` is someone else's copy — `init`'s
+    /// migration, or a hand-curated one. Clobbering it would lose an older
+    /// original to save a newer one. Unlike `init`, this path does not abort:
+    /// the rewrite is incidental to whatever command the user actually ran, so
+    /// a stale `.bak` must not fail it.
+    #[test]
+    fn save_project_config_does_not_clobber_an_existing_backup() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("scaffold.toml");
+        let backup = temp.path().join("scaffold.toml.bak");
+
+        fs::write(&path, minimal_scaffold_toml()).expect("seed");
+        let project = load_project_at(temp.path()).expect("load");
+
+        let prior = "# an older backup nobody should lose\n";
+        fs::write(&backup, prior).expect("seed backup");
+        fs::write(&path, "[[[ still broken").expect("break it");
+
+        save_project_config(&project).expect("a stale .bak must not fail the write");
+
+        assert_eq!(
+            fs::read_to_string(&backup).expect("read backup"),
+            prior,
+            "the pre-existing backup was overwritten"
+        );
+        load_project_at(temp.path()).expect("rewritten file must still load");
     }
 
     fn fixture_project(root: PathBuf, cache_root: &str) -> Project {
