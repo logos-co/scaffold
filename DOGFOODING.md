@@ -1060,6 +1060,7 @@ test -f scaffold.toml || "$SCAFFOLD_BIN" init
 grep -n '^\[repos.basecamp.attr\]\|^\[basecamp.profiles' scaffold.toml || true
 "$SCAFFOLD_BIN" basecamp setup
 ls .scaffold/basecamp/profiles
+cat .scaffold/state/basecamp.state
 "$SCAFFOLD_BIN" basecamp doctor
 "$SCAFFOLD_BIN" basecamp doctor --json
 "$SCAFFOLD_BIN" basecamp setup
@@ -1069,6 +1070,7 @@ ls .scaffold/basecamp/profiles
 # since the attrs are written before the build starts.
 "$SCAFFOLD_BIN" basecamp setup --inspector
 grep -n 'attr' scaffold.toml
+cat .scaffold/state/basecamp.state         # basecamp_bin must have moved
 "$SCAFFOLD_BIN" basecamp setup            # no flag: must stay on the inspector
 grep -n 'attr' scaffold.toml
 "$SCAFFOLD_BIN" basecamp paths alice | grep -i module_root
@@ -1080,7 +1082,8 @@ grep -n 'attr' scaffold.toml
 ### Expected Success Signals
 
 - `basecamp --help` lists `setup`, `modules`, `install`, `launch`, `develop`, `build`, `build-portable`, `run`, `doctor`, `paths`, and `docs`.
-- `basecamp docs` prints the canonical project-compatibility rules, including per-profile `env_file`, `runtime_dir`, `log_file`, custom profile names, and per-platform `[repos.basecamp.attr]`.
+- `basecamp docs` prints the canonical project-compatibility rules, including per-profile `env_file`, `runtime_dir`, `log_file`, custom profile names, per-platform `[repos.basecamp.attr]`, and what `setup` records in `.scaffold/state/basecamp.state`. That last one is the contract a headless consumer reads: a downstream repo driving basecamp from CI needs `basecamp_bin`, and if `docs` does not name it the consumer hand-reconstructs a cache path instead — which is wrong on at least one stack, silently.
+- `.scaffold/state/basecamp.state` after `setup` holds `pin`, `basecamp_bin`, and `lgpm_bin`, and both recorded paths exist on disk. After `setup --inspector`, `basecamp_bin` points at a *different* build than the plain-`setup` run did — a consumer that cached the earlier path is now exec'ing the wrong stack, which is why the docs say to re-read the file after every `setup`.
 - First `basecamp setup` clones the pinned basecamp repo into a pin-isolated cache path, builds `basecamp` and `lgpm` via Nix, seeds `.scaffold/basecamp/profiles/alice/` and `.scaffold/basecamp/profiles/bob/`, and reports completion.
 - If `[repos.basecamp.attr]` is a per-platform map, setup uses the current host's attr and preserves the map plus scalar fallback on serialize.
 - `basecamp doctor` reports the basecamp + lgpm binaries as present and both profiles as seeded; `--json` returns parseable JSON with the same checks. Immediately after a green first `setup` (before `basecamp modules`) that is four PASS rows — `basecamp binary`, `lgpm binary`, `basecamp profile alice`, `basecamp profile bob`. A doctor that summarizes `0 PASS` there is the regression: it leaves the user with no confirmation that `setup` actually landed.
@@ -1112,6 +1115,7 @@ grep -n 'attr' scaffold.toml
 - Relevant `scaffold.toml` excerpt for `[repos.basecamp.attr]` and `[basecamp.profiles.*]` when present.
 - The `[repos.basecamp].attr` / `[repos.lgpm].attr` pair after each of `--inspector`, the plain re-run, and `--no-inspector` — three excerpts, so the "moves as a set" and "no flag leaves it alone" claims are evidenced rather than asserted.
 - `basecamp paths alice` `module_root` on the inspector build, showing `LogosBasecamp` rather than `LogosBasecampDev`.
+- `.scaffold/state/basecamp.state` after the plain `setup` and again after `--inspector` — two excerpts, showing `basecamp_bin` moving with the stack. This is the file a downstream consumer reads; capturing it verbatim is how the documented contract stays honest.
 
 ### Execution Notes
 
@@ -1824,6 +1828,7 @@ HEAD0=$("$SCAFFOLD_BIN" test-node blocks head --url "$URL" --json | jq -r .block
 - Changes to AI skill materialization (`apply_skills`, the canonical `skills/` source, frontmatter rewrite, `AGENTS.md` template, or `init` re-run semantics): rerun `E3`.
 - Changes to `basecamp setup` (pin sync, lgpm build, profile seeding, idempotency), per-platform `[repos.basecamp.attr]`, or `basecamp doctor`: rerun `B1`.
 - Changes to the stack selector — `setup --inspector` / `--no-inspector`, `BASECAMP_PORTABLE_ATTRS`, `apply_inspector_selection`, `align_lgpm_attr`, or the point at which `setup` persists the attrs: rerun `B1`, and `B2` for the install path. These are the pieces that fail *quietly*: a misclassified attr seeds `<host>-dev` `.lgx` variants that the binary then declines to load, so the only symptom is basecamp opening to an empty UI with one line in its own log. Check `basecamp paths` `module_root` and the `[repos.lgpm].attr` that moved with it, not just that `setup` exited 0.
+- Changes to `.scaffold/state/basecamp.state` — its keys, its format, `write_basecamp_state`, `resolve_basecamp_binary`'s answer, or the documented contract for it in `docs/basecamp-module-requirements.md`: rerun `B1`, and `B7` for the launcher-selection half. This file is a *public interface* despite living under `.scaffold/`: it is how every headless consumer finds the binary, so a key rename or a path that stops resolving breaks downstream CI with no scaffold-side error at all. Capture the file itself as evidence, not just that `setup` exited 0.
 - Changes to `[modules]` derivation, dependency resolution, sibling `--override-input` handling, or `basecamp install` invocation of `lgpm`: rerun `B2`.
 - Changes to `basecamp paths`, `[basecamp.profiles.*]`, `env_file`, `runtime_dir`, `log_file`, `launch --log-file`, or single-profile launch path resolution: rerun `B2`.
 - Changes to `basecamp launch` (kill-and-scrub semantics, XDG isolation, runtime/log/env export, port-override env vars, p2p surface): rerun `B3`.
