@@ -1092,7 +1092,7 @@ grep -n '^port_base' scaffold.toml || echo "OK: default port_base is absent"
 cp scaffold.toml /tmp/scaffold.good.toml
 printf '\n[[[ broken\n' >> scaffold.toml
 "$SCAFFOLD_BIN" basecamp setup            # expect a "could not be parsed" warning on stderr
-ls -l scaffold.toml.bak-*                 # expect exactly one, named .bak-YYYY-MM-DD-HHMMSS.NNN
+ls -l scaffold.toml.bak-*                 # expect exactly one, .bak-YYYY-MM-DD-HHMMSS_NNNNNNNNN
 
 # Break it a second time: each rewrite keeps its OWN backup, so the second one
 # must not be blocked by the first.
@@ -1127,8 +1127,8 @@ cp /tmp/scaffold.good.toml scaffold.toml && rm -f scaffold.toml.bak-*
 - Second `basecamp setup` is idempotent: pin unchanged → no rebuild reported, exit 0.
 - **`scaffold.toml` comments and unmodelled sections survive every rewrite.** `basecamp setup` rewrites the file, and the planted `# LOAD-BEARING: …` comment and `[team.notes]` section must both still be present after two `setup` runs. Comments in this file record *why* a pin is held back or a `runtime_dir` override exists; dropping them silently re-opens the bug they were written to prevent.
 - **A value reset to its default is actually gone from the file.** After removing `port_base = 41000` by hand, a `setup` re-run must not resurrect it. The rewrite merges over the existing document, so a key that is only ever assigned and never removed keeps whatever the file already said — the two halves of that contract fail in opposite directions and only checking both catches either.
-- **An unparseable `scaffold.toml` is never replaced in silence.** `setup` on a broken file warns on stderr that the file could not be parsed and is being rewritten from scratch, and leaves the original at `scaffold.toml.bak-YYYY-MM-DD-HHMMSS.NNN`. Nothing scaffold does to a config file it cannot read should be quiet.
-- **Each destructive rewrite keeps its own backup.** The timestamp is what makes that work: a second broken-file rewrite writes a second `.bak-*` rather than colliding with the first. The names are zero-padded and date-before-time, so `ls` lists them oldest-first.
+- **An unparseable `scaffold.toml` is never replaced in silence.** `setup` on a broken file warns on stderr that the file could not be parsed and is being rewritten from scratch, and leaves the original at `scaffold.toml.bak-YYYY-MM-DD-HHMMSS_NNNNNNNNN` (local time; the nine digits after the underscore are nanoseconds). Nothing scaffold does to a config file it cannot read should be quiet.
+- **Each destructive rewrite keeps its own backup.** The timestamp is what makes that work: a second broken-file rewrite writes a second `.bak-*` rather than colliding with the first. The names are fixed-width, zero-padded and date-before-time, so `ls` lists them oldest-first. The nanosecond field is what makes a collision genuinely impossible between consecutive writes — which is why a collision is treated as a hard error rather than something to work around.
 - **The backup is fail-closed.** With the backup unwritable (directory read-only), `setup` exits non-zero and `scaffold.toml` is byte-identical to what it was. Scaffold must never destroy a file it could not first preserve — the rewrite is recoverable by re-running, the user's comments are not. The error names both the config file and the backup path that blocked it.
 - All commands run only inside the project; running them from outside the project must fail with the existing scaffold "not a logos-scaffold project" message.
 

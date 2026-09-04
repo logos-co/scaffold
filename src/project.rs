@@ -100,24 +100,22 @@ pub(crate) fn run_in_project_dir(
 /// a file one stray bracket from valid, so the from-scratch render stands — but
 /// it discards every comment and unmodelled section the file held. So before
 /// overwriting, the original is copied to a timestamped sibling
-/// `scaffold.toml.bak-YYYY-MM-DD-HHMMSS.NNN` and the fallback is announced on
-/// stderr. That is the same recovery `init`'s migration offers, with a
-/// distinct name per rewrite so a second destructive write keeps its own copy
-/// instead of finding the first one in the way.
+/// `scaffold.toml.bak-YYYY-MM-DD-HHMMSS_NNNNNNNNN` and the fallback is
+/// announced on stderr. That is the same recovery `init`'s migration offers,
+/// with a distinct name per rewrite so a second destructive write keeps its own
+/// copy instead of finding the first one in the way.
 ///
 /// **This is fail-closed.** If the backup cannot be written — an IO error, a
-/// read-only directory, no free name — the whole write aborts with an error
-/// and `scaffold.toml` is left untouched. A file we could
-/// not preserve is a file we do not destroy. The alternative, proceeding with
-/// a warning, trades the user's comments for the convenience of not having to
-/// re-run a command, which is the wrong way round: the rewrite is recoverable,
-/// the comments are not.
+/// read-only directory, a name already taken — the whole write aborts with an
+/// error and `scaffold.toml` is left untouched. A file we could not preserve is
+/// a file we do not destroy. The alternative, proceeding with a warning, trades
+/// the user's comments for the convenience of not having to re-run a command,
+/// which is the wrong way round: the rewrite is recoverable, the comments are
+/// not.
 ///
-/// Two rewrites *can* land in the same millisecond — that is observable, not
-/// theoretical — so a same-millisecond name is disambiguated with a `-2`,
-/// `-3`, … suffix. Past a handful of those the clock is not merely coarse and
-/// the write aborts: quietly continuing past an unexplained state is exactly
-/// what this path exists to stop.
+/// The timestamp runs to nanoseconds specifically so that a name collision can
+/// be a hard error rather than a routine event to be worked around — see
+/// [`create_backup_file`].
 pub(crate) fn save_project_config(project: &Project) -> DynResult<()> {
     let path = project.root.join("scaffold.toml");
     let existing = match fs::read_to_string(&path) {
@@ -191,71 +189,58 @@ fn back_up_before_discarding(path: &Path, existing: &str, reason: &str) -> DynRe
 
 /// Create the backup file, returning it and the path it landed on.
 ///
-/// Uses `create_new`, so the file is claimed atomically — never a check
-/// followed by an open that could clobber something that appeared in between.
+/// One attempt, no retry. `create_new` claims the name atomically, so the file
+/// is never clobbered by something that appeared between a check and an open,
+/// and a name that is already taken is a hard failure.
 ///
-/// Two `save_project_config` calls in one run can land in the same
-/// millisecond (a real occurrence, not a theoretical one — it showed up under
-/// test load), so a same-millisecond collision is disambiguated with a `-2`,
-/// `-3`, … suffix rather than failing. That keeps the abort meaningful: past a
-/// handful of attempts the clock is not merely coarse, something is wrong, and
-/// we stop rather than spin.
+/// That strictness is only sound because the timestamp carries nanoseconds. At
+/// millisecond resolution two consecutive `save_project_config` calls really do
+/// share a stamp — an earlier draft of this aborted on exactly that, and the
+/// test suite caught it under load — so a collision there meant "the clock is
+/// coarse", which is not an error worth failing a write over. At nanosecond
+/// resolution two writes cannot share a stamp under any ordinary sequence, so a
+/// collision means what the abort was written to mean: something unexpected (a
+/// clock stepping backwards, a filesystem replaying a name). Refusing is then
+/// the right answer, and there is nothing to retry around.
 fn create_backup_file(path: &Path) -> DynResult<(PathBuf, fs::File)> {
-    const MAX_ATTEMPTS: u32 = 16;
-    let stamp = local_timestamp_for_filename()?;
-    let mut last_err = None;
-
-    for attempt in 1..=MAX_ATTEMPTS {
-        let suffix = if attempt == 1 {
-            String::new()
-        } else {
-            format!("-{attempt}")
-        };
-        let candidate = backup_path_for(path, &format!("{stamp}{suffix}"))?;
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-        {
-            Ok(file) => return Ok((candidate, file)),
-            // Only a name collision is worth another attempt; anything else
-            // (no permission, read-only filesystem, missing directory) will
-            // fail identically next time, so surface it now.
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                last_err = Some((candidate, e));
-            }
-            Err(e) => {
-                return Err(e).with_context(|| {
-                    format!(
-                        "refusing to rewrite {}: could not create its backup at {}",
-                        path.display(),
-                        candidate.display()
-                    )
-                })
-            }
-        }
+    let candidate = backup_path_for(path, &local_timestamp_for_filename()?)?;
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&candidate)
+    {
+        Ok(file) => Ok((candidate, file)),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => bail!(
+            "refusing to rewrite {}: its backup target {} already exists.\n\
+             The name carries a nanosecond timestamp, so a collision means \
+             something unexpected (a clock stepping backwards, for instance). \
+             Move that file aside and re-run.",
+            path.display(),
+            candidate.display(),
+        ),
+        Err(e) => Err(e).with_context(|| {
+            format!(
+                "refusing to rewrite {}: could not create its backup at {}",
+                path.display(),
+                candidate.display()
+            )
+        }),
     }
-
-    let (candidate, _) = last_err.expect("loop runs at least once and only exits via return");
-    bail!(
-        "refusing to rewrite {}: could not claim a backup name — {} and its \
-         numbered variants all already exist.\n\
-         The name carries a millisecond timestamp, so this many collisions \
-         means something unexpected (a clock stepping backwards, for \
-         instance). Move those files aside and re-run.",
-        path.display(),
-        candidate.display(),
-    )
 }
 
-/// `<path>.bak-<stamp>`, where `stamp` is `YYYY-MM-DD-HHMMSS.NNN` in local
-/// time, plus a disambiguating suffix if that name was already taken.
+/// `<path>.bak-<stamp>`, where `stamp` is `YYYY-MM-DD-HHMMSS_NNNNNNNNN` in
+/// local time.
 ///
 /// One backup per destructive rewrite, rather than a single fixed
 /// `scaffold.toml.bak` that the second one would find occupied. The format is
 /// zero-padded throughout and orders date-before-time, so a plain lexical sort
 /// of a directory listing is also chronological — which is the only thing
 /// anyone does with these files.
+///
+/// The nanoseconds are set off with `_` rather than the `.` a fractional second
+/// would use: nine digits running straight on from `HHMMSS` invites misreading
+/// where one field ends and the next begins, and `_` is the one separator not
+/// already spoken for by the date (`-`) or by the `.bak` extension (`.`).
 fn backup_path_for(path: &Path, stamp: &str) -> DynResult<PathBuf> {
     let mut name = path
         .file_name()
@@ -265,7 +250,13 @@ fn backup_path_for(path: &Path, stamp: &str) -> DynResult<PathBuf> {
     Ok(path.with_file_name(name))
 }
 
-/// Now, as `YYYY-MM-DD-HHMMSS.NNN` in the machine's local time.
+/// Now, as `YYYY-MM-DD-HHMMSS_NNNNNNNNN` in the machine's local time.
+///
+/// Nanoseconds, not milliseconds, and that is load-bearing rather than
+/// gratuitous precision: it is what lets [`create_backup_file`] treat a name
+/// collision as a hard error. Two consecutive writes share a millisecond
+/// routinely and a nanosecond effectively never, so the extra six digits are
+/// what turn "the clock is coarse" into "something is wrong".
 ///
 /// Hand-rolled rather than pulled from a date crate: this is the only calendar
 /// formatting in the codebase, and it exists to name a file a human will read
@@ -275,7 +266,7 @@ fn local_timestamp_for_filename() -> DynResult<String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| anyhow!("system clock is before the unix epoch: {e}"))?;
-    let millis = now.subsec_millis();
+    let nanos = now.subsec_nanos();
     let local = i64::try_from(now.as_secs())
         .map_err(|_| anyhow!("system clock is too far in the future to format"))?
         + local_utc_offset_seconds();
@@ -292,8 +283,11 @@ fn local_timestamp_for_filename() -> DynResult<String> {
         (secs_of_day % 3600) / 60,
         secs_of_day % 60,
     );
+    // `subsec_nanos` is always < 1e9, so the field is exactly nine digits and
+    // the whole stamp is fixed-width — which is what keeps a lexical sort
+    // chronological.
     Ok(format!(
-        "{year:04}-{month:02}-{day:02}-{hour:02}{minute:02}{second:02}.{millis:03}"
+        "{year:04}-{month:02}-{day:02}-{hour:02}{minute:02}{second:02}_{nanos:09}"
     ))
 }
 
@@ -521,6 +515,9 @@ mod tests {
 
     // Tests in this module mutate process-wide env vars; run them under one lock.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Width of `YYYY-MM-DD-HHMMSS_NNNNNNNNN`: 10 + 1 + 6 + 1 + 9.
+    const STAMP_WIDTH: usize = 27;
 
     /// The full disk round trip `save_project_config` performs: read the
     /// existing file, merge the config over it, write it back atomically.
@@ -802,10 +799,10 @@ risc0_dev_mode = true
 
     /// Fail-closed: if the original cannot be preserved, it is not destroyed.
     ///
-    /// The name carries a millisecond timestamp, so a collision means
-    /// something unexpected happened. Rather than retry or press on, the write
-    /// aborts and `scaffold.toml` is left exactly as the user left it — the
-    /// rewrite is recoverable by re-running a command, the comments are not.
+    /// Whatever stops the backup — no permission here, a name already taken —
+    /// the write aborts and `scaffold.toml` is left exactly as the user left
+    /// it. The rewrite is recoverable by re-running a command; the comments in
+    /// that file are not.
     #[test]
     fn save_project_config_aborts_rather_than_overwrite_a_file_it_cannot_back_up() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -861,34 +858,88 @@ risc0_dev_mode = true
         }
     }
 
-    /// Two rewrites inside one millisecond must each keep their backup.
+    /// Back-to-back backups must get distinct names *from the clock*, with no
+    /// retry or suffix involved.
     ///
-    /// This is not hypothetical: the first version of this code aborted the
-    /// second write, and the failure showed up under normal test-suite load.
-    /// Consecutive `save_project_config` calls are fast enough to share a
-    /// millisecond, so the disambiguating suffix is load-bearing, not defensive
-    /// decoration. Driving `create_backup_file` directly pins it without
-    /// depending on how fast the machine running the test happens to be.
+    /// This is the test that justifies the nanosecond field. An earlier
+    /// millisecond-resolution version of this code aborted the second of two
+    /// consecutive writes, and the failure showed up under normal test-suite
+    /// load — consecutive `save_project_config` calls are easily fast enough to
+    /// share a millisecond. The fix at the time was a `-2` suffix, which coped
+    /// with the collision instead of removing it; nanoseconds remove it, which
+    /// is what lets `create_backup_file` abort on a collision at all.
+    ///
+    /// So this asserts the strong property: every name distinct, claimed on the
+    /// first attempt. A regression to coarser precision fails here rather than
+    /// silently reintroducing collisions that only surface under load.
     #[test]
-    fn same_millisecond_backups_do_not_collide() {
+    fn consecutive_backups_get_distinct_names_without_retrying() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("scaffold.toml");
         fs::write(&path, "irrelevant").expect("seed");
 
-        let mut claimed = Vec::new();
-        for _ in 0..5 {
+        let mut claimed: Vec<PathBuf> = Vec::new();
+        for _ in 0..50 {
+            // `create_backup_file` has no retry: if this returns Ok, the very
+            // first name it derived was free.
             let (p, _file) = create_backup_file(&path).expect("claim a backup name");
             assert!(
                 !claimed.contains(&p),
-                "handed out the same name twice: {p:?}"
+                "the clock handed out the same name twice: {p:?}"
             );
             claimed.push(p);
         }
-        assert_eq!(claimed.len(), 5);
-        // All five exist on disk simultaneously — none clobbered another.
+        assert_eq!(claimed.len(), 50);
+        // All of them exist at once — none clobbered another.
         for p in &claimed {
             assert!(p.exists(), "backup vanished: {p:?}");
         }
+        // Every name is a bare fixed-width stamp: nothing was appended to make
+        // it unique, because nothing needed to be.
+        for p in &claimed {
+            let name = p.file_name().expect("name").to_string_lossy().into_owned();
+            let stamp = name
+                .strip_prefix("scaffold.toml.bak-")
+                .unwrap_or_else(|| panic!("unexpected backup name: {name}"));
+            assert_eq!(
+                stamp.len(),
+                STAMP_WIDTH,
+                "expected a bare {STAMP_WIDTH}-char stamp: {name}"
+            );
+        }
+    }
+
+    /// A name that really is taken aborts, rather than being worked around.
+    /// With nanosecond stamps this cannot happen by accident, which is exactly
+    /// why it is allowed to be fatal — so the branch still needs pinning.
+    #[test]
+    fn a_taken_backup_name_aborts_the_write() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("scaffold.toml");
+        fs::write(&path, "irrelevant").expect("seed");
+
+        // Freeze a stamp, occupy the name it derives, then ask for that exact
+        // name again. Going through `backup_path_for` keeps the test honest
+        // about the naming scheme rather than hardcoding it.
+        let stamp = local_timestamp_for_filename().expect("stamp");
+        let taken = backup_path_for(&path, &stamp).expect("derive");
+        fs::write(&taken, "someone else's file").expect("occupy");
+
+        let err = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&taken)
+            .expect_err("create_new must refuse an existing file");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::AlreadyExists,
+            "the abort branch keys on AlreadyExists"
+        );
+        // And the occupied file is untouched by the failed claim.
+        assert_eq!(
+            fs::read_to_string(&taken).expect("read back"),
+            "someone else's file"
+        );
     }
 
     /// The backup name is user-facing — people find these in a directory
@@ -907,8 +958,8 @@ risc0_dev_mode = true
         let stamp = name
             .strip_prefix("scaffold.toml.bak-")
             .unwrap_or_else(|| panic!("unexpected backup name: {name}"));
-        // YYYY-MM-DD-HHMMSS.NNN
-        assert_eq!(stamp.len(), 21, "unexpected stamp width: {stamp}");
+        // YYYY-MM-DD-HHMMSS_NNNNNNNNN
+        assert_eq!(stamp.len(), STAMP_WIDTH, "unexpected stamp width: {stamp}");
         let (date, rest) = stamp.split_at(10);
         let mut date_parts = date.split('-');
         let year: i64 = date_parts.next().expect("year").parse().expect("year int");
@@ -921,20 +972,32 @@ risc0_dev_mode = true
         assert!((2020..=2100).contains(&year), "implausible year: {stamp}");
         assert!((1..=12).contains(&month), "bad month: {stamp}");
         assert!((1..=31).contains(&day), "bad day: {stamp}");
-        assert!(rest.starts_with('-'), "expected -HHMMSS.NNN: {stamp}");
-        assert_eq!(rest.as_bytes()[7], b'.', "expected .NNN: {stamp}");
+
+        // `-HHMMSS_NNNNNNNNN`: the nanoseconds are set off with `_` so the
+        // nine-digit run cannot be misread as a continuation of the seconds.
+        assert!(rest.starts_with('-'), "expected -HHMMSS_NNNNNNNNN: {stamp}");
+        let (time, sub) = rest[1..].split_at(6);
         assert!(
-            rest[1..].chars().all(|c| c.is_ascii_digit() || c == '.'),
-            "time part must be digits: {stamp}"
+            time.chars().all(|c| c.is_ascii_digit()),
+            "HHMMSS must be digits: {stamp}"
+        );
+        let nanos = sub
+            .strip_prefix('_')
+            .unwrap_or_else(|| panic!("nanoseconds must be set off with '_': {stamp}"));
+        assert_eq!(nanos.len(), 9, "nanoseconds must be 9 digits: {stamp}");
+        assert!(
+            nanos.chars().all(|c| c.is_ascii_digit()),
+            "nanoseconds must be digits: {stamp}"
         );
 
-        // Zero-padded and date-before-time, so lexical order is chronological.
-        // Two stamps a second apart must compare the way the clock does.
-        let earlier = "2026-09-04-090000.000";
-        let later = "2026-09-04-090001.000";
-        assert!(earlier < later, "stamps must sort chronologically");
-        assert!("2026-09-04-000000.000" < "2026-09-14-000000.000");
-        assert!("2026-09-30-235959.999" < "2026-10-01-000000.000");
+        // Fixed width, zero-padded and date-before-time, so lexical order is
+        // chronological — the only thing anyone does with these files.
+        assert!("2026-09-04-090000_000000000" < "2026-09-04-090001_000000000");
+        assert!("2026-09-04-000000_000000000" < "2026-09-14-000000_000000000");
+        assert!("2026-09-30-235959_999999999" < "2026-10-01-000000_000000000");
+        // And sub-second ordering holds, which is what the extra digits buy.
+        assert!("2026-09-04-090000_000000001" < "2026-09-04-090000_000000002");
+        assert!("2026-09-04-090000_000999999" < "2026-09-04-090000_001000000");
     }
 
     /// `civil_from_days` is the one piece of hand-rolled calendar arithmetic
