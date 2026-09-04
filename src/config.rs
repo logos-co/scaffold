@@ -779,15 +779,26 @@ pub(crate) fn update_config(existing: &str, cfg: &Config) -> DynResult<String> {
 ///   *drops* a `[basecamp.profiles.<name>]` that is fully default.
 /// - `parse_run` maps an all-default `[run]` (or `[run.watch]`) to the default
 ///   value, indistinguishable from absent.
+/// - `read_string` filters empty strings, and `parse_post_deploy` /
+///   `parse_glob_list` map an empty string or array to an empty `Vec` — so
+///   `path = ""`, `env_file = ""`, `post_deploy = ""` and `exclude = []` all
+///   reach the model as exactly the state that means "key absent".
 ///
 /// For those, the model's key set is a strict subset of the file's, so a
 /// `doc.remove(section)` or a `retain` keyed on the model deletes whatever the
 /// user wrote there — the key, the section, and the comment explaining it.
 /// Instead clear the keys scaffold owns and keep whatever survives:
-/// [`remove_owned_child`], [`remove_owned_section`] and [`prune_run_profiles`]
-/// do this. Blanket removal is used only for `[basecamp.env]` and a profile's
-/// `env`, where `parse_string_map` rejects every key it cannot model and the
-/// parse therefore *is* total.
+/// [`remove_owned_child`], [`clear_owned_basecamp_keys`],
+/// [`prune_run_profiles`] and [`remove_unless_empty_literal`] do this.
+///
+/// Note the second and third bullets compose: a section can parse to `None`
+/// *because* each of its fields was individually skipped, so clearing that
+/// section must recurse with the same scoped rules rather than dropping its
+/// child tables — see [`clear_owned_basecamp_keys`].
+///
+/// Blanket removal is used only for `[basecamp.env]` and a profile's `env`,
+/// where `parse_string_map` rejects every key it cannot model and the parse
+/// therefore *is* total.
 fn write_config_into(mut doc: DocumentMut, cfg: &Config) -> DynResult<String> {
     // [scaffold]
     let scaffold = doc.entry("scaffold").or_insert(Item::Table(Table::new()));
@@ -797,7 +808,7 @@ fn write_config_into(mut doc: DocumentMut, cfg: &Config) -> DynResult<String> {
         check_toml_value("cache_root", &cfg.cache_root)?;
         scaffold_table["cache_root"] = value(&cfg.cache_root);
     } else {
-        scaffold_table.remove("cache_root");
+        remove_unless_empty_literal(scaffold_table, "cache_root");
     }
 
     // [repos.<name>] entries — render in stable order.
@@ -847,7 +858,7 @@ fn write_config_into(mut doc: DocumentMut, cfg: &Config) -> DynResult<String> {
             check_toml_value(&format!("modules.{name}.standalone_app"), app)?;
             table["standalone_app"] = value(app);
         } else {
-            table.remove("standalone_app");
+            remove_unless_empty_literal(table, "standalone_app");
         }
         // Defensive: the function's check above already covered both fields.
         let _ = path;
@@ -893,12 +904,12 @@ fn write_config_into(mut doc: DocumentMut, cfg: &Config) -> DynResult<String> {
     if let Some(template) = &cfg.circuits.url_template {
         circuits_table["url_template"] = value(template);
     } else {
-        circuits_table.remove("url_template");
+        remove_unless_empty_literal(circuits_table, "url_template");
     }
     if cfg.circuits.install_dir != CircuitsConfig::default().install_dir {
         circuits_table["install_dir"] = value(&cfg.circuits.install_dir);
     } else {
-        circuits_table.remove("install_dir");
+        remove_unless_empty_literal(circuits_table, "install_dir");
     }
 
     // [basecamp]
@@ -1014,9 +1025,7 @@ fn write_config_into(mut doc: DocumentMut, cfg: &Config) -> DynResult<String> {
             {
                 for (_, item) in profiles.iter_mut() {
                     if let Some(profile) = item.as_table_mut() {
-                        for k in ["env_file", "runtime_dir", "log_file", "env"] {
-                            profile.remove(k);
-                        }
+                        clear_owned_profile_keys(profile);
                     }
                 }
                 profiles.retain(|_, item| !item.as_table().is_some_and(Table::is_empty));
@@ -1037,9 +1046,7 @@ fn write_config_into(mut doc: DocumentMut, cfg: &Config) -> DynResult<String> {
                 }
                 match item.as_table_mut() {
                     Some(profile) => {
-                        for k in ["env_file", "runtime_dir", "log_file", "env"] {
-                            profile.remove(k);
-                        }
+                        clear_owned_profile_keys(profile);
                         !profile.is_empty()
                     }
                     None => true,
@@ -1055,23 +1062,29 @@ fn write_config_into(mut doc: DocumentMut, cfg: &Config) -> DynResult<String> {
                 // follows. With no scalar key, keep the profile table implicit
                 // so only `[basecamp.profiles.<name>.env]` renders.
                 let mut wrote_scalar = false;
+                // The `else` arms keep an `env_file = ""` the user wrote:
+                // `read_string` filters empty strings, so it reaches the model
+                // as `None` — see `remove_unless_empty_literal`.
                 if let Some(f) = &p.env_file {
                     profile_table["env_file"] = value(f);
                     wrote_scalar = true;
                 } else {
-                    profile_table.remove("env_file");
+                    remove_unless_empty_literal(profile_table, "env_file");
+                    wrote_scalar |= profile_table.contains_key("env_file");
                 }
                 if let Some(d) = &p.runtime_dir {
                     profile_table["runtime_dir"] = value(d);
                     wrote_scalar = true;
                 } else {
-                    profile_table.remove("runtime_dir");
+                    remove_unless_empty_literal(profile_table, "runtime_dir");
+                    wrote_scalar |= profile_table.contains_key("runtime_dir");
                 }
                 if let Some(l) = &p.log_file {
                     profile_table["log_file"] = value(l);
                     wrote_scalar = true;
                 } else {
-                    profile_table.remove("log_file");
+                    remove_unless_empty_literal(profile_table, "log_file");
+                    wrote_scalar |= profile_table.contains_key("log_file");
                 }
                 if !p.env.is_empty() {
                     let env_table = child_table(profile_table, "env");
@@ -1090,11 +1103,7 @@ fn write_config_into(mut doc: DocumentMut, cfg: &Config) -> DynResult<String> {
     }
 
     if cfg.basecamp.is_none() {
-        remove_owned_section(
-            &mut doc,
-            "basecamp",
-            &["port_base", "port_stride", "env", "env_append", "profiles"],
-        );
+        clear_owned_basecamp_keys(&mut doc);
     }
 
     // [run] — only emit when non-default to keep fresh scaffold.toml minimal.
@@ -1116,8 +1125,12 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
     // early without removing would strand a section the config no longer has.
     if !has_inline && !has_default_profile && !has_profiles && !has_watch {
         if let Some(run_table) = doc.get_mut("run").and_then(Item::as_table_mut) {
-            for k in ["default_profile", "reset", "deploy", "topup", "post_deploy"] {
+            for k in ["reset", "deploy", "topup"] {
                 run_table.remove(k);
+            }
+            // These two have an empty-literal form the reader skips.
+            for k in ["default_profile", "post_deploy"] {
+                remove_unless_empty_literal(run_table, k);
             }
             // `profiles` and `watch` are tables that may hold user keys of
             // their own, so recurse into them rather than removing outright.
@@ -1136,7 +1149,7 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
         check_toml_value("run.default_profile", name)?;
         run_table["default_profile"] = value(name);
     } else {
-        run_table.remove("default_profile");
+        remove_unless_empty_literal(run_table, "default_profile");
     }
     if run.inline.reset {
         run_table["reset"] = value(true);
@@ -1161,7 +1174,7 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
         }
         run_table["post_deploy"] = post_deploy_value(&run.inline.post_deploy);
     } else {
-        run_table.remove("post_deploy");
+        remove_unless_empty_literal(run_table, "post_deploy");
     }
 
     if has_profiles {
@@ -1202,7 +1215,7 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
             if !profile.post_deploy.is_empty() {
                 profile_table["post_deploy"] = post_deploy_value(&profile.post_deploy);
             } else {
-                profile_table.remove("post_deploy");
+                remove_unless_empty_literal(profile_table, "post_deploy");
             }
         }
     } else if let Some(run_table) = doc.get_mut("run").and_then(Item::as_table_mut) {
@@ -1217,12 +1230,12 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
         if !run.watch.include.is_empty() {
             watch_table["include"] = string_array(&run.watch.include);
         } else {
-            watch_table.remove("include");
+            remove_unless_empty_literal(watch_table, "include");
         }
         if !run.watch.exclude.is_empty() {
             watch_table["exclude"] = string_array(&run.watch.exclude);
         } else {
-            watch_table.remove("exclude");
+            remove_unless_empty_literal(watch_table, "exclude");
         }
         if let Some(ms) = run.watch.debounce_ms {
             watch_table["debounce_ms"] = value(ms as i64);
@@ -1270,10 +1283,14 @@ fn write_repo_ref(doc: &mut DocumentMut, name: &str, repo: &RepoRef) -> DynResul
     let table = ensure_subtable(doc, "repos", name);
     table["source"] = value(&repo.source);
     table["pin"] = value(&repo.pin);
+    // The `else` arms here go through `remove_unless_empty_literal` because
+    // `parse_repo_ref` reads all three through `read_string`, which filters
+    // empty strings — so `build = ""` / `attr = ""` / `path = ""` reach the
+    // model as the same default a missing key gives.
     if repo.build != RepoBuild::default() {
         table["build"] = value(repo.build.as_str());
     } else {
-        table.remove("build");
+        remove_unless_empty_literal(table, "build");
     }
     // Per-platform map wins over the scalar form; render it as an inline table
     // (`attr = { aarch64-darwin = "…" }`) so it stays a value under the
@@ -1287,14 +1304,54 @@ fn write_repo_ref(doc: &mut DocumentMut, name: &str, repo: &RepoRef) -> DynResul
     } else if !repo.attr.is_empty() {
         table["attr"] = value(&repo.attr);
     } else {
-        table.remove("attr");
+        remove_unless_empty_literal(table, "attr");
     }
     if !repo.path.is_empty() {
         table["path"] = value(&repo.path);
     } else {
-        table.remove("path");
+        remove_unless_empty_literal(table, "path");
     }
     Ok(())
+}
+
+/// Remove `key` unless the file holds it as an *empty literal* — `key = ""` or
+/// `key = []`.
+///
+/// This is the third non-totality carve-out, alongside the two named on
+/// [`write_config_into`], and it comes from the readers rather than from a
+/// section parser. `read_string` ends in `.filter(|s| !s.is_empty())` and
+/// `parse_post_deploy` / `parse_glob_list` map an empty string or array to an
+/// empty `Vec`, so `env_file = ""`, `path = ""`, `post_deploy = ""` and
+/// `exclude = []` all parse to exactly the model state that means "absent".
+/// A plain `remove` on that state therefore deletes a line the user wrote —
+/// and, because `toml_edit` hangs a comment off the following key's prefix
+/// decor, the comment above it goes too.
+///
+/// Nothing observable changes either way: every consumer treats empty and
+/// absent alike. But silently deleting a hand-written line and its comment is
+/// the exact failure this rewrite exists to prevent, so preserve the literal
+/// and let the user delete it themselves. Anything else — a stale non-empty
+/// value the model no longer carries — is removed as usual.
+fn remove_unless_empty_literal(table: &mut Table, key: &str) {
+    let is_empty_literal = table.get(key).is_some_and(|item| {
+        item.as_str().is_some_and(str::is_empty) || item.as_array().is_some_and(|a| a.is_empty())
+    });
+    if !is_empty_literal {
+        table.remove(key);
+    }
+}
+
+/// Clear the keys scaffold owns from one `[basecamp.profiles.<name>]`, keeping
+/// any empty-string literal the reader skipped (see
+/// [`remove_unless_empty_literal`]). Callers then drop the profile if it is
+/// left empty.
+fn clear_owned_profile_keys(profile: &mut Table) {
+    for k in ["env_file", "runtime_dir", "log_file"] {
+        remove_unless_empty_literal(profile, k);
+    }
+    // `env` is a table parsed by the total `parse_string_map`, so a blanket
+    // remove is safe here — nothing in it is unmodelled.
+    profile.remove("env");
 }
 
 /// Clear the keys scaffold owns from `table[key]`, then drop the child table
@@ -1312,7 +1369,7 @@ fn remove_owned_child(table: &mut Table, key: &str, owned: &[&str]) {
         return;
     };
     for k in owned {
-        child.remove(k);
+        remove_unless_empty_literal(child, k);
     }
     if child.is_empty() {
         table.remove(key);
@@ -1336,9 +1393,10 @@ fn prune_run_profiles(run_table: &mut Table) {
     };
     for (_, item) in profiles.iter_mut() {
         if let Some(profile) = item.as_table_mut() {
-            for k in ["reset", "deploy", "topup", "post_deploy"] {
+            for k in ["reset", "deploy", "topup"] {
                 profile.remove(k);
             }
+            remove_unless_empty_literal(profile, "post_deploy");
         }
     }
     profiles.retain(|_, item| !item.as_table().is_some_and(Table::is_empty));
@@ -1347,18 +1405,50 @@ fn prune_run_profiles(run_table: &mut Table) {
     }
 }
 
-/// Same, one level up: clear scaffold's keys from a top-level section and drop
-/// it only when empty. See [`remove_owned_child`] for why emptiness is the
-/// test rather than the model being `None`.
-fn remove_owned_section(doc: &mut DocumentMut, key: &str, owned: &[&str]) {
-    let Some(table) = doc.get_mut(key).and_then(Item::as_table_mut) else {
+/// Clear everything scaffold owns from `[basecamp]` — the case where the whole
+/// section parsed away to `None` — and drop the table only once nothing is
+/// left. See [`remove_owned_child`] for why emptiness is the test rather than
+/// the model being `None`.
+///
+/// The subtlety is that `[basecamp]`'s *children* carry the same carve-outs as
+/// the section itself, and a blanket `remove("env_append")` /
+/// `remove("profiles")` here would reach straight past them. When
+/// `parse_basecamp_runtime` returns `None` it may be because every one of its
+/// fields was individually skipped, not because the file holds nothing: an
+/// `env_append` of only empty lists and a profile of only unmodelled keys both
+/// parse away, and both are content the user wrote. So recurse with the same
+/// scoped rules the non-`None` path uses rather than deleting the child tables
+/// outright.
+fn clear_owned_basecamp_keys(doc: &mut DocumentMut) {
+    let Some(table) = doc.get_mut("basecamp").and_then(Item::as_table_mut) else {
         return;
     };
-    for k in owned {
-        table.remove(k);
+    table.remove("port_base");
+    table.remove("port_stride");
+    // Total parser (`parse_string_map`), so nothing unmodelled can be in here.
+    table.remove("env");
+    // Not total: an empty list is skipped at parse, so keep those.
+    if let Some(append) = table.get_mut("env_append").and_then(Item::as_table_mut) {
+        append.retain(|_, item| item.as_array().is_some_and(|a| a.is_empty()));
+        if append.is_empty() {
+            table.remove("env_append");
+        }
+    }
+    // Not total: a fully-default profile is dropped at parse, so a profile of
+    // only unmodelled keys is absent from the model but present in the file.
+    if let Some(profiles) = table.get_mut("profiles").and_then(Item::as_table_mut) {
+        for (_, item) in profiles.iter_mut() {
+            if let Some(profile) = item.as_table_mut() {
+                clear_owned_profile_keys(profile);
+            }
+        }
+        profiles.retain(|_, item| !item.as_table().is_some_and(Table::is_empty));
+        if profiles.is_empty() {
+            table.remove("profiles");
+        }
     }
     if table.is_empty() {
-        doc.remove(key);
+        doc.remove("basecamp");
     }
 }
 
@@ -2614,6 +2704,317 @@ role = "project"
             back.basecamp.as_ref().expect("basecamp").port_base,
             41000,
             "clearing a child table clobbered its parent's keys:\n{updated}"
+        );
+    }
+
+    /// The `[basecamp] = None` path has to honour the *children's* carve-outs,
+    /// not just the section's own. `parse_basecamp_runtime` can return `None`
+    /// because every field was individually skipped rather than because the
+    /// file is empty — an `env_append` of only empty lists and a profile of
+    /// only unmodelled keys both parse away — so clearing the section by
+    /// blanket-removing `env_append` and `profiles` deletes content the user
+    /// wrote. The non-`None` path already scopes these; this pins that the
+    /// `None` path does too.
+    #[test]
+    fn update_config_keeps_skipped_basecamp_children_when_the_section_parses_to_none() {
+        let original = minimal_v0_2_0()
+            + "\n# ports come from the CI allocator\n[basecamp]\nci_lease = \"team-a\"\n\
+               \n[basecamp.env_append]\n\
+               # cleared deliberately; the wrapper appends at runtime\n\
+               LD_LIBRARY_PATH = []\n\
+               \n[basecamp.profiles.carol]\n\
+               # our harness reads this; scaffold does not model it\n\
+               screenshot_dir = \"/tmp/shots\"\n";
+        let cfg = parse_config(&original).expect("parse");
+        assert!(
+            cfg.basecamp.is_none(),
+            "fixture assumption: every field is skipped, so the section is None"
+        );
+
+        let rewritten = update_config(&original, &cfg).expect("update");
+        assert!(
+            rewritten.contains("ci_lease = \"team-a\""),
+            "the section's own unmodelled key was deleted:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("LD_LIBRARY_PATH = []"),
+            "an env_append entry the parser merely skipped was deleted:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("# cleared deliberately; the wrapper appends at runtime"),
+            "the comment explaining it went with it:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("screenshot_dir = \"/tmp/shots\""),
+            "a profile the parser merely skipped was deleted:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("# our harness reads this; scaffold does not model it"),
+            "the comment explaining the profile went with it:\n{rewritten}"
+        );
+        parse_config(&rewritten).expect("rewritten config must still parse");
+    }
+
+    /// `read_string` ends in `.filter(|s| !s.is_empty())`, and
+    /// `parse_post_deploy` / `parse_glob_list` map an empty string or array to
+    /// an empty `Vec` — so `path = ""`, `post_deploy = ""` and `exclude = []`
+    /// all reach the model as exactly the state that means "key absent". A
+    /// plain `remove` on that state deletes a line the user wrote, and takes
+    /// the comment above it with it. Nothing observable changes either way,
+    /// but silent deletion of a hand-written line is the failure this rewrite
+    /// exists to prevent.
+    #[test]
+    fn update_config_keeps_empty_literals_the_readers_skip() {
+        let original = minimal_v0_2_0().replace(
+            "[repos.spel]",
+            "[repos.spel]\n# resolved at runtime; deliberately blank\npath = \"\"",
+        ) + "\n[basecamp]\nport_base = 41000\n\
+               \n[basecamp.profiles.alice]\nruntime_dir = \"/run/user/1000\"\n\
+               # the wrapper supplies this\nenv_file = \"\"\n\
+               \n[run]\nreset = true\n\
+               \n[run.watch]\ninclude = [\"src/**\"]\n\
+               # nothing to exclude yet\nexclude = []\n";
+        let cfg = parse_config(&original).expect("parse");
+        // Fixture assumption: each of these reaches the model as "absent".
+        assert!(cfg.spel.path.is_empty(), "fixture: path parses away");
+        assert!(
+            cfg.basecamp
+                .as_ref()
+                .expect("basecamp")
+                .profiles
+                .get("alice")
+                .expect("alice")
+                .env_file
+                .is_none(),
+            "fixture: empty env_file parses away"
+        );
+        assert!(
+            cfg.run.watch.exclude.is_empty(),
+            "fixture: exclude is empty"
+        );
+
+        let rewritten = update_config(&original, &cfg).expect("update");
+        assert!(
+            rewritten.contains("path = \"\""),
+            "an empty `path` literal was deleted:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("# resolved at runtime; deliberately blank"),
+            "the comment above it went with it:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("env_file = \"\""),
+            "an empty `env_file` literal was deleted:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("# the wrapper supplies this"),
+            "the comment above env_file went with it:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("exclude = []"),
+            "an empty `exclude` array was deleted:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("# nothing to exclude yet"),
+            "the comment above exclude went with it:\n{rewritten}"
+        );
+        // Preserving them must not change what the file means.
+        let back = parse_config(&rewritten).expect("reparse");
+        assert!(back.spel.path.is_empty(), "empty literal changed meaning");
+        assert!(
+            back.run.watch.exclude.is_empty(),
+            "empty literal changed meaning"
+        );
+    }
+
+    /// A stale *non-empty* value is still removed — the empty-literal carve-out
+    /// above must not turn into "never remove anything". This is the class-A
+    /// half of the same helper, and it is what stops the fix for one failure
+    /// mode from reintroducing the other.
+    #[test]
+    fn update_config_still_clears_non_empty_optional_values() {
+        let original = minimal_v0_2_0().replace(
+            "[scaffold]\nversion = \"0.2.0\"",
+            "[scaffold]\nversion = \"0.2.0\"\ncache_root = \"/custom/cache\"",
+        ) + "\n[circuits]\nversion = \"0.1.0\"\n\
+               url_template = \"https://example.com/{version}.tar.gz\"\n\
+               \n[run]\ndefault_profile = \"dev\"\npost_deploy = \"echo hi\"\n\
+               \n[run.profiles.dev]\nreset = true\npost_deploy = \"echo dev\"\n\
+               \n[run.profiles.ci]\ndeploy = false\n\
+               \n[run.watch]\ninclude = [\"src/**\"]\ndebounce_ms = 500\n";
+        let mut cfg = parse_config(&original).expect("parse");
+        assert!(!cfg.cache_root.is_empty(), "fixture: cache_root is set");
+        assert!(cfg.circuits.url_template.is_some(), "fixture: template set");
+
+        // Reset each optional back to its default / absent form, while keeping
+        // enough non-default state that the writer takes the *emitting* path
+        // rather than the whole-section early return.
+        cfg.cache_root.clear();
+        cfg.circuits.url_template = None;
+        cfg.run.default_profile = None;
+        cfg.run.inline.post_deploy.clear();
+        let dev = cfg.run.profiles.get_mut("dev").expect("dev profile");
+        dev.reset = false;
+        dev.post_deploy.clear();
+        cfg.run.watch.include.clear();
+
+        let rewritten = update_config(&original, &cfg).expect("update");
+        let back = parse_config(&rewritten).expect("reparse");
+        assert!(
+            back.cache_root.is_empty(),
+            "stale cache_root survived:\n{rewritten}"
+        );
+        assert!(
+            back.circuits.url_template.is_none(),
+            "stale url_template survived:\n{rewritten}"
+        );
+        assert!(
+            back.run.default_profile.is_none(),
+            "stale default_profile survived:\n{rewritten}"
+        );
+        assert!(
+            back.run.inline.post_deploy.is_empty(),
+            "stale run.post_deploy survived:\n{rewritten}"
+        );
+        let back_dev = back.run.profiles.get("dev").expect("dev survives");
+        assert!(
+            !back_dev.reset,
+            "stale profile reset survived:\n{rewritten}"
+        );
+        assert!(
+            back_dev.post_deploy.is_empty(),
+            "stale profile post_deploy survived:\n{rewritten}"
+        );
+        assert!(
+            back.run.watch.include.is_empty(),
+            "stale watch include survived:\n{rewritten}"
+        );
+        // The keys that were *not* reset must be untouched, so this cannot
+        // pass by deleting whole sections.
+        assert_eq!(back.run.watch.debounce_ms, Some(500), "{rewritten}");
+        assert!(
+            !back.run.profiles.get("ci").expect("ci survives").deploy,
+            "an untouched sibling profile was clobbered:\n{rewritten}"
+        );
+    }
+
+    /// `write_repo_ref`'s three optionals, cleared under a merge. The fresh
+    /// render never exercised the removal side, and `[repos.<name>].path` is
+    /// the operationally sharp one: a stranded absolute path pins the project
+    /// to one machine's layout.
+    #[test]
+    fn update_config_clears_repo_optionals_reset_to_defaults() {
+        let original = minimal_v0_2_0()
+            + "\n[repos.basecamp]\nsource = \"https://github.com/logos-co/logos-basecamp.git\"\n\
+               pin = \"aa237766baf61404e12da86b7303cb41065464c9\"\n\
+               build = \"nix-flake\"\nattr = \"app\"\npath = \"/abs/basecamp\"\n";
+        let mut cfg = parse_config(&original).expect("parse");
+        let bc = cfg.basecamp_repo.as_mut().expect("basecamp repo");
+        assert_ne!(bc.build, RepoBuild::default(), "fixture: build non-default");
+        bc.build = RepoBuild::default();
+        bc.attr.clear();
+        bc.path.clear();
+
+        let rewritten = update_config(&original, &cfg).expect("update");
+        let back = parse_config(&rewritten).expect("reparse");
+        let rbc = back.basecamp_repo.as_ref().expect("repo survives");
+        assert_eq!(rbc.build, RepoBuild::default(), "stale build:\n{rewritten}");
+        assert!(rbc.attr.is_empty(), "stale attr:\n{rewritten}");
+        assert!(rbc.path.is_empty(), "stale path:\n{rewritten}");
+        // The repo itself must survive — this must not pass by deleting it.
+        assert_eq!(rbc.pin, "aa237766baf61404e12da86b7303cb41065464c9");
+    }
+
+    /// `[repos.lgpm]` takes the same `None` arm as `[repos.basecamp]`, and
+    /// `setup` writes both. Only `basecamp` was pinned; a loop is easy to
+    /// half-break.
+    #[test]
+    fn update_config_drops_a_dropped_lgpm_repo() {
+        let original = minimal_v0_2_0()
+            + "\n[repos.lgpm]\nsource = \"https://github.com/logos-co/lgpm.git\"\n\
+               pin = \"bb237766baf61404e12da86b7303cb41065464c9\"\nbuild = \"nix-flake\"\n";
+        let mut cfg = parse_config(&original).expect("parse");
+        assert!(cfg.lgpm_repo.is_some(), "fixture must start with one");
+        cfg.lgpm_repo = None;
+
+        let rewritten = update_config(&original, &cfg).expect("update");
+        assert!(
+            !rewritten.contains("[repos.lgpm]"),
+            "dropped lgpm table survived:\n{rewritten}"
+        );
+        assert!(
+            parse_config(&rewritten)
+                .expect("reparse")
+                .lgpm_repo
+                .is_none(),
+            "dropped lgpm reparsed as present:\n{rewritten}"
+        );
+        assert!(rewritten.contains("[repos.lez]"), "{rewritten}");
+    }
+
+    /// `prune_run_profiles` is the defensive twin of the `[basecamp]` prune.
+    /// Its own doc comment concedes it is not load-bearing today — which is
+    /// exactly why it needs a test: nothing else stops a future reader from
+    /// "simplifying" it into the blanket remove its basecamp analogue must
+    /// never become.
+    #[test]
+    fn update_config_keeps_unmodelled_keys_in_a_cleared_run_profile() {
+        let original = minimal_v0_2_0()
+            + "\n[run]\nreset = true\n\
+               \n[run.profiles.dev]\nreset = true\n\
+               # our harness reads this; scaffold does not model it\n\
+               harness_tag = \"nightly\"\n";
+        let mut cfg = parse_config(&original).expect("parse");
+        cfg.run = RunConfig::default();
+
+        let rewritten = update_config(&original, &cfg).expect("update");
+        assert!(
+            rewritten.contains("harness_tag = \"nightly\""),
+            "an unmodelled key in a cleared run profile was deleted:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("# our harness reads this; scaffold does not model it"),
+            "the comment explaining it went with it:\n{rewritten}"
+        );
+        let back = parse_config(&rewritten).expect("reparse");
+        assert!(
+            !back.run.profiles.get("dev").is_some_and(|p| p.reset),
+            "the owned key survived a reset to default:\n{rewritten}"
+        );
+    }
+
+    /// A per-profile `env` key removed from the model must go, while its
+    /// siblings stay. `parse_string_map` is total, so this retain is
+    /// legitimately model-keyed — the risk here is a stale key, not deletion.
+    #[test]
+    fn update_config_prunes_one_key_from_a_basecamp_profile_env() {
+        let original = minimal_v0_2_0()
+            + "\n[basecamp.profiles.alice]\nruntime_dir = \"/run/user/1000\"\n\
+               \n[basecamp.profiles.alice.env]\nA = \"1\"\nB = \"2\"\n";
+        let mut cfg = parse_config(&original).expect("parse");
+        cfg.basecamp
+            .as_mut()
+            .expect("basecamp")
+            .profiles
+            .get_mut("alice")
+            .expect("alice")
+            .env
+            .remove("B");
+
+        let rewritten = update_config(&original, &cfg).expect("update");
+        let back = parse_config(&rewritten).expect("reparse");
+        let env = &back
+            .basecamp
+            .as_ref()
+            .expect("basecamp")
+            .profiles
+            .get("alice")
+            .expect("alice")
+            .env;
+        assert_eq!(env.get("A").map(String::as_str), Some("1"), "{rewritten}");
+        assert!(
+            !env.contains_key("B"),
+            "stale env key survived:\n{rewritten}"
         );
     }
 

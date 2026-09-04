@@ -84,11 +84,29 @@ pub(crate) fn run_in_project_dir(
 ///
 /// Comments here are routinely load-bearing (why a `runtime_dir` override
 /// exists, why a pin is held back), so dropping them silently re-opens the
-/// bugs they document. If the file is missing or unparseable, this falls back
+/// bugs they document. If the file is absent or unparseable, this falls back
 /// to a from-scratch render.
+///
+/// A read error other than "not found" is *not* folded into that fallback. An
+/// absent file is a legitimate from-scratch write; an unreadable one means the
+/// comments are still on disk and we simply could not see them, so rendering
+/// fresh would delete them — the exact bug this function exists to fix, and
+/// silently, since the write would otherwise succeed. Fail instead.
 pub(crate) fn save_project_config(project: &Project) -> DynResult<()> {
     let path = project.root.join("scaffold.toml");
-    let existing = fs::read_to_string(&path).unwrap_or_default();
+    let existing = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(e).with_context(|| {
+                format!(
+                    "reading {} before rewriting it (refusing to rewrite from \
+                     scratch, which would drop the file's comments)",
+                    path.display()
+                )
+            })
+        }
+    };
     write_text_atomic(&path, &update_config(&existing, &project.config)?)
 }
 
@@ -273,6 +291,39 @@ mod tests {
     /// The unit tests in `config` cover `update_config` in isolation; only
     /// this covers the read-back, which is where a missing or unreadable file
     /// silently degrades to a from-scratch render.
+    /// A valid v0.2.0 `scaffold.toml`, with no comments of its own so callers
+    /// can add exactly the ones their assertions look for.
+    fn minimal_scaffold_toml() -> String {
+        "\
+[scaffold]
+version = \"0.2.0\"
+
+[repos.lez]
+source = \"https://github.com/logos-blockchain/logos-execution-zone.git\"
+pin = \"cf3639d8252040d13b3d4e933feb19b42c76e14a\"
+
+[repos.spel]
+source = \"https://github.com/logos-co/spel.git\"
+pin = \"73fc462eb8f0a4d00f1a846437c627ec2e523f83\"
+
+[wallet]
+home_dir = \".scaffold/wallet\"
+
+[framework]
+kind = \"default\"
+version = \"0.1.0\"
+
+[framework.idl]
+spec = \"lssa-idl/0.1.0\"
+path = \"idl\"
+
+[localnet]
+port = 3040
+risc0_dev_mode = true
+"
+        .to_string()
+    }
+
     #[test]
     fn save_project_config_preserves_comments_through_the_disk_round_trip() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -333,6 +384,48 @@ risc0_dev_mode = true
             reloaded.config.lez.pin,
             "2222222222222222222222222222222222222222"
         );
+    }
+
+    /// An unreadable `scaffold.toml` must fail the write, not fall back to a
+    /// from-scratch render. The comments are still on disk — we just could not
+    /// see them — so rendering fresh would delete them while reporting
+    /// success, which is exactly the bug this path exists to fix.
+    ///
+    /// An *absent* file is the legitimate case for that fallback and must
+    /// still succeed; both halves are here so neither can be "fixed" alone.
+    #[test]
+    #[cfg(unix)]
+    fn save_project_config_refuses_to_rewrite_an_unreadable_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("scaffold.toml");
+        fs::write(&path, format!("# keep me\n{}", minimal_scaffold_toml())).expect("seed");
+
+        let project = load_project_at(temp.path()).expect("load");
+
+        // Unreadable: the comments are there, we just cannot see them.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("chmod");
+        let unreadable = fs::read_to_string(&path).is_err();
+        // Running as root defeats the permission bit; skip rather than assert
+        // a falsehood about the environment.
+        if unreadable {
+            let err = save_project_config(&project)
+                .expect_err("an unreadable scaffold.toml must not be rewritten from scratch");
+            assert!(
+                err.to_string().contains("scaffold.toml"),
+                "error should name the file it refused to rewrite: {err}"
+            );
+        }
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("restore");
+        // Whatever happened, the comment must still be on disk.
+        let after = fs::read_to_string(&path).expect("read back");
+        assert!(after.contains("# keep me"), "comment lost:\n{after}");
+
+        // The absent-file case still writes, from scratch.
+        fs::remove_file(&path).expect("remove");
+        save_project_config(&project).expect("a missing file is a legitimate fresh write");
+        assert!(path.exists(), "fresh write did not happen");
     }
 
     fn fixture_project(root: PathBuf, cache_root: &str) -> Project {
