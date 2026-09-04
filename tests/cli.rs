@@ -3341,6 +3341,69 @@ fn basecamp_build_portable_inside_empty_project_emits_hint_to_capture_first() {
 }
 
 #[test]
+fn basecamp_build_accepts_print_output_flag() {
+    // The passthrough that gives CI a log-carrying module build. Assert it on
+    // both verbs: `build-portable` is a separate clap struct, so a flag added
+    // to one can silently miss the other.
+    for verb in ["build", "build-portable"] {
+        Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+            .args(["basecamp", verb, "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("--print-output"));
+    }
+}
+
+#[test]
+fn basecamp_setup_help_carries_the_inspector_flags() {
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .args(["basecamp", "setup", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--inspector"))
+        .stdout(predicate::str::contains("--no-inspector"));
+}
+
+/// The headline fix, end to end through the real binary: an explicit
+/// `--inspector` persists the stack choice *before* the long nix build, so an
+/// interrupted or failed setup cannot leave the next plain `setup` silently
+/// back on the dev build. The command is expected to fail here (no network,
+/// or a build that never finishes); the assertion is about what was already
+/// written when it did.
+///
+/// Nix-gated by necessity: `setup` bails on a missing `nix` before touching
+/// any config, so on a host without it this asserts nothing. CI has no nix, so
+/// treat this as local-only coverage — the attr *values* are pinned Nix-free
+/// by the `apply_inspector_selection` / `align_lgpm_attr` unit tests, and only
+/// the write *ordering* needs a real run.
+#[test]
+fn basecamp_setup_inspector_persists_both_attrs_before_the_build() {
+    let temp = tempdir().expect("tempdir");
+    let config = temp.path().join("scaffold.toml");
+    fs::write(&config, MINIMAL_SCAFFOLD_TOML).expect("write scaffold.toml");
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["basecamp", "setup", "--inspector"])
+        .assert();
+
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    if stderr.contains("requires Nix") {
+        return;
+    }
+
+    let written = fs::read_to_string(&config).expect("read scaffold.toml");
+    assert!(
+        written.contains("bin-bundle-dir-inspector"),
+        "inspector attr not persisted before the build:\n{written}"
+    );
+    assert!(
+        written.contains("cli-portable"),
+        "lgpm attr did not move with the stack:\n{written}"
+    );
+}
+
+#[test]
 fn basecamp_install_before_setup_emits_hint() {
     let temp = tempdir().expect("tempdir");
     fs::write(temp.path().join("scaffold.toml"), MINIMAL_SCAFFOLD_TOML)

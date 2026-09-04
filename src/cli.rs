@@ -1040,7 +1040,7 @@ enum BasecampSubcommand {
     #[command(
         about = "Fetch, build, and seed pinned basecamp + lgpm + alice/bob profiles. See `basecamp docs` for project requirements."
     )]
-    Setup,
+    Setup(BasecampSetupArgs),
     #[command(
         about = "Capture the set of modules + runtime dependencies to install; auto-discovers or takes explicit --flake/--path. See `basecamp docs` for project requirements."
     )]
@@ -1082,6 +1082,21 @@ enum BasecampSubcommand {
         about = "Print the canonical project-compatibility rules (embedded copy of docs/basecamp-module-requirements.md)"
     )]
     Docs,
+}
+
+#[derive(Debug, clap::Args)]
+struct BasecampSetupArgs {
+    /// Build Basecamp with the QML inspector compiled in, so a UI test
+    /// harness can connect and drive it headlessly. Test-only build: the
+    /// inspector is deliberately off in every shipping Basecamp output.
+    /// Selects `[repos.basecamp].attr = "bin-bundle-dir-inspector"` and
+    /// persists it, so later runs stay on the inspector build without the
+    /// flag; pass `--no-inspector` to go back to the shipping build.
+    #[arg(long, overrides_with = "no_inspector")]
+    inspector: bool,
+    /// Undo a previous `--inspector`: restore the default Basecamp build.
+    #[arg(long, overrides_with = "inspector")]
+    no_inspector: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -1135,6 +1150,12 @@ struct BasecampBuildArgs {
     /// Restrict the build to a single captured project module.
     #[arg(long, value_name = "NAME")]
     module: Option<String>,
+    /// Stream nix output directly to the terminal instead of logging to
+    /// `.scaffold/logs/<ts>-build-<variant>.log` and printing a one-line
+    /// status. Equivalent to `LOGOS_SCAFFOLD_PRINT_OUTPUT=1`. Useful for CI,
+    /// where a failed module build should explain itself in the job log.
+    #[arg(long)]
+    print_output: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -1145,6 +1166,11 @@ struct BasecampBuildPortableArgs {
     /// Restrict the build to a single captured project module.
     #[arg(long, value_name = "NAME")]
     module: Option<String>,
+    /// Stream nix output directly to the terminal instead of logging to
+    /// `.scaffold/logs/<ts>-build-<variant>.log` and printing a one-line
+    /// status. Equivalent to `LOGOS_SCAFFOLD_PRINT_OUTPUT=1`. Useful for CI.
+    #[arg(long)]
+    print_output: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -1506,7 +1532,18 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
         }
         Some(Commands::Basecamp(args)) => {
             let action = match args.command {
-                BasecampSubcommand::Setup => BasecampAction::Setup,
+                BasecampSubcommand::Setup(args) => BasecampAction::Setup {
+                    // Tri-state: neither flag leaves whatever the project
+                    // already configured alone, so a re-run of plain `setup`
+                    // never silently drops an inspector opt-in.
+                    inspector: if args.inspector {
+                        Some(true)
+                    } else if args.no_inspector {
+                        Some(false)
+                    } else {
+                        None
+                    },
+                },
                 BasecampSubcommand::Modules(args) => BasecampAction::Modules {
                     paths: args.path,
                     flakes: args.flake,
@@ -1526,10 +1563,12 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 BasecampSubcommand::Build(args) => BasecampAction::Build {
                     variants: args.variant.attrs(),
                     module: args.module,
+                    print_output: args.print_output,
                 },
                 BasecampSubcommand::BuildPortable(args) => BasecampAction::Build {
                     variants: vec!["lgx-portable".to_string()],
                     module: args.module,
+                    print_output: args.print_output,
                 },
                 BasecampSubcommand::Run(args) => BasecampAction::Run {
                     module: args.module,

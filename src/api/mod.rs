@@ -645,7 +645,14 @@ impl CreateProjectOptions {
 #[derive(Clone, Debug)]
 pub enum BasecampCommand {
     /// Build/install the pinned basecamp binary and seed profiles.
-    Setup,
+    Setup {
+        /// Select the QML-inspector build of basecamp — the test-only twin of
+        /// the shipping bundle, which a UI harness can drive headlessly.
+        /// `Some(true)` switches `[repos.basecamp].attr` to it and persists
+        /// the choice, `Some(false)` restores the default build, and `None`
+        /// leaves whatever the project already configured untouched.
+        inspector: Option<bool>,
+    },
     /// Capture project modules (and dependencies) into `scaffold.toml`.
     Modules {
         paths: Vec<PathBuf>,
@@ -686,7 +693,7 @@ pub enum BasecampCommand {
 impl BasecampCommand {
     fn into_action(self) -> BasecampAction {
         match self {
-            Self::Setup => BasecampAction::Setup,
+            Self::Setup { inspector } => BasecampAction::Setup { inspector },
             Self::Modules {
                 paths,
                 flakes,
@@ -706,10 +713,18 @@ impl BasecampCommand {
                 log_file: None,
             },
             Self::Develop { module, dev_shell } => BasecampAction::Develop { module, dev_shell },
-            Self::Build { variants, module } => BasecampAction::Build { variants, module },
+            // As with `--log-file` above, the public API doesn't surface
+            // `--print-output`: an embedder captures scaffold's own output
+            // rather than asking it to stream a subprocess to the terminal.
+            Self::Build { variants, module } => BasecampAction::Build {
+                variants,
+                module,
+                print_output: false,
+            },
             Self::BuildPortable => BasecampAction::Build {
                 variants: vec!["lgx-portable".to_string()],
                 module: None,
+                print_output: false,
             },
             Self::Run { module, host } => BasecampAction::Run { module, host },
             Self::Doctor => BasecampAction::Doctor { json: false },
