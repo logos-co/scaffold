@@ -295,7 +295,11 @@ fn cmd_basecamp_setup(mut project: Project, inspector: Option<bool>) -> DynResul
 
     project.config.basecamp_repo = Some(basecamp_repo);
     project.config.lgpm_repo = Some(lgpm_repo);
-    save_project_config(&project)?;
+    // On a toggle the pre-build save above already wrote exactly these bytes;
+    // writing them again would churn the file's mtime for no change.
+    if !stack_changed {
+        save_project_config(&project)?;
+    }
 
     println!("setup complete");
     Ok(())
@@ -322,13 +326,22 @@ fn format_flake_ref(repo: &RepoRef) -> String {
 /// removing one key, never replacing the map: a colleague's
 /// `aarch64-darwin = "bin-macos-app"` is not a Linux developer's to discard.
 ///
-/// - `--inspector` writes the inspector attr where `effective_attr` will find
-///   it. With a map entry for this host, that is the entry (the map wins over
-///   the scalar, so writing the scalar alone would leave the flag a silent
-///   no-op); otherwise it is the scalar.
-/// - `--no-inspector` reverses exactly that, and only that: an entry we set is
-///   removed so the scalar shows through again, or a scalar we set goes back
-///   to the default. An attr the flag never selected is left alone and said
+/// Which of the two forms we write is decided by whether the project uses a
+/// map at all, not by whether the map happens to mention this host. That is
+/// forced by serialization: `write_repo_ref` emits the inline map *instead of*
+/// the scalar whenever the map is non-empty, so on a project carrying only a
+/// colleague's `aarch64-darwin` entry, writing the scalar would persist
+/// nothing at all — the flag would appear to work, `[repos.lgpm].attr` would
+/// move to the portable variant, and the next plain `setup` would default the
+/// scalar back to `app` and build a dev basecamp against portable lgpm. That
+/// is the exact empty-UI mismatch this feature exists to prevent, so:
+///
+/// - `--inspector` writes this host's key into the map when the project has
+///   one, and the scalar only when it does not.
+/// - `--no-inspector` reverses exactly that, and only that: with a map, this
+///   host's entry is removed, which drops the host back to whatever the file
+///   would resolve for it anyway; without one, the scalar we set goes back to
+///   the default. An attr the flag never selected is left alone and said
 ///   so — a flag that appears to do nothing is the same silent-mismatch trap
 ///   this feature exists to close.
 ///
@@ -346,12 +359,12 @@ fn apply_inspector_selection(basecamp_repo: &mut RepoRef, inspector: Option<bool
             if basecamp_repo.effective_attr(system) == BASECAMP_ATTR_INSPECTOR {
                 return false;
             }
-            if basecamp_repo.attr_platform.contains_key(system) {
+            if basecamp_repo.attr_platform.is_empty() {
+                basecamp_repo.attr = BASECAMP_ATTR_INSPECTOR.to_string();
+            } else {
                 basecamp_repo
                     .attr_platform
                     .insert(system.to_string(), BASECAMP_ATTR_INSPECTOR.to_string());
-            } else {
-                basecamp_repo.attr = BASECAMP_ATTR_INSPECTOR.to_string();
             }
             true
         }
@@ -367,14 +380,37 @@ fn apply_inspector_selection(basecamp_repo: &mut RepoRef, inspector: Option<bool
                 }
                 return false;
             }
-            // Drop this host's map entry, so whatever the scalar says applies
-            // to it again. Then fix the scalar only if what now resolves is
-            // still the inspector (it was the scalar that selected it) or is
-            // nothing at all (the map was the only source for this host).
-            basecamp_repo.attr_platform.remove(system);
-            let resolved = basecamp_repo.effective_attr(system);
-            if resolved.is_empty() || resolved == BASECAMP_ATTR_INSPECTOR {
+            // Mirror of the `--inspector` branch: with a map, the inspector
+            // can only have come from this host's entry, so removing it is the
+            // whole undo and the scalar is not ours to touch (it is not even
+            // serialized while a map exists). Without a map, the scalar is
+            // what we set, so it goes back to the default.
+            if basecamp_repo.attr_platform.is_empty() {
                 basecamp_repo.attr = BASECAMP_ATTR.to_string();
+            } else {
+                basecamp_repo.attr_platform.remove(system);
+                // Removing the entry can uncover an empty scalar, which would
+                // build a bare `nix build .#`. `setup` defaults the scalar
+                // before calling us, so this is belt-and-braces rather than a
+                // path a real run reaches — but the undo must land on a
+                // buildable attr on its own, not by relying on its caller.
+                if basecamp_repo.effective_attr(system).is_empty() {
+                    basecamp_repo.attr = BASECAMP_ATTR.to_string();
+                }
+            }
+            // Undoing `--inspector` restores the default stack, not whatever
+            // the user had before it — scaffold does not remember a displaced
+            // hand-set attr like `bin-appimage`, and inventing one would be a
+            // guess. What it can do is not leave the move silent: landing on a
+            // different stack than the user started from is exactly the sort
+            // of quiet change this feature exists to surface.
+            let restored = basecamp_repo.effective_attr(system);
+            if restored != BASECAMP_ATTR {
+                eprintln!(
+                    "note: --no-inspector put [repos.basecamp].attr back to {restored:?} on this \
+                     host. If you had a different build selected before `--inspector`, set it \
+                     again — the previous value is not remembered."
+                );
             }
             true
         }
@@ -469,7 +505,14 @@ fn build_basecamp_app(
     attr: &str,
     out_dir: &Path,
 ) -> DynResult<PathBuf> {
-    let link = out_dir.join("app-result");
+    // Key the out-link by attr, not by pin alone. A single shared
+    // `app-result` would be re-pointed by every stack toggle: a consumer
+    // holding the path from a previous `setup` would silently exec the other
+    // build, and the displaced stack would lose its GC root, so toggling back
+    // would rebuild from scratch. Per-attr links let both stacks coexist under
+    // one pin and make `basecamp_bin` genuinely move when the stack does,
+    // which is what `basecamp.state`'s consumers are told to rely on.
+    let link = out_dir.join(format!("app-result-{attr}"));
     let log = derive_log_path(project_root, "setup-basecamp");
     let mut cmd = Command::new("nix");
     cmd.current_dir(repo)
@@ -2084,10 +2127,25 @@ fn run_build_portable_nix(
     for a in &inv.args {
         cmd.arg(a);
     }
+    // `--print-output` streams nix's progress and diagnostics to the terminal
+    // as they happen. Only stderr is redirected: nix writes its build log
+    // there, while stdout carries the `--print-out-paths` store paths this
+    // function has to parse — forwarding stdout too (or handing the whole
+    // spawn to `run_logged`, which redirects both) would leave `store_paths`
+    // empty and fail the build with "returned no output paths". The captured
+    // branch below keeps the previous behaviour, so the failure diagnostics
+    // that inspect stderr text still work when the flag is absent.
+    let streaming = print_output_enabled();
+    if streaming {
+        cmd.stderr(std::process::Stdio::inherit());
+    }
     let output = cmd
         .output()
         .with_context(|| format!("spawn nix build {flake_ref}"))?;
     if !output.status.success() {
+        // Already on the terminal when streaming; `output.stderr` is empty
+        // then, so the attribute-hint match below simply does not fire and the
+        // user reads the real error above instead of a truncated echo.
         let stderr = String::from_utf8_lossy(&output.stderr);
         if (stderr.contains("does not provide attribute") || stderr.contains("missing attribute"))
             && stderr.contains(variant)
@@ -4630,6 +4688,61 @@ mod tests {
         assert!(is_portable_basecamp(Some(&repo)));
     }
 
+    /// A map that does not mention this host at all — the common shape, since
+    /// a project only lists the platforms someone actually had to special-case.
+    ///
+    /// This is the case the scalar form cannot express. `write_repo_ref` emits
+    /// the inline map *instead of* the scalar whenever the map is non-empty,
+    /// so writing `attr` here would persist nothing: the flag would look like
+    /// it worked, `[repos.lgpm].attr` would move to the portable variant, and
+    /// the next plain `setup` would default the scalar back to `app` and build
+    /// a dev basecamp against portable lgpm — the empty-UI mismatch this
+    /// feature exists to prevent. The write has to land in the map.
+    #[test]
+    fn inspector_flag_writes_into_a_map_that_lacks_this_host() {
+        let other = if nix_current_system() == "aarch64-darwin" {
+            "x86_64-linux"
+        } else {
+            "aarch64-darwin"
+        };
+        let mut repo = repo_with_attr(BASECAMP_ATTR);
+        repo.attr_platform
+            .insert(other.to_string(), "bin-macos-app".to_string());
+
+        assert!(apply_inspector_selection(&mut repo, Some(true)));
+        assert_eq!(
+            repo.attr_platform
+                .get(nix_current_system())
+                .map(String::as_str),
+            Some(BASECAMP_ATTR_INSPECTOR),
+            "the inspector attr was not written into the map, so it will not survive serialization"
+        );
+        assert_eq!(
+            repo.effective_attr(nix_current_system()),
+            BASECAMP_ATTR_INSPECTOR
+        );
+        assert_eq!(
+            repo.attr_platform.get(other).map(String::as_str),
+            Some("bin-macos-app"),
+            "another platform's entry was discarded"
+        );
+
+        // And back: the entry we added is removed, leaving the map exactly as
+        // it was found. The scalar is not ours to touch — it is not even
+        // serialized while a map exists.
+        assert!(apply_inspector_selection(&mut repo, Some(false)));
+        assert_eq!(
+            repo.attr_platform.get(nix_current_system()),
+            None,
+            "the entry the flag added was not removed"
+        );
+        assert_eq!(
+            repo.attr_platform.get(other).map(String::as_str),
+            Some("bin-macos-app"),
+            "another platform's entry was discarded on the way back"
+        );
+    }
+
     /// `setup` builds for the host it runs on, so the flag is a decision about
     /// that host alone. Another platform's entry is a colleague's choice — a
     /// Linux developer toggling the inspector must not silently drop the
@@ -4659,8 +4772,15 @@ mod tests {
             "another platform's entry was discarded"
         );
 
-        // And back: the round trip restores this host without ever having
-        // touched the sibling.
+        // And back. Note what this does *not* assert: that `bin-appimage`
+        // comes back. It does not — scaffold keeps no memory of a displaced
+        // hand-set attr, so the round trip is lossy by construction and the
+        // host lands on the default stack. That is a deliberate limitation
+        // rather than the desired end state; `apply_inspector_selection`
+        // prints a note when it lands somewhere other than the default so the
+        // loss is at least visible. Restoring the prior value would mean
+        // persisting it somewhere, which is follow-up work. The invariant this
+        // test does defend is the sibling entry surviving both directions.
         apply_inspector_selection(&mut repo, Some(false));
         assert_eq!(
             repo.effective_attr(nix_current_system()),

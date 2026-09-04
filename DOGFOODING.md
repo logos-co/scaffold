@@ -1068,22 +1068,22 @@ cat .scaffold/state/basecamp.state
 # Inspector stack opt-in, and back. Each grep is the evidence for the step
 # above it; run them even if the build is out of reach in this environment,
 # since the attrs are written before the build starts.
-"$SCAFFOLD_BIN" basecamp setup --inspector
+"$SCAFFOLD_BIN" basecamp setup --inspector || true
 grep -n 'attr' scaffold.toml
-cat .scaffold/state/basecamp.state         # basecamp_bin must have moved
-"$SCAFFOLD_BIN" basecamp setup            # no flag: must stay on the inspector
+cat .scaffold/state/basecamp.state         # basecamp_bin ends in app-result-bin-bundle-dir-inspector
+"$SCAFFOLD_BIN" basecamp setup || true     # no flag: must stay on the inspector
 grep -n 'attr' scaffold.toml
 "$SCAFFOLD_BIN" basecamp paths alice | grep -i module_root
-"$SCAFFOLD_BIN" basecamp setup --no-inspector
+"$SCAFFOLD_BIN" basecamp setup --no-inspector || true
 grep -n 'attr' scaffold.toml
-"$SCAFFOLD_BIN" basecamp setup --inspector --no-inspector   # must be rejected
+"$SCAFFOLD_BIN" basecamp setup --inspector --no-inspector || true   # must be rejected
 ```
 
 ### Expected Success Signals
 
 - `basecamp --help` lists `setup`, `modules`, `install`, `launch`, `develop`, `build`, `build-portable`, `run`, `doctor`, `paths`, and `docs`.
 - `basecamp docs` prints the canonical project-compatibility rules, including per-profile `env_file`, `runtime_dir`, `log_file`, custom profile names, per-platform `[repos.basecamp.attr]`, and what `setup` records in `.scaffold/state/basecamp.state`. That last one is the contract a headless consumer reads: a downstream repo driving basecamp from CI needs `basecamp_bin`, and if `docs` does not name it the consumer hand-reconstructs a cache path instead — which is wrong on at least one stack, silently.
-- `.scaffold/state/basecamp.state` after `setup` holds `pin`, `basecamp_bin`, and `lgpm_bin`, and both recorded paths exist on disk. After `setup --inspector`, `basecamp_bin` points at a *different* build than the plain-`setup` run did — a consumer that cached the earlier path is now exec'ing the wrong stack, which is why the docs say to re-read the file after every `setup`.
+- `.scaffold/state/basecamp.state` after `setup` holds `pin`, `basecamp_bin`, and `lgpm_bin`, and both recorded paths exist on disk. The out-link is keyed by attr, so `basecamp_bin` after `setup --inspector` ends in `app-result-bin-bundle-dir-inspector` where the plain-`setup` run ended in `app-result-app` — a different path, not the same symlink re-pointed. Both stacks therefore coexist under one pin, and toggling back does not rebuild. A consumer that cached the earlier path is still exec'ing the earlier stack, which is why the docs say to re-read the file after every `setup`.
 - First `basecamp setup` clones the pinned basecamp repo into a pin-isolated cache path, builds `basecamp` and `lgpm` via Nix, seeds `.scaffold/basecamp/profiles/alice/` and `.scaffold/basecamp/profiles/bob/`, and reports completion.
 - If `[repos.basecamp.attr]` is a per-platform map, setup uses the current host's attr and preserves the map plus scalar fallback on serialize.
 - `basecamp doctor` reports the basecamp + lgpm binaries as present and both profiles as seeded; `--json` returns parseable JSON with the same checks. Immediately after a green first `setup` (before `basecamp modules`) that is four PASS rows — `basecamp binary`, `lgpm binary`, `basecamp profile alice`, `basecamp profile bob`. A doctor that summarizes `0 PASS` there is the regression: it leaves the user with no confirmation that `setup` actually landed.
@@ -1094,7 +1094,8 @@ grep -n 'attr' scaffold.toml
 - The inspector build is the **portable** stack: `basecamp paths alice` reports `module_root` under `Logos/LogosBasecamp`, *not* `Logos/LogosBasecampDev`. A `…Dev` path here means the attr was classified wrong and no module will load.
 - A plain `basecamp setup` after `--inspector` keeps the inspector attr — passing no flag means "leave the configured stack alone", never "reset to the default". A re-run that silently reverts to `app`/`cli` is the regression.
 - `--no-inspector` moves both attrs back (`app` / `cli`). On a project that was never on the inspector build it declines rather than acting: it prints a `note: --no-inspector left [repos.basecamp].attr = … alone` line for a hand-set attr, leaves `[repos.lgpm].attr` untouched, and rewrites nothing. A `--no-inspector` that changes `[repos.lgpm].attr` on a project it just declined to touch is a defect — the flag would be acting on the half of the pair the user cannot see.
-- Both flags edit **only the current host's entry** in a per-platform `[repos.basecamp.attr]` map. A sibling platform's mapping (e.g. `aarch64-darwin`) must survive a toggle in both directions.
+- Both flags edit **only the current host's entry** in a per-platform `[repos.basecamp.attr]` map. A sibling platform's mapping (e.g. `aarch64-darwin`) must survive a toggle in both directions. This holds whether or not the map already mentions the current host: on a project whose map lists *only* a sibling platform, `--inspector` must add this host's key to the map — persisting the scalar instead would write nothing to disk (the map is what gets serialized), and the next plain `setup` would silently rebuild the dev stack against portable lgpm.
+- `--no-inspector` restores the **default** stack, not the attr that was configured before `--inspector`. Scaffold does not remember a displaced hand-set value, so a project that started at `bin-appimage` lands on `app`; the command prints a `note: --no-inspector put [repos.basecamp].attr back to …` line whenever it ends up somewhere other than the default, so the change is not silent.
 - `basecamp setup --inspector --no-inspector` is rejected by the argument parser with a `cannot be used with` error, matching `run`'s `--reset` / `--no-reset`. A last-wins resolution here would persist a stack choice from a fat-fingered command line with no diagnostic.
 - All commands run only inside the project; running them from outside the project must fail with the existing scaffold "not a logos-scaffold project" message.
 

@@ -1172,10 +1172,10 @@ struct BasecampBuildArgs {
     /// Restrict the build to a single captured project module.
     #[arg(long, value_name = "NAME")]
     module: Option<String>,
-    /// Stream nix output directly to the terminal instead of logging to
-    /// `.scaffold/logs/<ts>-build-<variant>.log` and printing a one-line
-    /// status. Equivalent to `LOGOS_SCAFFOLD_PRINT_OUTPUT=1`. Useful for CI,
-    /// where a failed module build should explain itself in the job log.
+    /// Stream nix's build output to the terminal instead of capturing it and
+    /// surfacing only the error on failure. Equivalent to
+    /// `LOGOS_SCAFFOLD_PRINT_OUTPUT=1`. Useful for CI, where a failed module
+    /// build should explain itself in the job log.
     #[arg(long)]
     print_output: bool,
 }
@@ -1188,9 +1188,9 @@ struct BasecampBuildPortableArgs {
     /// Restrict the build to a single captured project module.
     #[arg(long, value_name = "NAME")]
     module: Option<String>,
-    /// Stream nix output directly to the terminal instead of logging to
-    /// `.scaffold/logs/<ts>-build-<variant>.log` and printing a one-line
-    /// status. Equivalent to `LOGOS_SCAFFOLD_PRINT_OUTPUT=1`. Useful for CI.
+    /// Stream nix's build output to the terminal instead of capturing it and
+    /// surfacing only the error on failure. Equivalent to
+    /// `LOGOS_SCAFFOLD_PRINT_OUTPUT=1`. Useful for CI.
     #[arg(long)]
     print_output: bool,
 }
