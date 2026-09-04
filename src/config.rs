@@ -723,33 +723,180 @@ fn read_string(table: &Table, key: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Serialize a `Config` to TOML text. Used for fresh writes (`new`, `init`
-/// from scratch). For migrations that need to preserve user comments,
-/// callers operate on a `DocumentMut` directly via the helpers in
-/// `commands::init`.
+/// Render `cfg` as a fresh `scaffold.toml`. For rewriting a file that already
+/// exists, prefer [`update_config`] — it keeps the user's comments.
 pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
-    let mut doc = DocumentMut::new();
+    write_config_into(DocumentMut::new(), cfg)
+}
 
+/// Rewrite an existing `scaffold.toml` in place, preserving comments, key
+/// ordering, and any sections scaffold does not model.
+///
+/// `serialize_config` renders from an empty document, so every comment in the
+/// file is dropped on the next write. That matters because scaffold.toml
+/// comments are frequently load-bearing — they record *why* a `runtime_dir`
+/// override or a pin is what it is — and losing them silently re-opens the bug
+/// they were written to prevent. Seeding the same writers with the parsed
+/// original leaves untouched keys, their formatting, and their comments
+/// exactly where they were.
+///
+/// **The contract this imposes on [`write_config_into`]:** seeded with a real
+/// document, assigning a key is no longer the same as rendering the model.
+/// Every optional key must be *removed* when the config no longer carries it,
+/// because skipping the assignment now leaves the old value in the file rather
+/// than omitting it. A conditional emit without a matching removal branch is a
+/// silent bug — the config read back is not the one that was written — so any
+/// new `if non_default { assign }` needs its `else { remove }`. The tests pin
+/// this by comparing a rewrite against a fresh render for a config whose
+/// optional sections have all been reset to defaults.
+///
+/// Falls back to a from-scratch render if `existing` doesn't parse: a
+/// hand-edit that broke the file shouldn't block writing a valid one.
+///
+/// That fallback is *lossy* — it is exactly the comment-and-unmodelled-section
+/// loss this function exists to prevent — so it must never happen quietly.
+/// Production code therefore calls [`update_config_reporting`] and acts on the
+/// [`RewriteOutcome`] it returns; this wrapper discards that signal and is
+/// test-only so no disk-writing path can pick it up by accident.
+#[cfg(test)]
+pub(crate) fn update_config(existing: &str, cfg: &Config) -> DynResult<String> {
+    Ok(update_config_reporting(existing, cfg)?.0)
+}
+
+/// How [`update_config_reporting`] produced its output.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RewriteOutcome {
+    /// `existing` parsed; the rewrite merged into it and kept its comments.
+    Merged,
+    /// `existing` did not parse as TOML, so the output is a from-scratch
+    /// render. Every comment and every unmodelled section in `existing` is
+    /// absent from it. `reason` is the parse error, for the diagnostic.
+    RenderedFresh { reason: String },
+}
+
+impl RewriteOutcome {
+    pub(crate) fn discarded_reason(&self) -> Option<&str> {
+        match self {
+            Self::Merged => None,
+            Self::RenderedFresh { reason } => Some(reason),
+        }
+    }
+}
+
+/// [`update_config`], but reporting whether the comment-preserving merge
+/// actually happened.
+///
+/// The fallback is deliberate — a file one stray bracket from valid should not
+/// wedge every command that persists config — but it replaces the user's file
+/// wholesale, so a caller writing the result to disk owes them a warning and,
+/// where it can, a copy of what it is about to discard.
+pub(crate) fn update_config_reporting(
+    existing: &str,
+    cfg: &Config,
+) -> DynResult<(String, RewriteOutcome)> {
+    let (doc, outcome) = match existing.parse::<DocumentMut>() {
+        Ok(doc) => (doc, RewriteOutcome::Merged),
+        Err(e) => (
+            DocumentMut::new(),
+            RewriteOutcome::RenderedFresh {
+                reason: e.to_string(),
+            },
+        ),
+    };
+    Ok((write_config_into(doc, cfg)?, outcome))
+}
+
+/// Render `cfg` into `doc`, which may be empty ([`serialize_config`]) or the
+/// parsed existing file ([`update_config`]).
+///
+/// Because `doc` may already hold values, this is a *merge*, not a render: an
+/// optional key that is skipped rather than assigned keeps whatever the file
+/// already said. So every conditional emit here needs a matching removal —
+/// `if non_default { assign } else { remove }` — and every map-backed table
+/// (`modules`, `basecamp.env`, `profiles`, `run.profiles`, …) needs a `retain`
+/// down to the keys the config still carries. Omitting either is silent: the
+/// file keeps a value the caller cleared, and the next load reads it back.
+///
+/// The inverse is equally a rule, and the sharper one, because getting it
+/// wrong destroys data rather than staling it. **A removal may only be driven
+/// by the model where the corresponding parser is _total_** — where it errors
+/// on anything it cannot represent, so that "absent from the model" really
+/// does mean "absent from the file". Several of scaffold's parsers are not:
+///
+/// - `parse_basecamp_runtime` returns `None` for a `[basecamp]` whose keys are
+///   all unmodelled, *skips* an `env_append` entry whose list is empty, and
+///   *drops* a `[basecamp.profiles.<name>]` that is fully default.
+/// - `parse_run` maps an all-default `[run]` (or `[run.watch]`) to the default
+///   value, indistinguishable from absent.
+/// - `read_string` filters empty strings, and `parse_post_deploy` /
+///   `parse_glob_list` map an empty string or array to an empty `Vec` — so
+///   `path = ""`, `env_file = ""`, `post_deploy = ""` and `exclude = []` all
+///   reach the model as exactly the state that means "key absent".
+///
+/// For those, the model's key set is a strict subset of the file's, so a
+/// `doc.remove(section)` or a `retain` keyed on the model deletes whatever the
+/// user wrote there — the key, the section, and the comment explaining it.
+/// Instead clear the keys scaffold owns and keep whatever survives:
+/// [`remove_owned_child`], [`clear_owned_basecamp_keys`],
+/// [`prune_run_profiles`] and [`remove_unless_empty_literal`] do this.
+///
+/// Note the second and third bullets compose: a section can parse to `None`
+/// *because* each of its fields was individually skipped, so clearing that
+/// section must recurse with the same scoped rules rather than dropping its
+/// child tables — see [`clear_owned_basecamp_keys`].
+///
+/// Blanket removal is used only for `[basecamp.env]` and a profile's `env`,
+/// where `parse_string_map` rejects every key it cannot model and the parse
+/// therefore *is* total.
+fn write_config_into(mut doc: DocumentMut, cfg: &Config) -> DynResult<String> {
     // [scaffold]
+    // Every `.entry(...).or_insert(...)` here goes through `coerce_to_table`
+    // rather than `.as_table_mut().expect(...)`: `or_insert` hands back the
+    // *occupied* item when the key already exists, and a root key the reader
+    // tolerated as a non-table (an inline table, most plausibly) would
+    // otherwise abort the process. See `coerce_to_table`.
     let scaffold = doc.entry("scaffold").or_insert(Item::Table(Table::new()));
-    let scaffold_table = scaffold.as_table_mut().expect("scaffold is a table");
+    let scaffold_table = coerce_to_table(scaffold);
     scaffold_table["version"] = value(&cfg.version);
     if !cfg.cache_root.is_empty() {
         check_toml_value("cache_root", &cfg.cache_root)?;
         scaffold_table["cache_root"] = value(&cfg.cache_root);
+    } else {
+        remove_unless_empty_literal(scaffold_table, "cache_root");
     }
 
     // [repos.<name>] entries — render in stable order.
     write_repo_ref(&mut doc, "lez", &cfg.lez)?;
     write_repo_ref(&mut doc, "spel", &cfg.spel)?;
-    if let Some(repo) = &cfg.basecamp_repo {
-        write_repo_ref(&mut doc, "basecamp", repo)?;
-    }
-    if let Some(repo) = &cfg.lgpm_repo {
-        write_repo_ref(&mut doc, "lgpm", repo)?;
+    // Both are `Option`, and the parse side reads a missing table back as
+    // `None` — so dropping one from the config has to drop its table too, the
+    // same way `[basecamp]` does below. No caller sets these to `None` today,
+    // but `[basecamp]` had no such caller either right up until it did.
+    for (name, repo) in [("basecamp", &cfg.basecamp_repo), ("lgpm", &cfg.lgpm_repo)] {
+        match repo {
+            Some(repo) => write_repo_ref(&mut doc, name, repo)?,
+            None => {
+                if let Some(repos) = doc.get_mut("repos").and_then(Item::as_table_mut) {
+                    repos.remove(name);
+                }
+            }
+        }
     }
 
-    // [modules.<name>] entries.
+    // [modules.<name>] entries. Drop any the config no longer carries: this
+    // rewrite merges over the existing document, so a table left behind would
+    // resurrect a module the caller removed.
+    if let Some(modules) = doc.get_mut("modules").and_then(Item::as_table_mut) {
+        modules.retain(|name, _| cfg.modules.contains_key(name));
+        // A file written with an explicit `[modules]` header parses that table
+        // as non-implicit, and toml_edit renders an empty non-implicit table
+        // as a bare header — so emptying it is not enough to make it vanish.
+        // Every entry under it is a `[modules.<name>]` table scaffold owns, so
+        // there is no user content to strand here.
+        if modules.is_empty() {
+            doc.remove("modules");
+        }
+    }
     for (name, entry) in &cfg.modules {
         check_toml_value(&format!("modules.{name}"), name)?;
         check_toml_value(&format!("modules.{name}.flake"), &entry.flake)?;
@@ -764,6 +911,8 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
         if let Some(app) = &entry.standalone_app {
             check_toml_value(&format!("modules.{name}.standalone_app"), app)?;
             table["standalone_app"] = value(app);
+        } else {
+            remove_unless_empty_literal(table, "standalone_app");
         }
         // Defensive: the function's check above already covered both fields.
         let _ = path;
@@ -772,7 +921,7 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
     // [wallet]
     check_toml_value("wallet.home_dir", &cfg.wallet_home_dir)?;
     let wallet = doc.entry("wallet").or_insert(Item::Table(Table::new()));
-    wallet.as_table_mut().expect("wallet table")["home_dir"] = value(&cfg.wallet_home_dir);
+    coerce_to_table(wallet)["home_dir"] = value(&cfg.wallet_home_dir);
 
     // [framework] / [framework.idl]
     check_toml_value("framework.kind", &cfg.framework.kind)?;
@@ -780,19 +929,16 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
     check_toml_value("framework.idl.spec", &cfg.framework.idl.spec)?;
     check_toml_value("framework.idl.path", &cfg.framework.idl.path)?;
     let framework = doc.entry("framework").or_insert(Item::Table(Table::new()));
-    let framework_table = framework.as_table_mut().expect("framework table");
+    let framework_table = coerce_to_table(framework);
     framework_table["kind"] = value(&cfg.framework.kind);
     framework_table["version"] = value(&cfg.framework.version);
-    let idl = framework_table
-        .entry("idl")
-        .or_insert(Item::Table(Table::new()));
-    let idl_table = idl.as_table_mut().expect("idl table");
+    let idl_table = child_table(framework_table, "idl");
     idl_table["spec"] = value(&cfg.framework.idl.spec);
     idl_table["path"] = value(&cfg.framework.idl.path);
 
     // [localnet]
     let localnet = doc.entry("localnet").or_insert(Item::Table(Table::new()));
-    let localnet_table = localnet.as_table_mut().expect("localnet table");
+    let localnet_table = coerce_to_table(localnet);
     localnet_table["port"] = value(i64::from(cfg.localnet.port));
     localnet_table["risc0_dev_mode"] = value(cfg.localnet.risc0_dev_mode);
 
@@ -804,13 +950,17 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
     }
     check_toml_value("circuits.install_dir", &cfg.circuits.install_dir)?;
     let circuits = doc.entry("circuits").or_insert(Item::Table(Table::new()));
-    let circuits_table = circuits.as_table_mut().expect("circuits table");
+    let circuits_table = coerce_to_table(circuits);
     circuits_table["version"] = value(&cfg.circuits.version);
     if let Some(template) = &cfg.circuits.url_template {
         circuits_table["url_template"] = value(template);
+    } else {
+        remove_unless_empty_literal(circuits_table, "url_template");
     }
     if cfg.circuits.install_dir != CircuitsConfig::default().install_dir {
         circuits_table["install_dir"] = value(&cfg.circuits.install_dir);
+    } else {
+        remove_unless_empty_literal(circuits_table, "install_dir");
     }
 
     // [basecamp]
@@ -845,7 +995,7 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
         }
 
         let basecamp = doc.entry("basecamp").or_insert(Item::Table(Table::new()));
-        let basecamp_table = basecamp.as_table_mut().expect("basecamp table");
+        let basecamp_table = coerce_to_table(basecamp);
         // Only emit port keys when they differ from the defaults, so setting
         // just `[basecamp.env]` doesn't churn a user's scaffold.toml with
         // default `port_base`/`port_stride` on the next `save_project_config`.
@@ -854,10 +1004,14 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
         if bc.port_base != default_bc.port_base {
             basecamp_table["port_base"] = value(i64::from(bc.port_base));
             wrote_direct_key = true;
+        } else {
+            basecamp_table.remove("port_base");
         }
         if bc.port_stride != default_bc.port_stride {
             basecamp_table["port_stride"] = value(i64::from(bc.port_stride));
             wrote_direct_key = true;
+        } else {
+            basecamp_table.remove("port_stride");
         }
         // With no direct keys, an explicit `[basecamp]` header would render
         // empty — mark it implicit so only the child `[basecamp.env]` / etc.
@@ -873,18 +1027,82 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
         // of an explicit `[basecamp]` table.
         if !bc.env.is_empty() {
             let env_table = child_table(basecamp_table, "env");
+            env_table.retain(|k, _| bc.env.contains_key(k));
             for (k, v) in &bc.env {
                 env_table[k] = value(v);
             }
+        } else {
+            // Safe to drop wholesale: `parse_string_map` is total — it errors
+            // on any key it cannot parse — so a loaded `[basecamp.env]`
+            // contains nothing scaffold does not model.
+            basecamp_table.remove("env");
         }
         if !bc.env_append.is_empty() {
             let append_table = child_table(basecamp_table, "env_append");
+            // Unlike `[basecamp.env]`, this parse is *not* total: an empty
+            // list is skipped rather than rejected (see the comment in
+            // `parse_basecamp_runtime`), so the model's keys are a subset of
+            // the file's. Keying the retain on the model alone would delete a
+            // `FOO = []` the user wrote — so keep those too, and prune only
+            // entries that carry a value the model no longer has.
+            append_table.retain(|k, item| {
+                bc.env_append.contains_key(k) || item.as_array().is_some_and(|a| a.is_empty())
+            });
             for (k, list) in &bc.env_append {
                 append_table[k] = string_array(list);
+            }
+        } else if let Some(append_table) = basecamp_table
+            .get_mut("env_append")
+            .and_then(Item::as_table_mut)
+        {
+            // Not a blanket remove, for the same reason as the retain above:
+            // an empty list is skipped at parse, so a table holding *only*
+            // those reads back as no `env_append` at all. Drop the entries the
+            // model accounts for and keep the rest.
+            append_table.retain(|_, item| item.as_array().is_some_and(|a| a.is_empty()));
+            if append_table.is_empty() {
+                basecamp_table.remove("env_append");
+            }
+        }
+        if bc.profiles.is_empty() {
+            // The branch below only prunes *within* an existing map, so
+            // without this a profile cleared from the config while
+            // `[basecamp]` itself survives would be left in the file and read
+            // straight back on the next load. `parse_basecamp_runtime` drops a
+            // fully-default profile, so clear only the modelled keys.
+            if let Some(profiles) = basecamp_table
+                .get_mut("profiles")
+                .and_then(Item::as_table_mut)
+            {
+                for (_, item) in profiles.iter_mut() {
+                    if let Some(profile) = item.as_table_mut() {
+                        clear_owned_profile_keys(profile);
+                    }
+                }
+                profiles.retain(|_, item| !item.as_table().is_some_and(Table::is_empty));
+                if profiles.is_empty() {
+                    basecamp_table.remove("profiles");
+                }
             }
         }
         if !bc.profiles.is_empty() {
             let profiles = child_table(basecamp_table, "profiles");
+            // Not total either: a fully-default profile is dropped at parse,
+            // so a profile carrying only the user's own keys is absent from
+            // the model. Prune by clearing what scaffold owns and keeping
+            // whatever survives, rather than by the model's key set.
+            profiles.retain(|name, item| {
+                if bc.profiles.contains_key(name) {
+                    return true;
+                }
+                match item.as_table_mut() {
+                    Some(profile) => {
+                        clear_owned_profile_keys(profile);
+                        !profile.is_empty()
+                    }
+                    None => true,
+                }
+            });
             // Implicit so `[basecamp.profiles.<name>]` renders as the nested
             // header without an empty `[basecamp.profiles]` line.
             profiles.set_implicit(true);
@@ -895,29 +1113,48 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
                 // follows. With no scalar key, keep the profile table implicit
                 // so only `[basecamp.profiles.<name>.env]` renders.
                 let mut wrote_scalar = false;
+                // The `else` arms keep an `env_file = ""` the user wrote:
+                // `read_string` filters empty strings, so it reaches the model
+                // as `None` — see `remove_unless_empty_literal`.
                 if let Some(f) = &p.env_file {
                     profile_table["env_file"] = value(f);
                     wrote_scalar = true;
+                } else {
+                    remove_unless_empty_literal(profile_table, "env_file");
+                    wrote_scalar |= profile_table.contains_key("env_file");
                 }
                 if let Some(d) = &p.runtime_dir {
                     profile_table["runtime_dir"] = value(d);
                     wrote_scalar = true;
+                } else {
+                    remove_unless_empty_literal(profile_table, "runtime_dir");
+                    wrote_scalar |= profile_table.contains_key("runtime_dir");
                 }
                 if let Some(l) = &p.log_file {
                     profile_table["log_file"] = value(l);
                     wrote_scalar = true;
+                } else {
+                    remove_unless_empty_literal(profile_table, "log_file");
+                    wrote_scalar |= profile_table.contains_key("log_file");
                 }
                 if !p.env.is_empty() {
                     let env_table = child_table(profile_table, "env");
+                    env_table.retain(|k, _| p.env.contains_key(k));
                     for (k, v) in &p.env {
                         env_table[k] = value(v);
                     }
+                } else {
+                    profile_table.remove("env");
                 }
                 if !wrote_scalar {
                     profile_table.set_implicit(true);
                 }
             }
         }
+    }
+
+    if cfg.basecamp.is_none() {
+        clear_owned_basecamp_keys(&mut doc);
     }
 
     // [run] — only emit when non-default to keep fresh scaffold.toml minimal.
@@ -934,35 +1171,69 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
     let has_default_profile = run.default_profile.is_some();
     let has_profiles = !run.profiles.is_empty();
     let has_watch = run.watch != WatchConfig::default();
+    // All-default: emit nothing, and drop any `[run]` the existing document
+    // still carries — this writer merges over that document, so returning
+    // early without removing would strand a section the config no longer has.
     if !has_inline && !has_default_profile && !has_profiles && !has_watch {
+        if let Some(run_table) = doc.get_mut("run").and_then(Item::as_table_mut) {
+            for k in ["reset", "deploy", "topup"] {
+                run_table.remove(k);
+            }
+            // These two have an empty-literal form the reader skips.
+            for k in ["default_profile", "post_deploy"] {
+                remove_unless_empty_literal(run_table, k);
+            }
+            // `profiles` and `watch` are tables that may hold user keys of
+            // their own, so recurse into them rather than removing outright.
+            remove_owned_child(run_table, "watch", &["include", "exclude", "debounce_ms"]);
+            prune_run_profiles(run_table);
+            if run_table.is_empty() {
+                doc.remove("run");
+            }
+        }
         return Ok(());
     }
 
     let run_item = doc.entry("run").or_insert(Item::Table(Table::new()));
-    let run_table = run_item.as_table_mut().expect("run table");
+    let run_table = coerce_to_table(run_item);
     if let Some(name) = &run.default_profile {
         check_toml_value("run.default_profile", name)?;
         run_table["default_profile"] = value(name);
+    } else {
+        remove_unless_empty_literal(run_table, "default_profile");
     }
     if run.inline.reset {
         run_table["reset"] = value(true);
+    } else {
+        run_table.remove("reset");
     }
     // Only emit `deploy`/`topup` when they deviate from the `true` default,
     // to keep a fresh scaffold.toml minimal.
     if !run.inline.deploy {
         run_table["deploy"] = value(false);
+    } else {
+        run_table.remove("deploy");
     }
     if !run.inline.topup {
         run_table["topup"] = value(false);
+    } else {
+        run_table.remove("topup");
     }
     if !run.inline.post_deploy.is_empty() {
         for hook in &run.inline.post_deploy {
             check_toml_value("run.post_deploy", hook)?;
         }
         run_table["post_deploy"] = post_deploy_value(&run.inline.post_deploy);
+    } else {
+        remove_unless_empty_literal(run_table, "post_deploy");
     }
 
     if has_profiles {
+        // Drop profiles the config no longer carries before writing the rest.
+        {
+            let table = ensure_subtable(doc, "run", "profiles");
+            table.retain(|name, _| run.profiles.contains_key(name));
+        }
         for (name, profile) in &run.profiles {
             check_toml_value(&format!("run.profiles.{name}"), name)?;
             for hook in &profile.post_deploy {
@@ -972,24 +1243,30 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
             // ensure_subtable returns the `profiles` table; we need a
             // sub-sub-table keyed by `name`.
             table.set_implicit(true);
-            let profile_table = table
-                .entry(name)
-                .or_insert(Item::Table(Table::new()))
-                .as_table_mut()
-                .expect("profile table");
+            let profile_table = child_table(table, name);
             if profile.reset {
                 profile_table["reset"] = value(true);
+            } else {
+                profile_table.remove("reset");
             }
             if !profile.deploy {
                 profile_table["deploy"] = value(false);
+            } else {
+                profile_table.remove("deploy");
             }
             if !profile.topup {
                 profile_table["topup"] = value(false);
+            } else {
+                profile_table.remove("topup");
             }
             if !profile.post_deploy.is_empty() {
                 profile_table["post_deploy"] = post_deploy_value(&profile.post_deploy);
+            } else {
+                remove_unless_empty_literal(profile_table, "post_deploy");
             }
         }
+    } else if let Some(run_table) = doc.get_mut("run").and_then(Item::as_table_mut) {
+        prune_run_profiles(run_table);
     }
 
     if has_watch {
@@ -999,13 +1276,24 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
         let watch_table = ensure_subtable(doc, "run", "watch");
         if !run.watch.include.is_empty() {
             watch_table["include"] = string_array(&run.watch.include);
+        } else {
+            remove_unless_empty_literal(watch_table, "include");
         }
         if !run.watch.exclude.is_empty() {
             watch_table["exclude"] = string_array(&run.watch.exclude);
+        } else {
+            remove_unless_empty_literal(watch_table, "exclude");
         }
         if let Some(ms) = run.watch.debounce_ms {
             watch_table["debounce_ms"] = value(ms as i64);
+        } else {
+            watch_table.remove("debounce_ms");
         }
+    } else if let Some(run_table) = doc.get_mut("run").and_then(Item::as_table_mut) {
+        // `[run.watch]` parses to the default when it holds no modelled key,
+        // so an all-unmodelled one is indistinguishable from absent — drop
+        // only what we own, and the table only once it is empty.
+        remove_owned_child(run_table, "watch", &["include", "exclude", "debounce_ms"]);
     }
     Ok(())
 }
@@ -1042,10 +1330,14 @@ fn write_repo_ref(doc: &mut DocumentMut, name: &str, repo: &RepoRef) -> DynResul
     let table = ensure_subtable(doc, "repos", name);
     table["source"] = value(&repo.source);
     table["pin"] = value(&repo.pin);
+    // The `else` arms here go through `remove_unless_empty_literal` because
+    // `parse_repo_ref` reads all three through `read_string`, which filters
+    // empty strings — so `build = ""` / `attr = ""` / `path = ""` reach the
+    // model as the same default a missing key gives.
     if repo.build != RepoBuild::default() {
         table["build"] = value(repo.build.as_str());
     } else {
-        table.remove("build");
+        remove_unless_empty_literal(table, "build");
     }
     // Per-platform map wins over the scalar form; render it as an inline table
     // (`attr = { aarch64-darwin = "…" }`) so it stays a value under the
@@ -1059,25 +1351,233 @@ fn write_repo_ref(doc: &mut DocumentMut, name: &str, repo: &RepoRef) -> DynResul
     } else if !repo.attr.is_empty() {
         table["attr"] = value(&repo.attr);
     } else {
-        table.remove("attr");
+        remove_unless_empty_literal(table, "attr");
     }
     if !repo.path.is_empty() {
         table["path"] = value(&repo.path);
     } else {
-        table.remove("path");
+        remove_unless_empty_literal(table, "path");
     }
     Ok(())
+}
+
+/// Remove `key` unless the file holds it as an *empty literal* — `key = ""` or
+/// `key = []`.
+///
+/// This is the third non-totality carve-out, alongside the two named on
+/// [`write_config_into`], and it comes from the readers rather than from a
+/// section parser. `read_string` ends in `.filter(|s| !s.is_empty())` and
+/// `parse_post_deploy` / `parse_glob_list` map an empty string or array to an
+/// empty `Vec`, so `env_file = ""`, `path = ""`, `post_deploy = ""` and
+/// `exclude = []` all parse to exactly the model state that means "absent".
+/// A plain `remove` on that state therefore deletes a line the user wrote —
+/// and, because `toml_edit` hangs a comment off the following key's prefix
+/// decor, the comment above it goes too.
+///
+/// Nothing observable changes either way: every consumer treats empty and
+/// absent alike. But silently deleting a hand-written line and its comment is
+/// the exact failure this rewrite exists to prevent, so preserve the literal
+/// and let the user delete it themselves. Anything else — a stale non-empty
+/// value the model no longer carries — is removed as usual.
+fn remove_unless_empty_literal(table: &mut Table, key: &str) {
+    let is_empty_literal = table.get(key).is_some_and(|item| {
+        item.as_str().is_some_and(str::is_empty) || item.as_array().is_some_and(|a| a.is_empty())
+    });
+    if !is_empty_literal {
+        table.remove(key);
+    }
+}
+
+/// Clear the keys scaffold owns from one `[basecamp.profiles.<name>]`, keeping
+/// any empty-string literal the reader skipped (see
+/// [`remove_unless_empty_literal`]). Callers then drop the profile if it is
+/// left empty.
+fn clear_owned_profile_keys(profile: &mut Table) {
+    for k in ["env_file", "runtime_dir", "log_file"] {
+        remove_unless_empty_literal(profile, k);
+    }
+    // `env` is a table parsed by the total `parse_string_map`, so a blanket
+    // remove is safe here — nothing in it is unmodelled.
+    profile.remove("env");
+}
+
+/// Clear the keys scaffold owns from `table[key]`, then drop the child table
+/// only if nothing is left in it.
+///
+/// A blanket `remove(key)` is wrong here. Scaffold's parsers return `None` (or
+/// a default) for a section that carries no *modelled* field, so a section
+/// holding only hand-written keys — a CI allocator's lease, a wrapper's own
+/// setting, the comment explaining either — is indistinguishable from an
+/// absent one at the model level. Removing it outright would delete user
+/// content this rewrite exists to preserve. Emptiness after clearing what we
+/// own is the only safe signal.
+fn remove_owned_child(table: &mut Table, key: &str, owned: &[&str]) {
+    let Some(child) = table.get_mut(key).and_then(Item::as_table_mut) else {
+        return;
+    };
+    for k in owned {
+        remove_unless_empty_literal(child, k);
+    }
+    if child.is_empty() {
+        table.remove(key);
+    }
+}
+
+/// Clear scaffold's keys from every `[run.profiles.<name>]`, dropping each
+/// profile that is left empty and then `profiles` itself if none remain.
+///
+/// Unlike `parse_basecamp_runtime`, `parse_run` inserts every profile it sees
+/// — it has no drop-if-default guard — so `run.profiles` and the file agree on
+/// which names exist, and a model-keyed prune here would in fact be safe. This
+/// is defensive rather than load-bearing: it keeps the two profile paths one
+/// shape, so the `[basecamp]` analogue (where the guard *does* exist and a
+/// model-keyed prune really does delete user content) cannot be reintroduced
+/// here by someone copying this code. Do not restate the guard as `parse_run`
+/// behaviour — it is not there.
+fn prune_run_profiles(run_table: &mut Table) {
+    let Some(profiles) = run_table.get_mut("profiles").and_then(Item::as_table_mut) else {
+        return;
+    };
+    for (_, item) in profiles.iter_mut() {
+        if let Some(profile) = item.as_table_mut() {
+            for k in ["reset", "deploy", "topup"] {
+                profile.remove(k);
+            }
+            remove_unless_empty_literal(profile, "post_deploy");
+        }
+    }
+    profiles.retain(|_, item| !item.as_table().is_some_and(Table::is_empty));
+    if profiles.is_empty() {
+        run_table.remove("profiles");
+    }
+}
+
+/// Clear everything scaffold owns from `[basecamp]` — the case where the whole
+/// section parsed away to `None` — and drop the table only once nothing is
+/// left. See [`remove_owned_child`] for why emptiness is the test rather than
+/// the model being `None`.
+///
+/// The subtlety is that `[basecamp]`'s *children* carry the same carve-outs as
+/// the section itself, and a blanket `remove("env_append")` /
+/// `remove("profiles")` here would reach straight past them. When
+/// `parse_basecamp_runtime` returns `None` it may be because every one of its
+/// fields was individually skipped, not because the file holds nothing: an
+/// `env_append` of only empty lists and a profile of only unmodelled keys both
+/// parse away, and both are content the user wrote. So recurse with the same
+/// scoped rules the non-`None` path uses rather than deleting the child tables
+/// outright.
+fn clear_owned_basecamp_keys(doc: &mut DocumentMut) {
+    let Some(table) = doc.get_mut("basecamp").and_then(Item::as_table_mut) else {
+        return;
+    };
+    table.remove("port_base");
+    table.remove("port_stride");
+    // Total parser (`parse_string_map`), so nothing unmodelled can be in here.
+    table.remove("env");
+    // Not total: an empty list is skipped at parse, so keep those.
+    if let Some(append) = table.get_mut("env_append").and_then(Item::as_table_mut) {
+        append.retain(|_, item| item.as_array().is_some_and(|a| a.is_empty()));
+        if append.is_empty() {
+            table.remove("env_append");
+        }
+    }
+    // Not total: a fully-default profile is dropped at parse, so a profile of
+    // only unmodelled keys is absent from the model but present in the file.
+    if let Some(profiles) = table.get_mut("profiles").and_then(Item::as_table_mut) {
+        for (_, item) in profiles.iter_mut() {
+            if let Some(profile) = item.as_table_mut() {
+                clear_owned_profile_keys(profile);
+            }
+        }
+        profiles.retain(|_, item| !item.as_table().is_some_and(Table::is_empty));
+        if profiles.is_empty() {
+            table.remove("profiles");
+        }
+    }
+    if table.is_empty() {
+        doc.remove("basecamp");
+    }
+}
+
+/// Coerce `item` into a real `Item::Table` in place, and hand back a mutable
+/// borrow of it.
+///
+/// **Why this exists.** Every parser in this module reads its section through
+/// [`Item::as_table`], which is `None` for an *inline* table
+/// (`wallet = { home_dir = "…" }`) and for any non-table value. So a file
+/// holding `wallet = { … }` parses perfectly well — the reader just falls back
+/// to the default — and the writer then reached the same key expecting a
+/// `Table`. `entry(...).or_insert(...)` returns the *occupied* item in that
+/// case, not a freshly inserted table, so `.as_table_mut()` was `None` and the
+/// old `.expect("wallet table")` aborted the process with a backtrace on a
+/// `scaffold.toml` that is entirely valid TOML. `DOGFOODING.md` B1 calls a raw
+/// panic on file content a UX regression, and weboko's review asked for a
+/// returned error or an explicit fallback instead. This is the fallback, and it
+/// is the data-preserving one:
+///
+/// - An **inline table** carries the user's own keys, so convert it rather than
+///   discarding it: every key moves into a real `Table`, unmodelled ones
+///   included. The section merely changes syntax — `wallet = { a = 1 }` becomes
+///   `[wallet]\na = 1` — and the writer's own keys are then assigned over the
+///   top exactly as they would have been. Nothing the user wrote is lost.
+/// - A **non-table value** (`wallet = 3`, `wallet = "x"`) has no keys to keep
+///   and cannot become a table without inventing structure. The parser already
+///   ignored it, so the model never carried it and the config being written is
+///   authoritative; replace it with an empty table. This is the "treat a
+///   modelled key that isn't a table as unrepresentable" branch — the same
+///   outcome the from-scratch fallback would give for that one section, but
+///   scoped to it rather than to the whole file.
+///
+/// Either way the result is a `Table` and no path here can panic on file
+/// content.
+fn coerce_to_table(item: &mut Item) -> &mut Table {
+    if item.as_table().is_none() {
+        let replacement = match item.as_inline_table() {
+            // `into_table` preserves every key, unmodelled ones included.
+            Some(inline) => {
+                let mut inline = inline.clone();
+                // An inline table's decor is the whitespace *around the value*
+                // on its `key = { … }` line. A real table's decor is the
+                // whitespace around its `[header]`. Carrying the former into
+                // the latter renders headers like "[\nframework.idl ]", which
+                // is not the section the user wrote. The keys are what we are
+                // preserving here; the punctuation around them is not worth
+                // corrupting the file for, so reset it and let toml_edit lay
+                // the promoted table out fresh.
+                inline.decor_mut().clear();
+                let mut table = inline.into_table();
+                table.decor_mut().clear();
+                table
+            }
+            None => Table::new(),
+        };
+        *item = Item::Table(replacement);
+    }
+    item.as_table_mut()
+        .expect("coerce_to_table just installed an Item::Table")
 }
 
 /// Get or create a child `Table` under an existing `Table` without touching the
 /// parent's implicit flag — unlike `ensure_subtable`, which marks its parent
 /// implicit (wrong when the parent has real keys, e.g. `[basecamp]`).
+///
+/// Coerces rather than asserting, for the reasons in [`coerce_to_table`]: a
+/// child key can be an inline table (`env = { FOO = "1" }`) just as easily as a
+/// root one.
 fn child_table<'a>(parent: &'a mut Table, name: &str) -> &'a mut Table {
-    parent
-        .entry(name)
-        .or_insert(Item::Table(Table::new()))
-        .as_table_mut()
-        .expect("child is a table")
+    // A child written as `idl = { … }` carries decor on the *key* too, and for
+    // a real table that decor is the whitespace inside the `[framework.idl]`
+    // header. Carrying an inline key's decor across renders "[\nframework.idl ]"
+    // — not the section the user wrote, and not even the same file. So reset
+    // the key's decor alongside the item's own (which `coerce_to_table` does),
+    // and only when we are actually about to promote.
+    if !matches!(parent.get(name), Some(Item::Table(_))) {
+        if let Some(mut key) = parent.key_mut(name) {
+            key.leaf_decor_mut().clear();
+            key.dotted_decor_mut().clear();
+        }
+    }
+    coerce_to_table(parent.entry(name).or_insert(Item::Table(Table::new())))
 }
 
 fn ensure_subtable<'a>(doc: &'a mut DocumentMut, parent: &str, child: &str) -> &'a mut Table {
@@ -1086,13 +1586,12 @@ fn ensure_subtable<'a>(doc: &'a mut DocumentMut, parent: &str, child: &str) -> &
         t.set_implicit(true);
         t
     }));
-    let parent_table = parent_item.as_table_mut().expect("parent is a table");
+    // `repos = { … }` / `modules = { … }` reach here the same way `[wallet]`
+    // does — via a parser that reads them with `as_table` and shrugs at an
+    // inline one. Coerce instead of asserting.
+    let parent_table = coerce_to_table(parent_item);
     parent_table.set_implicit(true);
-    parent_table
-        .entry(child)
-        .or_insert(Item::Table(Table::new()))
-        .as_table_mut()
-        .expect("child is a table")
+    child_table(parent_table, child)
 }
 
 /// Reject any value containing a newline, CR, tab, or other C0 control
@@ -1767,6 +2266,1054 @@ role = "project"
         for line in serialized.lines() {
             assert!(line.trim() != "path = \"\"", "{serialized}");
         }
+    }
+
+    /// `setup` rewrites scaffold.toml on every run. Project comments are
+    /// routinely load-bearing — they record why a `runtime_dir` override or a
+    /// held-back pin exists — so dropping them silently re-opens the bug they
+    /// document.
+    #[test]
+    fn update_config_preserves_comments_and_unmodelled_keys() {
+        let original = format!(
+            "# why this project pins what it pins\n{}\n\
+             # runtime_dir must be the session's real runtime dir: the 108-byte\n\
+             # sun_path cap makes every module segfault otherwise.\n\
+             [basecamp.profiles.alice]\n\
+             runtime_dir = \"/run/user/1000\"\n",
+            minimal_v0_2_0()
+        );
+        let cfg = parse_config(&original).expect("parse");
+        let rewritten = update_config(&original, &cfg).expect("update");
+
+        assert!(
+            rewritten.contains("# why this project pins what it pins"),
+            "leading comment lost:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("# sun_path cap makes every module segfault otherwise."),
+            "load-bearing comment lost:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("/run/user/1000"),
+            "the value the comment explains was lost:\n{rewritten}"
+        );
+        // And the result must still round-trip as valid config.
+        parse_config(&rewritten).expect("rewritten config must parse");
+    }
+
+    /// Build a fixture where one modelled section is written as a root-level
+    /// *inline* table instead of a `[header]`, dropping the header form so the
+    /// inline one is the only definition of that key.
+    fn with_inline_section(header: &str, inline: &str) -> String {
+        let base = minimal_v0_2_0();
+        let original = if header.is_empty() {
+            format!("{inline}\n{base}")
+        } else {
+            assert!(
+                base.contains(header),
+                "minimal_v0_2_0 fixture drifted; no such block:\n{header}"
+            );
+            base.replace(header, &format!("{inline}\n"))
+        };
+        assert!(
+            original.parse::<DocumentMut>().is_ok(),
+            "fixture itself must be valid TOML:\n{original}"
+        );
+        original
+    }
+
+    /// Regression for weboko's review finding 1.
+    ///
+    /// `parse_config` reads every section through `Item::as_table`, which is
+    /// `None` for an inline table — so `wallet = { home_dir = "…" }` is a
+    /// perfectly valid `scaffold.toml` that parses fine and falls back to the
+    /// default. The writer then reached the same key via
+    /// `entry(...).or_insert(...)`, which returns the *occupied* item, and the
+    /// old `.as_table_mut().expect("wallet table")` aborted the process with a
+    /// backtrace. Every modelled root section was reachable that way; this
+    /// covers each of them, plus the nested `ensure_subtable` /`child_table`
+    /// paths (`repos`, `modules`, `run.profiles`, `framework.idl`,
+    /// `basecamp.env`), which had the same `expect`.
+    ///
+    /// The contract asserted per case: the write must not panic, the result
+    /// must still be valid TOML, it must still parse as a config, and the
+    /// user's own keys inside the inline table must survive the coercion.
+    #[test]
+    fn update_config_survives_an_inline_table_for_every_modelled_section() {
+        // (label, header block to drop, inline replacement, a key the user
+        // wrote inside it that must survive).
+        let cases = [
+            (
+                "wallet",
+                "[wallet]\nhome_dir = \".scaffold/wallet\"\n",
+                "wallet = { home_dir = \".scaffold/wallet\", note = \"keep me\" }",
+                "keep me",
+            ),
+            (
+                "framework",
+                "[framework]\nkind = \"default\"\nversion = \"0.1.0\"\n",
+                "framework = { kind = \"default\", version = \"0.1.0\", note = \"keep me\" }",
+                "keep me",
+            ),
+            (
+                "localnet",
+                "[localnet]\nport = 3040\nrisc0_dev_mode = true\n",
+                "localnet = { port = 3040, risc0_dev_mode = true, note = \"keep me\" }",
+                "keep me",
+            ),
+            (
+                "framework.idl",
+                "[framework.idl]\nspec = \"lssa-idl/0.1.0\"\npath = \"idl\"\n",
+                "idl = { spec = \"lssa-idl/0.1.0\", path = \"idl\", note = \"keep me\" }",
+                "keep me",
+            ),
+            (
+                "circuits",
+                "",
+                "circuits = { version = \"0.1.0\", note = \"keep me\" }",
+                "keep me",
+            ),
+            (
+                "run",
+                "",
+                "run = { reset = true, note = \"keep me\" }",
+                "keep me",
+            ),
+            ("modules", "", "modules = { note = \"keep me\" }", "keep me"),
+            (
+                "basecamp",
+                "",
+                "basecamp = { port_base = 41000, note = \"keep me\" }",
+                "keep me",
+            ),
+        ];
+
+        for (label, header, inline, survivor) in cases {
+            let original = with_inline_section(header, inline);
+            // The whole point: this file is *valid* and the reader accepts it.
+            let cfg = parse_config(&original)
+                .unwrap_or_else(|e| panic!("{label}: fixture must parse, got {e}"));
+            // Before the fix this aborted the process rather than returning.
+            let rewritten = update_config(&original, &cfg)
+                .unwrap_or_else(|e| panic!("{label}: update must not fail, got {e}"));
+            assert!(
+                rewritten.parse::<DocumentMut>().is_ok(),
+                "{label}: rewrite is not valid TOML:\n{rewritten}"
+            );
+            parse_config(&rewritten)
+                .unwrap_or_else(|e| panic!("{label}: rewrite must reparse, got {e}\n{rewritten}"));
+            assert!(
+                rewritten.contains(survivor),
+                "{label}: the user's own key inside the inline table was dropped:\n{rewritten}"
+            );
+        }
+    }
+
+    /// `framework.idl` written inline *under* a real `[framework]` header —
+    /// the `child_table` path rather than the root one.
+    #[test]
+    fn update_config_survives_an_inline_child_table() {
+        let original = minimal_v0_2_0().replace(
+            "[framework.idl]\nspec = \"lssa-idl/0.1.0\"\npath = \"idl\"\n",
+            "",
+        );
+        let original = original.replace(
+            "[framework]\nkind = \"default\"\nversion = \"0.1.0\"\n",
+            "[framework]\nkind = \"default\"\nversion = \"0.1.0\"\n\
+             idl = { spec = \"lssa-idl/0.1.0\", path = \"idl\", note = \"keep me\" }\n",
+        );
+        let cfg = parse_config(&original).expect("fixture must parse");
+        let rewritten = update_config(&original, &cfg).expect("update must not panic");
+        parse_config(&rewritten).expect("rewrite must reparse");
+        assert!(
+            rewritten.contains("keep me"),
+            "unmodelled key inside the inline child table was dropped:\n{rewritten}"
+        );
+    }
+
+    /// A modelled key that is not a table at all and has no keys to keep:
+    /// there is nothing to coerce, so the section is replaced with the config's
+    /// own rendering. It must not panic and must leave a parseable file.
+    #[test]
+    fn update_config_replaces_a_modelled_key_that_is_a_scalar() {
+        for scalar in ["wallet = 3", "localnet = \"nope\"", "circuits = [1, 2]"] {
+            let original = format!(
+                "{scalar}\n{}",
+                minimal_v0_2_0()
+                    .replace("[wallet]\nhome_dir = \".scaffold/wallet\"\n", "")
+                    .replace("[localnet]\nport = 3040\nrisc0_dev_mode = true\n", "")
+            );
+            let cfg = parse_config(&original)
+                .unwrap_or_else(|e| panic!("{scalar}: fixture must parse, got {e}"));
+            let rewritten = update_config(&original, &cfg)
+                .unwrap_or_else(|e| panic!("{scalar}: update must not fail, got {e}"));
+            parse_config(&rewritten)
+                .unwrap_or_else(|e| panic!("{scalar}: rewrite must reparse, got {e}\n{rewritten}"));
+        }
+    }
+
+    /// A hand-edit that broke the file must not block writing a valid one.
+    #[test]
+    fn update_config_falls_back_when_existing_is_unparseable() {
+        let cfg = parse_config(&minimal_v0_2_0()).expect("parse");
+        let rewritten = update_config("this is not valid toml", &cfg).expect("update");
+        parse_config(&rewritten).expect("fallback output must parse");
+        // The garbage must be replaced, not merged with: a fallback that
+        // appended to the broken input would still parse and pass above.
+        assert!(
+            !rewritten.contains("this is not valid toml"),
+            "unparseable input survived into the rewrite:\n{rewritten}"
+        );
+    }
+
+    /// The dogfooding case: a comment explaining *why* a pin is what it is,
+    /// sitting on a key the rewrite then reassigns. Leaving a key untouched
+    /// and reassigning it are different `toml_edit` paths — decor survives the
+    /// first trivially, so only this pins the second.
+    #[test]
+    fn update_config_keeps_a_comment_on_a_key_it_reassigns() {
+        let original = minimal_v0_2_0().replace(
+            "[repos.spel]",
+            "# held back: 0.4 needs the new IDL spec\n[repos.spel]",
+        );
+        let mut cfg = parse_config(&original).expect("parse");
+        cfg.spel.pin = "1111111111111111111111111111111111111111".to_string();
+        let rewritten = update_config(&original, &cfg).expect("update");
+        assert!(
+            rewritten.contains("# held back: 0.4 needs the new IDL spec"),
+            "comment lost when its section's key was reassigned:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("1111111111111111111111111111111111111111"),
+            "new pin not written:\n{rewritten}"
+        );
+    }
+
+    /// `--inspector` clears `attr_platform`, turning a `[repos.basecamp.attr]`
+    /// header table into a scalar `attr = "…"`. That structural swap is the
+    /// one the flag performs on every project carrying a per-platform map, so
+    /// pin it rather than relying on `toml_edit` happening to do it right.
+    #[test]
+    fn update_config_replaces_a_per_platform_attr_table_with_a_scalar() {
+        let original = minimal_v0_2_0()
+            + "\n[repos.basecamp]\nsource = \"https://github.com/logos-co/logos-basecamp.git\"\n\
+               pin = \"aa237766baf61404e12da86b7303cb41065464c9\"\nbuild = \"nix-flake\"\n\
+               \n[repos.basecamp.attr]\nx86_64-linux = \"bin-appimage\"\n";
+        let mut cfg = parse_config(&original).expect("parse");
+        let bc = cfg.basecamp_repo.as_mut().expect("basecamp repo");
+        bc.attr_platform.clear();
+        bc.attr = "bin-bundle-dir-inspector".to_string();
+
+        let rewritten = update_config(&original, &cfg).expect("update");
+        let back = parse_config(&rewritten).expect("reparse");
+        let rbc = back.basecamp_repo.as_ref().expect("basecamp repo");
+        assert!(
+            rbc.attr_platform.is_empty(),
+            "stale per-platform map survived:\n{rewritten}"
+        );
+        assert_eq!(
+            rbc.effective_attr("x86_64-linux"),
+            "bin-bundle-dir-inspector",
+            "map still wins over the scalar:\n{rewritten}"
+        );
+    }
+
+    /// Rewriting an existing file must land the same values a fresh render
+    /// would; only comments and untouched keys are extra.
+    #[test]
+    fn update_config_agrees_with_a_fresh_render_on_owned_keys() {
+        let mut cfg = parse_config(&minimal_v0_2_0()).expect("parse");
+        cfg.lez.path = "/abs/lez".to_string();
+        let fresh = serialize_config(&cfg).expect("serialize");
+        let updated = update_config(&minimal_v0_2_0(), &cfg).expect("update");
+        assert_eq!(fresh, updated);
+    }
+
+    /// A scaffold.toml carrying every optional section, rewritten from a
+    /// config whose values were all reset to their defaults.
+    ///
+    /// This is the case a naive in-place rewrite gets wrong. The writers below
+    /// emit optional keys only when non-default (`if non_default { assign }`),
+    /// which against a fresh document means "a default renders no key". Once
+    /// the writer merges over the *existing* document, that same `if` stops
+    /// removing anything: skipping the assignment leaves the old value in the
+    /// file, so a value reset to its default silently persists and the config
+    /// scaffold reads back is not the one it wrote. Every conditional emitter
+    /// therefore needs an explicit removal branch, and comparing against a
+    /// fresh render is what proves it has one.
+    #[test]
+    fn update_config_clears_keys_reset_to_defaults() {
+        let original = minimal_v0_2_0()
+            + "\n[basecamp]\nport_base = 41000\nport_stride = 7\n\
+               \n[basecamp.env]\nFOO = \"bar\"\n\
+               \n[basecamp.profiles.alice]\nruntime_dir = \"/run/user/1000\"\n\
+               \n[modules.alpha]\nflake = \"./a#lgx\"\nrole = \"project\"\n\
+               standalone_app = \"oldapp\"\n\
+               \n[modules.beta]\nflake = \"./b#lgx\"\nrole = \"project\"\n\
+               \n[run]\nreset = true\npost_deploy = \"echo hi\"\n\
+               \n[circuits]\nversion = \"0.1.0\"\ninstall_dir = \"custom/dir\"\n";
+        let mut cfg = parse_config(&original).expect("parse");
+
+        // Reset everything optional back to its default / absent form.
+        cfg.basecamp = None;
+        cfg.modules.remove("beta");
+        if let Some(alpha) = cfg.modules.get_mut("alpha") {
+            alpha.standalone_app = None;
+        }
+        cfg.run = RunConfig::default();
+        cfg.circuits.install_dir = CircuitsConfig::default().install_dir;
+
+        let updated = update_config(&original, &cfg).expect("update");
+        let fresh = serialize_config(&cfg).expect("serialize");
+        // Compare the *set* of emitted lines, not the rendered string: an
+        // in-place rewrite deliberately keeps each section where the user put
+        // it, so section order legitimately differs from a fresh render.
+        // Reordering someone's file would be as unwelcome as dropping their
+        // comments; what must match is which keys exist and what they say.
+        let lines = |s: &str| {
+            let mut v: Vec<String> = s
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(str::to_string)
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            lines(&fresh),
+            lines(&updated),
+            "in-place rewrite must not strand keys the config no longer carries\n\
+             fresh:\n{fresh}\nupdated:\n{updated}"
+        );
+
+        // Spelled out, so a failure names the specific key that survived.
+        let back = parse_config(&updated).expect("reparse");
+        assert!(back.basecamp.is_none(), "[basecamp] survived:\n{updated}");
+        assert!(
+            !back.modules.contains_key("beta"),
+            "removed module survived:\n{updated}"
+        );
+        assert_eq!(
+            back.modules
+                .get("alpha")
+                .and_then(|m| m.standalone_app.as_deref()),
+            None,
+            "standalone_app survived:\n{updated}"
+        );
+        assert!(!back.run.inline.reset, "run.reset survived:\n{updated}");
+        assert!(
+            back.run.inline.post_deploy.is_empty(),
+            "run.post_deploy survived:\n{updated}"
+        );
+        assert_eq!(
+            back.circuits.install_dir,
+            CircuitsConfig::default().install_dir,
+            "circuits.install_dir survived:\n{updated}"
+        );
+    }
+
+    /// The mirror image of the stale-key bug, and the worse failure: pruning
+    /// must not reach past the keys scaffold owns. A key scaffold does not
+    /// model, sitting inside a table it *does* own, is a hand-edit — a
+    /// forward-compatible field, a note to a future reader — and deleting it
+    /// would be a silent data loss no comment could survive.
+    #[test]
+    fn update_config_keeps_unmodelled_keys_inside_tables_it_owns() {
+        let original = minimal_v0_2_0().replace(
+            "[repos.spel]",
+            "[repos.spel]\nfuture_field = \"scaffold does not model this\"",
+        ) + "\n[some_unknown_section]\nkey = \"value\"\n";
+        let mut cfg = parse_config(&original).expect("parse");
+        // Touch a key scaffold *does* own in that same table.
+        cfg.spel.pin = "3333333333333333333333333333333333333333".to_string();
+
+        let rewritten = update_config(&original, &cfg).expect("update");
+        assert!(
+            rewritten.contains("future_field = \"scaffold does not model this\""),
+            "unmodelled key inside a scaffold-owned table was deleted:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("[some_unknown_section]"),
+            "a section scaffold does not own was deleted:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("3333333333333333333333333333333333333333"),
+            "the edit itself was not written:\n{rewritten}"
+        );
+    }
+
+    /// A `[repos.basecamp]` dropped from the config must lose its table, the
+    /// same as `[basecamp]`. The parse side reads a missing table back as
+    /// `None`, so a stranded one silently resurrects the repo.
+    #[test]
+    fn update_config_drops_a_repo_table_the_config_no_longer_carries() {
+        let original = minimal_v0_2_0()
+            + "\n[repos.basecamp]\nsource = \"https://github.com/logos-co/logos-basecamp.git\"\n\
+               pin = \"aa237766baf61404e12da86b7303cb41065464c9\"\nbuild = \"nix-flake\"\n\
+               attr = \"app\"\n";
+        let mut cfg = parse_config(&original).expect("parse");
+        assert!(cfg.basecamp_repo.is_some(), "fixture must start with one");
+        cfg.basecamp_repo = None;
+
+        let rewritten = update_config(&original, &cfg).expect("update");
+        assert!(
+            !rewritten.contains("[repos.basecamp]"),
+            "dropped repo table survived:\n{rewritten}"
+        );
+        assert!(
+            parse_config(&rewritten)
+                .expect("reparse")
+                .basecamp_repo
+                .is_none(),
+            "dropped repo reparsed as present:\n{rewritten}"
+        );
+        // The sibling repos must be untouched.
+        assert!(rewritten.contains("[repos.lez]"), "{rewritten}");
+        assert!(rewritten.contains("[repos.spel]"), "{rewritten}");
+    }
+
+    /// A file carrying only `[basecamp.env]` parses `[basecamp]` as implicit.
+    /// Assigning a non-default `port_base` into a table still flagged implicit
+    /// would render it as a dotted `basecamp.port_base = …` under whatever
+    /// section came before — landing the key in the wrong place entirely.
+    #[test]
+    fn update_config_promotes_an_implicit_basecamp_table_when_a_direct_key_appears() {
+        let original = minimal_v0_2_0() + "\n[basecamp.env]\nFOO = \"bar\"\n";
+        let mut cfg = parse_config(&original).expect("parse");
+        cfg.basecamp.as_mut().expect("basecamp").port_base = 41000;
+
+        let rewritten = update_config(&original, &cfg).expect("update");
+        let back = parse_config(&rewritten).expect("reparse");
+        assert_eq!(
+            back.basecamp.as_ref().expect("basecamp").port_base,
+            41000,
+            "port_base did not survive the round trip:\n{rewritten}"
+        );
+        assert!(
+            !rewritten.contains("basecamp.port_base"),
+            "key rendered dotted instead of under a [basecamp] header:\n{rewritten}"
+        );
+    }
+
+    /// A section scaffold models but that currently holds *only* unmodelled
+    /// user keys parses to `None` — there is no modelled field to see — so a
+    /// blanket `doc.remove(...)` for the `None` case deletes the user's
+    /// content. Removing a section is only safe once the keys scaffold owns
+    /// are gone and nothing else is left.
+    #[test]
+    fn update_config_keeps_a_section_holding_only_unmodelled_keys() {
+        let original = minimal_v0_2_0()
+            + "\n# ports come from the CI allocator; do not hand-edit\n\
+               [basecamp]\nci_port_lease = \"team-alpha\"\n\
+               \n[run]\nmakefile_target = \"deploy\"\n\
+               \n[run.watch]\npoll_interval_ms = 250\n";
+        let cfg = parse_config(&original).expect("parse");
+        // Nothing modelled in either section, so both parse away entirely.
+        assert!(cfg.basecamp.is_none(), "fixture assumption");
+
+        let rewritten = update_config(&original, &cfg).expect("update");
+        assert!(
+            rewritten.contains("ci_port_lease = \"team-alpha\""),
+            "[basecamp] holding only user keys was deleted:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("# ports come from the CI allocator; do not hand-edit"),
+            "the comment explaining it went with it:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("makefile_target = \"deploy\""),
+            "[run] holding only user keys was deleted:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("poll_interval_ms = 250"),
+            "[run.watch] holding only user keys was deleted:\n{rewritten}"
+        );
+    }
+
+    /// The two requirements have to hold at once, in the same table: scaffold
+    /// clears the keys it owns, and leaves everything else exactly as written.
+    /// Testing either alone would pass with the other broken — a writer that
+    /// removed nothing preserves user keys trivially, and one that removed the
+    /// whole table clears scaffold's keys trivially.
+    #[test]
+    fn update_config_clears_owned_keys_while_keeping_user_keys_in_one_table() {
+        let original = minimal_v0_2_0()
+            + "\n[basecamp]\nport_base = 41000\nci_port_lease = \"team-alpha\"\n\
+               \n[run]\nreset = true\nmakefile_target = \"deploy\"\n\
+               \n[run.watch]\ninclude = [\"src/**\"]\npoll_interval_ms = 250\n";
+        let mut cfg = parse_config(&original).expect("parse");
+        // Reset every modelled value in those tables to its default.
+        cfg.basecamp.as_mut().expect("basecamp").port_base = BasecampConfig::default().port_base;
+        cfg.run = RunConfig::default();
+
+        let rewritten = update_config(&original, &cfg).expect("update");
+
+        // Scaffold's keys are gone. Assert on the reparsed model rather than
+        // substrings: `!contains("include")` would also match a comment or a
+        // longer key, and — worse — it passes just as happily if the whole
+        // table was deleted, which is the failure the second half exists to
+        // catch.
+        // (`[basecamp]` now reparses to `None`: only the user's unmodelled key
+        // is left in it, and that is exactly the state the second half checks
+        // is still *present in the file*.)
+        let back = parse_config(&rewritten).expect("rewritten config must still parse");
+        assert!(
+            back.basecamp.is_none(),
+            "owned key survived a reset to default:\n{rewritten}"
+        );
+        assert!(
+            !back.run.inline.reset,
+            "owned key survived a reset to default:\n{rewritten}"
+        );
+        assert!(
+            back.run.watch.include.is_empty(),
+            "owned key survived a reset to default:\n{rewritten}"
+        );
+        // Pinned as full assignments so a stray substring cannot satisfy them.
+        assert!(
+            !rewritten.contains("port_base ="),
+            "owned key survived a reset to default:\n{rewritten}"
+        );
+        assert!(
+            !rewritten.contains("include ="),
+            "owned key survived a reset to default:\n{rewritten}"
+        );
+        // ...and the user's are untouched, tables and all.
+        assert!(
+            rewritten.contains("ci_port_lease = \"team-alpha\""),
+            "user key deleted alongside an owned one:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("makefile_target = \"deploy\""),
+            "user key deleted alongside an owned one:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("poll_interval_ms = 250"),
+            "user key deleted alongside an owned one:\n{rewritten}"
+        );
+        parse_config(&rewritten).expect("rewritten config must still parse");
+    }
+
+    /// `parse_basecamp_runtime` *skips* an empty `env_append` list instead of
+    /// erroring on it, so unlike `[basecamp.env]` the parse is not total and
+    /// the model's key set is narrower than the file's. A `retain` keyed on
+    /// the model therefore deletes a line the user wrote.
+    #[test]
+    fn update_config_keeps_an_empty_env_append_list() {
+        let original = minimal_v0_2_0()
+            + "\n[basecamp.env_append]\n\
+               # cleared deliberately; the wrapper appends to it at runtime\n\
+               LD_LIBRARY_PATH = []\nPATH = [\"/opt/bin\"]\n";
+        let cfg = parse_config(&original).expect("parse");
+        assert!(
+            !cfg.basecamp
+                .as_ref()
+                .expect("basecamp")
+                .env_append
+                .contains_key("LD_LIBRARY_PATH"),
+            "fixture assumption: the empty list is skipped by the parser"
+        );
+
+        let rewritten = update_config(&original, &cfg).expect("update");
+        assert!(
+            rewritten.contains("LD_LIBRARY_PATH"),
+            "an empty env_append list the parser skipped was deleted:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("PATH = [\"/opt/bin\"]"),
+            "the modelled sibling was lost:\n{rewritten}"
+        );
+
+        // The retain above only runs while the model is non-empty. Drop the
+        // modelled sibling and the whole table takes the `else` path, which
+        // must still not delete what the parser merely skipped.
+        let only_empty = minimal_v0_2_0()
+            + "\n[basecamp]\nport_base = 41000\n\
+               \n[basecamp.env_append]\nLD_LIBRARY_PATH = []\n";
+        let cfg = parse_config(&only_empty).expect("parse");
+        assert!(
+            cfg.basecamp
+                .as_ref()
+                .expect("basecamp")
+                .env_append
+                .is_empty(),
+            "fixture assumption: the model sees no env_append at all"
+        );
+        let rewritten = update_config(&only_empty, &cfg).expect("update");
+        assert!(
+            rewritten.contains("LD_LIBRARY_PATH"),
+            "the sole skipped entry was deleted with its table:\n{rewritten}"
+        );
+    }
+
+    /// Same asymmetry one level over: `parse_basecamp_runtime` drops a
+    /// fully-default profile, so a `[basecamp.profiles.<name>]` holding only
+    /// unmodelled keys is absent from the model but present in the file.
+    #[test]
+    fn update_config_keeps_a_profile_holding_only_unmodelled_keys() {
+        let original = minimal_v0_2_0()
+            + "\n[basecamp.profiles.alice]\nruntime_dir = \"/run/user/1000\"\n\
+               \n[basecamp.profiles.carol]\n\
+               # our harness reads this; scaffold does not model it\n\
+               screenshot_dir = \"/tmp/shots\"\n";
+        let cfg = parse_config(&original).expect("parse");
+        assert!(
+            !cfg.basecamp
+                .as_ref()
+                .expect("basecamp")
+                .profiles
+                .contains_key("carol"),
+            "fixture assumption: an all-unmodelled profile is skipped"
+        );
+
+        let rewritten = update_config(&original, &cfg).expect("update");
+        assert!(
+            rewritten.contains("screenshot_dir = \"/tmp/shots\""),
+            "a profile the parser skipped was deleted:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("/run/user/1000"),
+            "the modelled sibling profile was lost:\n{rewritten}"
+        );
+    }
+
+    /// Clearing the last profile while `[basecamp]` itself survives must not
+    /// leave the profile in the file — the prune below only walks entries
+    /// *within* a non-empty map, so this needs its own branch.
+    #[test]
+    fn update_config_drops_a_cleared_basecamp_profile() {
+        let original = minimal_v0_2_0()
+            + "\n[basecamp]\nport_base = 41000\n\
+               \n[basecamp.profiles.alice]\nruntime_dir = \"/run/user/1000\"\n";
+        let mut cfg = parse_config(&original).expect("parse");
+        cfg.basecamp.as_mut().expect("basecamp").profiles.clear();
+
+        let rewritten = update_config(&original, &cfg).expect("update");
+        assert!(
+            !rewritten.contains("[basecamp.profiles.alice]"),
+            "cleared profile survived:\n{rewritten}"
+        );
+        let back = parse_config(&rewritten).expect("reparse");
+        assert!(
+            back.basecamp
+                .as_ref()
+                .expect("basecamp")
+                .profiles
+                .is_empty(),
+            "cleared profile reparsed as present:\n{rewritten}"
+        );
+        assert_eq!(
+            back.basecamp.as_ref().expect("basecamp").port_base,
+            41000,
+            "the surviving parent lost its own key:\n{rewritten}"
+        );
+    }
+
+    /// A file written with an explicit `[modules]` header parses that table as
+    /// non-implicit, and toml_edit renders an empty non-implicit table as a
+    /// bare header — so emptying it is not enough to make it disappear.
+    #[test]
+    fn update_config_drops_an_explicit_modules_header_when_emptied() {
+        let original = minimal_v0_2_0()
+            + "\n[modules]\n\n[modules.alpha]\nflake = \"./a#lgx\"\nrole = \"project\"\n";
+        let mut cfg = parse_config(&original).expect("parse");
+        cfg.modules.clear();
+
+        let rewritten = update_config(&original, &cfg).expect("update");
+        assert!(
+            !rewritten.contains("[modules"),
+            "bare [modules] header stranded:\n{rewritten}"
+        );
+    }
+
+    /// Removing the *last* module must not strand a bare `[modules]` header.
+    /// `retain` empties the table rather than deleting it, and an empty
+    /// explicit table still renders its header — which then reparses as an
+    /// empty section rather than no section.
+    #[test]
+    fn update_config_drops_the_modules_table_when_the_last_entry_goes() {
+        let original =
+            minimal_v0_2_0() + "\n[modules.alpha]\nflake = \"./a#lgx\"\nrole = \"project\"\n";
+        let mut cfg = parse_config(&original).expect("parse");
+        cfg.modules.clear();
+
+        let updated = update_config(&original, &cfg).expect("update");
+        assert!(
+            !updated.contains("[modules"),
+            "empty modules table left behind:\n{updated}"
+        );
+        assert_eq!(
+            updated,
+            serialize_config(&cfg).expect("serialize"),
+            "rewrite diverged from a fresh render:\n{updated}"
+        );
+    }
+
+    /// Same edge one level down, where the parent carries real keys and is
+    /// therefore *not* implicit: clearing every `[basecamp.env]` entry while
+    /// `[basecamp]` itself survives must leave no empty child header.
+    #[test]
+    fn update_config_drops_an_emptied_basecamp_env_but_keeps_its_parent() {
+        let original =
+            minimal_v0_2_0() + "\n[basecamp]\nport_base = 41000\n\n[basecamp.env]\nFOO = \"bar\"\n";
+        let mut cfg = parse_config(&original).expect("parse");
+        cfg.basecamp.as_mut().expect("basecamp").env.clear();
+
+        let updated = update_config(&original, &cfg).expect("update");
+        assert!(
+            !updated.contains("[basecamp.env]"),
+            "empty env table left behind:\n{updated}"
+        );
+        // The non-default port must survive — only the emptied child goes.
+        let back = parse_config(&updated).expect("reparse");
+        assert_eq!(
+            back.basecamp.as_ref().expect("basecamp").port_base,
+            41000,
+            "clearing a child table clobbered its parent's keys:\n{updated}"
+        );
+    }
+
+    /// The `[basecamp] = None` path has to honour the *children's* carve-outs,
+    /// not just the section's own. `parse_basecamp_runtime` can return `None`
+    /// because every field was individually skipped rather than because the
+    /// file is empty — an `env_append` of only empty lists and a profile of
+    /// only unmodelled keys both parse away — so clearing the section by
+    /// blanket-removing `env_append` and `profiles` deletes content the user
+    /// wrote. The non-`None` path already scopes these; this pins that the
+    /// `None` path does too.
+    #[test]
+    fn update_config_keeps_skipped_basecamp_children_when_the_section_parses_to_none() {
+        let original = minimal_v0_2_0()
+            + "\n# ports come from the CI allocator\n[basecamp]\nci_lease = \"team-a\"\n\
+               \n[basecamp.env_append]\n\
+               # cleared deliberately; the wrapper appends at runtime\n\
+               LD_LIBRARY_PATH = []\n\
+               \n[basecamp.profiles.carol]\n\
+               # our harness reads this; scaffold does not model it\n\
+               screenshot_dir = \"/tmp/shots\"\n";
+        let cfg = parse_config(&original).expect("parse");
+        assert!(
+            cfg.basecamp.is_none(),
+            "fixture assumption: every field is skipped, so the section is None"
+        );
+
+        let rewritten = update_config(&original, &cfg).expect("update");
+        assert!(
+            rewritten.contains("ci_lease = \"team-a\""),
+            "the section's own unmodelled key was deleted:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("LD_LIBRARY_PATH = []"),
+            "an env_append entry the parser merely skipped was deleted:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("# cleared deliberately; the wrapper appends at runtime"),
+            "the comment explaining it went with it:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("screenshot_dir = \"/tmp/shots\""),
+            "a profile the parser merely skipped was deleted:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("# our harness reads this; scaffold does not model it"),
+            "the comment explaining the profile went with it:\n{rewritten}"
+        );
+        parse_config(&rewritten).expect("rewritten config must still parse");
+    }
+
+    /// `read_string` ends in `.filter(|s| !s.is_empty())`, and
+    /// `parse_post_deploy` / `parse_glob_list` map an empty string or array to
+    /// an empty `Vec` — so `path = ""`, `post_deploy = ""` and `exclude = []`
+    /// all reach the model as exactly the state that means "key absent". A
+    /// plain `remove` on that state deletes a line the user wrote, and takes
+    /// the comment above it with it. Nothing observable changes either way,
+    /// but silent deletion of a hand-written line is the failure this rewrite
+    /// exists to prevent.
+    #[test]
+    fn update_config_keeps_empty_literals_the_readers_skip() {
+        let original = minimal_v0_2_0().replace(
+            "[repos.spel]",
+            "[repos.spel]\n# resolved at runtime; deliberately blank\npath = \"\"",
+        ) + "\n[basecamp]\nport_base = 41000\n\
+               \n[basecamp.profiles.alice]\nruntime_dir = \"/run/user/1000\"\n\
+               # the wrapper supplies this\nenv_file = \"\"\n\
+               \n[run]\nreset = true\n\
+               \n[run.watch]\ninclude = [\"src/**\"]\n\
+               # nothing to exclude yet\nexclude = []\n";
+        let cfg = parse_config(&original).expect("parse");
+        // Fixture assumption: each of these reaches the model as "absent".
+        assert!(cfg.spel.path.is_empty(), "fixture: path parses away");
+        assert!(
+            cfg.basecamp
+                .as_ref()
+                .expect("basecamp")
+                .profiles
+                .get("alice")
+                .expect("alice")
+                .env_file
+                .is_none(),
+            "fixture: empty env_file parses away"
+        );
+        assert!(
+            cfg.run.watch.exclude.is_empty(),
+            "fixture: exclude is empty"
+        );
+
+        let rewritten = update_config(&original, &cfg).expect("update");
+        assert!(
+            rewritten.contains("path = \"\""),
+            "an empty `path` literal was deleted:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("# resolved at runtime; deliberately blank"),
+            "the comment above it went with it:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("env_file = \"\""),
+            "an empty `env_file` literal was deleted:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("# the wrapper supplies this"),
+            "the comment above env_file went with it:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("exclude = []"),
+            "an empty `exclude` array was deleted:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("# nothing to exclude yet"),
+            "the comment above exclude went with it:\n{rewritten}"
+        );
+        // Preserving them must not change what the file means.
+        let back = parse_config(&rewritten).expect("reparse");
+        assert!(back.spel.path.is_empty(), "empty literal changed meaning");
+        assert!(
+            back.run.watch.exclude.is_empty(),
+            "empty literal changed meaning"
+        );
+    }
+
+    /// A stale *non-empty* value is still removed — the empty-literal carve-out
+    /// above must not turn into "never remove anything". This is the class-A
+    /// half of the same helper, and it is what stops the fix for one failure
+    /// mode from reintroducing the other.
+    #[test]
+    fn update_config_still_clears_non_empty_optional_values() {
+        let original = minimal_v0_2_0().replace(
+            "[scaffold]\nversion = \"0.2.0\"",
+            "[scaffold]\nversion = \"0.2.0\"\ncache_root = \"/custom/cache\"",
+        ) + "\n[circuits]\nversion = \"0.1.0\"\n\
+               url_template = \"https://example.com/{version}.tar.gz\"\n\
+               \n[run]\ndefault_profile = \"dev\"\npost_deploy = \"echo hi\"\n\
+               \n[run.profiles.dev]\nreset = true\npost_deploy = \"echo dev\"\n\
+               \n[run.profiles.ci]\ndeploy = false\n\
+               \n[run.watch]\ninclude = [\"src/**\"]\ndebounce_ms = 500\n";
+        let mut cfg = parse_config(&original).expect("parse");
+        assert!(!cfg.cache_root.is_empty(), "fixture: cache_root is set");
+        assert!(cfg.circuits.url_template.is_some(), "fixture: template set");
+
+        // Reset each optional back to its default / absent form, while keeping
+        // enough non-default state that the writer takes the *emitting* path
+        // rather than the whole-section early return.
+        cfg.cache_root.clear();
+        cfg.circuits.url_template = None;
+        cfg.run.default_profile = None;
+        cfg.run.inline.post_deploy.clear();
+        let dev = cfg.run.profiles.get_mut("dev").expect("dev profile");
+        dev.reset = false;
+        dev.post_deploy.clear();
+        cfg.run.watch.include.clear();
+
+        let rewritten = update_config(&original, &cfg).expect("update");
+        let back = parse_config(&rewritten).expect("reparse");
+        assert!(
+            back.cache_root.is_empty(),
+            "stale cache_root survived:\n{rewritten}"
+        );
+        assert!(
+            back.circuits.url_template.is_none(),
+            "stale url_template survived:\n{rewritten}"
+        );
+        assert!(
+            back.run.default_profile.is_none(),
+            "stale default_profile survived:\n{rewritten}"
+        );
+        assert!(
+            back.run.inline.post_deploy.is_empty(),
+            "stale run.post_deploy survived:\n{rewritten}"
+        );
+        let back_dev = back.run.profiles.get("dev").expect("dev survives");
+        assert!(
+            !back_dev.reset,
+            "stale profile reset survived:\n{rewritten}"
+        );
+        assert!(
+            back_dev.post_deploy.is_empty(),
+            "stale profile post_deploy survived:\n{rewritten}"
+        );
+        assert!(
+            back.run.watch.include.is_empty(),
+            "stale watch include survived:\n{rewritten}"
+        );
+        // The keys that were *not* reset must be untouched, so this cannot
+        // pass by deleting whole sections.
+        assert_eq!(back.run.watch.debounce_ms, Some(500), "{rewritten}");
+        assert!(
+            !back.run.profiles.get("ci").expect("ci survives").deploy,
+            "an untouched sibling profile was clobbered:\n{rewritten}"
+        );
+    }
+
+    /// `write_repo_ref`'s three optionals, cleared under a merge. The fresh
+    /// render never exercised the removal side, and `[repos.<name>].path` is
+    /// the operationally sharp one: a stranded absolute path pins the project
+    /// to one machine's layout.
+    #[test]
+    fn update_config_clears_repo_optionals_reset_to_defaults() {
+        let original = minimal_v0_2_0()
+            + "\n[repos.basecamp]\nsource = \"https://github.com/logos-co/logos-basecamp.git\"\n\
+               pin = \"aa237766baf61404e12da86b7303cb41065464c9\"\n\
+               build = \"nix-flake\"\nattr = \"app\"\npath = \"/abs/basecamp\"\n";
+        let mut cfg = parse_config(&original).expect("parse");
+        let bc = cfg.basecamp_repo.as_mut().expect("basecamp repo");
+        assert_ne!(bc.build, RepoBuild::default(), "fixture: build non-default");
+        bc.build = RepoBuild::default();
+        bc.attr.clear();
+        bc.path.clear();
+
+        let rewritten = update_config(&original, &cfg).expect("update");
+        let back = parse_config(&rewritten).expect("reparse");
+        let rbc = back.basecamp_repo.as_ref().expect("repo survives");
+        assert_eq!(rbc.build, RepoBuild::default(), "stale build:\n{rewritten}");
+        assert!(rbc.attr.is_empty(), "stale attr:\n{rewritten}");
+        assert!(rbc.path.is_empty(), "stale path:\n{rewritten}");
+        // The repo itself must survive — this must not pass by deleting it.
+        assert_eq!(rbc.pin, "aa237766baf61404e12da86b7303cb41065464c9");
+    }
+
+    /// `[repos.lgpm]` takes the same `None` arm as `[repos.basecamp]`, and
+    /// `setup` writes both. Only `basecamp` was pinned; a loop is easy to
+    /// half-break.
+    #[test]
+    fn update_config_drops_a_dropped_lgpm_repo() {
+        let original = minimal_v0_2_0()
+            + "\n[repos.lgpm]\nsource = \"https://github.com/logos-co/lgpm.git\"\n\
+               pin = \"bb237766baf61404e12da86b7303cb41065464c9\"\nbuild = \"nix-flake\"\n";
+        let mut cfg = parse_config(&original).expect("parse");
+        assert!(cfg.lgpm_repo.is_some(), "fixture must start with one");
+        cfg.lgpm_repo = None;
+
+        let rewritten = update_config(&original, &cfg).expect("update");
+        assert!(
+            !rewritten.contains("[repos.lgpm]"),
+            "dropped lgpm table survived:\n{rewritten}"
+        );
+        assert!(
+            parse_config(&rewritten)
+                .expect("reparse")
+                .lgpm_repo
+                .is_none(),
+            "dropped lgpm reparsed as present:\n{rewritten}"
+        );
+        assert!(rewritten.contains("[repos.lez]"), "{rewritten}");
+    }
+
+    /// `prune_run_profiles` is the defensive twin of the `[basecamp]` prune.
+    /// Its own doc comment concedes it is not load-bearing today — which is
+    /// exactly why it needs a test: nothing else stops a future reader from
+    /// "simplifying" it into the blanket remove its basecamp analogue must
+    /// never become.
+    #[test]
+    fn update_config_keeps_unmodelled_keys_in_a_cleared_run_profile() {
+        let original = minimal_v0_2_0()
+            + "\n[run]\nreset = true\n\
+               \n[run.profiles.dev]\nreset = true\n\
+               # our harness reads this; scaffold does not model it\n\
+               harness_tag = \"nightly\"\n";
+        let mut cfg = parse_config(&original).expect("parse");
+        cfg.run = RunConfig::default();
+
+        let rewritten = update_config(&original, &cfg).expect("update");
+        assert!(
+            rewritten.contains("harness_tag = \"nightly\""),
+            "an unmodelled key in a cleared run profile was deleted:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("# our harness reads this; scaffold does not model it"),
+            "the comment explaining it went with it:\n{rewritten}"
+        );
+        let back = parse_config(&rewritten).expect("reparse");
+        assert!(
+            !back.run.profiles.get("dev").is_some_and(|p| p.reset),
+            "the owned key survived a reset to default:\n{rewritten}"
+        );
+    }
+
+    /// A per-profile `env` key removed from the model must go, while its
+    /// siblings stay. `parse_string_map` is total, so this retain is
+    /// legitimately model-keyed — the risk here is a stale key, not deletion.
+    #[test]
+    fn update_config_prunes_one_key_from_a_basecamp_profile_env() {
+        let original = minimal_v0_2_0()
+            + "\n[basecamp.profiles.alice]\nruntime_dir = \"/run/user/1000\"\n\
+               \n[basecamp.profiles.alice.env]\nA = \"1\"\nB = \"2\"\n";
+        let mut cfg = parse_config(&original).expect("parse");
+        cfg.basecamp
+            .as_mut()
+            .expect("basecamp")
+            .profiles
+            .get_mut("alice")
+            .expect("alice")
+            .env
+            .remove("B");
+
+        let rewritten = update_config(&original, &cfg).expect("update");
+        let back = parse_config(&rewritten).expect("reparse");
+        let env = &back
+            .basecamp
+            .as_ref()
+            .expect("basecamp")
+            .profiles
+            .get("alice")
+            .expect("alice")
+            .env;
+        assert_eq!(env.get("A").map(String::as_str), Some("1"), "{rewritten}");
+        assert!(
+            !env.contains_key("B"),
+            "stale env key survived:\n{rewritten}"
+        );
+    }
+
+    /// Writing the same config twice must converge: the second rewrite of an
+    /// already-rendered file changes nothing.
+    #[test]
+    fn update_config_is_idempotent() {
+        // Every section with conditional emit logic, plus comments and an
+        // unmodelled section — the minimal fixture alone would skip all of the
+        // branches that could oscillate between two renderings.
+        let original = format!(
+            "# leading comment\n{}\n\
+             [basecamp]\nport_base = 41000\n\n[basecamp.env]\nFOO = \"bar\"\n\
+             \n[basecamp.profiles.alice]\nruntime_dir = \"/run/user/1000\"\n\
+             \n[modules.alpha]\nflake = \"./a#lgx\"\nrole = \"project\"\n\
+             standalone_app = \"app\"\n\
+             \n[run]\nreset = true\npost_deploy = \"echo hi\"\n\
+             \n[run.watch]\ninclude = [\"src/**\"]\n\
+             \n[unknown_section]\nkey = \"value\"\n",
+            minimal_v0_2_0()
+        );
+        let cfg = parse_config(&original).expect("parse");
+        let once = update_config(&original, &cfg).expect("first");
+        let twice = update_config(&once, &parse_config(&once).expect("reparse")).expect("second");
+        assert_eq!(
+            once, twice,
+            "a second save must be a no-op; churn here rewrites the user's \
+             file on every command"
+        );
+        // And the first pass must not have lost anything on the way.
+        assert!(once.contains("# leading comment"), "{once}");
+        assert!(once.contains("[unknown_section]"), "{once}");
     }
 
     #[test]
