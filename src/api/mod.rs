@@ -645,6 +645,12 @@ impl CreateProjectOptions {
 #[derive(Clone, Debug)]
 pub enum BasecampCommand {
     /// Build/install the pinned basecamp binary and seed profiles.
+    ///
+    /// **Breaking change:** this was a unit variant in 0.3.1 and earlier.
+    /// Embedders writing `BasecampCommand::Setup` must now write
+    /// `BasecampCommand::Setup { inspector: None }`, which is the previous
+    /// behaviour. See ADR.md, "Breaking Change: `BasecampCommand::Setup`
+    /// Takes an `inspector` Field".
     Setup {
         /// Select the QML-inspector build of basecamp — the test-only twin of
         /// the shipping bundle, which a UI harness can drive headlessly.

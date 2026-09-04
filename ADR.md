@@ -477,3 +477,26 @@ regardless of whether it is a workspace member. The probe is a single stat; abse
 so non-Risc0 projects pay nothing. Release mode is chosen so the produced `.bin` lands in the
 same `release/` path component the deploy-side discovery requires — the two halves are designed
 together. The shared `methods` directory name lives in `crate::constants::METHODS_DIR`.
+
+## Breaking Change: `BasecampCommand::Setup` Takes an `inspector` Field
+
+`BasecampCommand::Setup` changed from a unit variant to a struct variant so
+`basecamp setup` could carry the `--inspector` / `--no-inspector` tri-state.
+`BasecampCommand` is a public enum on a published crate, so this breaks any
+embedder that constructs the variant. The CLI is unaffected.
+
+```rust
+// before
+project.basecamp(BasecampCommand::Setup)?;
+
+// after — `None` is the previous behaviour: leave the configured stack alone
+project.basecamp(BasecampCommand::Setup { inspector: None })?;
+```
+
+`Some(true)` selects the inspector build, `Some(false)` restores the default,
+and `None` matches what the unit variant did.
+
+A version bump is expected to follow in a separate `chore:` commit, per this
+repo's convention of bumping outside feature PRs. The enum is deliberately
+left without `#[non_exhaustive]`: adding it would itself be a breaking change
+and is a separate decision.
