@@ -1092,11 +1092,33 @@ struct BasecampSetupArgs {
     /// Selects `[repos.basecamp].attr = "bin-bundle-dir-inspector"` and
     /// persists it, so later runs stay on the inspector build without the
     /// flag; pass `--no-inspector` to go back to the shipping build.
-    #[arg(long, overrides_with = "no_inspector")]
+    #[arg(long)]
     inspector: bool,
     /// Undo a previous `--inspector`: restore the default Basecamp build.
-    #[arg(long, overrides_with = "inspector")]
+    /// `conflicts_with` rather than `overrides_with`, matching `run`'s
+    /// `--reset` / `--no-reset` pair: passing both is a mistake worth a hard
+    /// error, not a last-wins guess, because this flag has a *persistent*
+    /// side effect on `scaffold.toml` and a silently-resolved fat-finger
+    /// would rewrite the project's stack with no diagnostic.
+    #[arg(long, conflicts_with = "inspector")]
     no_inspector: bool,
+}
+
+/// Collapse the `--inspector` / `--no-inspector` flag pair into the tri-state
+/// the basecamp action takes. `None` — neither flag — is the load-bearing
+/// case: it means "leave whatever the project already configured alone", so a
+/// plain `setup` re-run never silently drops an inspector opt-in. Returning
+/// `Some(false)` there instead would do exactly that, on every project, which
+/// is the failure this feature exists to prevent — hence a named function with
+/// its own tests rather than an `if` inlined in the dispatch arm.
+fn inspector_selection(inspector: bool, no_inspector: bool) -> Option<bool> {
+    if inspector {
+        Some(true)
+    } else if no_inspector {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, clap::Args)]
@@ -1533,16 +1555,7 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
         Some(Commands::Basecamp(args)) => {
             let action = match args.command {
                 BasecampSubcommand::Setup(args) => BasecampAction::Setup {
-                    // Tri-state: neither flag leaves whatever the project
-                    // already configured alone, so a re-run of plain `setup`
-                    // never silently drops an inspector opt-in.
-                    inspector: if args.inspector {
-                        Some(true)
-                    } else if args.no_inspector {
-                        Some(false)
-                    } else {
-                        None
-                    },
+                    inspector: inspector_selection(args.inspector, args.no_inspector),
                 },
                 BasecampSubcommand::Modules(args) => BasecampAction::Modules {
                     paths: args.path,
@@ -1799,7 +1812,20 @@ fn require_address(
 
 #[cfg(test)]
 mod tests {
-    use super::BuildVariant;
+    use super::{inspector_selection, BuildVariant};
+
+    /// The neither-flag case is the one that matters: a plain `basecamp setup`
+    /// must resolve to `None` — "leave the configured attr alone" — not to
+    /// `Some(false)`. `Some(false)` there would make every plain re-run
+    /// silently drop an inspector opt-in and rebuild the dev stack under a
+    /// harness that then finds no inspector, which is precisely the quiet
+    /// failure this feature exists to close.
+    #[test]
+    fn inspector_flags_collapse_to_the_tri_state() {
+        assert_eq!(inspector_selection(false, false), None);
+        assert_eq!(inspector_selection(true, false), Some(true));
+        assert_eq!(inspector_selection(false, true), Some(false));
+    }
 
     #[test]
     fn build_variant_all_expands_to_both_variants_in_build_order() {

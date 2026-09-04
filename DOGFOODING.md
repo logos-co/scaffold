@@ -1063,6 +1063,18 @@ ls .scaffold/basecamp/profiles
 "$SCAFFOLD_BIN" basecamp doctor
 "$SCAFFOLD_BIN" basecamp doctor --json
 "$SCAFFOLD_BIN" basecamp setup
+
+# Inspector stack opt-in, and back. Each grep is the evidence for the step
+# above it; run them even if the build is out of reach in this environment,
+# since the attrs are written before the build starts.
+"$SCAFFOLD_BIN" basecamp setup --inspector
+grep -n 'attr' scaffold.toml
+"$SCAFFOLD_BIN" basecamp setup            # no flag: must stay on the inspector
+grep -n 'attr' scaffold.toml
+"$SCAFFOLD_BIN" basecamp paths alice | grep -i module_root
+"$SCAFFOLD_BIN" basecamp setup --no-inspector
+grep -n 'attr' scaffold.toml
+"$SCAFFOLD_BIN" basecamp setup --inspector --no-inspector   # must be rejected
 ```
 
 ### Expected Success Signals
@@ -1075,6 +1087,12 @@ ls .scaffold/basecamp/profiles
 - `basecamp doctor` shows a `basecamp pin set` row. On a project using scaffold's defaults it passes and names both pins. It warns only when *one* of the pair is at the default and the other is not — that split is what silently breaks module loading, since the app embeds the same package-manager library the CLI installs with. A project deliberately pinned away from both defaults passes with a note, not a warning.
 - On a fresh `setup` against the default pin, the built basecamp carries its own bundled modules inside the nix output (`result/modules`, `result/plugins`) rather than pushing them into the profile — so a freshly seeded profile's `modules/` holding only the project's own modules is correct.
 - Second `basecamp setup` is idempotent: pin unchanged → no rebuild reported, exit 0.
+- `basecamp setup --inspector` prints `inspector build selected (.#bin-bundle-dir-inspector) — test-only, not a release artifact` *before* the clone/build lines, and `scaffold.toml` carries `[repos.basecamp].attr = "bin-bundle-dir-inspector"` **and** `[repos.lgpm].attr = "cli-portable"` as soon as that line appears. Check the file while the build is still running, or after interrupting it: the whole point is that the choice survives a build that never finishes. The two attrs move as a set — an inspector basecamp against `lgpm.attr = "cli"` is the silent failure the flag exists to prevent, and it is invisible until basecamp opens to an empty UI with one `variant ... not supported on this platform` line in its log.
+- The inspector build is the **portable** stack: `basecamp paths alice` reports `module_root` under `Logos/LogosBasecamp`, *not* `Logos/LogosBasecampDev`. A `…Dev` path here means the attr was classified wrong and no module will load.
+- A plain `basecamp setup` after `--inspector` keeps the inspector attr — passing no flag means "leave the configured stack alone", never "reset to the default". A re-run that silently reverts to `app`/`cli` is the regression.
+- `--no-inspector` moves both attrs back (`app` / `cli`). On a project that was never on the inspector build it declines rather than acting: it prints a `note: --no-inspector left [repos.basecamp].attr = … alone` line for a hand-set attr, leaves `[repos.lgpm].attr` untouched, and rewrites nothing. A `--no-inspector` that changes `[repos.lgpm].attr` on a project it just declined to touch is a defect — the flag would be acting on the half of the pair the user cannot see.
+- Both flags edit **only the current host's entry** in a per-platform `[repos.basecamp.attr]` map. A sibling platform's mapping (e.g. `aarch64-darwin`) must survive a toggle in both directions.
+- `basecamp setup --inspector --no-inspector` is rejected by the argument parser with a `cannot be used with` error, matching `run`'s `--reset` / `--no-reset`. A last-wins resolution here would persist a stack choice from a fat-fingered command line with no diagnostic.
 - All commands run only inside the project; running them from outside the project must fail with the existing scaffold "not a logos-scaffold project" message.
 
 ### Failure Signals / Common Pitfalls
@@ -1092,6 +1110,8 @@ ls .scaffold/basecamp/profiles
 - `basecamp doctor` and `basecamp doctor --json` output.
 - Listing of `.scaffold/basecamp/profiles/`.
 - Relevant `scaffold.toml` excerpt for `[repos.basecamp.attr]` and `[basecamp.profiles.*]` when present.
+- The `[repos.basecamp].attr` / `[repos.lgpm].attr` pair after each of `--inspector`, the plain re-run, and `--no-inspector` — three excerpts, so the "moves as a set" and "no flag leaves it alone" claims are evidenced rather than asserted.
+- `basecamp paths alice` `module_root` on the inspector build, showing `LogosBasecamp` rather than `LogosBasecampDev`.
 
 ### Execution Notes
 
@@ -1331,6 +1351,8 @@ From the module project root:
 "$SCAFFOLD_BIN" basecamp build --variant lgx --module <module-name>
 "$SCAFFOLD_BIN" basecamp build --variant lgx-portable --module <module-name>
 "$SCAFFOLD_BIN" basecamp build-portable
+"$SCAFFOLD_BIN" basecamp build --variant lgx --print-output
+"$SCAFFOLD_BIN" basecamp build-portable --print-output
 find .scaffold/basecamp -maxdepth 3 -type f -o -type l | sort
 ```
 
@@ -1341,6 +1363,7 @@ find .scaffold/basecamp -maxdepth 3 -type f -o -type l | sort
 - `build-portable` behaves like `basecamp build --variant lgx-portable` and keeps the historical `.scaffold/basecamp/portable/` output directory.
 - `role = "dependency"` entries are skipped by build commands; dependencies are runtime inputs provided by install/basecamp.
 - A flake that does not expose the requested variant fails with a targeted error naming the missing attribute, not a raw nix trace or silent fallback.
+- `--print-output` (on both `build` and `build-portable`, which are separate argument structs) streams nix output to the terminal instead of writing `.scaffold/logs/<ts>-build-<variant>.log` and printing a one-line status. `LOGOS_SCAFFOLD_PRINT_OUTPUT=1` does the same thing without the flag. This is the CI case: without it a failing module build reports the derivation failure with none of the compiler output explaining why, and the only recourse is to reproduce locally. Verify against a *failing* build, not just a green one — a green build's streamed output is not what the flag is for.
 
 ### Failure Signals / Common Pitfalls
 
@@ -1800,11 +1823,12 @@ HEAD0=$("$SCAFFOLD_BIN" test-node blocks head --url "$URL" --json | jq -r .block
 - Changes to `create`/`new` flags or template selection logic: rerun `E2`.
 - Changes to AI skill materialization (`apply_skills`, the canonical `skills/` source, frontmatter rewrite, `AGENTS.md` template, or `init` re-run semantics): rerun `E3`.
 - Changes to `basecamp setup` (pin sync, lgpm build, profile seeding, idempotency), per-platform `[repos.basecamp.attr]`, or `basecamp doctor`: rerun `B1`.
+- Changes to the stack selector — `setup --inspector` / `--no-inspector`, `BASECAMP_PORTABLE_ATTRS`, `apply_inspector_selection`, `align_lgpm_attr`, or the point at which `setup` persists the attrs: rerun `B1`, and `B2` for the install path. These are the pieces that fail *quietly*: a misclassified attr seeds `<host>-dev` `.lgx` variants that the binary then declines to load, so the only symptom is basecamp opening to an empty UI with one line in its own log. Check `basecamp paths` `module_root` and the `[repos.lgpm].attr` that moved with it, not just that `setup` exited 0.
 - Changes to `[modules]` derivation, dependency resolution, sibling `--override-input` handling, or `basecamp install` invocation of `lgpm`: rerun `B2`.
 - Changes to `basecamp paths`, `[basecamp.profiles.*]`, `env_file`, `runtime_dir`, `log_file`, `launch --log-file`, or single-profile launch path resolution: rerun `B2`.
 - Changes to `basecamp launch` (kill-and-scrub semantics, XDG isolation, runtime/log/env export, port-override env vars, p2p surface): rerun `B3`.
 - Changes to clean-slate scrub semantics, profile-name validation, path-root bounds, or the empty `[modules]` guard on `launch`: rerun `B4`.
-- Changes to `basecamp build`, `basecamp build-portable`, variant normalization, `--module` filtering, or build attr selection: rerun `B5`.
+- Changes to `basecamp build`, `basecamp build-portable`, variant normalization, `--module` filtering, build attr selection, or the `--print-output` / `LOGOS_SCAFFOLD_PRINT_OUTPUT` passthrough: rerun `B5`.
 - Changes to `basecamp run`, `standalone_app`, or module source validation for run: rerun `B6`.
 - Changes to `resolve_basecamp_binary`, `basecamp_comm_candidates`, or `lgpm_install_hint`: rerun `B7` (and `B4` for the relaunch kill path). These are the pieces that silently do the wrong thing rather than failing — a wrong entry point starts an app with no Qt environment, an unmatched `comm` skips the kill, and an over-broad hint misdirects.
 - Changes to the basecamp/`lgpm`/companion pin set (`DEFAULT_BASECAMP_PIN`, `DEFAULT_LGPM_PIN`, `BASECAMP_DEPENDENCIES`, `BASECAMP_PREINSTALLED_MODULES`): rerun the whole `B` series on both a Linux and a macOS host, and on macOS cover both `attr = "app"` and `attr = "bin-macos-app"`. The three pins are one set — the app embeds the same package-manager library the CLI installs with — so a change to any of them re-opens every basecamp scenario. Confirm from the built `$out` what the release actually bundles (`$out/modules`, `$out/plugins`) rather than trusting the constant. Where the basecamp app build is out of reach (a container without the RAM to evaluate the flake), run `B7` and report it as the partial coverage it is — it still exercises the `lgpm` pin, the `.lgx` contract, both install-hint paths, and the launcher selection.

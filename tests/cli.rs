@@ -3364,6 +3364,22 @@ fn basecamp_setup_help_carries_the_inspector_flags() {
         .stdout(predicate::str::contains("--no-inspector"));
 }
 
+/// Passing both flags is a hard error, matching `run`'s `--reset` /
+/// `--no-reset` pair rather than resolving last-wins. Two adjacent tri-state
+/// flag pairs in the same binary behaving differently is a usability trap, and
+/// the quieter resolution is the worse one here: this flag *persists* to
+/// `scaffold.toml`, so a fat-fingered `--inspector --no-inspector` would
+/// silently rewrite the project's stack with no diagnostic. Asserted through
+/// the real binary because it is clap wiring, which a unit test cannot see.
+#[test]
+fn basecamp_setup_rejects_both_inspector_flags() {
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .args(["basecamp", "setup", "--inspector", "--no-inspector"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
 /// The headline fix, end to end through the real binary: an explicit
 /// `--inspector` persists the stack choice *before* the long nix build, so an
 /// interrupted or failed setup cannot leave the next plain `setup` silently
@@ -3376,14 +3392,28 @@ fn basecamp_setup_help_carries_the_inspector_flags() {
 /// treat this as local-only coverage — the attr *values* are pinned Nix-free
 /// by the `apply_inspector_selection` / `align_lgpm_attr` unit tests, and only
 /// the write *ordering* needs a real run.
+///
+/// Opt-in via `LOGOS_SCAFFOLD_E2E_NIX=1`, because on a host that *does* have
+/// nix this shells out to a real `setup`: a clone of the pinned basecamp repo
+/// and the start of a Qt-heavy closure build. That is not something a plain
+/// `cargo test` should do, and it is the only test in this file that reaches
+/// the network or the nix store. When it does run, `LOGOS_SCAFFOLD_CACHE_ROOT`
+/// points at the test's own tempdir so the clone lands there and not in the
+/// developer's shared `~/.cache/logos-scaffold` — B1's "do not pollute the
+/// user's home" rule applies to the test suite too.
 #[test]
 fn basecamp_setup_inspector_persists_both_attrs_before_the_build() {
+    if std::env::var("LOGOS_SCAFFOLD_E2E_NIX").unwrap_or_default() != "1" {
+        return;
+    }
+
     let temp = tempdir().expect("tempdir");
     let config = temp.path().join("scaffold.toml");
     fs::write(&config, MINIMAL_SCAFFOLD_TOML).expect("write scaffold.toml");
 
     let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(temp.path())
+        .env("LOGOS_SCAFFOLD_CACHE_ROOT", temp.path().join("cache"))
         .args(["basecamp", "setup", "--inspector"])
         .assert();
 

@@ -209,7 +209,7 @@ fn cmd_basecamp_setup(mut project: Project, inspector: Option<bool>) -> DynResul
         basecamp_repo.attr = BASECAMP_ATTR.to_string();
     }
 
-    apply_inspector_selection(&mut basecamp_repo, inspector);
+    let stack_changed = apply_inspector_selection(&mut basecamp_repo, inspector);
     let using_inspector =
         basecamp_repo.effective_attr(nix_current_system()) == BASECAMP_ATTR_INSPECTOR;
 
@@ -225,7 +225,7 @@ fn cmd_basecamp_setup(mut project: Project, inspector: Option<bool>) -> DynResul
     if lgpm_repo.pin.is_empty() {
         lgpm_repo.pin = DEFAULT_LGPM_PIN.to_string();
     }
-    align_lgpm_attr(&mut lgpm_repo, &basecamp_repo, inspector.is_some());
+    align_lgpm_attr(&mut lgpm_repo, &basecamp_repo, stack_changed);
 
     if using_inspector {
         println!(
@@ -240,8 +240,12 @@ fn cmd_basecamp_setup(mut project: Project, inspector: Option<bool>) -> DynResul
     // there would leave the next plain `setup` silently back on the other
     // stack — the same quiet mismatch the flag exists to prevent. The attrs
     // alone are inert config; nothing downstream depends on the build having
-    // finished. Only on an explicit flag, so a plain `setup` still writes once.
-    if inspector.is_some() {
+    // finished. Keyed on the stack having actually moved rather than on a flag
+    // merely being present: a `--no-inspector` that declined to touch a
+    // hand-set attr has nothing to persist, and rewriting `scaffold.toml` to
+    // say exactly what it already said is churn the user did not ask for. A
+    // plain `setup` still writes once, at the end.
+    if stack_changed {
         project.config.basecamp_repo = Some(basecamp_repo.clone());
         project.config.lgpm_repo = Some(lgpm_repo.clone());
         save_project_config(&project)?;
@@ -327,10 +331,21 @@ fn format_flake_ref(repo: &RepoRef) -> String {
 ///   to the default. An attr the flag never selected is left alone and said
 ///   so — a flag that appears to do nothing is the same silent-mismatch trap
 ///   this feature exists to close.
-fn apply_inspector_selection(basecamp_repo: &mut RepoRef, inspector: Option<bool>) {
+///
+/// Returns whether this host's effective attr actually moved. That is the
+/// signal `align_lgpm_attr` needs: "the user passed a flag" and "the stack
+/// changed" are different questions, and only the second licenses rewriting a
+/// persisted `[repos.lgpm].attr`. A `--no-inspector` that declined to touch a
+/// hand-set `bin-appimage` must not go on to rewrite lgpm underneath it —
+/// that would be the flag appearing to do nothing while acting anyway, on the
+/// half of the pair the user cannot see.
+fn apply_inspector_selection(basecamp_repo: &mut RepoRef, inspector: Option<bool>) -> bool {
     let system = nix_current_system();
     match inspector {
         Some(true) => {
+            if basecamp_repo.effective_attr(system) == BASECAMP_ATTR_INSPECTOR {
+                return false;
+            }
             if basecamp_repo.attr_platform.contains_key(system) {
                 basecamp_repo
                     .attr_platform
@@ -338,6 +353,7 @@ fn apply_inspector_selection(basecamp_repo: &mut RepoRef, inspector: Option<bool
             } else {
                 basecamp_repo.attr = BASECAMP_ATTR_INSPECTOR.to_string();
             }
+            true
         }
         Some(false) => {
             let effective = basecamp_repo.effective_attr(system).to_string();
@@ -349,7 +365,7 @@ fn apply_inspector_selection(basecamp_repo: &mut RepoRef, inspector: Option<bool
                          to undo."
                     );
                 }
-                return;
+                return false;
             }
             // Drop this host's map entry, so whatever the scalar says applies
             // to it again. Then fix the scalar only if what now resolves is
@@ -360,28 +376,28 @@ fn apply_inspector_selection(basecamp_repo: &mut RepoRef, inspector: Option<bool
             if resolved.is_empty() || resolved == BASECAMP_ATTR_INSPECTOR {
                 basecamp_repo.attr = BASECAMP_ATTR.to_string();
             }
+            true
         }
-        None => {}
+        None => false,
     }
 }
 
 /// Keep `[repos.lgpm].attr` on the same stack as `[repos.basecamp]`.
 ///
 /// Unset: fill in the variant matching the basecamp stack. Already set: leave
-/// it alone *unless* the caller explicitly toggled the stack this run
-/// (`stack_explicitly_chosen`), in which case the persisted value has to move
-/// with it. The two are one choice — `cli` writes `<host>-dev` `.lgx` variants
+/// it alone *unless* this run actually moved the basecamp stack
+/// (`stack_changed`), in which case the persisted value has to move with it.
+/// Note "moved", not "a flag was passed" — a `--no-inspector` that declined to
+/// touch an attr scaffold never selected changed nothing, and must not drag
+/// lgpm somewhere the user never asked for. The two are one choice — `cli`
+/// writes `<host>-dev` `.lgx` variants
 /// and `cli-portable` writes bare `<host>`, and basecamp loads only the one
 /// matching how it was built. A stale `cli` against an inspector build is
 /// exactly the quiet failure the flag exists to prevent: basecamp logs a
 /// single `variant ... not supported on this platform` line and opens to an
 /// empty UI. Only the two attrs scaffold itself manages are rewritten, so a
 /// hand-set third value survives.
-fn align_lgpm_attr(
-    lgpm_repo: &mut RepoRef,
-    basecamp_repo: &RepoRef,
-    stack_explicitly_chosen: bool,
-) {
+fn align_lgpm_attr(lgpm_repo: &mut RepoRef, basecamp_repo: &RepoRef, stack_changed: bool) {
     let portable = is_portable_basecamp(Some(basecamp_repo));
     if lgpm_repo.attr.is_empty() {
         lgpm_repo.attr = if portable {
@@ -390,7 +406,7 @@ fn align_lgpm_attr(
             LGPM_ATTR
         }
         .to_string();
-    } else if stack_explicitly_chosen {
+    } else if stack_changed {
         let (from, to) = if portable {
             (LGPM_ATTR, LGPM_ATTR_PORTABLE)
         } else {
@@ -4688,6 +4704,63 @@ mod tests {
             lgpm.attr, "cli-static",
             "a hand-set attr must not be clobbered"
         );
+    }
+
+    /// A flag that declines to act must not act on the other half of the pair.
+    ///
+    /// `apply_inspector_selection` returns whether this host's effective attr
+    /// actually moved, and that — not "a flag was passed" — is what licenses
+    /// rewriting a persisted `[repos.lgpm].attr`. The regression this pins:
+    /// keying the realignment on `inspector.is_some()` meant `--no-inspector`
+    /// on a project that was never on the inspector build still ran the
+    /// realignment, and on a dev basecamp with a hand-set `cli-portable` that
+    /// silently rewrote it to `cli`. The user asked to undo a selection that
+    /// was never made, got told there was nothing to undo, and had their lgpm
+    /// variant changed anyway — the flag appearing to do nothing while acting
+    /// on the half they cannot see, which is the exact trap this feature is
+    /// supposed to close.
+    #[test]
+    fn declining_to_toggle_the_stack_leaves_lgpm_alone() {
+        // `--no-inspector` against a dev basecamp scaffold never selected.
+        let mut basecamp = repo_with_attr(BASECAMP_ATTR);
+        let mut lgpm = lgpm_repo_with_attr(LGPM_ATTR_PORTABLE);
+        let changed = apply_inspector_selection(&mut basecamp, Some(false));
+        assert!(!changed, "nothing was on the inspector build to undo");
+        align_lgpm_attr(&mut lgpm, &basecamp, changed);
+        assert_eq!(
+            lgpm.attr, LGPM_ATTR_PORTABLE,
+            "a declined --no-inspector must not rewrite [repos.lgpm].attr"
+        );
+
+        // Same for a hand-set portable attr the flag refuses to touch.
+        let mut hand_set = repo_with_attr("bin-appimage");
+        let mut lgpm_dev = lgpm_repo_with_attr(LGPM_ATTR);
+        let changed = apply_inspector_selection(&mut hand_set, Some(false));
+        assert!(!changed, "bin-appimage is not ours to undo");
+        align_lgpm_attr(&mut lgpm_dev, &hand_set, changed);
+        assert_eq!(
+            lgpm_dev.attr, LGPM_ATTR,
+            "a declined --no-inspector must not rewrite [repos.lgpm].attr"
+        );
+
+        // And `--inspector` on a project already on the inspector build is
+        // likewise a no-op, so a re-run persists nothing and rewrites nothing.
+        let mut already = repo_with_attr(BASECAMP_ATTR_INSPECTOR);
+        assert!(
+            !apply_inspector_selection(&mut already, Some(true)),
+            "--inspector on an already-inspector project changed nothing"
+        );
+        assert_eq!(already.attr, BASECAMP_ATTR_INSPECTOR);
+
+        // The positive control: a real toggle still reports true and still
+        // drags lgpm with it, so the guard above cannot be satisfied by an
+        // implementation that simply never realigns.
+        let mut dev = repo_with_attr(BASECAMP_ATTR);
+        let mut lgpm_moves = lgpm_repo_with_attr(LGPM_ATTR);
+        let changed = apply_inspector_selection(&mut dev, Some(true));
+        assert!(changed, "a real toggle must report that the stack moved");
+        align_lgpm_attr(&mut lgpm_moves, &dev, changed);
+        assert_eq!(lgpm_moves.attr, LGPM_ATTR_PORTABLE);
     }
 
     /// `--no-inspector` on a project whose per-platform map selects some other
