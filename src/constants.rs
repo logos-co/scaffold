@@ -199,8 +199,30 @@ pub(crate) const BASECAMP_BASE_DIR_LOGS: &str = "logs";
 
 /// `[repos.basecamp].attr` values that select the portable distribution stack.
 /// Anything else (including unrecognised attrs) is treated as dev.
-pub(crate) const BASECAMP_PORTABLE_ATTRS: &[&str] =
-    &["bin-macos-app", "bin-appimage", "bin-bundle-dir"];
+///
+/// `bin-bundle-dir-inspector` is basecamp's test-only twin of `bin-bundle-dir`:
+/// the same `portable = true` app derivation through the same directory
+/// bundler, differing only by the `enableInspector` compile-time flag. It is
+/// therefore the same distribution stack by construction, and classifying it
+/// as portable is what makes the profiles scaffold seeds loadable by it — the
+/// dev classification would pick `LogosBasecampDev` for the XDG subpath and
+/// the `cli` lgpm variant, and basecamp would decline to load every module
+/// with a one-line `variant ... not supported on this platform` warning.
+/// Select it via `basecamp setup --inspector` rather than by hand.
+pub(crate) const BASECAMP_PORTABLE_ATTRS: &[&str] = &[
+    "bin-macos-app",
+    "bin-appimage",
+    "bin-bundle-dir",
+    BASECAMP_ATTR_INSPECTOR,
+];
+
+/// Basecamp flake attr built by `basecamp setup --inspector`: `bin-bundle-dir`
+/// with the QML inspector compiled in, so a UI harness can connect and drive
+/// the app headlessly — the build a sitometres end-to-end suite needs, driving
+/// Basecamp through the inspector via `logos-qt-mcp`. Upstream marks it
+/// explicitly as not a release artifact — the inspector is deliberately off in
+/// every shipping output — so scaffold surfaces it only behind the opt-in flag.
+pub(crate) const BASECAMP_ATTR_INSPECTOR: &str = "bin-bundle-dir-inspector";
 
 /// Default `source` / `pin` / `attr` for `[repos.lgpm]`. The `lgpm` CLI
 /// lives in a separate repo (`logos-package-manager`) from basecamp; pin

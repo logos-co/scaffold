@@ -1040,7 +1040,7 @@ enum BasecampSubcommand {
     #[command(
         about = "Fetch, build, and seed pinned basecamp + lgpm + alice/bob profiles. See `basecamp docs` for project requirements."
     )]
-    Setup,
+    Setup(BasecampSetupArgs),
     #[command(
         about = "Capture the set of modules + runtime dependencies to install; auto-discovers or takes explicit --flake/--path. See `basecamp docs` for project requirements."
     )]
@@ -1082,6 +1082,43 @@ enum BasecampSubcommand {
         about = "Print the canonical project-compatibility rules (embedded copy of docs/basecamp-module-requirements.md)"
     )]
     Docs,
+}
+
+#[derive(Debug, clap::Args)]
+struct BasecampSetupArgs {
+    /// Build Basecamp with the QML inspector compiled in, so a UI test
+    /// harness can connect and drive it headlessly. Test-only build: the
+    /// inspector is deliberately off in every shipping Basecamp output.
+    /// Selects `[repos.basecamp].attr = "bin-bundle-dir-inspector"` and
+    /// persists it, so later runs stay on the inspector build without the
+    /// flag; pass `--no-inspector` to go back to the shipping build.
+    #[arg(long)]
+    inspector: bool,
+    /// Undo a previous `--inspector`: restore the default Basecamp build.
+    /// `conflicts_with` rather than `overrides_with`, matching `run`'s
+    /// `--reset` / `--no-reset` pair: passing both is a mistake worth a hard
+    /// error, not a last-wins guess, because this flag has a *persistent*
+    /// side effect on `scaffold.toml` and a silently-resolved fat-finger
+    /// would rewrite the project's stack with no diagnostic.
+    #[arg(long, conflicts_with = "inspector")]
+    no_inspector: bool,
+}
+
+/// Collapse the `--inspector` / `--no-inspector` flag pair into the tri-state
+/// the basecamp action takes. `None` — neither flag — is the load-bearing
+/// case: it means "leave whatever the project already configured alone", so a
+/// plain `setup` re-run never silently drops an inspector opt-in. Returning
+/// `Some(false)` there instead would do exactly that, on every project, which
+/// is the failure this feature exists to prevent — hence a named function with
+/// its own tests rather than an `if` inlined in the dispatch arm.
+fn inspector_selection(inspector: bool, no_inspector: bool) -> Option<bool> {
+    if inspector {
+        Some(true)
+    } else if no_inspector {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, clap::Args)]
@@ -1135,6 +1172,12 @@ struct BasecampBuildArgs {
     /// Restrict the build to a single captured project module.
     #[arg(long, value_name = "NAME")]
     module: Option<String>,
+    /// Stream nix's build output to the terminal instead of capturing it and
+    /// surfacing only the error on failure. Equivalent to
+    /// `LOGOS_SCAFFOLD_PRINT_OUTPUT=1`. Useful for CI, where a failed module
+    /// build should explain itself in the job log.
+    #[arg(long)]
+    print_output: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -1145,6 +1188,11 @@ struct BasecampBuildPortableArgs {
     /// Restrict the build to a single captured project module.
     #[arg(long, value_name = "NAME")]
     module: Option<String>,
+    /// Stream nix's build output to the terminal instead of capturing it and
+    /// surfacing only the error on failure. Equivalent to
+    /// `LOGOS_SCAFFOLD_PRINT_OUTPUT=1`. Useful for CI.
+    #[arg(long)]
+    print_output: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -1506,7 +1554,9 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
         }
         Some(Commands::Basecamp(args)) => {
             let action = match args.command {
-                BasecampSubcommand::Setup => BasecampAction::Setup,
+                BasecampSubcommand::Setup(args) => BasecampAction::Setup {
+                    inspector: inspector_selection(args.inspector, args.no_inspector),
+                },
                 BasecampSubcommand::Modules(args) => BasecampAction::Modules {
                     paths: args.path,
                     flakes: args.flake,
@@ -1526,10 +1576,12 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 BasecampSubcommand::Build(args) => BasecampAction::Build {
                     variants: args.variant.attrs(),
                     module: args.module,
+                    print_output: args.print_output,
                 },
                 BasecampSubcommand::BuildPortable(args) => BasecampAction::Build {
                     variants: vec!["lgx-portable".to_string()],
                     module: args.module,
+                    print_output: args.print_output,
                 },
                 BasecampSubcommand::Run(args) => BasecampAction::Run {
                     module: args.module,
@@ -1760,7 +1812,20 @@ fn require_address(
 
 #[cfg(test)]
 mod tests {
-    use super::BuildVariant;
+    use super::{inspector_selection, BuildVariant};
+
+    /// The neither-flag case is the one that matters: a plain `basecamp setup`
+    /// must resolve to `None` — "leave the configured attr alone" — not to
+    /// `Some(false)`. `Some(false)` there would make every plain re-run
+    /// silently drop an inspector opt-in and rebuild the dev stack under a
+    /// harness that then finds no inspector, which is precisely the quiet
+    /// failure this feature exists to close.
+    #[test]
+    fn inspector_flags_collapse_to_the_tri_state() {
+        assert_eq!(inspector_selection(false, false), None);
+        assert_eq!(inspector_selection(true, false), Some(true));
+        assert_eq!(inspector_selection(false, true), Some(false));
+    }
 
     #[test]
     fn build_variant_all_expands_to_both_variants_in_build_order() {

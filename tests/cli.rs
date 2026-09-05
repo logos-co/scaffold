@@ -3341,6 +3341,236 @@ fn basecamp_build_portable_inside_empty_project_emits_hint_to_capture_first() {
 }
 
 #[test]
+fn basecamp_build_accepts_print_output_flag() {
+    // The passthrough that gives CI a log-carrying module build. Assert it on
+    // both verbs: `build-portable` is a separate clap struct, so a flag added
+    // to one can silently miss the other.
+    for verb in ["build", "build-portable"] {
+        Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+            .args(["basecamp", verb, "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("--print-output"));
+    }
+}
+
+/// `--print-output` has to actually stream, not merely parse. The flag existed
+/// on `build` for a release while `run_build_portable_nix` captured nix's
+/// output and discarded it, so the help text was the only thing that changed —
+/// a `--help` assertion cannot tell the two apart.
+///
+/// A stub `nix` writes a recognizable line to stderr, which is where nix puts
+/// its build log. With the flag that line must appear on its own, as nix
+/// emitted it; without it, it may appear only inside scaffold's one-line
+/// `nix build ... failed (...)` error, which quotes the captured stderr by
+/// design. Distinguishing the two is what makes this a real behavioral test:
+/// asserting mere presence would pass even with the flag deleted, because the
+/// failure echo carries the marker either way.
+#[test]
+fn basecamp_build_print_output_actually_streams_nix_output() {
+    const MARKER: &str = "stub-nix-build-log-line";
+
+    for (args, expect_streamed) in [
+        (vec!["basecamp", "build", "--print-output"], true),
+        (vec!["basecamp", "build"], false),
+    ] {
+        let temp = tempdir().expect("tempdir");
+        let toml = format!(
+            "{MINIMAL_SCAFFOLD_TOML}\n[modules.demo]\n\
+             flake = \"github:logos-co/demo#lgx\"\nrole = \"project\"\n"
+        );
+        fs::write(temp.path().join("scaffold.toml"), toml).expect("write scaffold.toml");
+
+        // Fails after writing the marker, so the run stops at the first build
+        // rather than depending on anything downstream.
+        let stub_dir = temp.path().join("stubbin");
+        fs::create_dir_all(&stub_dir).expect("create stub bin dir");
+        let nix = stub_dir.join("nix");
+        fs::write(&nix, format!("#!/bin/sh\necho {MARKER} >&2\nexit 1\n")).expect("write nix stub");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&nix).expect("stat nix stub").permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&nix, perms).expect("chmod nix stub");
+        }
+
+        let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+            .current_dir(temp.path())
+            .env("PATH", prepend_path(&stub_dir))
+            .env("LOGOS_SCAFFOLD_CACHE_ROOT", temp.path().join("cache"))
+            .args(&args)
+            .assert()
+            .failure();
+
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+        // The marker standing alone on a line is nix's own output arriving
+        // live. The same marker quoted inside scaffold's `... failed (...)`
+        // summary is the captured-path echo, which happens either way.
+        let streamed = stderr.lines().any(|line| line.trim() == MARKER);
+        if expect_streamed {
+            assert!(
+                streamed,
+                "--print-output did not stream nix's output; the flag is a no-op:\n{stderr}"
+            );
+        } else {
+            assert!(
+                !streamed,
+                "nix output streamed to the terminal without --print-output:\n{stderr}"
+            );
+        }
+    }
+}
+
+#[test]
+fn basecamp_setup_help_carries_the_inspector_flags() {
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .args(["basecamp", "setup", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--inspector"))
+        .stdout(predicate::str::contains("--no-inspector"));
+}
+
+/// Passing both flags is a hard error, matching `run`'s `--reset` /
+/// `--no-reset` pair rather than resolving last-wins. Two adjacent tri-state
+/// flag pairs in the same binary behaving differently is a usability trap, and
+/// the quieter resolution is the worse one here: this flag *persists* to
+/// `scaffold.toml`, so a fat-fingered `--inspector --no-inspector` would
+/// silently rewrite the project's stack with no diagnostic. Asserted through
+/// the real binary because it is clap wiring, which a unit test cannot see.
+#[test]
+fn basecamp_setup_rejects_both_inspector_flags() {
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .args(["basecamp", "setup", "--inspector", "--no-inspector"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+/// The headline fix, end to end through the real binary: an explicit
+/// `--inspector` persists the stack choice *before* the long nix build, so an
+/// interrupted or failed setup cannot leave the next plain `setup` silently
+/// back on the dev build. The command is expected to fail here (no network,
+/// or a build that never finishes); the assertion is about what was already
+/// written when it did.
+///
+/// Runs unconditionally: `ensure_nix_present` is only a `which("nix")`, so a
+/// stub `nix` on PATH satisfies it, and an unresolvable `[repos.basecamp]`
+/// source makes the clone fail within milliseconds — well before any real
+/// build would start. That is precisely the window under test, so nothing is
+/// lost by never reaching nix: the command is *expected* to fail here, and the
+/// assertion is about what was already on disk when it did.
+///
+/// `LOGOS_SCAFFOLD_CACHE_ROOT` points at the test's own tempdir so nothing
+/// lands in the developer's shared `~/.cache/logos-scaffold` — B1's "do not
+/// pollute the user's home" rule applies to the test suite too.
+#[test]
+fn basecamp_setup_inspector_persists_both_attrs_before_the_build() {
+    let temp = tempdir().expect("tempdir");
+    let config = temp.path().join("scaffold.toml");
+    // An unreachable source: the clone fails immediately, standing in for the
+    // interrupted or failed build this ordering exists to survive.
+    let toml = format!(
+        "{MINIMAL_SCAFFOLD_TOML}\n[repos.basecamp]\n\
+         source = \"file:///nonexistent/basecamp.git\"\n\
+         pin = \"deadbeef\"\nbuild = \"nix-flake\"\n"
+    );
+    fs::write(&config, toml).expect("write scaffold.toml");
+
+    let stub_dir = temp.path().join("stubbin");
+    write_nix_stub(&stub_dir);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .env("PATH", prepend_path(&stub_dir))
+        .env("LOGOS_SCAFFOLD_CACHE_ROOT", temp.path().join("cache"))
+        .args(["basecamp", "setup", "--inspector"])
+        .assert()
+        .failure();
+
+    let written = fs::read_to_string(&config).expect("read scaffold.toml");
+    assert!(
+        written.contains("bin-bundle-dir-inspector"),
+        "inspector attr not persisted before the build:\n{written}"
+    );
+    assert!(
+        written.contains("cli-portable"),
+        "lgpm attr did not move with the stack:\n{written}"
+    );
+}
+
+/// The per-platform-map half of the same guarantee, end to end. A project
+/// whose `[repos.basecamp.attr]` map covers only a *different* platform is the
+/// case where the scalar cannot carry the choice: `write_repo_ref` renders the
+/// inline map instead of the scalar, so a scalar write would reach disk as
+/// nothing at all. Asserted through the real binary because the defect lives
+/// in the seam between the selector and the serializer, which neither side's
+/// unit tests can see.
+#[test]
+fn basecamp_setup_inspector_persists_into_a_platform_map_lacking_this_host() {
+    let temp = tempdir().expect("tempdir");
+    let config = temp.path().join("scaffold.toml");
+    // `aarch64-darwin` is not the CI host, and on an aarch64-darwin developer
+    // machine `x86_64-linux` is not either — either way the map lacks the
+    // current host, which is the shape under test.
+    let other = if cfg!(all(target_arch = "aarch64", target_os = "macos")) {
+        "x86_64-linux"
+    } else {
+        "aarch64-darwin"
+    };
+    let toml = format!(
+        "{MINIMAL_SCAFFOLD_TOML}\n[repos.basecamp]\n\
+         source = \"file:///nonexistent/basecamp.git\"\n\
+         pin = \"deadbeef\"\nbuild = \"nix-flake\"\n\
+         attr = {{ {other} = \"bin-macos-app\" }}\n"
+    );
+    fs::write(&config, toml).expect("write scaffold.toml");
+
+    let stub_dir = temp.path().join("stubbin");
+    write_nix_stub(&stub_dir);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .env("PATH", prepend_path(&stub_dir))
+        .env("LOGOS_SCAFFOLD_CACHE_ROOT", temp.path().join("cache"))
+        .args(["basecamp", "setup", "--inspector"])
+        .assert()
+        .failure();
+
+    let written = fs::read_to_string(&config).expect("read scaffold.toml");
+    assert!(
+        written.contains("bin-bundle-dir-inspector"),
+        "inspector attr was dropped on a project with a per-platform map — the next plain \
+         `setup` will silently rebuild the dev stack:\n{written}"
+    );
+    assert!(
+        written.contains("bin-macos-app"),
+        "the sibling platform's mapping was discarded:\n{written}"
+    );
+}
+
+/// A `nix` that exists on PATH and does nothing. Enough for
+/// `ensure_nix_present`, which only probes for the executable.
+fn write_nix_stub(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::create_dir_all(dir).expect("create stub bin dir");
+    let path = dir.join("nix");
+    fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write nix stub");
+    let mut perms = fs::metadata(&path).expect("stat nix stub").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).expect("chmod nix stub");
+}
+
+/// Put `dir` ahead of the inherited PATH so the stub wins, while keeping real
+/// tools (`git`, and the shell the stub needs) reachable.
+fn prepend_path(dir: &Path) -> std::ffi::OsString {
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let mut entries = vec![dir.to_path_buf()];
+    entries.extend(std::env::split_paths(&inherited));
+    std::env::join_paths(entries).expect("join PATH")
+}
+
+#[test]
 fn basecamp_install_before_setup_emits_hint() {
     let temp = tempdir().expect("tempdir");
     fs::write(temp.path().join("scaffold.toml"), MINIMAL_SCAFFOLD_TOML)

@@ -11,14 +11,14 @@ use anyhow::{anyhow, bail, Context};
 
 use crate::config::{default_basecamp_repo, default_lgpm_repo};
 use crate::constants::{
-    BASECAMP_ATTR, BASECAMP_AUTODISCOVER_SKIP_SUBDIRS, BASECAMP_BASE_DIR_LOGS,
-    BASECAMP_BASE_DIR_MODULES, BASECAMP_BASE_DIR_MODULE_DATA, BASECAMP_BASE_DIR_PLUGINS,
-    BASECAMP_BIN_LAUNCHER_V01, BASECAMP_BIN_V01_TARGET, BASECAMP_DEPENDENCIES,
-    BASECAMP_MODULE_ROOT_ENV_VAR_DATA_DIR, BASECAMP_MODULE_ROOT_ENV_VAR_USER_DIR,
-    BASECAMP_PORTABLE_ATTRS, BASECAMP_PREINSTALLED_MODULES, BASECAMP_PROFILES_REL,
-    BASECAMP_PROFILE_ALICE, BASECAMP_PROFILE_BOB, BASECAMP_SOURCE, BASECAMP_XDG_APP_SUBPATH_DEV,
-    BASECAMP_XDG_APP_SUBPATH_PORTABLE, DEFAULT_BASECAMP_PIN, DEFAULT_LGPM_PIN, LGPM_ATTR,
-    LGPM_ATTR_PORTABLE, LGPM_SOURCE,
+    BASECAMP_ATTR, BASECAMP_ATTR_INSPECTOR, BASECAMP_AUTODISCOVER_SKIP_SUBDIRS,
+    BASECAMP_BASE_DIR_LOGS, BASECAMP_BASE_DIR_MODULES, BASECAMP_BASE_DIR_MODULE_DATA,
+    BASECAMP_BASE_DIR_PLUGINS, BASECAMP_BIN_LAUNCHER_V01, BASECAMP_BIN_V01_TARGET,
+    BASECAMP_DEPENDENCIES, BASECAMP_MODULE_ROOT_ENV_VAR_DATA_DIR,
+    BASECAMP_MODULE_ROOT_ENV_VAR_USER_DIR, BASECAMP_PORTABLE_ATTRS, BASECAMP_PREINSTALLED_MODULES,
+    BASECAMP_PROFILES_REL, BASECAMP_PROFILE_ALICE, BASECAMP_PROFILE_BOB, BASECAMP_SOURCE,
+    BASECAMP_XDG_APP_SUBPATH_DEV, BASECAMP_XDG_APP_SUBPATH_PORTABLE, DEFAULT_BASECAMP_PIN,
+    DEFAULT_LGPM_PIN, LGPM_ATTR, LGPM_ATTR_PORTABLE, LGPM_SOURCE,
 };
 use crate::model::{
     BasecampConfig, BasecampSource, BasecampState, ModuleEntry, ModuleRole, Project, RepoBuild,
@@ -35,7 +35,11 @@ use crate::DynResult;
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Fields wired up in later phases
 pub(crate) enum BasecampAction {
-    Setup,
+    /// `inspector` is the tri-state `--inspector` / `--no-inspector`
+    /// selector: `Some(true)` switches `[repos.basecamp].attr` to the
+    /// inspector build, `Some(false)` restores the default, and `None`
+    /// (neither flag) leaves the configured attr untouched.
+    Setup { inspector: Option<bool> },
     Modules {
         paths: Vec<PathBuf>,
         flakes: Vec<String>,
@@ -45,9 +49,7 @@ pub(crate) enum BasecampAction {
     /// first). No source-set flags — use `basecamp modules` to change what's
     /// captured. If state is empty, transparently invokes `modules` in
     /// auto-discover mode and proceeds.
-    Install {
-        print_output: bool,
-    },
+    Install { print_output: bool },
     Launch {
         profile: String,
         /// `--log-file` selector: `None` = flag absent (fall back to config);
@@ -70,6 +72,10 @@ pub(crate) enum BasecampAction {
     Build {
         variants: Vec<String>,
         module: Option<String>,
+        /// Stream nix output instead of logging it to a file. Same switch
+        /// `install` exposes; a failed module build in CI is the case that
+        /// needs the full log rather than a one-line status.
+        print_output: bool,
     },
     /// Run a captured module via `nix run`. `host` accepts `standalone` (the
     /// module's own app — the only host today, and the default when `None`).
@@ -81,15 +87,10 @@ pub(crate) enum BasecampAction {
     /// Basecamp-specific doctor: captured modules summary, manifest variant
     /// check per seeded profile, and uncaptured-module drift against
     /// auto-discovery.
-    Doctor {
-        json: bool,
-    },
+    Doctor { json: bool },
     /// Print the resolved per-profile path manifest (xdg dirs, runtime dir,
     /// module/plugin dirs, log file). Read-only; no nix.
-    Paths {
-        profile: String,
-        json: bool,
-    },
+    Paths { profile: String, json: bool },
     /// Print the canonical compatibility doc (`docs/basecamp-module-requirements.md`,
     /// embedded at compile time). Runnable outside a scaffold project so LLMs
     /// exploring the CLI can retrieve the rules before setup.
@@ -115,7 +116,7 @@ pub(crate) fn basecamp_for_project(project: Project, action: BasecampAction) -> 
     }
 
     match action {
-        BasecampAction::Setup => cmd_basecamp_setup(project),
+        BasecampAction::Setup { inspector } => cmd_basecamp_setup(project, inspector),
         BasecampAction::Modules {
             paths,
             flakes,
@@ -133,7 +134,16 @@ pub(crate) fn basecamp_for_project(project: Project, action: BasecampAction) -> 
         BasecampAction::Develop { module, dev_shell } => {
             cmd_basecamp_develop(project, module, dev_shell)
         }
-        BasecampAction::Build { variants, module } => cmd_basecamp_build(project, variants, module),
+        BasecampAction::Build {
+            variants,
+            module,
+            print_output,
+        } => {
+            if print_output {
+                set_print_output(true);
+            }
+            cmd_basecamp_build(project, variants, module)
+        }
         BasecampAction::Run { module, host } => cmd_basecamp_run(project, module, host),
         BasecampAction::Doctor { json } => cmd_basecamp_doctor(project, json),
         BasecampAction::Paths { profile, json } => cmd_basecamp_paths(project, profile, json),
@@ -172,7 +182,7 @@ fn ensure_nix_present() -> DynResult<()> {
     Ok(())
 }
 
-fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
+fn cmd_basecamp_setup(mut project: Project, inspector: Option<bool>) -> DynResult<()> {
     ensure_nix_present()?;
 
     // Pull or default-fill [repos.basecamp]. If the project has never been
@@ -199,6 +209,10 @@ fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
         basecamp_repo.attr = BASECAMP_ATTR.to_string();
     }
 
+    let stack_changed = apply_inspector_selection(&mut basecamp_repo, inspector);
+    let using_inspector =
+        basecamp_repo.effective_attr(nix_current_system()) == BASECAMP_ATTR_INSPECTOR;
+
     // Same defaults for lgpm.
     let mut lgpm_repo = project
         .config
@@ -211,13 +225,30 @@ fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
     if lgpm_repo.pin.is_empty() {
         lgpm_repo.pin = DEFAULT_LGPM_PIN.to_string();
     }
-    if lgpm_repo.attr.is_empty() {
-        lgpm_repo.attr = if is_portable_basecamp(Some(&basecamp_repo)) {
-            LGPM_ATTR_PORTABLE
-        } else {
-            LGPM_ATTR
-        }
-        .to_string();
+    align_lgpm_attr(&mut lgpm_repo, &basecamp_repo, stack_changed);
+
+    if using_inspector {
+        println!(
+            "inspector build selected (.#{BASECAMP_ATTR_INSPECTOR}) — test-only, \
+             not a release artifact"
+        );
+    }
+
+    // Persist an explicit stack choice *before* the build rather than only at
+    // the end of a fully successful setup. The basecamp build is long enough
+    // to be interrupted or to fail on an unrelated step, and losing the choice
+    // there would leave the next plain `setup` silently back on the other
+    // stack — the same quiet mismatch the flag exists to prevent. The attrs
+    // alone are inert config; nothing downstream depends on the build having
+    // finished. Keyed on the stack having actually moved rather than on a flag
+    // merely being present: a `--no-inspector` that declined to touch a
+    // hand-set attr has nothing to persist, and rewriting `scaffold.toml` to
+    // say exactly what it already said is churn the user did not ask for. A
+    // plain `setup` still writes once, at the end.
+    if stack_changed {
+        project.config.basecamp_repo = Some(basecamp_repo.clone());
+        project.config.lgpm_repo = Some(lgpm_repo.clone());
+        save_project_config(&project)?;
     }
 
     let (cache_root, _) = resolve_cache_root(&project)?;
@@ -264,7 +295,11 @@ fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
 
     project.config.basecamp_repo = Some(basecamp_repo);
     project.config.lgpm_repo = Some(lgpm_repo);
-    save_project_config(&project)?;
+    // On a toggle the pre-build save above already wrote exactly these bytes;
+    // writing them again would churn the file's mtime for no change.
+    if !stack_changed {
+        save_project_config(&project)?;
+    }
 
     println!("setup complete");
     Ok(())
@@ -280,6 +315,156 @@ fn format_flake_ref(repo: &RepoRef) -> String {
         format!("{}/{}", repo.source, repo.pin)
     } else {
         format!("{}/{}#{}", repo.source, repo.pin, attr)
+    }
+}
+
+/// Apply the `--inspector` / `--no-inspector` selector to `[repos.basecamp]`.
+///
+/// The flag is a decision about *this host* — `setup` builds for the machine
+/// it runs on — so it edits this host's entry and nothing else. On a project
+/// carrying a per-platform `[repos.basecamp.attr]` map that means adding or
+/// removing one key, never replacing the map: a colleague's
+/// `aarch64-darwin = "bin-macos-app"` is not a Linux developer's to discard.
+///
+/// Which of the two forms we write is decided by whether the project uses a
+/// map at all, not by whether the map happens to mention this host. That is
+/// forced by serialization: `write_repo_ref` emits the inline map *instead of*
+/// the scalar whenever the map is non-empty, so on a project carrying only a
+/// colleague's `aarch64-darwin` entry, writing the scalar would persist
+/// nothing at all — the flag would appear to work, `[repos.lgpm].attr` would
+/// move to the portable variant, and the next plain `setup` would default the
+/// scalar back to `app` and build a dev basecamp against portable lgpm. That
+/// is the exact empty-UI mismatch this feature exists to prevent, so:
+///
+/// - `--inspector` writes this host's key into the map when the project has
+///   one, and the scalar only when it does not.
+/// - `--no-inspector` reverses exactly that, and only that: with a map, this
+///   host's entry is removed, which drops the host back to whatever the file
+///   would resolve for it anyway; without one, the scalar we set goes back to
+///   the default. An attr the flag never selected is left alone and said
+///   so — a flag that appears to do nothing is the same silent-mismatch trap
+///   this feature exists to close.
+///
+/// Returns whether this host's effective attr actually moved. That is the
+/// signal `align_lgpm_attr` needs: "the user passed a flag" and "the stack
+/// changed" are different questions, and only the second licenses rewriting a
+/// persisted `[repos.lgpm].attr`. A `--no-inspector` that declined to touch a
+/// hand-set `bin-appimage` must not go on to rewrite lgpm underneath it —
+/// that would be the flag appearing to do nothing while acting anyway, on the
+/// half of the pair the user cannot see.
+fn apply_inspector_selection(basecamp_repo: &mut RepoRef, inspector: Option<bool>) -> bool {
+    let system = nix_current_system();
+    match inspector {
+        Some(true) => {
+            if basecamp_repo.effective_attr(system) == BASECAMP_ATTR_INSPECTOR {
+                return false;
+            }
+            if basecamp_repo.attr_platform.is_empty() {
+                basecamp_repo.attr = BASECAMP_ATTR_INSPECTOR.to_string();
+            } else {
+                basecamp_repo
+                    .attr_platform
+                    .insert(system.to_string(), BASECAMP_ATTR_INSPECTOR.to_string());
+            }
+            true
+        }
+        Some(false) => {
+            let effective = basecamp_repo.effective_attr(system).to_string();
+            if effective != BASECAMP_ATTR_INSPECTOR {
+                if effective != BASECAMP_ATTR {
+                    eprintln!(
+                        "note: --no-inspector left [repos.basecamp].attr = {effective:?} alone \
+                         on this host — it is not the inspector build, so there was nothing \
+                         to undo."
+                    );
+                }
+                return false;
+            }
+            // Mirror of the `--inspector` branch: with a map, the inspector
+            // can only have come from this host's entry, so removing it is the
+            // whole undo and the scalar is not ours to touch (it is not even
+            // serialized while a map exists). Without a map, the scalar is
+            // what we set, so it goes back to the default.
+            if basecamp_repo.attr_platform.is_empty() {
+                basecamp_repo.attr = BASECAMP_ATTR.to_string();
+            } else {
+                basecamp_repo.attr_platform.remove(system);
+                // Removing the entry can uncover an empty scalar, which would
+                // build a bare `nix build .#`. `setup` defaults the scalar
+                // before calling us, so this is belt-and-braces rather than a
+                // path a real run reaches — but the undo must land on a
+                // buildable attr on its own, not by relying on its caller.
+                if basecamp_repo.effective_attr(system).is_empty() {
+                    basecamp_repo.attr = BASECAMP_ATTR.to_string();
+                }
+            }
+            // Undoing `--inspector` restores the default stack, not whatever
+            // the user had before it — scaffold does not remember a displaced
+            // hand-set attr like `bin-appimage`, and inventing one would be a
+            // guess. What it can do is not leave the move silent: landing on a
+            // different stack than the user started from is exactly the sort
+            // of quiet change this feature exists to surface.
+            let restored = basecamp_repo.effective_attr(system);
+            if restored != BASECAMP_ATTR {
+                eprintln!(
+                    "note: --no-inspector put [repos.basecamp].attr back to {restored:?} on this \
+                     host. If you had a different build selected before `--inspector`, set it \
+                     again — the previous value is not remembered."
+                );
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// Keep `[repos.lgpm].attr` on the same stack as `[repos.basecamp]`.
+///
+/// Unset: fill in the variant matching the basecamp stack. Already set: leave
+/// it alone *unless* this run actually moved the basecamp stack
+/// (`stack_changed`), in which case the persisted value has to move with it.
+/// Note "moved", not "a flag was passed" — a `--no-inspector` that declined to
+/// touch an attr scaffold never selected changed nothing, and must not drag
+/// lgpm somewhere the user never asked for. The two are one choice — `cli`
+/// writes `<host>-dev` `.lgx` variants
+/// and `cli-portable` writes bare `<host>`, and basecamp loads only the one
+/// matching how it was built. A stale `cli` against an inspector build is
+/// exactly the quiet failure the flag exists to prevent: basecamp logs a
+/// single `variant ... not supported on this platform` line and opens to an
+/// empty UI. Only the two attrs scaffold itself manages are rewritten, so a
+/// hand-set third value survives.
+fn align_lgpm_attr(lgpm_repo: &mut RepoRef, basecamp_repo: &RepoRef, stack_changed: bool) {
+    let portable = is_portable_basecamp(Some(basecamp_repo));
+    if lgpm_repo.attr.is_empty() {
+        lgpm_repo.attr = if portable {
+            LGPM_ATTR_PORTABLE
+        } else {
+            LGPM_ATTR
+        }
+        .to_string();
+    } else if stack_changed {
+        let (from, to) = if portable {
+            (LGPM_ATTR, LGPM_ATTR_PORTABLE)
+        } else {
+            (LGPM_ATTR_PORTABLE, LGPM_ATTR)
+        };
+        if lgpm_repo.attr == from {
+            lgpm_repo.attr = to.to_string();
+        } else if lgpm_repo.attr != to {
+            // A third value scaffold doesn't manage. Preserving it is right —
+            // it is a deliberate hand-edit — but preserving it *silently*
+            // rebuilds the exact trap this flag exists to close, so say so.
+            // The user is the only one who can tell whether it matches the
+            // stack they just chose.
+            eprintln!(
+                "warning: [repos.lgpm].attr = {:?} is not a variant scaffold manages, so it was \
+                 left as-is against the {} basecamp stack. If it writes the wrong `.lgx` variant, \
+                 basecamp will load no modules and open to an empty UI; set it to {:?} to match.",
+                lgpm_repo.attr,
+                if portable { "portable" } else { "dev" },
+                to
+            );
+        }
     }
 }
 
@@ -320,7 +505,14 @@ fn build_basecamp_app(
     attr: &str,
     out_dir: &Path,
 ) -> DynResult<PathBuf> {
-    let link = out_dir.join("app-result");
+    // Key the out-link by attr, not by pin alone. A single shared
+    // `app-result` would be re-pointed by every stack toggle: a consumer
+    // holding the path from a previous `setup` would silently exec the other
+    // build, and the displaced stack would lose its GC root, so toggling back
+    // would rebuild from scratch. Per-attr links let both stacks coexist under
+    // one pin and make `basecamp_bin` genuinely move when the stack does,
+    // which is what `basecamp.state`'s consumers are told to rely on.
+    let link = out_dir.join(format!("app-result-{attr}"));
     let log = derive_log_path(project_root, "setup-basecamp");
     let mut cmd = Command::new("nix");
     cmd.current_dir(repo)
@@ -1935,10 +2127,25 @@ fn run_build_portable_nix(
     for a in &inv.args {
         cmd.arg(a);
     }
+    // `--print-output` streams nix's progress and diagnostics to the terminal
+    // as they happen. Only stderr is redirected: nix writes its build log
+    // there, while stdout carries the `--print-out-paths` store paths this
+    // function has to parse — forwarding stdout too (or handing the whole
+    // spawn to `run_logged`, which redirects both) would leave `store_paths`
+    // empty and fail the build with "returned no output paths". The captured
+    // branch below keeps the previous behaviour, so the failure diagnostics
+    // that inspect stderr text still work when the flag is absent.
+    let streaming = print_output_enabled();
+    if streaming {
+        cmd.stderr(std::process::Stdio::inherit());
+    }
     let output = cmd
         .output()
         .with_context(|| format!("spawn nix build {flake_ref}"))?;
     if !output.status.success() {
+        // Already on the terminal when streaming; `output.stderr` is empty
+        // then, so the attribute-hint match below simply does not fire and the
+        // user reads the real error above instead of a truncated echo.
         let stderr = String::from_utf8_lossy(&output.stderr);
         if (stderr.contains("does not provide attribute") || stderr.contains("missing attribute"))
             && stderr.contains(variant)
@@ -4428,6 +4635,322 @@ mod tests {
             "bin-bundle-dir"
         ))));
         assert!(!is_portable_basecamp(Some(&repo_with_attr("future-attr"))));
+    }
+
+    fn lgpm_repo_with_attr(attr: &str) -> RepoRef {
+        RepoRef {
+            source: LGPM_SOURCE.to_string(),
+            pin: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
+            build: RepoBuild::NixFlake,
+            attr: attr.to_string(),
+            attr_platform: std::collections::BTreeMap::new(),
+            path: String::new(),
+        }
+    }
+
+    #[test]
+    fn inspector_flag_selects_and_restores_the_attr() {
+        // Opt in from the default dev build.
+        let mut repo = repo_with_attr(BASECAMP_ATTR);
+        apply_inspector_selection(&mut repo, Some(true));
+        assert_eq!(repo.attr, BASECAMP_ATTR_INSPECTOR);
+
+        // Opting out again restores the default.
+        apply_inspector_selection(&mut repo, Some(false));
+        assert_eq!(repo.attr, BASECAMP_ATTR);
+
+        // Neither flag: leave whatever is configured untouched, so a plain
+        // `setup` re-run never silently drops an inspector opt-in.
+        let mut kept = repo_with_attr(BASECAMP_ATTR_INSPECTOR);
+        apply_inspector_selection(&mut kept, None);
+        assert_eq!(kept.attr, BASECAMP_ATTR_INSPECTOR);
+
+        // `--no-inspector` must not clobber a deliberately hand-set attr it
+        // never selected.
+        let mut hand_set = repo_with_attr("bin-appimage");
+        apply_inspector_selection(&mut hand_set, Some(false));
+        assert_eq!(hand_set.attr, "bin-appimage");
+    }
+
+    /// `effective_attr` prefers a per-platform entry, so a project carrying an
+    /// `[repos.basecamp.attr]` map would otherwise keep building the mapped
+    /// attr and `--inspector` would be a silent no-op on that host.
+    #[test]
+    fn inspector_flag_overrides_a_per_platform_attr_map() {
+        let mut repo = repo_with_attr(BASECAMP_ATTR);
+        repo.attr_platform
+            .insert(nix_current_system().to_string(), "bin-appimage".to_string());
+        apply_inspector_selection(&mut repo, Some(true));
+        assert_eq!(
+            repo.effective_attr(nix_current_system()),
+            BASECAMP_ATTR_INSPECTOR
+        );
+        assert!(is_portable_basecamp(Some(&repo)));
+    }
+
+    /// A map that does not mention this host at all — the common shape, since
+    /// a project only lists the platforms someone actually had to special-case.
+    ///
+    /// This is the case the scalar form cannot express. `write_repo_ref` emits
+    /// the inline map *instead of* the scalar whenever the map is non-empty,
+    /// so writing `attr` here would persist nothing: the flag would look like
+    /// it worked, `[repos.lgpm].attr` would move to the portable variant, and
+    /// the next plain `setup` would default the scalar back to `app` and build
+    /// a dev basecamp against portable lgpm — the empty-UI mismatch this
+    /// feature exists to prevent. The write has to land in the map.
+    #[test]
+    fn inspector_flag_writes_into_a_map_that_lacks_this_host() {
+        let other = if nix_current_system() == "aarch64-darwin" {
+            "x86_64-linux"
+        } else {
+            "aarch64-darwin"
+        };
+        let mut repo = repo_with_attr(BASECAMP_ATTR);
+        repo.attr_platform
+            .insert(other.to_string(), "bin-macos-app".to_string());
+
+        assert!(apply_inspector_selection(&mut repo, Some(true)));
+        assert_eq!(
+            repo.attr_platform
+                .get(nix_current_system())
+                .map(String::as_str),
+            Some(BASECAMP_ATTR_INSPECTOR),
+            "the inspector attr was not written into the map, so it will not survive serialization"
+        );
+        assert_eq!(
+            repo.effective_attr(nix_current_system()),
+            BASECAMP_ATTR_INSPECTOR
+        );
+        assert_eq!(
+            repo.attr_platform.get(other).map(String::as_str),
+            Some("bin-macos-app"),
+            "another platform's entry was discarded"
+        );
+
+        // And back: the entry we added is removed, leaving the map exactly as
+        // it was found. The scalar is not ours to touch — it is not even
+        // serialized while a map exists.
+        assert!(apply_inspector_selection(&mut repo, Some(false)));
+        assert_eq!(
+            repo.attr_platform.get(nix_current_system()),
+            None,
+            "the entry the flag added was not removed"
+        );
+        assert_eq!(
+            repo.attr_platform.get(other).map(String::as_str),
+            Some("bin-macos-app"),
+            "another platform's entry was discarded on the way back"
+        );
+    }
+
+    /// `setup` builds for the host it runs on, so the flag is a decision about
+    /// that host alone. Another platform's entry is a colleague's choice — a
+    /// Linux developer toggling the inspector must not silently drop the
+    /// project's `aarch64-darwin` mapping.
+    #[test]
+    fn inspector_flags_touch_only_the_current_host_entry() {
+        let other = if nix_current_system() == "aarch64-darwin" {
+            "x86_64-linux"
+        } else {
+            "aarch64-darwin"
+        };
+        let mut repo = repo_with_attr(BASECAMP_ATTR);
+        repo.attr_platform
+            .insert(nix_current_system().to_string(), "bin-appimage".to_string());
+        repo.attr_platform
+            .insert(other.to_string(), "bin-macos-app".to_string());
+
+        apply_inspector_selection(&mut repo, Some(true));
+        assert_eq!(
+            repo.effective_attr(nix_current_system()),
+            BASECAMP_ATTR_INSPECTOR,
+            "this host did not move to the inspector build"
+        );
+        assert_eq!(
+            repo.attr_platform.get(other).map(String::as_str),
+            Some("bin-macos-app"),
+            "another platform's entry was discarded"
+        );
+
+        // And back. Note what this does *not* assert: that `bin-appimage`
+        // comes back. It does not — scaffold keeps no memory of a displaced
+        // hand-set attr, so the round trip is lossy by construction and the
+        // host lands on the default stack. That is a deliberate limitation
+        // rather than the desired end state; `apply_inspector_selection`
+        // prints a note when it lands somewhere other than the default so the
+        // loss is at least visible. Restoring the prior value would mean
+        // persisting it somewhere, which is follow-up work. The invariant this
+        // test does defend is the sibling entry surviving both directions.
+        apply_inspector_selection(&mut repo, Some(false));
+        assert_eq!(
+            repo.effective_attr(nix_current_system()),
+            BASECAMP_ATTR,
+            "this host did not come back off the inspector build"
+        );
+        assert_eq!(
+            repo.attr_platform.get(other).map(String::as_str),
+            Some("bin-macos-app"),
+            "another platform's entry was discarded on the way back"
+        );
+    }
+
+    /// The regression the flag exists to prevent: a project set up on the dev
+    /// stack already has `lgpm.attr = "cli"` persisted, so toggling the
+    /// basecamp stack without moving lgpm with it seeds `<host>-dev` variants
+    /// that the inspector build declines to load.
+    #[test]
+    fn toggling_the_stack_realigns_a_persisted_lgpm_attr() {
+        let basecamp = repo_with_attr(BASECAMP_ATTR_INSPECTOR);
+        let mut lgpm = lgpm_repo_with_attr(LGPM_ATTR);
+        align_lgpm_attr(&mut lgpm, &basecamp, true);
+        assert_eq!(lgpm.attr, LGPM_ATTR_PORTABLE);
+
+        // ...and back again on `--no-inspector`.
+        let dev = repo_with_attr(BASECAMP_ATTR);
+        align_lgpm_attr(&mut lgpm, &dev, true);
+        assert_eq!(lgpm.attr, LGPM_ATTR);
+    }
+
+    /// A hand-set lgpm attr scaffold doesn't manage survives an explicit stack
+    /// toggle — clobbering a deliberate choice would be worse — but the user
+    /// is warned, because silently leaving it mismatched is the failure mode
+    /// this flag exists to prevent.
+    #[test]
+    fn unmanaged_lgpm_attr_survives_a_stack_toggle() {
+        let basecamp = repo_with_attr(BASECAMP_ATTR_INSPECTOR);
+        let mut lgpm = lgpm_repo_with_attr("cli-static");
+        align_lgpm_attr(&mut lgpm, &basecamp, true);
+        assert_eq!(
+            lgpm.attr, "cli-static",
+            "a hand-set attr must not be clobbered"
+        );
+    }
+
+    /// A flag that declines to act must not act on the other half of the pair.
+    ///
+    /// `apply_inspector_selection` returns whether this host's effective attr
+    /// actually moved, and that — not "a flag was passed" — is what licenses
+    /// rewriting a persisted `[repos.lgpm].attr`. The regression this pins:
+    /// keying the realignment on `inspector.is_some()` meant `--no-inspector`
+    /// on a project that was never on the inspector build still ran the
+    /// realignment, and on a dev basecamp with a hand-set `cli-portable` that
+    /// silently rewrote it to `cli`. The user asked to undo a selection that
+    /// was never made, got told there was nothing to undo, and had their lgpm
+    /// variant changed anyway — the flag appearing to do nothing while acting
+    /// on the half they cannot see, which is the exact trap this feature is
+    /// supposed to close.
+    #[test]
+    fn declining_to_toggle_the_stack_leaves_lgpm_alone() {
+        // `--no-inspector` against a dev basecamp scaffold never selected.
+        let mut basecamp = repo_with_attr(BASECAMP_ATTR);
+        let mut lgpm = lgpm_repo_with_attr(LGPM_ATTR_PORTABLE);
+        let changed = apply_inspector_selection(&mut basecamp, Some(false));
+        assert!(!changed, "nothing was on the inspector build to undo");
+        align_lgpm_attr(&mut lgpm, &basecamp, changed);
+        assert_eq!(
+            lgpm.attr, LGPM_ATTR_PORTABLE,
+            "a declined --no-inspector must not rewrite [repos.lgpm].attr"
+        );
+
+        // Same for a hand-set portable attr the flag refuses to touch.
+        let mut hand_set = repo_with_attr("bin-appimage");
+        let mut lgpm_dev = lgpm_repo_with_attr(LGPM_ATTR);
+        let changed = apply_inspector_selection(&mut hand_set, Some(false));
+        assert!(!changed, "bin-appimage is not ours to undo");
+        align_lgpm_attr(&mut lgpm_dev, &hand_set, changed);
+        assert_eq!(
+            lgpm_dev.attr, LGPM_ATTR,
+            "a declined --no-inspector must not rewrite [repos.lgpm].attr"
+        );
+
+        // And `--inspector` on a project already on the inspector build is
+        // likewise a no-op, so a re-run persists nothing and rewrites nothing.
+        let mut already = repo_with_attr(BASECAMP_ATTR_INSPECTOR);
+        assert!(
+            !apply_inspector_selection(&mut already, Some(true)),
+            "--inspector on an already-inspector project changed nothing"
+        );
+        assert_eq!(already.attr, BASECAMP_ATTR_INSPECTOR);
+
+        // The positive control: a real toggle still reports true and still
+        // drags lgpm with it, so the guard above cannot be satisfied by an
+        // implementation that simply never realigns.
+        let mut dev = repo_with_attr(BASECAMP_ATTR);
+        let mut lgpm_moves = lgpm_repo_with_attr(LGPM_ATTR);
+        let changed = apply_inspector_selection(&mut dev, Some(true));
+        assert!(changed, "a real toggle must report that the stack moved");
+        align_lgpm_attr(&mut lgpm_moves, &dev, changed);
+        assert_eq!(lgpm_moves.attr, LGPM_ATTR_PORTABLE);
+    }
+
+    /// `--no-inspector` on a project whose per-platform map selects some other
+    /// attr must leave it alone. The guard reads `effective_attr`, not the
+    /// scalar, so the map — which is what actually decides the build — is what
+    /// gets tested.
+    #[test]
+    fn no_inspector_leaves_a_hand_set_platform_map_alone() {
+        let mut repo = repo_with_attr(String::new().as_str());
+        repo.attr_platform
+            .insert(nix_current_system().to_string(), "bin-appimage".to_string());
+        apply_inspector_selection(&mut repo, Some(false));
+        assert_eq!(
+            repo.effective_attr(nix_current_system()),
+            "bin-appimage",
+            "--no-inspector must not clobber an attr it never selected"
+        );
+
+        // ...but it does undo an inspector selection expressed through the map.
+        let mut mapped = repo_with_attr(String::new().as_str());
+        mapped.attr_platform.insert(
+            nix_current_system().to_string(),
+            BASECAMP_ATTR_INSPECTOR.to_string(),
+        );
+        apply_inspector_selection(&mut mapped, Some(false));
+        assert_eq!(
+            mapped.effective_attr(nix_current_system()),
+            BASECAMP_ATTR,
+            "an inspector attr in the map must still be undone"
+        );
+    }
+
+    #[test]
+    fn lgpm_attr_is_left_alone_without_an_explicit_stack_choice() {
+        // No flag passed: an existing value is never rewritten, even when it
+        // disagrees with the basecamp stack — that is a hand-edit to respect,
+        // not drift to correct behind the user's back.
+        let basecamp = repo_with_attr(BASECAMP_ATTR_INSPECTOR);
+        let mut lgpm = lgpm_repo_with_attr(LGPM_ATTR);
+        align_lgpm_attr(&mut lgpm, &basecamp, false);
+        assert_eq!(lgpm.attr, LGPM_ATTR);
+
+        // Unset is always filled to match the stack.
+        let mut unset = lgpm_repo_with_attr("");
+        align_lgpm_attr(&mut unset, &basecamp, false);
+        assert_eq!(unset.attr, LGPM_ATTR_PORTABLE);
+    }
+
+    /// The inspector build is `bin-bundle-dir` plus a compile-time flag —
+    /// upstream builds it from the same `portable = true` derivation through
+    /// the same directory bundler. Classifying it dev would seed profiles
+    /// under `LogosBasecampDev` with `<host>-dev` `.lgx` variants that the
+    /// binary then silently declines to load, which is the whole bug.
+    #[test]
+    fn inspector_attr_is_the_portable_stack() {
+        let repo = repo_with_attr(BASECAMP_ATTR_INSPECTOR);
+        assert!(is_portable_basecamp(Some(&repo)));
+        assert_eq!(
+            basecamp_xdg_subpath(Some(&repo)),
+            BASECAMP_XDG_APP_SUBPATH_PORTABLE
+        );
+        // Portable variant keys carry no `-dev` suffix. `expect` rather than
+        // `if let`: on a host outside `platform_variant_key`'s match this is
+        // the assertion that matters most, and skipping it silently would
+        // leave the test passing while covering nothing.
+        let key = platform_variant_key(Some(&repo)).expect("variant key for current host");
+        assert!(
+            !key.ends_with("-dev"),
+            "inspector build must resolve a portable variant key, got {key}"
+        );
     }
 
     #[test]

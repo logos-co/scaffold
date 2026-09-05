@@ -22,6 +22,26 @@
    - a `ui_qml` package must ship a **256×256 PNG icon** (bundled to `assets/icon.png` at the package root), and
    - `main` / `view` entries in `metadata.json` must point at files that actually exist in the built variant — validation now rejects a manifest that names a missing entry point rather than failing later at load time.
 
+## What `setup` leaves behind — `.scaffold/state/basecamp.state`
+
+`setup` records what it built as `key=value` lines in `.scaffold/state/basecamp.state`. This is the supported way for a script — a CI job, a UI harness, anything driving basecamp without a human at the keyboard — to find the binaries it just built:
+
+```
+pin=<the [repos.basecamp].pin that was built>
+basecamp_bin=<absolute path to the basecamp entry point>
+lgpm_bin=<absolute path to the lgpm binary>
+```
+
+Three things about `basecamp_bin` that a consumer needs and cannot infer:
+
+- **Read it; do not reconstruct it.** The path is under the cache root (`~/.cache/logos-scaffold/basecamp/<pin>/app-result-<attr>/…` by default, and wherever `LOGOS_SCAFFOLD_CACHE_ROOT` or `[scaffold].cache_root` points otherwise), but *which file* under that output is the correct entry point differs by basecamp generation and by stack. On a dev `#app` build it is a `/bin/sh` launcher that exports `QT_PLUGIN_PATH` / `QML2_IMPORT_PATH` before exec'ing the real binary; on a portable build (`bin-bundle-dir`, `bin-bundle-dir-inspector`, `bin-appimage`) it is the unwrapped binary, because the bundle supplies those paths itself; on macOS `bin-macos-app` it is inside `LogosBasecamp.app/Contents/MacOS/`. Picking the wrong name starts an app that cannot find its Qt platform plugin or QML imports — a failure that looks like a basecamp bug, not a path bug. `setup` resolves this for you and writes the answer.
+- **It is a nix out-link, so it is read-only**, and on a portable build the real ELF sits beside it as a dot-prefixed sibling (`.LogosBasecamp.elf`). A harness that needs a writable copy, or one that probes for a specific file layout, has to account for that — copy the tree out rather than expecting to modify it in place.
+- **It moves when the stack moves.** The out-link is keyed by attr (`app-result-<attr>`), so `setup --inspector` writes `basecamp_bin` to a different path than a plain `setup` does, and both stacks coexist under the same pin rather than one overwriting the other's link. Re-read the file after any `setup`: a cached path does not follow the stack, so a consumer holding it keeps exec'ing whichever build it was captured from.
+
+`lgs basecamp doctor` prints the same two paths for humans, and warns when a recorded path no longer exists on disk (a garbage-collected nix store is the usual cause — re-run `setup`).
+
+A consumer that pins the basecamp rev itself — a CI cache key, say — is pinning it in a second place: `setup` builds whatever `[repos.basecamp].pin` says, and nothing reconciles that against an external copy of the same rev. Bump one without the other and the build silently goes cold, or worse, runs against a different basecamp than the one the cache was keyed on. Assert the two are equal in the consumer rather than assuming they stay in step.
+
 ## The captured module set — `[modules]` in scaffold.toml
 
 The set of modules that `basecamp install` / `launch` / `build-portable` will act on lives in `scaffold.toml` as one sub-section per module, keyed by `module_name`:
@@ -226,7 +246,7 @@ aarch64-linux  = "bin-appimage"
 | `XDG_RUNTIME_DIR` | the resolved `runtime_dir` | only when one resolves — a configured `runtime_dir`, or the `/tmp/lgs-<profile>` macOS default |
 | `LOGOS_PROFILE` | the profile name | always |
 | `LOGOS_USER_DIR` | `<profile-dir>/xdg-data/Logos/LogosBasecamp[Dev]` — basecamp's base directory for this profile | always |
-| `LOGOS_DATA_DIR` | same default as `LOGOS_USER_DIR`, resolved independently of it | macOS **and** a portable `[repos.basecamp].attr` (`bin-macos-app`, `bin-appimage`, `bin-bundle-dir`) |
+| `LOGOS_DATA_DIR` | same default as `LOGOS_USER_DIR`, resolved independently of it | macOS **and** a portable `[repos.basecamp].attr` (`bin-macos-app`, `bin-appimage`, `bin-bundle-dir`, `bin-bundle-dir-inspector`) |
 
 Module-owned port-override variables are not in this list: no module has published a name yet, so scaffold exports none.
 
@@ -254,6 +274,7 @@ If you override `runtime_dir` on macOS, keep it short (a `/tmp/…` root is safe
 
 - [ ] `scaffold.toml` exists at the project root.
 - [ ] `logos-scaffold basecamp setup` has been run.
+- [ ] Anything driving basecamp from a script reads `basecamp_bin` from `.scaffold/state/basecamp.state` rather than reconstructing a path under the cache root (see "What `setup` leaves behind" above).
 - [ ] Each sub-flake exposes `packages.<system>.lgx`.
 - [ ] The `.lgx` is built by `logos-module-builder` 0.2.x (or `nix-bundle-lgx`), so it carries the content hashes `lgpm` validates on install.
 - [ ] Sibling sub-flake URLs use the `path:../<sibling-dir>` form, declared on a single `<name>.url = "…"` line (not split across multiple lines inside a nested attrset — parser limitation).
