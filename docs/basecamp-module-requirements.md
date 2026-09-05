@@ -246,7 +246,7 @@ aarch64-linux  = "bin-appimage"
 | `XDG_RUNTIME_DIR` | the resolved `runtime_dir` | only when one resolves — a configured `runtime_dir`, or the `/tmp/lgs-<profile>` macOS default |
 | `LOGOS_PROFILE` | the profile name | always |
 | `LOGOS_USER_DIR` | `<profile-dir>/xdg-data/Logos/LogosBasecamp[Dev]` — basecamp's base directory for this profile | always |
-| `LOGOS_DATA_DIR` | same default as `LOGOS_USER_DIR`, resolved independently of it | macOS **and** a portable `[repos.basecamp].attr` (`bin-macos-app`, `bin-appimage`, `bin-bundle-dir`) |
+| `LOGOS_DATA_DIR` | same default as `LOGOS_USER_DIR`, resolved independently of it | macOS **and** a portable `[repos.basecamp].attr` (`bin-macos-app`, `bin-appimage`, `bin-bundle-dir`, `bin-bundle-dir-inspector`) |
 
 Module-owned port-override variables are not in this list: no module has published a name yet, so scaffold exports none.
 
