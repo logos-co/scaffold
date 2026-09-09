@@ -148,7 +148,10 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
 
     // Step 1: Build (chains setup internally)
     println!("[1/{total_steps}] Building...");
-    cmd_build_shortcut(None, false)?;
+    // `run` has no guest-mode flag of its own: the pipeline follows
+    // `[build].guest` so that what it deploys matches what a bare `lgs build`
+    // would have produced.
+    cmd_build_shortcut(None, false, None)?;
 
     // Step 2: Build IDL (no-op for non-lez-framework projects). `build_idl_for_current_project`
     // deliberately bails when typed directly against a non-lez-framework project, so the
@@ -1022,6 +1025,7 @@ mod tests {
                         path: "idl".to_string(),
                     },
                 },
+                build: crate::model::BuildConfig::default(),
                 localnet: LocalnetConfig {
                     port: 3040,
                     risc0_dev_mode: true,

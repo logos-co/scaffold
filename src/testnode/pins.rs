@@ -603,6 +603,7 @@ mod tests {
                         path: String::new(),
                     },
                 },
+                build: crate::model::BuildConfig::default(),
                 localnet: LocalnetConfig::default(),
                 modules: std::collections::BTreeMap::new(),
                 basecamp: None,

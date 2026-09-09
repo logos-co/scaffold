@@ -40,7 +40,15 @@ pub(crate) const EXAMPLES_BUILD: &str = r"Examples:
   logos-scaffold build idl
   logos-scaffold build idl ./my-project
   logos-scaffold build client
-  logos-scaffold build client ./my-project";
+  logos-scaffold build client ./my-project
+  logos-scaffold build --guest docker
+
+Guest build strategy:
+  Guest programs build with the host risc0 toolchain by default, so their
+  program_id can differ across machines. --guest docker builds them inside the
+  pinned risczero/risc0-guest-builder container for a reproducible program_id
+  (needs Docker and cargo-risczero). Set [build].guest in scaffold.toml to make
+  the choice permanent.";
 
 pub(crate) const EXAMPLES_DEPLOY: &str = r"Examples:
   logos-scaffold deploy

@@ -28,10 +28,14 @@ logos-scaffold init [--dry-run] [--no-backup]
 
 ```bash
 logos-scaffold setup [--prebuilt]
-logos-scaffold build [project-path] [--prebuilt]
+logos-scaffold build [project-path] [--prebuilt] [--guest <local|docker>]
 logos-scaffold build idl [project-path]
 logos-scaffold build client [project-path]
 ```
+
+`--guest` overrides `[build].guest` for one invocation. See
+[configuration.md](./configuration.md#build--guest-program-build-strategy) for
+the durable setting and what each mode costs.
 
 ## Run the local sequencer
 
@@ -163,8 +167,8 @@ logos-scaffold help
 - `create` and `new` are aliases.
 - `init` writes `scaffold.toml` (schema v0.2.0) with defaults into the current directory so an existing project can use the scaffold workflow. It creates `.scaffold/{state,logs}` and appends `.scaffold` to `.gitignore`. When `scaffold.toml` already exists at an older schema, `init` migrates it in place via `toml_edit` so comments, key ordering, and unrelated sections survive the rewrite — old `[basecamp].pin` / `.source` / `.lgpm_flake` move to `[repos.basecamp]` / `[repos.lgpm]`; old `[basecamp.modules.*]` move to top-level `[modules.*]`; legacy `url` fields on `[repos.{lez,spel}]` are dropped. Migrations write a `scaffold.toml.bak` next to the original by default (skip with `--no-backup`); preview either form with `--dry-run`. Already-current configs succeed, leave `scaffold.toml` unchanged, and refresh the shipped AI skills. Run `setup` next after a fresh init or migration.
 - `setup` syncs LEZ and `spel` to their pinned commits (read from `[repos.lez]` / `[repos.spel]`), builds the standalone `sequencer_service`, `wallet`, and `spel` binaries locally, and seeds a project default wallet when none is set. Seeding takes the first preconfigured public account from the pinned LEZ debug wallet config when it ships any (deterministic); when it ships none — LEZ v0.2.0 does not — `setup` instead runs the wallet CLI once so it creates its own storage and adopts the first public account it lists, which is freshly generated key material guarded by `LOGOS_SCAFFOLD_WALLET_PASSWORD` (see [SECURITY.md](../SECURITY.md)). All binaries are project-local and are not installed to PATH — use `logos-scaffold wallet ...` / `logos-scaffold spel -- ...` to interact with them. By default `[repos.lez].path` / `[repos.spel].path` are empty in `scaffold.toml`; the on-disk location is resolved at runtime from `<cache_root>/repos/<name>/<pin>`, so the file is portable across machines and CI. `--vendor-deps` projects keep relative `.scaffold/repos/{lez,spel}` literals; an explicit absolute `path` set in `scaffold.toml` is honored as-is.
-- `build [project-path]` runs `setup` and then `cargo build --workspace`.
-- `deploy [program-name]` deploys one or all guest programs discovered in `methods/guest/src/bin/*.rs` using prebuilt `.bin` artifacts. After each successful submission it prints `program_id: <hex>` (the risc0 image ID, computed locally from the submitted ELF) and includes it in `--json` output on both code paths. Use `--json` for machine-readable output (recommended for automation): `--program-path … --json` emits the bare per-program object, and the discovery path emits `{"deploys":[…]}` with one such object per attempted program (see FURPS Functionality #9 for the field contract).
+- `build [project-path]` runs `setup` and then `cargo build --workspace`. When the project has a `methods/Cargo.toml`, it then builds the risc0 guest programs using the strategy in `[build].guest` — `local` (default) with the host toolchain, or `docker` with the pinned `risczero/risc0-guest-builder` container for a reproducible `program_id`. `--guest <local|docker>` overrides the config for one run. Guest artefacts from the mode that did *not* run are removed, so the last `build` is unambiguously what `deploy` ships.
+- `deploy [program-name]` deploys one or all guest programs discovered in `methods/guest/src/bin/*.rs` using prebuilt `.bin` artifacts. Artefacts from a deterministic build (`target/riscv-guest-docker/.../docker/`) outrank host-toolchain ones (`.../release/`), which outrank debug builds. After each successful submission it prints `program_id: <hex>` (the risc0 image ID, computed locally from the submitted ELF) and includes it in `--json` output on both code paths. Use `--json` for machine-readable output (recommended for automation): `--program-path … --json` emits the bare per-program object, and the discovery path emits `{"deploys":[…]}` with one such object per attempted program (see FURPS Functionality #9 for the field contract).
 - `build idl [project-path]` regenerates the IDL from the project source using the vendored `spel` binary.
 - `build client [project-path]` regenerates client bindings from the current IDL using the vendored `spel` binary.
 - `localnet start` waits until localnet is actually ready (`pid alive` + `127.0.0.1:3040` reachable), otherwise fails with diagnostics. The sequencer is daemonized via `setsid` so it survives shell/tmux session closure — closing the terminal or detaching a tmux session does not kill the localnet.

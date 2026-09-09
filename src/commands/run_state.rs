@@ -388,6 +388,7 @@ mod tests {
                         path: "idl".to_string(),
                     },
                 },
+                build: crate::model::BuildConfig::default(),
                 localnet: LocalnetConfig {
                     port: 3040,
                     risc0_dev_mode: true,

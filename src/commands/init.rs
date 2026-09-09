@@ -229,6 +229,7 @@ fn fresh_default_config() -> Config {
                 path: DEFAULT_FRAMEWORK_IDL_PATH.to_string(),
             },
         },
+        build: crate::model::BuildConfig::default(),
         localnet: LocalnetConfig::default(),
         modules: std::collections::BTreeMap::new(),
         basecamp: None,

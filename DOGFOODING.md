@@ -169,6 +169,7 @@ If any of these is missing, do not "skip the real run" — go back and fix the s
 | D5 | `default` | Advanced | Diagnostics bundle and support artifact hygiene | `report`, `report --out`, `report --tail` |
 | D6 | `default` | Core | Example runner interaction and account state verification | `cargo run --bin run_hello_world`, `cargo run --bin run_hello_world_with_move_function`, `wallet -- account get` |
 | D7 | `default` | Core | One-step `run` pipeline and post-deploy hooks | `run`, `run --post-deploy`, `run --no-post-deploy`, `[run]` config |
+| D8 | `default` | Advanced | Reproducible guest builds and the `program_id` they produce | `build`, `build --guest docker`, `[build]` config, `doctor`, `deploy --json` |
 | L1 | `lez-framework` | Core | Fresh LEZ project bootstrap to ready state | `new --template lez-framework`, `setup`, `localnet start`, `doctor`, `build` |
 | L2 | `lez-framework` | Core | LEZ IDL regeneration | `build idl` |
 | L3 | `lez-framework` | Advanced | LEZ client generation from current IDL | `build client` |
@@ -235,7 +236,7 @@ Use `new` for the main runnable project and `create` as the lightweight alias-pa
 - Generated `scaffold.toml` includes a `[circuits]` table. The default install dir is project-local (`.scaffold/circuits`), and the configured version/download template/install dir become the single source of truth for commands that need `logos-blockchain-circuits`.
 - `setup` completes after syncing LEZ to the configured pin, building both `sequencer_service` and `wallet` inside the project's LEZ tree, and either seeding the default wallet or reporting that a default wallet is already configured. Both seeding paths are a PASS: `default wallet seeded from preconfigured account` when the pinned LEZ debug config ships an `initial_accounts` entry, and `default wallet seeded by initializing wallet storage (config ships no preconfigured account)` on LEZ v0.2.0, whose debug config ships none — there `setup` runs the freshly built `wallet` to create its persistent storage and adopts the first `Public/` account on a `/ `-prefixed listing line, ignoring `Public/` addresses on lines that are not `/ `-prefixed — notably the wallet's own `Preconfigured …` entries, which it prints above the stored accounts even when the config ships no `initial_accounts`, and which a first-token scan would adopt instead of the account the wallet just created. Only if no `/ `-prefixed line yields a usable `Public/` address does it fall back to the first `Public/` token anywhere in the output; if the wallet ever stops `/ `-prefixing stored accounts, that fallback starts adopting a preconfigured address, so a seeded address matching a `Preconfigured` line rather than a `/ ` one is worth reporting. Either line is followed by `  Address:` and `  State file:`. Only `warning: could not seed default wallet automatically` is a failure. With `--prebuilt`: `sequencer_service` is downloaded instead of built from source (falls back to source build if no artifact is published); `wallet` is always built from source regardless of `--prebuilt`.
 - `localnet start` reports a ready localnet rather than only a spawned PID.
-- `build` exits successfully after preparing the project workspace, resolving the configured circuits release, and — when the project has a `methods/Cargo.toml` (Risc0 guest crate excluded from the main workspace) — also prints `Building guest methods...` and produces guest `.bin` files under `target/riscv-guest/<methods-crate>/<guest-crate>/riscv32im-risc0-zkvm-elf/release/`, the same paths `deploy` submits from. The default template uses the workspace `target/` tree, not `methods/target/`.
+- `build` exits successfully after preparing the project workspace, resolving the configured circuits release, and — when the project has a `methods/Cargo.toml` (Risc0 guest crate excluded from the main workspace) — also prints `Building guest methods...` and produces guest `.bin` files under `target/riscv-guest/<methods-crate>/<guest-crate>/riscv32im-risc0-zkvm-elf/release/`, the same paths `deploy` submits from. The default template uses the workspace `target/` tree, not `methods/target/`. Because this is the default (`[build].guest = "local"`) path, `build` also prints a one-time `Note: guest ELFs were built with the local risc0 toolchain ...` naming the `[build] guest = "docker"` opt-in — its absence is a regression (see D8).
 - `deploy` prints a submission summary with zero failures when built binaries are present. Multi-program deploys are paced one program per sequencer block (`Waiting for a new block past N before the next deployment ...` between submissions): the pinned LEZ settles each block as a single bedrock inscription with a ~896 KiB payload cap and panics fatally when a block exceeds it, so batching several ~370 KiB deployment ELFs into one block kills the sequencer. Expect roughly one `block_create_timeout` (15s) of wait per additional program. Pacing fails closed: a stalled head or an unreadable post-submission baseline aborts the remaining submissions with `deploy pacing aborted ...` and a non-zero exit rather than batching unpaced (re-run `deploy` for the rest once the sequencer recovers, or raise `LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS` for slow block intervals). A deploy that continues unpaced and crashes localnet mid-flow is a regression; equally, record it if the upstream cap is lifted and pacing becomes dead weight.
 - `wallet topup` succeeds without an explicit address because the project default wallet was seeded during setup.
 - `wallet -- check-health` succeeds against the running localnet without requiring a global `wallet` install or manual `PATH` changes.
@@ -352,6 +353,7 @@ Both deploy paths honor `--json`, with a different shape each. `--program-path -
 - `deploy <name> --json` and bare `deploy --json` print a parseable `{"deploys":[…]}` object whose entries carry the same fields.
 - `deploy --program-path ...` without `--json` prints a human-readable `OK` line with the binary path.
 - `deploy nonexistent_program` fails with an error listing the available discovered programs.
+- The echoed `wallet deploy-program <path>` names which artefact was shipped. With only a default (`local`) build on disk that is the `target/riscv-guest/.../release/` one; a `target/riscv-guest-docker/.../docker/` artefact, when present, outranks it. With the guest artefacts removed (and localnet up — the missing-binary report comes after the sequencer preflight), `deploy` names the searched roots, which must list all three in ranking order: `target/riscv-guest-docker`, `target/riscv-guest`, `methods/target`. A missing root is why a built program looks undeployable. See `D8` for the ranking itself.
 
 ### Failure Signals / Common Pitfalls
 
@@ -650,6 +652,101 @@ post_deploy = ["echo 'topup skipped:' $SCAFFOLD_TOPUP_SKIPPED"]
 - Output of `run --no-post-deploy` showing the deployed-programs summary instead of hooks.
 - Output of `run --profile self-deploy` showing the ``[5/6] Deploy skipped (`deploy = false` ...)`` header and the `post_deploy` hook reporting `deploy skipped: 1`.
 - Output of `run --profile self-fund` showing the ``[4/6] Topup skipped (`topup = false` ...)`` header followed by the deploy step and the `post_deploy` hook reporting `topup skipped: 1`, plus the profile-less run of the same hook reporting `topup skipped: 0`.
+
+## D8. Reproducible Guest Builds and `program_id` Stability
+
+### Goal
+
+Validate that `program_id` is a stable identifier when the project asks for it: that `[build].guest = "docker"` produces the same guest ELF on any machine, that the default path says out loud that it does not, and that `deploy` ships whichever artefact the last `build` produced.
+
+### Preconditions
+
+- D1 completed in `dogfood-default` (localnet running, wallet seeded).
+- Docker daemon running and `cargo-risczero` on `PATH`. `cargo-risczero` is a separate rzup component — `rzup install rust` does **not** provide it; run `rzup install cargo-risczero`. If either is missing, run only the `local`-mode steps and the negative check below, and report the partial coverage — do not skip the scenario silently.
+
+### Commands / Actions
+
+From the generated project root:
+
+```bash
+# sha256sum is coreutils; on macOS use `shasum -a 256` throughout.
+DOCKER_BINS=target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker
+
+# 1. Default (local) mode: baseline program_id.
+"$SCAFFOLD_BIN" build
+"$SCAFFOLD_BIN" deploy --json | tee /tmp/d8-local.json
+
+# 2. Negative check: ask for docker on a machine without it.
+#    (Run this with the Docker daemon stopped, or skip if you cannot stop it.)
+"$SCAFFOLD_BIN" build --guest docker; echo "exit=$?"
+
+# 3. Deterministic mode, one-off.
+"$SCAFFOLD_BIN" build --guest docker
+ls "$DOCKER_BINS"
+
+# 4. Same build again from a clean artefact tree — bytes must be identical.
+sha256sum "$DOCKER_BINS"/*.bin > /tmp/d8-first.sha
+rm -rf target/riscv-guest-docker
+"$SCAFFOLD_BIN" build --guest docker
+sha256sum -c /tmp/d8-first.sha
+
+# 5. Make it the project default and confirm doctor + deploy agree.
+cp scaffold.toml /tmp/d8-scaffold.toml.bak
+printf '\n[build]\nguest = "docker"\n' >> scaffold.toml
+"$SCAFFOLD_BIN" doctor | grep "guest build"
+"$SCAFFOLD_BIN" deploy --json | tee /tmp/d8-docker.json
+
+# 6. Switch back and confirm the deterministic tree is cleared.
+cp /tmp/d8-scaffold.toml.bak scaffold.toml
+"$SCAFFOLD_BIN" build
+ls target/riscv-guest-docker 2>&1
+```
+
+Steps 3 and 4 are also run in CI by
+[`.github/workflows/guest-reproducibility.yml`](.github/workflows/guest-reproducibility.yml)
+(path-gated to `src/commands/build.rs` and `src/constants.rs`, plus manual
+dispatch), which renders a project, builds the guests through the container
+twice, and diffs the digests. Run them by hand when changing the pinned tag or
+when a host disagrees with CI; otherwise CI is the standing check.
+
+Steps 1, 2, 5, and 6 need no Docker beyond the `docker`/`cargo-risczero`
+binaries; only 3 and 4 run a container. On a host that cannot build containers
+at all, run 1, 2, 5, and 6 and additionally check the discovery ranking by
+hand: copy the `release/` `.bin` into `$DOCKER_BINS/` and confirm the next
+`deploy` echoes `wallet deploy-program <…/docker/…>` rather than the
+`release/` path. That covers everything except reproducibility itself.
+
+### Expected Success Signals
+
+- Step 1 prints the one-time `Note: guest ELFs were built with the local risc0 toolchain ...` and names `[build] guest = "docker"` as the fix. Repeated guest builds inside one process (`run --watch`) print it once, not once per rebuild.
+- Step 2 fails *before* pulling anything, with a message naming the missing piece (`cargo-risczero`, `docker`, or a daemon that is not running) and offering `[build].guest = "local"` as the alternative. A raw `docker build` error or a hung pull is a regression.
+- Step 3 prints `Building guest methods (deterministic, risc0-guest-builder:<tag>)...`, then risc0's own `ELFs ready at: ImageID: <hex> - <path>` lines, and leaves one `<program>.bin` per program under `target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/`.
+- Step 4's `sha256sum -c` passes. This is the whole point of the scenario: a differing hash between two builds of unchanged source means the deterministic path is not deterministic, and is the single most important thing to report from D8.
+- Comparing against **another machine** only proves anything if both used the same `Cargo.lock`. The container builds `--locked`, and cargo's MSRV-aware resolver picks dependency versions from the host toolchain, so two machines that each generated their own lockfile legitimately produce different `program_id`s. Copy the lockfile across, or compare within one commit that has it committed. A mismatch with differing lockfiles is not a D8 failure — record the two lockfiles before concluding anything.
+- Step 5's `doctor` row names the mode and the pin either way: `PASS | guest build | docker — reproducible via risczero/risc0-guest-builder:<tag>` when the toolchain is installed, `FAIL | guest build | docker (risczero/risc0-guest-builder:<tag>) — … not found on PATH` when it is not. A `docker` row that does not mention the tag at all is a regression — the tag is what makes the ID reproducible. The `program_id` in `/tmp/d8-docker.json` matches the `ImageID` risc0 printed in step 3 and is **different** from the one in `/tmp/d8-local.json` (different toolchains, different bytes) — record both values.
+- Step 6 prints `Clearing deterministic guest artefacts in ...` and `target/riscv-guest-docker` no longer exists, so a later `deploy` cannot ship a stale deterministic ELF.
+
+### Failure Signals / Common Pitfalls
+
+- The same `program_id` from steps 1 and 5 usually means `deploy` picked the same artefact twice — check which path `deploy` reported as the binary, not just the ID.
+- `deploy` reporting a `release/` binary while `[build].guest = "docker"` is set is a discovery-ranking regression.
+- A deterministic build that succeeds but produces no `.bin` (only extension-less ELFs) means risc0's output layout moved; capture `ls -R target/riscv-guest-docker`.
+- Very slow builds are expected on the first run (~1.7 GB image pull, no cargo cache reuse inside the container). Slowness is worth recording as a DX finding, but it is not a correctness failure.
+- Any large directory in the project root inflates the Docker build context (risc0 excludes only `.git`, `target`, `node_modules`, `tmp`). If the context transfer dominates the build, capture its reported size.
+- An MSRV error naming `rustc 1.88.0-dev` (`... requires rustc 1.89`) means the build used risc0's **default** image `r0.1.88.0`, not scaffold's pin — `RISC0_DOCKER_CONTAINER_TAG` did not reach `cargo risczero`. Through `lgs build` that is a real regression worth reporting; running `cargo risczero build` by hand without exporting the variable is the expected behaviour of the underlying tool, not a scaffold defect. Check which of the two you ran before filing.
+- `Cargo.lock not found in path .../methods/guest/Cargo.lock` on stderr is expected and non-fatal — risc0 looks next to the guest manifest, while scaffold projects keep one lockfile at the workspace root. A *fatal* lockfile error is different: the container builds with `--locked`, so a stale root `Cargo.lock` fails the build. Re-run a plain `lgs build` first and report it if that does not clear it.
+
+### Evidence to Capture
+
+- Both `deploy --json` outputs and the `program_id` from each. `--json` does not carry the binary path; for that, run one `deploy <program>` without `--json` in each mode and capture the echoed `$ … wallet deploy-program <path>` line. That line is the only direct evidence of which artefact was shipped.
+- The `sha256sum -c` result from step 4 and the `ImageID` lines from step 3.
+- The `doctor` `guest build` row in both modes.
+- The exact failure text from step 2.
+
+### Execution Notes
+
+- Steps 4 and 5 are the load-bearing ones. If time is short, run 1, 3, 4, and 5.
+- A second machine (or a CI runner) building the same commit and comparing hashes is stronger evidence than two builds on one host; do that when it is available.
 
 ## L1. LEZ Template Bootstrap
 
@@ -1795,6 +1892,7 @@ HEAD0=$("$SCAFFOLD_BIN" test-node blocks head --url "$URL" --json | jq -r .block
 - Changes to diagnostics, report contents, or redaction logic: rerun `D5`.
 - Changes to example runner binaries or template `src/bin/*` code: rerun `D6`.
 - Changes to `run` step ordering, the `deploy = false` deploy-skip branch, the `topup = false` topup-skip branch, post-deploy env vars, post-deploy CLI override flag handling, or `[run]` config parsing: rerun `D7`.
+- Changes to guest build strategy (`[build]` config, `--guest`, `build_methods_guests`, `DEFAULT_RISC0_DOCKER_TAG`, `GUEST_DOCKER_TARGET_DIR`) or to deploy-side binary discovery/ranking (`GUEST_BIN_SEARCH_ROOTS`, `discover_program_binaries`): rerun `D8` (its container steps also run in CI — see the Guest Build Reproducibility workflow), plus `D1` and `D3` — `D1` covers the default path's note, `D3` covers the artefact `deploy` actually submits. Bumping `DEFAULT_RISC0_DOCKER_TAG` changes every `program_id`, so record the before/after values.
 - Changes to LEZ template scaffolding or generated outputs: rerun `L1`, `L2`, `L3`, and `L4`.
 - Changes to CLI argument parsing, help text, or error messages: rerun `E1`.
 - Changes to `create`/`new` flags or template selection logic: rerun `E2`.

@@ -73,7 +73,10 @@ Some workflows need more:
 
 - `curl`, used by the first `setup` to fetch the pinned
   `logos-blockchain-circuits` release
-- A container runtime, Docker or Podman, for guest builds
+- Docker, for reproducible guest builds (`[build].guest = "docker"`). The
+  default guest build uses your host toolchain and needs no container runtime,
+  but the `program_id` it produces is not portable across machines — see
+  [docs/configuration.md](docs/configuration.md#build--guest-program-build-strategy)
 - `nix` with flakes enabled, for `basecamp` subcommands
 
 Circuits are not a manual step. Scaffold downloads the release pinned in
@@ -122,7 +125,7 @@ semantics of each one.
 | `lgs new <name>` | Create a project from a template (`create` is an alias) |
 | `lgs init` | Add scaffold to an existing project, or migrate an older one |
 | `lgs setup` | Sync pinned dependencies and build project-local binaries |
-| `lgs build` | Build the workspace and guest programs |
+| `lgs build` | Build the workspace and guest programs (`--guest docker` for a reproducible `program_id`) |
 | `lgs deploy` | Deploy guest programs to the running localnet |
 | `lgs localnet` | Start, stop, inspect, or reset the local sequencer |
 | `lgs run` | Chain the whole loop: build, IDL, localnet, topup, deploy |

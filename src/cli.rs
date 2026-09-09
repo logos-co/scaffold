@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use clap::{CommandFactory, Parser, Subcommand};
 
 use crate::cli_help::{
@@ -28,6 +28,7 @@ use crate::commands::spel::cmd_spel;
 use crate::commands::testnode::{cmd_test_node, TestNodeAction};
 use crate::commands::wallet::{cmd_wallet, WalletAction};
 use crate::constants::{DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, VERSION};
+use crate::model::GuestBuildMode;
 use crate::process::set_command_echo;
 use crate::template::project::available_templates;
 use crate::DynResult;
@@ -243,9 +244,33 @@ struct BuildArgs {
     /// Falls back to source build if no prebuilt exists for the pinned commit.
     #[arg(long, default_value_t = false)]
     prebuilt: bool,
+    /// Override [build].guest for this invocation. `local` builds guest
+    /// programs with the host risc0 toolchain (fast, no Docker,
+    /// non-reproducible program_id); `docker` builds them inside the pinned
+    /// risc0-guest-builder container (reproducible program_id, needs Docker
+    /// and cargo-risczero).
+    #[arg(long, value_enum, value_name = "MODE")]
+    guest: Option<GuestBuildModeArg>,
     #[command(subcommand)]
     subcommand: Option<BuildSubcommand>,
     project_path: Option<PathBuf>,
+}
+
+/// CLI spelling of [`GuestBuildMode`]. Separate type so clap's derive stays
+/// out of `model.rs`.
+#[derive(Copy, Clone, Debug, clap::ValueEnum)]
+enum GuestBuildModeArg {
+    Local,
+    Docker,
+}
+
+impl From<GuestBuildModeArg> for GuestBuildMode {
+    fn from(value: GuestBuildModeArg) -> Self {
+        match value {
+            GuestBuildModeArg::Local => Self::Local,
+            GuestBuildModeArg::Docker => Self::Docker,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -1265,6 +1290,16 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
         }),
         Some(Commands::Setup(args)) => cmd_setup(args.prebuilt),
         Some(Commands::Build(args)) => match args.subcommand {
+            // `build idl` / `build client` regenerate artefacts from source
+            // and never compile a guest, so `--guest` has nothing to act on.
+            // Rejecting it beats accepting and ignoring it: someone who typed
+            // `lgs build --guest docker idl` expecting a deterministic guest
+            // would otherwise get a silent local build.
+            Some(_) if args.guest.is_some() => bail!(
+                "`--guest` applies to `logos-scaffold build`, which compiles the guest programs. \
+                 `build idl` and `build client` only regenerate IDL/client code from source. \
+                 Run `logos-scaffold build --guest <MODE>` on its own."
+            ),
             Some(BuildSubcommand::Idl(sub)) => cmd_idl(
                 &sub.project_path
                     .map(|p| vec!["build".to_string(), p.to_string_lossy().to_string()])
@@ -1275,7 +1310,11 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                     .map(|p| vec!["build".to_string(), p.to_string_lossy().to_string()])
                     .unwrap_or_else(|| vec!["build".to_string()]),
             ),
-            None => cmd_build_shortcut(args.project_path, args.prebuilt),
+            None => cmd_build_shortcut(
+                args.project_path,
+                args.prebuilt,
+                args.guest.map(GuestBuildMode::from),
+            ),
         },
         Some(Commands::Deploy(args)) => cmd_deploy(args.program_name, args.program_path, args.json),
         Some(Commands::Localnet(localnet)) => {

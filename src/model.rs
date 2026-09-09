@@ -80,6 +80,67 @@ impl Default for LocalnetConfig {
     }
 }
 
+/// Which toolchain `lgs build` compiles the `methods/` risc0 guest programs
+/// with. The choice decides whether the emitted guest ELF — and therefore the
+/// `program_id` the sequencer stores for it — is reproducible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GuestBuildMode {
+    /// `cargo build --release --manifest-path methods/Cargo.toml`, i.e. the
+    /// guest crate's own `risc0_build::embed_methods()`. Uses the host's Rust
+    /// and clang, needs no Docker, and is fast — but the ELF (and its
+    /// `program_id`) can differ between machines, OS versions, and toolchain
+    /// versions. The default, because requiring Docker for a first build is a
+    /// bigger tax than non-reproducibility is for a program you have not
+    /// deployed anywhere yet.
+    Local,
+    /// `cargo risczero build` inside the pinned
+    /// `risczero/risc0-guest-builder:<tag>` container — the strategy `lssa`
+    /// uses for the program artefacts it ships. Same source plus same pinned
+    /// tag produces the same ELF bytes, so `program_id` is stable across
+    /// machines and CI. Needs Docker and `cargo-risczero` on PATH.
+    Docker,
+}
+
+impl GuestBuildMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Docker => "docker",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "local" => Some(Self::Local),
+            "docker" => Some(Self::Docker),
+            _ => None,
+        }
+    }
+
+    /// Whether this mode produces byte-identical ELFs across build hosts.
+    pub(crate) fn is_deterministic(self) -> bool {
+        matches!(self, Self::Docker)
+    }
+}
+
+/// `[build]` — how guest programs are compiled. See [`GuestBuildMode`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BuildConfig {
+    pub(crate) guest: GuestBuildMode,
+    /// Tag of the `risczero/risc0-guest-builder` image used when `guest =
+    /// "docker"`. Ignored in `local` mode.
+    pub(crate) risc0_docker_tag: String,
+}
+
+impl Default for BuildConfig {
+    fn default() -> Self {
+        Self {
+            guest: GuestBuildMode::Local,
+            risc0_docker_tag: crate::constants::DEFAULT_RISC0_DOCKER_TAG.to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct CircuitsConfig {
     pub(crate) version: String,
@@ -112,6 +173,9 @@ pub(crate) struct Config {
     pub(crate) wallet_home_dir: String,
     pub(crate) circuits: CircuitsConfig,
     pub(crate) framework: FrameworkConfig,
+    /// `[build]` — guest-program build strategy (`lgs build`, `lgs run`) and
+    /// the artefact layout `lgs deploy` ships.
+    pub(crate) build: BuildConfig,
     pub(crate) localnet: LocalnetConfig,
     /// `[modules.<name>]` — top-level Logos module catalog (was
     /// `[basecamp.modules.<name>]` pre-consolidation).

@@ -90,6 +90,39 @@ pub(crate) const SEQUENCER_BIN_REL_PATH: &str = "target/release/sequencer_servic
 /// `.bin` artefacts under the canonical workspace `target/riscv-guest/...` layout
 /// or the supported sub-crate `methods/target/...` compatibility layout.
 pub(crate) const METHODS_DIR: &str = "methods";
+/// `[package.metadata.risc0].methods` entry every risc0 template ships, and the
+/// fallback when `methods/Cargo.toml` declares none. Values are paths relative
+/// to `methods/`.
+pub(crate) const DEFAULT_RISC0_METHODS_ENTRY: &str = "guest";
+/// Docker image tag scaffold pins for the deterministic guest build
+/// (`risczero/risc0-guest-builder:<tag>`). The tag fixes the guest Rust
+/// toolchain, so it is part of what makes the emitted ELF — and therefore the
+/// `program_id` derived from it — reproducible across machines.
+///
+/// Verified in CI: this image reports `rustc 1.97.0-dev (e638c6cfe 2026-07-15)`,
+/// the same compiler build as rzup's `v1.97.0` toolchain, so the container and
+/// a local `rzup install rust` agree. The Guest Build Reproducibility workflow
+/// re-prints the image's `rustc --version` on every run rather than leaving
+/// anyone to infer it from the tag string.
+///
+/// **Passing this explicitly is the whole point.** `risc0-build`'s own
+/// `DEFAULT_DOCKER_TAG` is `r0.1.88.0`, whose rustc is 1.88 — too old for the
+/// template's dependency graph. Anyone running `cargo risczero build` by hand
+/// without exporting `RISC0_DOCKER_CONTAINER_TAG` silently gets that image and
+/// an MSRV error that reads like a scaffold bug. Scaffold always sets the
+/// variable (`deterministic_guest_command`), which is what keeps the pin real.
+///
+/// Bumping this changes every `program_id` the project produces. Projects
+/// override it with `[build].risc0_docker_tag` in `scaffold.toml`; the same
+/// value reaches risc0 through `RISC0_DOCKER_CONTAINER_TAG`.
+pub(crate) const DEFAULT_RISC0_DOCKER_TAG: &str = "r0.1.97.0";
+/// Project-relative `CARGO_TARGET_DIR` for the deterministic guest build.
+/// `cargo risczero build` emits into `<this>/riscv32im-risc0-zkvm-elf/docker/`.
+/// Kept out of the workspace `target/riscv-guest/` tree that
+/// `risc0_build::embed_methods()` owns so the two build modes never write to
+/// the same directory, and so a mode switch can clear one without touching the
+/// other. Also a `deploy`-side search root — see `GUEST_BIN_SEARCH_ROOTS`.
+pub(crate) const GUEST_DOCKER_TARGET_DIR: &str = "target/riscv-guest-docker";
 pub(crate) const SEQUENCER_CONFIG_REL_PATH: &str =
     "sequencer/service/configs/debug/sequencer_config.json";
 pub(crate) const SEQUENCER_CONFIG_NESTED_REL_PATH: &str =

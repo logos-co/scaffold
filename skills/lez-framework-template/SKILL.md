@@ -162,6 +162,8 @@ Client artefacts under `src/generated/` reflect the current contents of `idl/`. 
 
 For the LEZ template, `lgs build` automatically runs IDL regeneration and client generation as part of the pipeline (per DOGFOODING scenario L1). You usually don't need to call `build idl` / `build client` manually except when iterating on IDL alone.
 
+Guest programs build with the host risc0 toolchain by default, which makes `program_id` non-reproducible across machines. Set `[build].guest = "docker"` in `scaffold.toml` (or pass `lgs build --guest docker`) to build them in the pinned `risczero/risc0-guest-builder` container instead — see the `lez-template` skill's "Reproducible `program_id`" section; the setting behaves identically here.
+
 ```bash
 lgs setup
 lgs localnet start
