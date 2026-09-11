@@ -850,17 +850,18 @@ pub(crate) fn update_config_reporting(
 /// therefore *is* total.
 fn write_config_into(mut doc: DocumentMut, cfg: &Config) -> DynResult<String> {
     // [scaffold]
-    // Every `.entry(...).or_insert(...)` here goes through `coerce_to_table`
-    // rather than `.as_table_mut().expect(...)`: `or_insert` hands back the
-    // *occupied* item when the key already exists, and a root key the reader
-    // tolerated as a non-table (an inline table, most plausibly) would
-    // otherwise abort the process. See `coerce_to_table`.
-    let scaffold = doc.entry("scaffold").or_insert(Item::Table(Table::new()));
-    let scaffold_table = coerce_to_table(scaffold);
-    scaffold_table["version"] = value(&cfg.version);
+    // Every section here is reached through `section_table` rather than
+    // `.as_table_mut().expect(...)`: `or_insert` hands back the *occupied* item
+    // when the key already exists, and a root key the reader tolerated as a
+    // non-table (an inline table, most plausibly) would otherwise abort the
+    // process. `section_table` also resets the key's decor on promotion, without
+    // which a commented inline key renders as an unparseable header — see
+    // `section_table` and `coerce_to_table`.
+    let scaffold_table = section_table(&mut doc, "scaffold");
+    set_preserving_suffix(scaffold_table, "version", value(&cfg.version));
     if !cfg.cache_root.is_empty() {
         check_toml_value("cache_root", &cfg.cache_root)?;
-        scaffold_table["cache_root"] = value(&cfg.cache_root);
+        set_preserving_suffix(scaffold_table, "cache_root", value(&cfg.cache_root));
     } else {
         remove_unless_empty_literal(scaffold_table, "cache_root");
     }
@@ -906,11 +907,11 @@ fn write_config_into(mut doc: DocumentMut, cfg: &Config) -> DynResult<String> {
         };
         let path = format!("modules.{name}");
         let table = ensure_subtable(&mut doc, "modules", name);
-        table["flake"] = value(&entry.flake);
-        table["role"] = value(role_str);
+        set_preserving_suffix(table, "flake", value(&entry.flake));
+        set_preserving_suffix(table, "role", value(role_str));
         if let Some(app) = &entry.standalone_app {
             check_toml_value(&format!("modules.{name}.standalone_app"), app)?;
-            table["standalone_app"] = value(app);
+            set_preserving_suffix(table, "standalone_app", value(app));
         } else {
             remove_unless_empty_literal(table, "standalone_app");
         }
@@ -920,27 +921,32 @@ fn write_config_into(mut doc: DocumentMut, cfg: &Config) -> DynResult<String> {
 
     // [wallet]
     check_toml_value("wallet.home_dir", &cfg.wallet_home_dir)?;
-    let wallet = doc.entry("wallet").or_insert(Item::Table(Table::new()));
-    coerce_to_table(wallet)["home_dir"] = value(&cfg.wallet_home_dir);
+    set_preserving_suffix(
+        section_table(&mut doc, "wallet"),
+        "home_dir",
+        value(&cfg.wallet_home_dir),
+    );
 
     // [framework] / [framework.idl]
     check_toml_value("framework.kind", &cfg.framework.kind)?;
     check_toml_value("framework.version", &cfg.framework.version)?;
     check_toml_value("framework.idl.spec", &cfg.framework.idl.spec)?;
     check_toml_value("framework.idl.path", &cfg.framework.idl.path)?;
-    let framework = doc.entry("framework").or_insert(Item::Table(Table::new()));
-    let framework_table = coerce_to_table(framework);
-    framework_table["kind"] = value(&cfg.framework.kind);
-    framework_table["version"] = value(&cfg.framework.version);
+    let framework_table = section_table(&mut doc, "framework");
+    set_preserving_suffix(framework_table, "kind", value(&cfg.framework.kind));
+    set_preserving_suffix(framework_table, "version", value(&cfg.framework.version));
     let idl_table = child_table(framework_table, "idl");
-    idl_table["spec"] = value(&cfg.framework.idl.spec);
-    idl_table["path"] = value(&cfg.framework.idl.path);
+    set_preserving_suffix(idl_table, "spec", value(&cfg.framework.idl.spec));
+    set_preserving_suffix(idl_table, "path", value(&cfg.framework.idl.path));
 
     // [localnet]
-    let localnet = doc.entry("localnet").or_insert(Item::Table(Table::new()));
-    let localnet_table = coerce_to_table(localnet);
-    localnet_table["port"] = value(i64::from(cfg.localnet.port));
-    localnet_table["risc0_dev_mode"] = value(cfg.localnet.risc0_dev_mode);
+    let localnet_table = section_table(&mut doc, "localnet");
+    set_preserving_suffix(localnet_table, "port", value(i64::from(cfg.localnet.port)));
+    set_preserving_suffix(
+        localnet_table,
+        "risc0_dev_mode",
+        value(cfg.localnet.risc0_dev_mode),
+    );
 
     // [circuits]
     check_toml_value("circuits.version", &cfg.circuits.version)?;
@@ -949,16 +955,19 @@ fn write_config_into(mut doc: DocumentMut, cfg: &Config) -> DynResult<String> {
         check_circuits_url_template(template)?;
     }
     check_toml_value("circuits.install_dir", &cfg.circuits.install_dir)?;
-    let circuits = doc.entry("circuits").or_insert(Item::Table(Table::new()));
-    let circuits_table = coerce_to_table(circuits);
-    circuits_table["version"] = value(&cfg.circuits.version);
+    let circuits_table = section_table(&mut doc, "circuits");
+    set_preserving_suffix(circuits_table, "version", value(&cfg.circuits.version));
     if let Some(template) = &cfg.circuits.url_template {
-        circuits_table["url_template"] = value(template);
+        set_preserving_suffix(circuits_table, "url_template", value(template));
     } else {
         remove_unless_empty_literal(circuits_table, "url_template");
     }
     if cfg.circuits.install_dir != CircuitsConfig::default().install_dir {
-        circuits_table["install_dir"] = value(&cfg.circuits.install_dir);
+        set_preserving_suffix(
+            circuits_table,
+            "install_dir",
+            value(&cfg.circuits.install_dir),
+        );
     } else {
         remove_unless_empty_literal(circuits_table, "install_dir");
     }
@@ -994,21 +1003,24 @@ fn write_config_into(mut doc: DocumentMut, cfg: &Config) -> DynResult<String> {
             }
         }
 
-        let basecamp = doc.entry("basecamp").or_insert(Item::Table(Table::new()));
-        let basecamp_table = coerce_to_table(basecamp);
+        let basecamp_table = section_table(&mut doc, "basecamp");
         // Only emit port keys when they differ from the defaults, so setting
         // just `[basecamp.env]` doesn't churn a user's scaffold.toml with
         // default `port_base`/`port_stride` on the next `save_project_config`.
         let default_bc = BasecampConfig::default();
         let mut wrote_direct_key = false;
         if bc.port_base != default_bc.port_base {
-            basecamp_table["port_base"] = value(i64::from(bc.port_base));
+            set_preserving_suffix(basecamp_table, "port_base", value(i64::from(bc.port_base)));
             wrote_direct_key = true;
         } else {
             basecamp_table.remove("port_base");
         }
         if bc.port_stride != default_bc.port_stride {
-            basecamp_table["port_stride"] = value(i64::from(bc.port_stride));
+            set_preserving_suffix(
+                basecamp_table,
+                "port_stride",
+                value(i64::from(bc.port_stride)),
+            );
             wrote_direct_key = true;
         } else {
             basecamp_table.remove("port_stride");
@@ -1029,7 +1041,7 @@ fn write_config_into(mut doc: DocumentMut, cfg: &Config) -> DynResult<String> {
             let env_table = child_table(basecamp_table, "env");
             env_table.retain(|k, _| bc.env.contains_key(k));
             for (k, v) in &bc.env {
-                env_table[k] = value(v);
+                set_preserving_suffix(env_table, k, value(v));
             }
         } else {
             // Safe to drop wholesale: `parse_string_map` is total — it errors
@@ -1117,21 +1129,21 @@ fn write_config_into(mut doc: DocumentMut, cfg: &Config) -> DynResult<String> {
                 // `read_string` filters empty strings, so it reaches the model
                 // as `None` — see `remove_unless_empty_literal`.
                 if let Some(f) = &p.env_file {
-                    profile_table["env_file"] = value(f);
+                    set_preserving_suffix(profile_table, "env_file", value(f));
                     wrote_scalar = true;
                 } else {
                     remove_unless_empty_literal(profile_table, "env_file");
                     wrote_scalar |= profile_table.contains_key("env_file");
                 }
                 if let Some(d) = &p.runtime_dir {
-                    profile_table["runtime_dir"] = value(d);
+                    set_preserving_suffix(profile_table, "runtime_dir", value(d));
                     wrote_scalar = true;
                 } else {
                     remove_unless_empty_literal(profile_table, "runtime_dir");
                     wrote_scalar |= profile_table.contains_key("runtime_dir");
                 }
                 if let Some(l) = &p.log_file {
-                    profile_table["log_file"] = value(l);
+                    set_preserving_suffix(profile_table, "log_file", value(l));
                     wrote_scalar = true;
                 } else {
                     remove_unless_empty_literal(profile_table, "log_file");
@@ -1141,7 +1153,7 @@ fn write_config_into(mut doc: DocumentMut, cfg: &Config) -> DynResult<String> {
                     let env_table = child_table(profile_table, "env");
                     env_table.retain(|k, _| p.env.contains_key(k));
                     for (k, v) in &p.env {
-                        env_table[k] = value(v);
+                        set_preserving_suffix(env_table, k, value(v));
                     }
                 } else {
                     profile_table.remove("env");
@@ -1194,28 +1206,27 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
         return Ok(());
     }
 
-    let run_item = doc.entry("run").or_insert(Item::Table(Table::new()));
-    let run_table = coerce_to_table(run_item);
+    let run_table = section_table(doc, "run");
     if let Some(name) = &run.default_profile {
         check_toml_value("run.default_profile", name)?;
-        run_table["default_profile"] = value(name);
+        set_preserving_suffix(run_table, "default_profile", value(name));
     } else {
         remove_unless_empty_literal(run_table, "default_profile");
     }
     if run.inline.reset {
-        run_table["reset"] = value(true);
+        set_preserving_suffix(run_table, "reset", value(true));
     } else {
         run_table.remove("reset");
     }
     // Only emit `deploy`/`topup` when they deviate from the `true` default,
     // to keep a fresh scaffold.toml minimal.
     if !run.inline.deploy {
-        run_table["deploy"] = value(false);
+        set_preserving_suffix(run_table, "deploy", value(false));
     } else {
         run_table.remove("deploy");
     }
     if !run.inline.topup {
-        run_table["topup"] = value(false);
+        set_preserving_suffix(run_table, "topup", value(false));
     } else {
         run_table.remove("topup");
     }
@@ -1245,17 +1256,17 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
             table.set_implicit(true);
             let profile_table = child_table(table, name);
             if profile.reset {
-                profile_table["reset"] = value(true);
+                set_preserving_suffix(profile_table, "reset", value(true));
             } else {
                 profile_table.remove("reset");
             }
             if !profile.deploy {
-                profile_table["deploy"] = value(false);
+                set_preserving_suffix(profile_table, "deploy", value(false));
             } else {
                 profile_table.remove("deploy");
             }
             if !profile.topup {
-                profile_table["topup"] = value(false);
+                set_preserving_suffix(profile_table, "topup", value(false));
             } else {
                 profile_table.remove("topup");
             }
@@ -1285,7 +1296,7 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
             remove_unless_empty_literal(watch_table, "exclude");
         }
         if let Some(ms) = run.watch.debounce_ms {
-            watch_table["debounce_ms"] = value(ms as i64);
+            set_preserving_suffix(watch_table, "debounce_ms", value(ms as i64));
         } else {
             watch_table.remove("debounce_ms");
         }
@@ -1328,14 +1339,14 @@ fn write_repo_ref(doc: &mut DocumentMut, name: &str, repo: &RepoRef) -> DynResul
     }
     check_toml_value(&format!("repos.{name}.path"), &repo.path)?;
     let table = ensure_subtable(doc, "repos", name);
-    table["source"] = value(&repo.source);
-    table["pin"] = value(&repo.pin);
+    set_preserving_suffix(table, "source", value(&repo.source));
+    set_preserving_suffix(table, "pin", value(&repo.pin));
     // The `else` arms here go through `remove_unless_empty_literal` because
     // `parse_repo_ref` reads all three through `read_string`, which filters
     // empty strings — so `build = ""` / `attr = ""` / `path = ""` reach the
     // model as the same default a missing key gives.
     if repo.build != RepoBuild::default() {
-        table["build"] = value(repo.build.as_str());
+        set_preserving_suffix(table, "build", value(repo.build.as_str()));
     } else {
         remove_unless_empty_literal(table, "build");
     }
@@ -1347,14 +1358,14 @@ fn write_repo_ref(doc: &mut DocumentMut, name: &str, repo: &RepoRef) -> DynResul
         for (system, a) in &repo.attr_platform {
             inline.insert(system, a.as_str().into());
         }
-        table["attr"] = value(inline);
+        set_preserving_suffix(table, "attr", value(inline));
     } else if !repo.attr.is_empty() {
-        table["attr"] = value(&repo.attr);
+        set_preserving_suffix(table, "attr", value(&repo.attr));
     } else {
         remove_unless_empty_literal(table, "attr");
     }
     if !repo.path.is_empty() {
-        table["path"] = value(&repo.path);
+        set_preserving_suffix(table, "path", value(&repo.path));
     } else {
         remove_unless_empty_literal(table, "path");
     }
@@ -1557,6 +1568,164 @@ fn coerce_to_table(item: &mut Item) -> &mut Table {
         .expect("coerce_to_table just installed an Item::Table")
 }
 
+/// The two things a modelled section can hang off: the document root and a
+/// `Table`. Both expose the same get/entry/key_mut trio, but through separate
+/// inherent methods rather than a shared trait, so [`section_table`] needs this
+/// to treat them alike.
+///
+/// This exists so the decor reset in [`section_table`] cannot be skipped at a
+/// new call site. It previously lived only in `child_table`, and every
+/// root-level section reached `coerce_to_table(doc.entry(..).or_insert(..))`
+/// directly — which takes `&mut Item` and so structurally *cannot* reach the
+/// key's decor, where a preceding own-line comment lives. See [`section_table`].
+trait TableParent {
+    fn is_real_table(&self, name: &str) -> bool;
+    /// Clear the key's decor, returning any own-line comments it held so the
+    /// caller can re-home them onto the promoted table's header.
+    fn take_key_comments(&mut self, name: &str) -> String;
+    fn entry_or_new_table(&mut self, name: &str) -> &mut Item;
+}
+
+/// Shared body of [`TableParent::take_key_comments`] for both implementors.
+fn take_key_comments_from(key: Option<&mut toml_edit::KeyMut<'_>>) -> String {
+    let Some(key) = key else {
+        return String::new();
+    };
+    let salvaged = key
+        .leaf_decor()
+        .prefix()
+        .and_then(|p| p.as_str())
+        .map(comment_lines)
+        .unwrap_or_default();
+    key.leaf_decor_mut().clear();
+    key.dotted_decor_mut().clear();
+    salvaged
+}
+
+/// Assign `val` to `table[key]`, preserving any trailing comment already on
+/// that key's line.
+///
+/// `table[key] = value(v)` installs a fresh `Item`, and a trailing comment
+/// (`pin = "aa2377…"  # held back until the new IDL spec lands`) lives in the
+/// *old value's* suffix decor — so the plain assignment deletes it on every
+/// write, including on keys whose value did not change. Own-line comments live
+/// in the key's decor and survive a reassignment untouched, which is why this
+/// only has to deal with the suffix.
+///
+/// That comment is exactly the load-bearing kind this module exists to keep:
+/// weboko's review found `# held back until the new IDL spec lands` being
+/// silently dropped while the README promised comments were "left exactly where
+/// they were". Every scaffold-owned key assignment routes through here.
+fn set_preserving_suffix(table: &mut Table, key: &str, val: Item) {
+    let suffix = table
+        .get(key)
+        .and_then(Item::as_value)
+        .and_then(|v| v.decor().suffix())
+        .and_then(|s| s.as_str())
+        .map(str::to_owned);
+    table[key] = val;
+    // Re-home the old suffix only when there is one and the new value can carry
+    // it. A prefix is deliberately left alone: for a value it is the spacing
+    // after `=`, which `value()` already renders correctly.
+    if let Some(suffix) = suffix {
+        if !suffix.trim().is_empty() {
+            if let Some(v) = table[key].as_value_mut() {
+                v.decor_mut().set_suffix(suffix);
+            }
+        }
+    }
+}
+
+/// Keep only the comment lines from a decor prefix, dropping blank lines and
+/// the inline-specific whitespace around them.
+///
+/// A key's leaf-decor prefix is free-form text that toml_edit reproduces
+/// verbatim, so it holds the user's own-line comments *and* whatever spacing
+/// surrounded `key = { … }`. Only the former is meaningful once the key becomes
+/// a `[header]`; re-emitting the latter is what produced `[# comment\ncircuits ]`.
+fn comment_lines(prefix: &str) -> String {
+    let mut out = String::new();
+    for line in prefix.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            out.push_str(trimmed);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+impl TableParent for DocumentMut {
+    fn is_real_table(&self, name: &str) -> bool {
+        matches!(self.get(name), Some(Item::Table(_)))
+    }
+    fn take_key_comments(&mut self, name: &str) -> String {
+        take_key_comments_from(self.key_mut(name).as_mut())
+    }
+    fn entry_or_new_table(&mut self, name: &str) -> &mut Item {
+        self.entry(name).or_insert(Item::Table(Table::new()))
+    }
+}
+
+impl TableParent for Table {
+    fn is_real_table(&self, name: &str) -> bool {
+        matches!(self.get(name), Some(Item::Table(_)))
+    }
+    fn take_key_comments(&mut self, name: &str) -> String {
+        take_key_comments_from(self.key_mut(name).as_mut())
+    }
+    fn entry_or_new_table(&mut self, name: &str) -> &mut Item {
+        self.entry(name).or_insert(Item::Table(Table::new()))
+    }
+}
+
+/// Get or create a section `Table` under `parent`, promoting an inline table or
+/// a scalar in place, and resetting the key's decor when — and only when — a
+/// promotion actually happens.
+///
+/// **The decor reset is the load-bearing half.** [`coerce_to_table`] handles the
+/// *item's* decor, but a preceding own-line comment does not live there: it
+/// lives in the **key's** leaf decor. For an inline key that decor is the
+/// whitespace around `key = { … }`; for a real table it is the text inside the
+/// `[header]`. Carry it across and a commented inline key renders as
+///
+/// ```toml
+/// [# why this override exists
+/// circuits ]
+/// ```
+///
+/// which is not valid TOML at all — so the write *succeeds*, reports exit 0, and
+/// leaves a `scaffold.toml` that every later command rejects with a parse error.
+/// That is strictly worse than the panic this coercion replaced, since the panic
+/// aborted before writing and left the file intact. weboko's review caught it on
+/// a real `lgs init` project.
+///
+/// Root sections and nested ones both route through here for exactly that
+/// reason: `coerce_to_table` takes `&mut Item` and cannot reach the key, so a
+/// call site that skips this helper silently loses the guard.
+///
+/// The comment itself is **not** discarded. Clearing the decor outright is
+/// enough to keep the file parseable, but it deletes the very thing this PR
+/// exists to preserve — `# why this override exists` above a `wallet = { … }`
+/// is load-bearing in exactly the way the PR's own framing argues. So the
+/// comment lines are lifted out of the key's decor and re-homed onto the
+/// promoted table's header decor, which is where toml_edit renders text
+/// preceding a `[header]`. Only the inline-specific whitespace is dropped.
+fn section_table<'a, P: TableParent + ?Sized>(parent: &'a mut P, name: &str) -> &'a mut Table {
+    // Only when we are actually about to promote: an existing real table's
+    // header decor is the user's own, and must be left alone.
+    let salvaged = if parent.is_real_table(name) {
+        String::new()
+    } else {
+        parent.take_key_comments(name)
+    };
+    let table = coerce_to_table(parent.entry_or_new_table(name));
+    if !salvaged.is_empty() {
+        table.decor_mut().set_prefix(salvaged);
+    }
+    table
+}
+
 /// Get or create a child `Table` under an existing `Table` without touching the
 /// parent's implicit flag — unlike `ensure_subtable`, which marks its parent
 /// implicit (wrong when the parent has real keys, e.g. `[basecamp]`).
@@ -1565,31 +1734,15 @@ fn coerce_to_table(item: &mut Item) -> &mut Table {
 /// child key can be an inline table (`env = { FOO = "1" }`) just as easily as a
 /// root one.
 fn child_table<'a>(parent: &'a mut Table, name: &str) -> &'a mut Table {
-    // A child written as `idl = { … }` carries decor on the *key* too, and for
-    // a real table that decor is the whitespace inside the `[framework.idl]`
-    // header. Carrying an inline key's decor across renders "[\nframework.idl ]"
-    // — not the section the user wrote, and not even the same file. So reset
-    // the key's decor alongside the item's own (which `coerce_to_table` does),
-    // and only when we are actually about to promote.
-    if !matches!(parent.get(name), Some(Item::Table(_))) {
-        if let Some(mut key) = parent.key_mut(name) {
-            key.leaf_decor_mut().clear();
-            key.dotted_decor_mut().clear();
-        }
-    }
-    coerce_to_table(parent.entry(name).or_insert(Item::Table(Table::new())))
+    section_table(parent, name)
 }
 
 fn ensure_subtable<'a>(doc: &'a mut DocumentMut, parent: &str, child: &str) -> &'a mut Table {
-    let parent_item = doc.entry(parent).or_insert(Item::Table({
-        let mut t = Table::new();
-        t.set_implicit(true);
-        t
-    }));
     // `repos = { … }` / `modules = { … }` reach here the same way `[wallet]`
     // does — via a parser that reads them with `as_table` and shrugs at an
-    // inline one. Coerce instead of asserting.
-    let parent_table = coerce_to_table(parent_item);
+    // inline one. Coerce instead of asserting, and through `section_table` so
+    // the parent key's decor is reset on promotion like every other section.
+    let parent_table = section_table(doc, parent);
     parent_table.set_implicit(true);
     child_table(parent_table, child)
 }
@@ -2301,11 +2454,25 @@ role = "project"
         parse_config(&rewritten).expect("rewritten config must parse");
     }
 
+    /// An own-line comment planted immediately above the inline key in every
+    /// fixture built by [`with_inline_section`].
+    ///
+    /// It is not decoration. A preceding own-line comment lives in the *key's*
+    /// leaf decor, and promoting an inline table to a real one turns that decor
+    /// into the whitespace inside the `[header]` — so carrying it across emits
+    /// `[# why this override exists\nwallet ]`, which no longer parses. Without
+    /// a comment here the promotion looks correct and the bug escapes the
+    /// table-driven test entirely.
+    const INLINE_KEY_COMMENT: &str = "# why this override exists";
+
     /// Build a fixture where one modelled section is written as a root-level
     /// *inline* table instead of a `[header]`, dropping the header form so the
     /// inline one is the only definition of that key.
+    ///
+    /// The inline key always carries [`INLINE_KEY_COMMENT`] on the line above.
     fn with_inline_section(header: &str, inline: &str) -> String {
         let base = minimal_v0_2_0();
+        let inline = &format!("{INLINE_KEY_COMMENT}\n{inline}");
         let original = if header.is_empty() {
             format!("{inline}\n{base}")
         } else {
@@ -2406,7 +2573,50 @@ role = "project"
                 rewritten.contains(survivor),
                 "{label}: the user's own key inside the inline table was dropped:\n{rewritten}"
             );
+            // The comment explaining the section is exactly the kind this PR
+            // exists to keep, and promoting the key must not swallow it into
+            // the header it generates.
+            //
+            // `framework.idl` is excluded: `with_inline_section` drops the
+            // `[framework.idl]` header and writes `idl = { … }` at *root*
+            // level, so the commented key is a root `idl`, not the section the
+            // writer promotes. The writer builds a fresh `[framework.idl]`
+            // under `[framework]` and the root comment is orphaned — a
+            // property of the fixture, not of the promotion. The genuine
+            // child-table promotion is covered by
+            // `update_config_survives_an_inline_child_table`.
+            if label != "framework.idl" {
+                assert!(
+                    rewritten.contains(INLINE_KEY_COMMENT),
+                    "{label}: the comment above the inline key was lost:\n{rewritten}"
+                );
+                assert!(
+                    !rewritten.contains(&format!("[{INLINE_KEY_COMMENT}")),
+                    "{label}: the comment was absorbed into the section header:\n{rewritten}"
+                );
+            }
         }
+    }
+
+    /// The promoted section must render as a clean `[header]` with the salvaged
+    /// comment on its own line above — not merely "parseable somehow".
+    ///
+    /// Pins the exact shape, because the bug weboko found was a *rendering*
+    /// one: `[# why this override exists\ncircuits ]` reparses as nothing at
+    /// all, and an assertion that only checked for the comment's presence
+    /// somewhere in the file would have passed against it.
+    #[test]
+    fn update_config_promotes_a_commented_inline_section_to_a_clean_header() {
+        let original = with_inline_section("", "circuits = { version = \"0.4.1\" }");
+        let cfg = parse_config(&original).expect("fixture must parse");
+        let rewritten = update_config(&original, &cfg).expect("update must not fail");
+
+        assert!(
+            rewritten.contains(&format!("{INLINE_KEY_COMMENT}\n[circuits]")),
+            "promoted section must carry its comment on the line above a clean \
+             header:\n{rewritten}"
+        );
+        parse_config(&rewritten).expect("rewrite must reparse");
     }
 
     /// `framework.idl` written inline *under* a real `[framework]` header —
@@ -2419,8 +2629,11 @@ role = "project"
         );
         let original = original.replace(
             "[framework]\nkind = \"default\"\nversion = \"0.1.0\"\n",
-            "[framework]\nkind = \"default\"\nversion = \"0.1.0\"\n\
-             idl = { spec = \"lssa-idl/0.1.0\", path = \"idl\", note = \"keep me\" }\n",
+            &format!(
+                "[framework]\nkind = \"default\"\nversion = \"0.1.0\"\n\
+                 {INLINE_KEY_COMMENT}\n\
+                 idl = {{ spec = \"lssa-idl/0.1.0\", path = \"idl\", note = \"keep me\" }}\n"
+            ),
         );
         let cfg = parse_config(&original).expect("fixture must parse");
         let rewritten = update_config(&original, &cfg).expect("update must not panic");
@@ -2428,6 +2641,11 @@ role = "project"
         assert!(
             rewritten.contains("keep me"),
             "unmodelled key inside the inline child table was dropped:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains(INLINE_KEY_COMMENT)
+                && !rewritten.contains(&format!("[{INLINE_KEY_COMMENT}")),
+            "the comment above the inline child key was lost or absorbed:\n{rewritten}"
         );
     }
 
@@ -2487,6 +2705,55 @@ role = "project"
             rewritten.contains("1111111111111111111111111111111111111111"),
             "new pin not written:\n{rewritten}"
         );
+    }
+
+    /// The *trailing* half of the same case, which the test above does not
+    /// reach: a comment on the end of the key's own line.
+    ///
+    /// `table["k"] = value(v)` installs a fresh `Item` and drops the old
+    /// value's suffix decor, which is where toml_edit keeps a trailing comment.
+    /// Own-line comments live in the key's decor and survive trivially, so only
+    /// this pins the reassignment path. `pin = "aa2377…"  # held back until the
+    /// new IDL spec lands` is precisely the load-bearing comment this PR cites
+    /// as its reason to exist, and it was being deleted on every write.
+    #[test]
+    fn update_config_keeps_a_trailing_comment_on_a_key_it_reassigns() {
+        // Three shapes: a key whose value CHANGES, one that is rewritten with
+        // the identical value, and a non-string so the decor handling cannot
+        // be quietly string-specific.
+        let original = minimal_v0_2_0()
+            .replace(
+                "pin = \"73fc462eb8f0a4d00f1a846437c627ec2e523f83\"",
+                "pin = \"73fc462eb8f0a4d00f1a846437c627ec2e523f83\"  # held back: needs the new IDL spec",
+            )
+            .replace(
+                "port = 3040",
+                "port = 3040  # chosen to dodge the corp VPN range",
+            )
+            .replace(
+                "risc0_dev_mode = true",
+                "risc0_dev_mode = true  # keep proofs cheap locally",
+            );
+        let mut cfg = parse_config(&original).expect("fixture must parse");
+        // Change one of the three; leave the other two identical.
+        cfg.spel.pin = "1111111111111111111111111111111111111111".to_string();
+        let rewritten = update_config(&original, &cfg).expect("update");
+
+        for comment in [
+            "# held back: needs the new IDL spec",
+            "# chosen to dodge the corp VPN range",
+            "# keep proofs cheap locally",
+        ] {
+            assert!(
+                rewritten.contains(comment),
+                "trailing comment lost on reassign: {comment}\n{rewritten}"
+            );
+        }
+        assert!(
+            rewritten.contains("1111111111111111111111111111111111111111"),
+            "new pin not written:\n{rewritten}"
+        );
+        parse_config(&rewritten).expect("rewrite must reparse");
     }
 
     /// `--inspector` clears `attr_platform`, turning a `[repos.basecamp.attr]`

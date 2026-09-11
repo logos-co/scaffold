@@ -186,17 +186,10 @@ Two things follow from that:
   when the value goes back to its default rather than re-asserting them, so
   deleting a line is a real edit, not one that gets undone on the next run.
 - If the file cannot be parsed as TOML — a stray bracket from a hand-edit —
-  scaffold cannot merge into it, so it writes a fresh one instead. It warns on
-  stderr when it does this and first saves your original next to it as
-  `scaffold.toml.bak-YYYY-MM-DD-HHMMSS_NNNNNNNNN` (local time, nanoseconds
-  after the underscore), so nothing is lost quietly. The name is timestamped,
-  so each such rewrite keeps its own copy and they sort oldest-first in a
-  directory listing.
-
-  This is fail-closed: **if the backup cannot be written, scaffold aborts and
-  leaves your `scaffold.toml` alone.** Re-running a command is recoverable;
-  your comments are not. If that happens, the error names the backup path that
-  blocked it — move that file aside and re-run.
+  **no command runs at all.** Every command loads `scaffold.toml` before doing
+  anything, and an unparseable file is a hard error naming the line and column,
+  with the file left untouched. Fix the syntax and re-run; scaffold will not
+  overwrite a config it cannot read.
 
 ## Configuration
 
