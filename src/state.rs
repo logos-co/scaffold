@@ -2,7 +2,7 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
 
-use anyhow::{anyhow, bail};
+use anyhow::{anyhow, bail, Context};
 
 use crate::commands::wallet_support::WALLET_CONFIG_PRIMARY;
 use crate::constants::WALLET_CONFIG_REL_PATHS;
@@ -127,13 +127,40 @@ pub(crate) fn read_basecamp_state(path: &Path) -> DynResult<BasecampState> {
     Ok(state)
 }
 
-pub(crate) fn prepare_wallet_home(lez_repo: &Path, wallet_home: &Path) -> DynResult<()> {
+/// Seed a fresh wallet home from the vendored LEZ debug wallet config, if
+/// one doesn't already exist there.
+///
+/// `sequencer_addr` overrides the vendored config's hardcoded value (the
+/// LEZ debug fixture ships `http://127.0.0.1:3040`) with the address this
+/// project's sequencer actually binds to, so the wallet follows
+/// `[localnet].port` instead of silently pointing at 3040 regardless of
+/// what the project is configured to use. Pass
+/// `default_sequencer_http_url_for_project(project)`.
+pub(crate) fn prepare_wallet_home(
+    lez_repo: &Path,
+    wallet_home: &Path,
+    sequencer_addr: &str,
+) -> DynResult<()> {
     fs::create_dir_all(wallet_home)?;
     let cfg_dst = wallet_home.join(WALLET_CONFIG_PRIMARY);
     if !cfg_dst.exists() {
         let cfg_src =
             first_existing_lez_path(lez_repo, WALLET_CONFIG_REL_PATHS, "wallet debug config")?;
-        fs::copy(cfg_src, cfg_dst)?;
+        let text = fs::read_to_string(&cfg_src)
+            .with_context(|| format!("failed to read {}", cfg_src.display()))?;
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&text).context("failed to parse wallet debug config")?;
+        let Some(obj) = doc.as_object_mut() else {
+            bail!(
+                "wallet debug config is not a JSON object: {}",
+                cfg_src.display()
+            );
+        };
+        obj.insert(
+            "sequencer_addr".to_string(),
+            serde_json::Value::String(sequencer_addr.to_string()),
+        );
+        fs::write(&cfg_dst, serde_json::to_string_pretty(&doc)?)?;
     }
     Ok(())
 }
@@ -211,10 +238,78 @@ mod tests {
         fs::create_dir_all(cfg_src.parent().unwrap()).expect("create nested wallet config dir");
         fs::write(&cfg_src, "{ \"network\": \"debug\" }\n").expect("write wallet config");
 
-        prepare_wallet_home(&lez, &wallet_home).expect("prepare wallet home");
+        prepare_wallet_home(&lez, &wallet_home, "http://127.0.0.1:5050")
+            .expect("prepare wallet home");
 
         let copied = fs::read_to_string(wallet_home.join(WALLET_CONFIG_PRIMARY))
             .expect("read copied wallet config");
-        assert_eq!(copied, "{ \"network\": \"debug\" }\n");
+        let copied: serde_json::Value = serde_json::from_str(&copied).expect("parse copied");
+        assert_eq!(copied["network"], "debug");
+        assert_eq!(copied["sequencer_addr"], "http://127.0.0.1:5050");
+    }
+
+    /// Regression for #263: the vendored LEZ debug wallet config hardcodes
+    /// `sequencer_addr: http://127.0.0.1:3040`. Without overriding it on
+    /// seeding, a project configured for a different `[localnet].port`
+    /// would silently get a wallet that talks to the wrong (or, when 3040
+    /// is occupied by another project, a nonexistent) sequencer.
+    #[test]
+    fn prepare_wallet_home_overrides_vendored_sequencer_addr() {
+        let tmp = tempdir().expect("tempdir");
+        let lez = tmp.path().join("lez");
+        let wallet_home = tmp.path().join("wallet-home");
+
+        let cfg_src = lez.join("wallet/configs/debug/wallet_config.json");
+        fs::create_dir_all(cfg_src.parent().unwrap()).expect("create wallet config dir");
+        fs::write(
+            &cfg_src,
+            r#"{ "sequencer_addr": "http://127.0.0.1:3040", "seq_poll_timeout": "30s" }"#,
+        )
+        .expect("write vendored wallet config");
+
+        prepare_wallet_home(&lez, &wallet_home, "http://127.0.0.1:4141")
+            .expect("prepare wallet home");
+
+        let copied = fs::read_to_string(wallet_home.join(WALLET_CONFIG_PRIMARY))
+            .expect("read copied wallet config");
+        let copied: serde_json::Value = serde_json::from_str(&copied).expect("parse copied");
+        assert_eq!(
+            copied["sequencer_addr"], "http://127.0.0.1:4141",
+            "expected the project's configured sequencer address to replace the vendored default, got: {copied}"
+        );
+        // Unrelated fields must survive untouched.
+        assert_eq!(copied["seq_poll_timeout"], "30s");
+    }
+
+    /// An already-seeded wallet home (e.g. a project whose wallet was set up
+    /// before, and whose localnet port later changed) must not be silently
+    /// rewritten — `prepare_wallet_home` only seeds a fresh wallet home.
+    #[test]
+    fn prepare_wallet_home_does_not_touch_existing_wallet_config() {
+        let tmp = tempdir().expect("tempdir");
+        let lez = tmp.path().join("lez");
+        let wallet_home = tmp.path().join("wallet-home");
+
+        let cfg_src = lez.join("wallet/configs/debug/wallet_config.json");
+        fs::create_dir_all(cfg_src.parent().unwrap()).expect("create wallet config dir");
+        fs::write(&cfg_src, r#"{ "sequencer_addr": "http://127.0.0.1:3040" }"#)
+            .expect("write vendored wallet config");
+
+        fs::create_dir_all(&wallet_home).expect("create wallet home");
+        let existing = wallet_home.join(WALLET_CONFIG_PRIMARY);
+        fs::write(
+            &existing,
+            r#"{ "sequencer_addr": "http://127.0.0.1:9999" }"#,
+        )
+        .expect("write pre-existing wallet config");
+
+        prepare_wallet_home(&lez, &wallet_home, "http://127.0.0.1:4141")
+            .expect("prepare wallet home");
+
+        let unchanged = fs::read_to_string(&existing).expect("read wallet config");
+        assert_eq!(
+            unchanged,
+            r#"{ "sequencer_addr": "http://127.0.0.1:9999" }"#
+        );
     }
 }
