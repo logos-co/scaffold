@@ -1061,7 +1061,7 @@ fn write_config_into(mut doc: DocumentMut, cfg: &Config) -> DynResult<String> {
                 bc.env_append.contains_key(k) || item.as_array().is_some_and(|a| a.is_empty())
             });
             for (k, list) in &bc.env_append {
-                append_table[k] = string_array(list);
+                set_preserving_suffix(append_table, k, string_array(list));
             }
         } else if let Some(append_table) = basecamp_table
             .get_mut("env_append")
@@ -1234,7 +1234,11 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
         for hook in &run.inline.post_deploy {
             check_toml_value("run.post_deploy", hook)?;
         }
-        run_table["post_deploy"] = post_deploy_value(&run.inline.post_deploy);
+        set_preserving_suffix(
+            run_table,
+            "post_deploy",
+            post_deploy_value(&run.inline.post_deploy),
+        );
     } else {
         remove_unless_empty_literal(run_table, "post_deploy");
     }
@@ -1271,7 +1275,11 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
                 profile_table.remove("topup");
             }
             if !profile.post_deploy.is_empty() {
-                profile_table["post_deploy"] = post_deploy_value(&profile.post_deploy);
+                set_preserving_suffix(
+                    profile_table,
+                    "post_deploy",
+                    post_deploy_value(&profile.post_deploy),
+                );
             } else {
                 remove_unless_empty_literal(profile_table, "post_deploy");
             }
@@ -1286,12 +1294,12 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
         }
         let watch_table = ensure_subtable(doc, "run", "watch");
         if !run.watch.include.is_empty() {
-            watch_table["include"] = string_array(&run.watch.include);
+            set_preserving_suffix(watch_table, "include", string_array(&run.watch.include));
         } else {
             remove_unless_empty_literal(watch_table, "include");
         }
         if !run.watch.exclude.is_empty() {
-            watch_table["exclude"] = string_array(&run.watch.exclude);
+            set_preserving_suffix(watch_table, "exclude", string_array(&run.watch.exclude));
         } else {
             remove_unless_empty_literal(watch_table, "exclude");
         }
@@ -1615,14 +1623,31 @@ fn take_key_comments_from(key: Option<&mut toml_edit::KeyMut<'_>>) -> String {
 /// That comment is exactly the load-bearing kind this module exists to keep:
 /// weboko's review found `# held back until the new IDL spec lands` being
 /// silently dropped while the README promised comments were "left exactly where
-/// they were". Every scaffold-owned key assignment routes through here.
+/// they were". Every scaffold-owned key assignment routes through here,
+/// whatever the value's shape — scalars, arrays and `post_deploy`'s inline
+/// table alike, since `Item::as_value` covers all of them.
+///
+/// Only the **first line** of the suffix is carried. toml_edit's suffix runs to
+/// the next key, so for
+///
+/// ```toml
+/// port = 3040  # a
+/// # b
+/// risc0_dev_mode = true
+/// ```
+///
+/// `port`'s suffix is `"  # a\n# b"` — and `# b` is an own-line comment
+/// belonging to the *next* key, not a trailing comment on this one. Re-homing
+/// it wholesale happens to round-trip today, but it would relocate `# b` the
+/// moment the value is rendered differently. Taking the first line matches what
+/// this function claims to do; toml_edit re-derives the remainder.
 fn set_preserving_suffix(table: &mut Table, key: &str, val: Item) {
     let suffix = table
         .get(key)
         .and_then(Item::as_value)
         .and_then(|v| v.decor().suffix())
         .and_then(|s| s.as_str())
-        .map(str::to_owned);
+        .map(|s| s.split('\n').next().unwrap_or("").to_owned());
     table[key] = val;
     // Re-home the old suffix only when there is one and the new value can carry
     // it. A prefix is deliberately left alone: for a value it is the spacing
@@ -2596,6 +2621,96 @@ role = "project"
                 );
             }
         }
+    }
+
+    /// The array- and `post_deploy`-valued keys, which the scalar cases miss.
+    ///
+    /// `set_preserving_suffix` takes an `Item`, so it handles an array or an
+    /// inline-table value as readily as a scalar — but the sites writing them
+    /// were a different enough shape to be skipped when the scalar sites were
+    /// converted. They are scaffold-owned keys on the same merge path, so a
+    /// trailing comment on one was dropped exactly like the scalar case was.
+    #[test]
+    fn update_config_keeps_a_trailing_comment_on_array_valued_keys() {
+        let original = format!(
+            "{}\n\
+             [run.watch]\n\
+             include = [\"src/**\"]  # only sources\n\
+             exclude = [\"target/**\"]  # never build output\n\
+             debounce_ms = 200  # slow filesystem\n",
+            minimal_v0_2_0()
+        );
+        let cfg = parse_config(&original).expect("fixture must parse");
+        let rewritten = update_config(&original, &cfg).expect("update");
+
+        for comment in [
+            "# only sources",
+            "# never build output",
+            // The scalar control: it already survived, so its presence proves
+            // the fixture reaches the writer at all.
+            "# slow filesystem",
+        ] {
+            assert!(
+                rewritten.contains(comment),
+                "trailing comment lost on an array-valued key: {comment}\n{rewritten}"
+            );
+        }
+        parse_config(&rewritten).expect("rewrite must reparse");
+    }
+
+    /// A trailing comment followed by an own-line comment on the next line.
+    ///
+    /// toml_edit's value suffix runs to the next key, so `port`'s suffix here
+    /// is `"  # trailing\n# owned by risc0_dev_mode"` — two comments belonging
+    /// to two different keys. Both must come out attached to the key they went
+    /// in with.
+    #[test]
+    fn update_config_keeps_a_trailing_and_a_following_own_line_comment_apart() {
+        let original = minimal_v0_2_0().replace(
+            "port = 3040\nrisc0_dev_mode = true",
+            "port = 3040  # trailing\n# owned by risc0_dev_mode\nrisc0_dev_mode = true",
+        );
+        let cfg = parse_config(&original).expect("fixture must parse");
+        let rewritten = update_config(&original, &cfg).expect("update");
+
+        assert!(
+            rewritten.contains("port = 3040  # trailing"),
+            "trailing comment did not stay on its own key:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("# owned by risc0_dev_mode\nrisc0_dev_mode = true"),
+            "following own-line comment was relocated off its key:\n{rewritten}"
+        );
+        parse_config(&rewritten).expect("rewrite must reparse");
+    }
+
+    /// The same promotion, on a file with CRLF line endings.
+    ///
+    /// A `scaffold.toml` authored on Windows, or checked out through
+    /// `core.autocrlf`, reaches the writer with `\r\n` throughout, so the
+    /// comment a promotion salvages ends `"# …\r\n"`. Every other fixture in
+    /// this module is LF, so nothing else here would catch a regression that
+    /// only bites on CRLF.
+    #[test]
+    fn update_config_promotes_a_commented_inline_section_in_a_crlf_file() {
+        let original =
+            with_inline_section("", "circuits = { version = \"0.4.1\" }").replace('\n', "\r\n");
+        let cfg = parse_config(&original).expect("CRLF fixture must parse");
+        let rewritten = update_config(&original, &cfg).expect("update must not fail");
+
+        rewritten
+            .parse::<DocumentMut>()
+            .unwrap_or_else(|e| panic!("CRLF rewrite is not valid TOML: {e}\n{rewritten}"));
+        parse_config(&rewritten)
+            .unwrap_or_else(|e| panic!("CRLF rewrite must reparse: {e}\n{rewritten}"));
+        assert!(
+            !rewritten.contains(&format!("[{INLINE_KEY_COMMENT}")),
+            "CRLF: the comment was absorbed into the section header:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains(INLINE_KEY_COMMENT),
+            "CRLF: the comment above the inline key was lost:\n{rewritten}"
+        );
     }
 
     /// The promoted section must render as a clean `[header]` with the salvaged
