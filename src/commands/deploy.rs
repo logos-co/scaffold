@@ -19,14 +19,22 @@ use super::wallet_support::{
     RpcReachabilityError,
 };
 
-/// Roots searched (in order) for guest `.bin` artefacts. Both layouts exist in
-/// the wild: risc0's default workspace layout emits to `target/riscv-guest/...`
-/// (used by the scaffold template), while sub-crate builds can land in
-/// `methods/target/...`. Discovery walks both so renamed projects work
-/// regardless of which layout cargo/risc0 chose. The `methods/...` half of
-/// this constant is the same project-relative directory that `build.rs`
-/// compiles via `crate::constants::METHODS_DIR`; keep them in sync.
-const GUEST_BIN_SEARCH_ROOTS: &[&str] = &["target/riscv-guest", "methods/target"];
+/// Roots searched (in order) for guest `.bin` artefacts. Three layouts exist
+/// in the wild: risc0's default workspace layout emits to
+/// `target/riscv-guest/...` (used by the scaffold template); sub-crate builds
+/// sharing the parent workspace can land in `methods/target/...`; and a guest
+/// crate that carries its own `[workspace]` (so it builds independently of
+/// the parent, e.g. for a docker-based risc0 toolchain) emits to
+/// `methods/guest/target/...` instead. Discovery walks all three so renamed
+/// projects and independently-versioned guest crates both work regardless of
+/// which layout cargo/risc0 chose. The `methods/...` entries are the same
+/// project-relative directory that `build.rs` compiles via
+/// `crate::constants::METHODS_DIR`; keep them in sync.
+const GUEST_BIN_SEARCH_ROOTS: &[&str] = &[
+    "target/riscv-guest",
+    "methods/target",
+    "methods/guest/target",
+];
 
 /// `spel program-id` line prefix that carries the risc0 image ID — the value
 /// the sequencer uses as the on-chain program ID. Format is whitespace-tolerant:
@@ -996,6 +1004,23 @@ mod tests {
         assert!(result
             .components()
             .any(|c| c.as_os_str() == "my_app_methods"));
+    }
+
+    /// Regression test for issue #231: a guest crate that carries its own
+    /// `[workspace]` (so it builds independently of the parent workspace)
+    /// emits to `methods/guest/target/...` rather than `methods/target/...`
+    /// or `target/riscv-guest/...`, and that root was not searched.
+    #[test]
+    fn finds_binary_in_independent_guest_workspace_layout() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp
+            .path()
+            .join("methods/guest/target/riscv32im-risc0-zkvm-elf/docker");
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(bin_dir.join("my_program.bin"), b"fake").unwrap();
+
+        let result = lookup(tmp.path(), "my_program").unwrap();
+        assert!(result.ends_with("my_program.bin"));
     }
 
     #[test]
