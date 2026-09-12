@@ -21,7 +21,7 @@
 //! corresponding rewrite lives in `crate::migrate`.
 
 use anyhow::{anyhow, bail, Context};
-use toml_edit::{value, DocumentMut, Item, Table};
+use toml_edit::{value, DocumentMut, Item, Table, TableLike};
 
 use crate::constants::{
     BASECAMP_ATTR, BASECAMP_SOURCE, DEFAULT_FRAMEWORK_IDL_PATH, DEFAULT_FRAMEWORK_IDL_SPEC,
@@ -42,9 +42,7 @@ pub(crate) fn parse_config(text: &str) -> DynResult<Config> {
         .parse()
         .context("invalid scaffold.toml: TOML parse error")?;
 
-    let scaffold = doc
-        .get("scaffold")
-        .and_then(Item::as_table)
+    let scaffold = section_like(doc.as_table(), "scaffold")
         .ok_or_else(|| anyhow!("invalid scaffold.toml: missing [scaffold] section"))?;
     let version = read_string(scaffold, "version")
         .ok_or_else(|| anyhow!("invalid scaffold.toml: missing [scaffold].version"))?;
@@ -74,9 +72,7 @@ pub(crate) fn parse_config(text: &str) -> DynResult<Config> {
     let framework = parse_framework(&doc);
     let localnet = parse_localnet(&doc)?;
     let circuits = parse_circuits(&doc)?;
-    let wallet_home_dir = doc
-        .get("wallet")
-        .and_then(Item::as_table)
+    let wallet_home_dir = section_like(doc.as_table(), "wallet")
         .and_then(|t| read_string(t, "home_dir"))
         .unwrap_or_else(|| ".scaffold/wallet".to_string());
 
@@ -98,7 +94,7 @@ pub(crate) fn parse_config(text: &str) -> DynResult<Config> {
 }
 
 fn parse_run(doc: &DocumentMut) -> DynResult<RunConfig> {
-    let Some(run_table) = doc.get("run").and_then(Item::as_table) else {
+    let Some(run_table) = section_like(doc.as_table(), "run") else {
         return Ok(RunConfig::default());
     };
 
@@ -122,9 +118,9 @@ fn parse_run(doc: &DocumentMut) -> DynResult<RunConfig> {
 
     let mut profiles: std::collections::BTreeMap<String, RunProfile> =
         std::collections::BTreeMap::new();
-    if let Some(profiles_table) = run_table.get("profiles").and_then(Item::as_table) {
+    if let Some(profiles_table) = section_like(run_table, "profiles") {
         for (name, item) in profiles_table.iter() {
-            let table = item.as_table().ok_or_else(|| {
+            let table = item.as_table_like().ok_or_else(|| {
                 anyhow!("invalid scaffold.toml: [run.profiles.{name}] is not a table")
             })?;
             let reset = table
@@ -178,8 +174,8 @@ fn parse_run(doc: &DocumentMut) -> DynResult<RunConfig> {
     })
 }
 
-fn parse_run_watch(run_table: &Table) -> DynResult<WatchConfig> {
-    let Some(watch_table) = run_table.get("watch").and_then(Item::as_table) else {
+fn parse_run_watch(run_table: &dyn TableLike) -> DynResult<WatchConfig> {
+    let Some(watch_table) = section_like(run_table, "watch") else {
         return Ok(WatchConfig::default());
     };
     let include = parse_glob_list(watch_table.get("include"), "[run.watch].include")?;
@@ -290,16 +286,16 @@ pub(crate) fn detect_old_schema_markers(doc: &DocumentMut, version: &str) -> Old
     m.version_stale = version != SCAFFOLD_TOML_SCHEMA_VERSION
         && (version.starts_with("0.1.") || version == "0.1" || version == "0.0");
 
-    let repos_table = doc.get("repos").and_then(Item::as_table);
+    let repos_table = section_like(doc.as_table(), "repos");
     // [repos.lssa] — pre-spel-era alias for [repos.lez].
     m.has_lssa = repos_table.is_some_and(|t| t.get("lssa").is_some());
     // [repos.{lez,spel}].url — dropped in 0.2.0; source is the single field.
     m.has_repo_url = ["lez", "spel"].iter().any(|name| {
         repos_table
-            .and_then(|t| t.get(name).and_then(Item::as_table))
+            .and_then(|t| section_like(t, name))
             .is_some_and(|tbl| tbl.get("url").is_some())
     });
-    let basecamp_table = doc.get("basecamp").and_then(Item::as_table);
+    let basecamp_table = section_like(doc.as_table(), "basecamp");
     // Old [basecamp] shape: pin / source / lgpm_flake at the root.
     m.has_old_basecamp_keys = basecamp_table.is_some_and(|t| {
         ["pin", "source", "lgpm_flake"]
@@ -308,7 +304,7 @@ pub(crate) fn detect_old_schema_markers(doc: &DocumentMut, version: &str) -> Old
     });
     // [basecamp.modules.*] — moved to [modules.*].
     m.has_old_basecamp_modules = basecamp_table
-        .and_then(|t| t.get("modules").and_then(Item::as_table))
+        .and_then(|t| section_like(t, "modules"))
         .is_some_and(|m| m.iter().next().is_some());
 
     m
@@ -333,10 +329,7 @@ fn parse_repo_ref(doc: &DocumentMut, name: &str) -> DynResult<Option<RepoRef>> {
     // [repos.<name>] is the canonical key. Pre-spel-era configs that used
     // [repos.lssa] are rejected upstream in `detect_old_schema` so users are
     // pushed through `init` for the rename — no alias acceptance here.
-    let Some(table) = doc
-        .get("repos")
-        .and_then(Item::as_table)
-        .and_then(|t| t.get(name).and_then(Item::as_table))
+    let Some(table) = section_like(doc.as_table(), "repos").and_then(|t| section_like(t, name))
     else {
         return Ok(None);
     };
@@ -378,7 +371,7 @@ fn parse_repo_ref(doc: &DocumentMut, name: &str) -> DynResult<Option<RepoRef>> {
 /// `attr` is absent or given in scalar form (handled by the caller's
 /// `read_string`). Keys are nix system triples (`aarch64-darwin`, etc.).
 fn parse_attr_platform(
-    repo_table: &Table,
+    repo_table: &dyn TableLike,
     name: &str,
 ) -> DynResult<std::collections::BTreeMap<String, String>> {
     let mut out = std::collections::BTreeMap::new();
@@ -450,12 +443,12 @@ fn is_dangerous_transport(source: &str) -> bool {
 
 fn parse_modules(doc: &DocumentMut) -> DynResult<std::collections::BTreeMap<String, ModuleEntry>> {
     let mut out = std::collections::BTreeMap::new();
-    let Some(modules) = doc.get("modules").and_then(Item::as_table) else {
+    let Some(modules) = section_like(doc.as_table(), "modules") else {
         return Ok(out);
     };
     for (name, item) in modules.iter() {
         let table = item
-            .as_table()
+            .as_table_like()
             .ok_or_else(|| anyhow!("invalid scaffold.toml: [modules.{name}] is not a table"))?;
         let flake = read_string(table, "flake").ok_or_else(|| {
             anyhow!("invalid scaffold.toml: [modules.{name}] missing required field `flake`")
@@ -486,7 +479,7 @@ fn parse_modules(doc: &DocumentMut) -> DynResult<std::collections::BTreeMap<Stri
 }
 
 fn parse_basecamp_runtime(doc: &DocumentMut) -> DynResult<Option<BasecampConfig>> {
-    let Some(table) = doc.get("basecamp").and_then(Item::as_table) else {
+    let Some(table) = section_like(doc.as_table(), "basecamp") else {
         return Ok(None);
     };
     // An empty [basecamp] table (e.g. just defaults inherited) still resolves
@@ -512,12 +505,12 @@ fn parse_basecamp_runtime(doc: &DocumentMut) -> DynResult<Option<BasecampConfig>
     }
 
     // [basecamp.env] — plain string map.
-    if let Some(env_table) = table.get("env").and_then(Item::as_table) {
+    if let Some(env_table) = section_like(table, "env") {
         cfg.env = parse_string_map(env_table, "basecamp.env")?;
         any_field = any_field || !cfg.env.is_empty();
     }
     // [basecamp.env_append] — map of string -> array<string>.
-    if let Some(append_table) = table.get("env_append").and_then(Item::as_table) {
+    if let Some(append_table) = section_like(table, "env_append") {
         for (key, item) in append_table.iter() {
             validate_env_var_name(key, "basecamp.env_append")?;
             let arr = item.as_array().ok_or_else(|| {
@@ -547,13 +540,13 @@ fn parse_basecamp_runtime(doc: &DocumentMut) -> DynResult<Option<BasecampConfig>
         any_field = any_field || !cfg.env_append.is_empty();
     }
     // [basecamp.profiles.<name>] — per-profile launch config.
-    if let Some(profiles) = table.get("profiles").and_then(Item::as_table) {
+    if let Some(profiles) = section_like(table, "profiles") {
         for (name, item) in profiles.iter() {
-            let ptable = item.as_table().ok_or_else(|| {
+            let ptable = item.as_table_like().ok_or_else(|| {
                 anyhow!("invalid scaffold.toml: [basecamp.profiles.{name}] is not a table")
             })?;
             let mut profile = BasecampProfile::default();
-            if let Some(env_table) = ptable.get("env").and_then(Item::as_table) {
+            if let Some(env_table) = section_like(ptable, "env") {
                 profile.env =
                     parse_string_map(env_table, &format!("basecamp.profiles.{name}.env"))?;
             }
@@ -582,7 +575,7 @@ fn parse_basecamp_runtime(doc: &DocumentMut) -> DynResult<Option<BasecampConfig>
 }
 
 fn parse_string_map(
-    table: &Table,
+    table: &dyn TableLike,
     key: &str,
 ) -> DynResult<std::collections::BTreeMap<String, String>> {
     let mut out = std::collections::BTreeMap::new();
@@ -615,17 +608,14 @@ fn validate_env_var_name(name: &str, context: &str) -> DynResult<()> {
 }
 
 fn parse_framework(doc: &DocumentMut) -> FrameworkConfig {
-    let table = doc.get("framework").and_then(Item::as_table);
+    let table = section_like(doc.as_table(), "framework");
     let kind = table
         .and_then(|t| read_string(t, "kind"))
         .unwrap_or_else(|| FRAMEWORK_KIND_DEFAULT.to_string());
     let version = table
         .and_then(|t| read_string(t, "version"))
         .unwrap_or_else(|| DEFAULT_FRAMEWORK_VERSION.to_string());
-    let idl_table = doc
-        .get("framework")
-        .and_then(|f| f.as_table())
-        .and_then(|t| t.get("idl").and_then(Item::as_table));
+    let idl_table = table.and_then(|t| section_like(t, "idl"));
     let idl_spec = idl_table
         .and_then(|t| read_string(t, "spec"))
         .unwrap_or_else(|| DEFAULT_FRAMEWORK_IDL_SPEC.to_string());
@@ -644,7 +634,7 @@ fn parse_framework(doc: &DocumentMut) -> FrameworkConfig {
 
 fn parse_localnet(doc: &DocumentMut) -> DynResult<LocalnetConfig> {
     let mut cfg = LocalnetConfig::default();
-    let Some(table) = doc.get("localnet").and_then(Item::as_table) else {
+    let Some(table) = section_like(doc.as_table(), "localnet") else {
         return Ok(cfg);
     };
     if let Some(v) = table.get("port").and_then(Item::as_value) {
@@ -664,7 +654,7 @@ fn parse_localnet(doc: &DocumentMut) -> DynResult<LocalnetConfig> {
 }
 
 fn parse_circuits(doc: &DocumentMut) -> DynResult<CircuitsConfig> {
-    let Some(table) = doc.get("circuits").and_then(Item::as_table) else {
+    let Some(table) = section_like(doc.as_table(), "circuits") else {
         return Ok(CircuitsConfig::default());
     };
 
@@ -715,12 +705,35 @@ fn check_circuits_url_template(template: &str) -> DynResult<()> {
     Ok(())
 }
 
-fn read_string(table: &Table, key: &str) -> Option<String> {
+fn read_string(table: &dyn TableLike, key: &str) -> Option<String> {
     table
         .get(key)
         .and_then(Item::as_str)
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// Read a modelled section, accepting **either** syntax TOML allows for it:
+/// a `[header]` table or an inline `section = { … }` value.
+///
+/// [`Item::as_table`] is `None` for an inline table, so every reader that used
+/// it treated `wallet = { home_dir = "CUSTOM" }` — a perfectly valid
+/// `scaffold.toml` that `toml` and every other parser accepts — as an *absent*
+/// section and silently substituted the default. The user's value was never
+/// read, so it was never in the `Config`, so the next write emitted the default
+/// over the top of it. The file parsed, the command exited 0, and the override
+/// quietly stopped applying.
+///
+/// The two syntaxes are semantically identical in TOML; only their formatting
+/// differs. The reader has no business distinguishing them, so it no longer
+/// does. [`Item::as_table_like`] covers both, and `TableLike` exposes the same
+/// `get`/`iter` surface both concrete types already provided.
+///
+/// The *writer* still normalises an inline section to a `[header]` on rewrite
+/// (see [`coerce_to_table`]); that is a formatting choice, and it is safe
+/// precisely because the values now survive the round-trip through the model.
+fn section_like<'a>(parent: &'a dyn TableLike, name: &str) -> Option<&'a dyn TableLike> {
+    parent.get(name).and_then(Item::as_table_like)
 }
 
 /// Render `cfg` as a fresh `scaffold.toml`. For rewriting a file that already
@@ -1521,10 +1534,10 @@ fn clear_owned_basecamp_keys(doc: &mut DocumentMut) {
 /// Coerce `item` into a real `Item::Table` in place, and hand back a mutable
 /// borrow of it.
 ///
-/// **Why this exists.** Every parser in this module reads its section through
-/// [`Item::as_table`], which is `None` for an *inline* table
+/// **Why this exists.** Every parser in this module used to read its section
+/// through [`Item::as_table`], which is `None` for an *inline* table
 /// (`wallet = { home_dir = "…" }`) and for any non-table value. So a file
-/// holding `wallet = { … }` parses perfectly well — the reader just falls back
+/// holding `wallet = { … }` parses perfectly well while the reader falls back
 /// to the default — and the writer then reached the same key expecting a
 /// `Table`. `entry(...).or_insert(...)` returns the *occupied* item in that
 /// case, not a freshly inserted table, so `.as_table_mut()` was `None` and the
@@ -1533,6 +1546,23 @@ fn clear_owned_basecamp_keys(doc: &mut DocumentMut) {
 /// panic on file content a UX regression, and weboko's review asked for a
 /// returned error or an explicit fallback instead. This is the fallback, and it
 /// is the data-preserving one:
+///
+/// **The reader half is fixed separately, and it has to be.** Coercing at write
+/// time keeps the *keys*, but on its own it silently rewrites their **values**:
+/// if the reader never saw `home_dir = "CUSTOM/PATH"` (because `as_table` said
+/// the section was absent), then `cfg` carries the default, and promoting the
+/// table only to assign that default over the top turns a working override into
+/// a no-op — with exit 0 and no diagnostic. So [`section_like`] now reads both
+/// syntaxes, and the model carries the user's real values into this function.
+///
+/// **The resulting semantics, stated once:** a modelled section written inline
+/// is treated as exactly equivalent to the `[header]` form. Its values are read
+/// into the model, scaffold's own modelled keys are then assigned over the top
+/// (as they are for any section — that is the writer's job), and every key
+/// scaffold does *not* model is carried through untouched. The only thing that
+/// changes is syntax: the section is normalised to a `[header]` in place, so
+/// after a rewrite there is exactly one definition of it and no shadowed inline
+/// remnant for a later block to override.
 ///
 /// - An **inline table** carries the user's own keys, so convert it rather than
 ///   discarding it: every key moves into a real `Table`, unmodelled ones
@@ -1769,7 +1799,35 @@ fn ensure_subtable<'a>(doc: &'a mut DocumentMut, parent: &str, child: &str) -> &
     // the parent key's decor is reset on promotion like every other section.
     let parent_table = section_table(doc, parent);
     parent_table.set_implicit(true);
-    child_table(parent_table, child)
+    // `section_table` parks any comment salvaged from a promoted `modules = { … }`
+    // on the *parent's* header decor — but an implicit parent emits no
+    // `[modules]` header at all, so that decor is never rendered and the
+    // comment is dropped. Carry it down to the first child, which is the
+    // header the user will actually see (`[modules.foo]`). Only on promotion:
+    // an already-real parent's decor is its own and stays put.
+    let salvaged = parent_table.decor().prefix().and_then(|p| p.as_str());
+    let salvaged = match salvaged {
+        Some(s) if !s.trim().is_empty() => {
+            let owned = s.to_owned();
+            parent_table.decor_mut().clear();
+            Some(owned)
+        }
+        _ => None,
+    };
+    let child_table = child_table(parent_table, child);
+    if let Some(salvaged) = salvaged {
+        // Prepend: the child may carry its own comment already.
+        let existing = child_table
+            .decor()
+            .prefix()
+            .and_then(|p| p.as_str())
+            .unwrap_or("")
+            .to_owned();
+        child_table
+            .decor_mut()
+            .set_prefix(format!("{salvaged}{existing}"));
+    }
+    child_table
 }
 
 /// Reject any value containing a newline, CR, tab, or other C0 control
@@ -2495,21 +2553,50 @@ role = "project"
     /// inline one is the only definition of that key.
     ///
     /// The inline key always carries [`INLINE_KEY_COMMENT`] on the line above.
+    ///
+    /// **The key must end up at document root**, which is not automatic: in
+    /// TOML a bare `key = value` line belongs to the most recent `[header]`
+    /// above it, so substituting the inline form into the middle of the file —
+    /// where the dropped `[wallet]` block used to sit, right after
+    /// `[repos.spel]` — silently produces `repos.spel.wallet`, a key of an
+    /// unrelated table rather than the section under test. The writer then
+    /// quite correctly leaves that foreign key alone and creates the real root
+    /// `[wallet]`, which *looks* like "the inline table was abandoned and
+    /// shadowed" but is simply the fixture describing a different file than it
+    /// meant to. Prepending keeps the key at root in every case, and the
+    /// assertion below pins that rather than trusting the layout.
     fn with_inline_section(header: &str, inline: &str) -> String {
         let base = minimal_v0_2_0();
-        let inline = &format!("{INLINE_KEY_COMMENT}\n{inline}");
-        let original = if header.is_empty() {
-            format!("{inline}\n{base}")
+        let commented = format!("{INLINE_KEY_COMMENT}\n{inline}");
+        // Drop the header form (when there is one) so the inline key is the
+        // only definition, then place that key *before* any `[header]` so it
+        // is scoped to the document root.
+        let body = if header.is_empty() {
+            base
         } else {
             assert!(
                 base.contains(header),
                 "minimal_v0_2_0 fixture drifted; no such block:\n{header}"
             );
-            base.replace(header, &format!("{inline}\n"))
+            base.replace(header, "")
         };
+        let original = format!("{commented}\n{body}");
+        let doc: DocumentMut = original
+            .parse()
+            .unwrap_or_else(|e| panic!("fixture itself must be valid TOML: {e}\n{original}"));
+        // The key under test is the first one on the inline line; require the
+        // parser to agree it is a root key, so a future edit cannot quietly
+        // re-nest it and hollow out every test built on this fixture.
+        let key = inline
+            .split('=')
+            .next()
+            .expect("inline fixture has a key")
+            .trim();
         assert!(
-            original.parse::<DocumentMut>().is_ok(),
-            "fixture itself must be valid TOML:\n{original}"
+            doc.as_table().contains_key(key),
+            "fixture must put `{key}` at document root, not inside a preceding \
+             table; got root keys {:?}\n{original}",
+            doc.as_table().iter().map(|(k, _)| k).collect::<Vec<_>>()
         );
         original
     }
@@ -2530,57 +2617,81 @@ role = "project"
     /// The contract asserted per case: the write must not panic, the result
     /// must still be valid TOML, it must still parse as a config, and the
     /// user's own keys inside the inline table must survive the coercion.
+    ///
+    /// **The survivor assertion is deliberately structural, not a substring
+    /// match.** It originally read `assert!(rewritten.contains("keep me"))`,
+    /// which was satisfied by the very data loss it was meant to exclude: when
+    /// the section was left inline and a second `[section]` appended after it,
+    /// `keep me` was still *present in the text* while being dead, shadowed
+    /// TOML. Asserting on the reparsed document instead — the key must live
+    /// inside the one real `[section]` table — is what makes this test able to
+    /// fail. See `update_config_promotes_a_mid_file_inline_section`.
     #[test]
     fn update_config_survives_an_inline_table_for_every_modelled_section() {
-        // (label, header block to drop, inline replacement, a key the user
-        // wrote inside it that must survive).
+        // (label, header block to drop, inline replacement, the dotted path at
+        // which the user's own unmodelled key must be readable afterwards).
         let cases = [
             (
                 "wallet",
                 "[wallet]\nhome_dir = \".scaffold/wallet\"\n",
                 "wallet = { home_dir = \".scaffold/wallet\", note = \"keep me\" }",
-                "keep me",
+                vec!["wallet", "note"],
             ),
+            // `[framework.idl]` has to go too: TOML forbids a `[header]` from
+            // extending a key already defined as an inline table, so leaving it
+            // in place makes the fixture itself unparseable.
             (
                 "framework",
-                "[framework]\nkind = \"default\"\nversion = \"0.1.0\"\n",
+                "[framework]\nkind = \"default\"\nversion = \"0.1.0\"\n\n[framework.idl]\nspec = \"lssa-idl/0.1.0\"\npath = \"idl\"\n",
                 "framework = { kind = \"default\", version = \"0.1.0\", note = \"keep me\" }",
-                "keep me",
+                vec!["framework", "note"],
             ),
             (
                 "localnet",
                 "[localnet]\nport = 3040\nrisc0_dev_mode = true\n",
                 "localnet = { port = 3040, risc0_dev_mode = true, note = \"keep me\" }",
-                "keep me",
+                vec!["localnet", "note"],
             ),
-            (
-                "framework.idl",
-                "[framework.idl]\nspec = \"lssa-idl/0.1.0\"\npath = \"idl\"\n",
-                "idl = { spec = \"lssa-idl/0.1.0\", path = \"idl\", note = \"keep me\" }",
-                "keep me",
-            ),
+            // NOTE: there is deliberately no `framework.idl` row. This fixture
+            // only builds *root-level* inline keys, so the row that used to sit
+            // here wrote a root `idl = { … }` — a key scaffold does not model at
+            // all, not the `[framework.idl]` section it was named after. The
+            // writer correctly ignored it and built `[framework.idl]` from the
+            // config, so the row asserted nothing about promotion while looking
+            // as though it did. Genuine nested-section promotion is covered by
+            // `update_config_survives_an_inline_child_table` and
+            // `update_config_promotes_a_mid_file_inline_child_section`.
             (
                 "circuits",
                 "",
                 "circuits = { version = \"0.1.0\", note = \"keep me\" }",
-                "keep me",
+                vec!["circuits", "note"],
             ),
             (
                 "run",
                 "",
                 "run = { reset = true, note = \"keep me\" }",
-                "keep me",
+                vec!["run", "note"],
             ),
-            ("modules", "", "modules = { note = \"keep me\" }", "keep me"),
+            // `[modules.*]` is a map of module *entries*, so the user's own key
+            // has to be a well-formed entry rather than a bare scalar — a bare
+            // `note = "…"` here is an invalid module, and is now correctly
+            // rejected at parse time rather than silently ignored.
+            (
+                "modules",
+                "",
+                "modules = { note = { flake = \"./keep me\", role = \"project\" } }",
+                vec!["modules", "note", "flake"],
+            ),
             (
                 "basecamp",
                 "",
                 "basecamp = { port_base = 41000, note = \"keep me\" }",
-                "keep me",
+                vec!["basecamp", "note"],
             ),
         ];
 
-        for (label, header, inline, survivor) in cases {
+        for (label, header, inline, path) in cases {
             let original = with_inline_section(header, inline);
             // The whole point: this file is *valid* and the reader accepts it.
             let cfg = parse_config(&original)
@@ -2588,29 +2699,36 @@ role = "project"
             // Before the fix this aborted the process rather than returning.
             let rewritten = update_config(&original, &cfg)
                 .unwrap_or_else(|e| panic!("{label}: update must not fail, got {e}"));
-            assert!(
-                rewritten.parse::<DocumentMut>().is_ok(),
-                "{label}: rewrite is not valid TOML:\n{rewritten}"
-            );
+            let doc: DocumentMut = rewritten
+                .parse()
+                .unwrap_or_else(|e| panic!("{label}: rewrite is not valid TOML: {e}\n{rewritten}"));
             parse_config(&rewritten)
                 .unwrap_or_else(|e| panic!("{label}: rewrite must reparse, got {e}\n{rewritten}"));
+            // Structural, not textual: walk to the key and require it to be
+            // reachable through real tables. A shadowed inline table would
+            // still `contains("keep me")` but would not resolve here.
+            let mut item = doc.as_item();
+            for seg in &path {
+                item = item
+                    .get(seg)
+                    .unwrap_or_else(|| panic!("{label}: no `{seg}` on the way to {path:?} — the user's own key did not survive promotion:\n{rewritten}"));
+            }
             assert!(
-                rewritten.contains(survivor),
-                "{label}: the user's own key inside the inline table was dropped:\n{rewritten}"
+                item.as_str().is_some_and(|s| s.contains("keep me")),
+                "{label}: {path:?} is {:?}, not the user's value:\n{rewritten}",
+                item.as_str()
+            );
+            // Exactly one definition of the section: the promoted header, with
+            // no surviving inline form for a later one to shadow.
+            let head = path[0];
+            assert!(
+                !rewritten.contains(&format!("{head} = {{")),
+                "{label}: the inline form survived and is now shadowed dead text:\n{rewritten}"
             );
             // The comment explaining the section is exactly the kind this PR
             // exists to keep, and promoting the key must not swallow it into
             // the header it generates.
-            //
-            // `framework.idl` is excluded: `with_inline_section` drops the
-            // `[framework.idl]` header and writes `idl = { … }` at *root*
-            // level, so the commented key is a root `idl`, not the section the
-            // writer promotes. The writer builds a fresh `[framework.idl]`
-            // under `[framework]` and the root comment is orphaned — a
-            // property of the fixture, not of the promotion. The genuine
-            // child-table promotion is covered by
-            // `update_config_survives_an_inline_child_table`.
-            if label != "framework.idl" {
+            {
                 assert!(
                     rewritten.contains(INLINE_KEY_COMMENT),
                     "{label}: the comment above the inline key was lost:\n{rewritten}"
@@ -2621,6 +2739,150 @@ role = "project"
                 );
             }
         }
+    }
+
+    /// A `scaffold.toml` whose sections are written inline and sit *after* at
+    /// least one `[header]` — the shape a hand-edited file most plausibly takes.
+    ///
+    /// This is the silent-data-loss regression. The reader reached every
+    /// section through `Item::as_table`, which is `None` for an inline table,
+    /// so `wallet = { home_dir = "CUSTOM/PATH" }` was read as *no wallet
+    /// section at all* and `wallet_home_dir` silently became the default. The
+    /// writer then faithfully wrote that default back over the user's file.
+    /// Nothing failed: the file parsed, the command exited 0, and the override
+    /// simply stopped applying.
+    ///
+    /// The assertion that matters is the round-trip through `parse_config`. A
+    /// substring check on the rewritten text cannot see this bug — indeed the
+    /// old table-driven test's `contains("keep me")` passed throughout — because
+    /// the user's characters are still *somewhere* in the file; what changed is
+    /// which definition wins.
+    #[test]
+    fn update_config_reads_and_preserves_mid_file_inline_sections() {
+        // Root-scoped inline sections with `[header]` blocks both before and
+        // after them. `[scaffold]` is a real header, so these keys sit *mid
+        // file* — but they are still root keys, because a dotted `[a.b]` header
+        // does not reopen the root and `[scaffold]`'s own key region ends at the
+        // blank line only in appearance: what actually matters is that we place
+        // them before the next header, then reopen the root scope explicitly.
+        //
+        // The distinction is the whole trap here: a bare `key = value` line
+        // belongs to the nearest preceding `[header]`, so appending these to the
+        // end of the fixture would define `localnet.wallet`, not `wallet`. The
+        // root-key assertion below pins that we built what we meant to.
+        let base = minimal_v0_2_0()
+            .replace("[wallet]\nhome_dir = \".scaffold/wallet\"\n", "")
+            .replace("[localnet]\nport = 3040\nrisc0_dev_mode = true\n", "");
+        let original = format!(
+            "# why this override exists\n\
+             wallet = {{ home_dir = \"CUSTOM/PATH\", note = \"keep me\" }}\n\
+             localnet = {{ port = 9999, risc0_dev_mode = false }}\n\
+             {base}"
+        );
+        let probe: DocumentMut = original.parse().expect("fixture is valid TOML");
+        for key in ["wallet", "localnet"] {
+            assert!(
+                probe.as_table().contains_key(key),
+                "fixture must define `{key}` at document root:\n{original}"
+            );
+        }
+
+        // 1. The reader must see the user's values, not the defaults. Before the
+        //    fix these were ".scaffold/wallet" and 3040.
+        let cfg = parse_config(&original).expect("fixture parses");
+        assert_eq!(cfg.wallet_home_dir, "CUSTOM/PATH");
+        assert_eq!(cfg.localnet.port, 9999);
+        assert!(!cfg.localnet.risc0_dev_mode);
+
+        let rewritten = update_config(&original, &cfg).expect("update succeeds");
+
+        // 2. The values must survive the write. Before the fix the rewrite
+        //    emitted scaffold's defaults into a second, winning `[wallet]`.
+        let reread = parse_config(&rewritten).expect("rewrite reparses");
+        assert_eq!(
+            reread.wallet_home_dir, "CUSTOM/PATH",
+            "the user's home_dir was replaced by the default:\n{rewritten}"
+        );
+        assert_eq!(
+            reread.localnet.port, 9999,
+            "the user's port was replaced by the default:\n{rewritten}"
+        );
+
+        // 3. Exactly one definition of each promoted section, so nothing is
+        //    left as shadowed dead text for a later block to override.
+        for section in ["wallet", "localnet"] {
+            assert_eq!(
+                rewritten.matches(&format!("[{section}]")).count(),
+                1,
+                "expected exactly one [{section}] definition:\n{rewritten}"
+            );
+            assert!(
+                !rewritten.contains(&format!("{section} = {{")),
+                "the inline {section} form survived alongside the header:\n{rewritten}"
+            );
+        }
+
+        // 4. An unmodelled key the user wrote inside the inline table survives
+        //    the promotion — scaffold assigns its own keys over the top, but
+        //    must not discard the ones it does not model.
+        let doc: DocumentMut = rewritten.parse().expect("valid TOML");
+        assert_eq!(
+            doc["wallet"]["note"].as_str(),
+            Some("keep me"),
+            "an unmodelled key inside the promoted table was dropped:\n{rewritten}"
+        );
+
+        // 5. The own-line comment above the inline key is re-homed above the
+        //    generated header, not absorbed into it.
+        assert!(
+            rewritten.contains(&format!("{INLINE_KEY_COMMENT}\n[wallet]")),
+            "the comment was not re-homed above the promoted header:\n{rewritten}"
+        );
+    }
+
+    /// The same loss one level down: a nested section written inline.
+    ///
+    /// `[repos.lez]` is reached through `parse_repo_ref`, which drilled in with
+    /// two chained `as_table` calls — so an inline `lez = { … }` under
+    /// `[repos]`, or an inline `repos = { lez = { … } }`, made the repo look
+    /// absent. For `lez` that surfaced as a hard "missing [repos.lez]" error
+    /// rather than silent loss, which is why it escaped notice; the same shape
+    /// on an *optional* repo loses the pin silently.
+    #[test]
+    fn update_config_reads_and_preserves_inline_nested_sections() {
+        // `repos` must be a *root* key, so it goes before `[scaffold]` — after
+        // it, the line would define `scaffold.repos` instead.
+        let original = format!(
+            "repos = {{ lez = {{ source = \"{lez}\", pin = \"{lezpin}\" }}, \
+             spel = {{ source = \"{spel}\", pin = \"{spelpin}\", note = \"keep me\" }} }}\n\n\
+             [scaffold]\nversion = \"0.2.0\"\n",
+            lez = LEZ_SOURCE,
+            lezpin = DEFAULT_LEZ.sha,
+            spel = SPEL_SOURCE,
+            spelpin = DEFAULT_SPEL.sha,
+        );
+
+        // Before the fix this failed outright with "missing [repos.lez]".
+        let cfg = parse_config(&original).expect("inline repos must be readable");
+        assert_eq!(cfg.lez.source, LEZ_SOURCE);
+        assert_eq!(cfg.spel.pin, DEFAULT_SPEL.sha);
+
+        let rewritten = update_config(&original, &cfg).expect("update succeeds");
+        let reread = parse_config(&rewritten).expect("rewrite reparses");
+        assert_eq!(reread.lez.pin, DEFAULT_LEZ.sha);
+        assert_eq!(reread.spel.source, SPEL_SOURCE);
+
+        // The unmodelled key inside the nested inline table survives.
+        let doc: DocumentMut = rewritten.parse().expect("valid TOML");
+        assert_eq!(
+            doc["repos"]["spel"]["note"].as_str(),
+            Some("keep me"),
+            "an unmodelled key in a nested inline table was dropped:\n{rewritten}"
+        );
+        assert!(
+            !rewritten.contains("repos = {"),
+            "the inline repos form survived:\n{rewritten}"
+        );
     }
 
     /// The array- and `post_deploy`-valued keys, which the scalar cases miss.
