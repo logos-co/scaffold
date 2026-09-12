@@ -172,6 +172,25 @@ lgs setup   # picks up the new section
 
 Existing fields are preserved verbatim.
 
+### How scaffold edits `scaffold.toml`
+
+Two commands write the file back: `basecamp setup` and `basecamp modules`
+(module capture). They rewrite it **in place**: your comments, your key
+ordering, and any sections scaffold does not model are left exactly where they
+were, and only the keys scaffold owns are reassigned. Comments in this file are
+worth writing; they survive.
+
+Two things follow from that:
+
+- A setting you remove by hand stays removed. Scaffold clears the keys it owns
+  when the value goes back to its default rather than re-asserting them, so
+  deleting a line is a real edit, not one that gets undone on the next run.
+- If the file cannot be parsed as TOML — a stray bracket from a hand-edit —
+  **no command runs at all.** Every command loads `scaffold.toml` before doing
+  anything, and an unparseable file is a hard error naming the line and column,
+  with the file left untouched. Fix the syntax and re-run; scaffold will not
+  overwrite a config it cannot read.
+
 ## Configuration
 
 `lgs run` works with no configuration. To add post-deploy hooks, named
