@@ -110,7 +110,12 @@ pub(crate) fn compute_program_hashes(project: &Project) -> DynResult<BTreeMap<St
         // that's the path the IDL was actually written to: a raw stem
         // like `my-program` would miss the on-disk `my_program.json`
         // and bail with a misleading "run `lgs build idl`" error.
-        let idl_path = idl_dir.join(format!("{}.json", sanitize_file_stem(&stem)));
+        // spel projects don't use the `<idl-dir>/<stem>.json` convention: the
+        // IDL is a single file at the project root, named by `spel.toml`
+        // (`<project>-idl.json`). Resolving it the scaffold way would bail on
+        // a file that is never written.
+        let idl_path = spel_idl_path(project, &stem)
+            .unwrap_or_else(|| idl_dir.join(format!("{}.json", sanitize_file_stem(&stem))));
         if idl_path.exists() {
             let idl_bytes = std::fs::read(&idl_path)
                 .with_context(|| format!("read {} for hashing", idl_path.display()))?;
@@ -131,6 +136,25 @@ pub(crate) fn compute_program_hashes(project: &Project) -> DynResult<BTreeMap<St
         out.insert(stem, hex_encode(&hasher.finalize()));
     }
     Ok(out)
+}
+
+/// The IDL path declared by a spel project's `spel.toml`, if this is a spel
+/// project and the file names one. Supports both the single-program
+/// (`[program]`) and multi-program (`[programs.<name>]`) shapes.
+fn spel_idl_path(project: &Project, stem: &str) -> Option<std::path::PathBuf> {
+    if project.config.framework.kind != FRAMEWORK_KIND_SPEL {
+        return None;
+    }
+    let text = std::fs::read_to_string(project.root.join("spel.toml")).ok()?;
+    let doc = text.parse::<toml_edit::DocumentMut>().ok()?;
+    let named = doc
+        .get("programs")
+        .and_then(|p| p.get(stem))
+        .and_then(|p| p.get("idl"));
+    let idl = named
+        .or_else(|| doc.get("program").and_then(|p| p.get("idl")))?
+        .as_str()?;
+    Some(project.root.join(idl))
 }
 
 /// Canonical, stable digest of the deploy-affecting bits of scaffold.toml

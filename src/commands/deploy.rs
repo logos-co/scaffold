@@ -26,7 +26,13 @@ use super::wallet_support::{
 /// regardless of which layout cargo/risc0 chose. The `methods/...` half of
 /// this constant is the same project-relative directory that `build.rs`
 /// compiles via `crate::constants::METHODS_DIR`; keep them in sync.
-const GUEST_BIN_SEARCH_ROOTS: &[&str] = &["target/riscv-guest", "methods/target"];
+// `methods/guest/target` is where `cargo risczero build` (spel projects)
+// writes, under a `docker/` directory rather than `release/`.
+const GUEST_BIN_SEARCH_ROOTS: &[&str] = &[
+    "target/riscv-guest",
+    "methods/target",
+    "methods/guest/target",
+];
 
 /// `spel program-id` line prefix that carries the risc0 image ID — the value
 /// the sequencer uses as the on-chain program ID. Format is whitespace-tolerant:
@@ -830,7 +836,11 @@ pub(crate) fn discover_program_binaries(
                         if name.starts_with("riscv32im") {
                             has_riscv32im = true;
                         }
-                        if name == "release" {
+                        // `docker` is `cargo risczero build`'s output
+                        // directory and is the reproducible build, so treat
+                        // it the same as `release` rather than as a debug
+                        // fallback.
+                        if name == "release" || name == "docker" {
                             has_release = true;
                         }
                     }

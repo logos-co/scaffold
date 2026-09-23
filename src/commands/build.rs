@@ -21,6 +21,25 @@ pub(crate) fn cmd_build_shortcut(project_dir: Option<PathBuf>, prebuilt: bool) -
 
         let project = load_project()?;
         ensure_circuits_for_project(&project)?;
+
+        // spel projects build through their own Makefile. Two reasons, both
+        // load-bearing:
+        //
+        //  * `cargo build --workspace` panics. `spel init` writes a
+        //    `methods/Cargo.toml` whose build script calls
+        //    `risc0_build::embed_methods()`, but the manifest carries no
+        //    `[package.metadata.risc0]` section, and embed_methods unwraps it.
+        //  * `make build` runs `cargo risczero build`, which produces the
+        //    Docker-reproducible guest binary under
+        //    `methods/guest/target/<triple>/docker/`. That is the binary
+        //    `deploy` needs and the one whose ImageID is the ProgramId; a
+        //    host-side `cargo build` never produces it.
+        if project.config.framework.kind == FRAMEWORK_KIND_SPEL {
+            build_spel_guest(&cwd)?;
+            build_idl_for_current_project()?;
+            return Ok(());
+        }
+
         build_workspace_for_current_project(&cwd)?;
         match project.config.framework.kind.as_str() {
             FRAMEWORK_KIND_DEFAULT => {}
@@ -49,6 +68,15 @@ pub(crate) fn cmd_build_shortcut(project_dir: Option<PathBuf>, prebuilt: bool) -
 
         Ok(())
     })
+}
+
+/// Build a spel project's guest via the Makefile `spel init` generated.
+fn build_spel_guest(cwd: &Path) -> DynResult<()> {
+    println!("Building guest via `make build` (spel project)...");
+    let mut cmd = Command::new("make");
+    cmd.current_dir(cwd).arg("build");
+    apply_host_cc_overrides(&mut cmd);
+    run_checked(&mut cmd, "make build (spel guest)")
 }
 
 fn build_workspace_for_current_project(cwd: &Path) -> DynResult<()> {
