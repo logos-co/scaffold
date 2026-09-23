@@ -100,6 +100,9 @@ pub(crate) const SEQUENCER_CONFIG_NESTED_REL_PATH: &str =
 pub(crate) const SEQUENCER_CONFIG_REL_PATHS: &[&str] =
     &[SEQUENCER_CONFIG_NESTED_REL_PATH, SEQUENCER_CONFIG_REL_PATH];
 pub(crate) const SPEL_BIN_REL_PATH: &str = "target/release/spel";
+/// FFI/client code generator. A separate binary from `spel` — there is no
+/// `spel ffi-gen` subcommand; the scaffolded Makefile shells out to this.
+pub(crate) const SPEL_CLIENT_GEN_BIN_REL_PATH: &str = "target/release/spel-client-gen";
 /// Default seconds to wait for the sequencer to become ready when `lgs run`
 /// has to start localnet itself. Cold first runs (fresh repo clone, cold
 /// nix/cargo caches) routinely overshoot the previous 20s ceiling. Override

@@ -91,7 +91,9 @@ pub(crate) fn setup_for_project(project: &crate::model::Project, prebuilt: bool)
             .arg("build")
             .arg("--release")
             .arg("-p")
-            .arg("spel"),
+            .arg("spel")
+            .arg("-p")
+            .arg("spel-client-gen"),
         "build spel",
     )?;
 
