@@ -108,16 +108,6 @@ fn cmd_new_spel(
     target: &Path,
     bootstrap_cache: &std::path::Path,
 ) -> DynResult<()> {
-    let spel_bin = find_spel_on_path().with_context(|| {
-        format!(
-            "spel binary not found on PATH.\n\
-             Install it first:\n  \
-             cargo install --git https://github.com/logos-co/spel.git --tag {} spel",
-            DEFAULT_SPEL.tag
-        )
-    })?;
-    check_spel_version(&spel_bin);
-
     if cmd.lez_path.is_some() {
         anyhow::bail!(
             "`--lez-path` is not supported with `--template spel`.\n\
@@ -132,6 +122,16 @@ fn cmd_new_spel(
              Use `--template default` if you need vendored deps."
         );
     }
+
+    let spel_bin = find_spel_on_path().with_context(|| {
+        format!(
+            "spel binary not found on PATH.\n\
+             Install it first:\n  \
+             cargo install --git https://github.com/logos-co/spel.git --tag {} spel",
+            DEFAULT_SPEL.tag
+        )
+    })?;
+    check_spel_version(&spel_bin);
 
     println!(
         "Running `spel init {}` (LEZ tag: {}, spel tag: {})...",
@@ -154,7 +154,7 @@ fn cmd_new_spel(
         anyhow::bail!("spel init failed");
     }
 
-    // spel init created `target/`; layer scaffold state on top.
+    // `spel init` created the project directory; layer scaffold state on top.
     fs::create_dir_all(target.join(".scaffold/state"))?;
     fs::create_dir_all(target.join(".scaffold/logs"))?;
 
@@ -400,7 +400,14 @@ fn check_spel_version(spel_bin: &std::path::Path) {
     if !output.status.success() || reported.is_empty() {
         return;
     }
-    if !reported.contains(DEFAULT_SPEL.tag) {
+    // Cargo-built CLIs print `spel 0.7.0`, while the pin is the git tag
+    // `v0.7.0`; compare on the bare semver so the `v` doesn't cause a false
+    // mismatch.
+    let expected = DEFAULT_SPEL
+        .tag
+        .strip_prefix('v')
+        .unwrap_or(DEFAULT_SPEL.tag);
+    if !reported.contains(expected) {
         eprintln!(
             "warning: installed spel version ({}) does not match the expected {} pinned by scaffold.\n\
              This may cause unexpected behaviour. Install the pinned version with:\n  \
