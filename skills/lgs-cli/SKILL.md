@@ -1,6 +1,6 @@
 ---
 name: lgs-cli
-description: Use for the `lgs` / `logos-scaffold` CLI as a whole — bootstrap a project, run setup/build/deploy/localnet/wallet/doctor/report, diagnose CLI errors, or adopt scaffold in an existing project. Covers the full CLI surface, the `.scaffold/` state layout, and error → recovery patterns. Entry point that routes into `lez-template`, `lez-framework-template`, or `basecamp` once project context is identified.
+description: Use for the `lgs` / `logos-scaffold` CLI as a whole — bootstrap a project, run setup/build/deploy/localnet/wallet/doctor/report, diagnose CLI errors, or adopt scaffold in an existing project. Covers the full CLI surface, the `.scaffold/` state layout, and error → recovery patterns. Entry point that routes into `lez-template`, `spel-template`, or `basecamp` once project context is identified.
 ---
 
 # Using `logos-scaffold`
@@ -16,8 +16,8 @@ description: Use for the `lgs` / `logos-scaffold` CLI as a whole — bootstrap a
 
 Once a project exists on disk, also pull in the matching template / integration skill:
 
-- `lez-template` — bare LEZ standalone (Rust + risc0). Identify by absence of `framework = "lez-framework"` in `scaffold.toml` and presence of `methods/guest/src/bin/*.rs`.
-- `lez-framework-template` — declarative macros (Anchor parallel). Identify by `framework = "lez-framework"` in `scaffold.toml` plus `crates/lez-client-gen/` and `idl/`.
+- `lez-template` — bare LEZ standalone (Rust + risc0). Identify by `framework.kind` other than `spel` in `scaffold.toml` and presence of `methods/guest/src/bin/*.rs`.
+- `spel-template` — SPEL's declarative macros (Anchor parallel). Identify by `framework.kind = "spel"` in `scaffold.toml` plus `spel.toml` and a `*-idl.json` at the project root.
 - `basecamp` — `lgs basecamp …` lifecycle for Logos module projects (capture / develop / build / run / install / launch with profile-isolated state). Activates additionally on any `lgs basecamp` invocation, presence of `[modules]` in `scaffold.toml`, or `.scaffold/basecamp/profiles/`. Independent of the template skills — can layer onto either template or stand alone in an external module project.
 
 ## Command Map
@@ -26,7 +26,7 @@ Once a project exists on disk, also pull in the matching template / integration 
 
 | Group | Command | Purpose |
 |---|---|---|
-| Project | `new <name>` / `create <name>` | Scaffold a new project. Flags: `--template {default,lez-framework}`, `--vendor-deps`, `--lez-path`, `--cache-root`. |
+| Project | `new <name>` / `create <name>` | Scaffold a new project. Flags: `--template {default,spel}`, `--vendor-deps`, `--lez-path`, `--cache-root`. |
 | Project | `init` | Adopt scaffold in an existing project (writes `scaffold.toml`, creates `.scaffold/`, appends to `.gitignore`). Re-run to migrate older schemas or refresh shipped AI skills in place. |
 | Project | `setup` | Sync LEZ + spel to pinned commits, build `sequencer_service` / `wallet` / `spel` locally, seed default wallet. Project-local; no PATH installs. |
 | Project | `build [project-path]` | Runs `setup` then `cargo build --workspace`; auto-compiles `methods/Cargo.toml` if present. |
@@ -171,7 +171,7 @@ lgs basecamp doctor --json
 The canonical scenarios in `DOGFOODING.md`:
 
 - **D1–D6** — default template (bootstrap, localnet/doctor, deploy variants, wallet, report, runner interaction).
-- **L1–L4** — lez-framework template (bootstrap, IDL regen, client regen, deploy + counter).
+- **L1–L4** — SPEL template (bootstrap, IDL regen, client regen, deploy + counter).
 - **E1–E2** — CLI surface (help/version/error quality, advanced `new` flags).
 - **B1–B6** — basecamp (setup, modules+install+paths+launch, p2p, clean-slate, variant builds, standalone run).
 

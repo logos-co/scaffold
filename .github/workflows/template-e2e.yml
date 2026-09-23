@@ -34,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        template: [default, lez-framework]
+        template: [default, spel]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -82,6 +82,19 @@ jobs:
             tar -xzf /tmp/circuits.tar.gz -C "$dest" --strip-components=1
           fi
           echo "LOGOS_BLOCKCHAIN_CIRCUITS=$dest" >> "$GITHUB_ENV"
+
+      # `lgs new --template spel` shells out to `spel init`, so the spel CLI
+      # has to be on PATH. Install the tag pinned in constants.rs so this can't
+      # drift from what scaffold records in the generated scaffold.toml.
+      - name: Install spel CLI (spel template only)
+        if: matrix.template == 'spel'
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y libpcsclite-dev
+          tag="$(sed -n '/DEFAULT_SPEL: GitRef/,/};/s/.*tag: "\([^"]*\)".*/\1/p' src/constants.rs)"
+          if [ -z "$tag" ]; then echo "could not parse DEFAULT_SPEL tag"; exit 1; fi
+          echo "installing spel $tag"
+          cargo install --git https://github.com/logos-co/spel.git --tag "$tag" spel
 
       - name: Render project from template
         run: |
@@ -148,7 +161,7 @@ jobs:
           bash "$RUNNER_TEMP/rzup-install.sh"
           echo "$HOME/.risc0/bin" >> "$GITHUB_PATH"
           "$HOME/.risc0/bin/rzup" install rust
-          # Guest deps that compile C sources (e.g. `ring` in the lez-framework
+          # Guest deps that compile C sources (e.g. `ring` in the spel
           # guest) additionally need risc0's C++ cross-toolchain. When it is
           # missing, risc0-build points CC at a sentinel path
           # (/no_risc0_cpp_toolchain_installed_run_rzup_install_cpp) and the
