@@ -33,6 +33,47 @@ pub(crate) fn check_binary(binary: &str, required: bool) -> CheckRow {
     }
 }
 
+/// The LEZ wallet links against libpcsclite (keycard support), so a missing
+/// PCSC dev package breaks `setup` deep inside a cargo build, with a
+/// `pcsc-sys` link error that says nothing about scaffold. Surface it here
+/// instead. macOS ships PCSC in the system frameworks, so only probe on Linux.
+pub(crate) fn check_pcsc_library() -> CheckRow {
+    if !cfg!(target_os = "linux") {
+        return CheckRow {
+            status: CheckStatus::Pass,
+            name: "PCSC library".to_string(),
+            detail: "not required on this platform".to_string(),
+            remediation: None,
+        };
+    }
+    let found = which("pkg-config").is_some_and(|pkg_config| {
+        std::process::Command::new(pkg_config)
+            .args(["--exists", "libpcsclite"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    });
+    if found {
+        CheckRow {
+            status: CheckStatus::Pass,
+            name: "PCSC library".to_string(),
+            detail: "pkg-config found libpcsclite".to_string(),
+            remediation: None,
+        }
+    } else {
+        CheckRow {
+            status: CheckStatus::Warn,
+            name: "PCSC library".to_string(),
+            detail: "pkg-config could not find libpcsclite; building the LEZ wallet will fail with `Could not find a PCSC library`".to_string(),
+            remediation: Some(
+                "Install the PCSC headers: `sudo apt install pkgconf libpcsclite-dev` \
+                 (Fedora: `pkgconf pcsc-lite-devel`, Arch: `pkgconf pcsclite`)"
+                    .to_string(),
+            ),
+        }
+    }
+}
+
 pub(crate) fn check_container_runtime() -> CheckRow {
     container_runtime_row(which("docker"), which("podman"))
 }

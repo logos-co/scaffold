@@ -59,6 +59,11 @@ jobs:
             ~/.logos-blockchain-circuits
           key: scaffold-bootstrap-${{ runner.os }}-${{ hashFiles('src/constants.rs') }}
 
+      # The LEZ wallet links against libpcsclite (keycard support), so `setup`
+      # cannot build it on a bare runner: `Could not find a PCSC library`.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkgconf libpcsclite-dev
+
       - name: Build scaffold CLI
         run: cargo build --release --bin logos-scaffold
 

@@ -71,6 +71,11 @@ Every command needs these:
 
 - `git`, `rustc`, `cargo` (Rust 1.81 or newer)
 - Unix process helpers: `lsof`, `ps`, `kill`
+- `pkg-config` and the PCSC development headers, which the LEZ wallet links
+  against for keycard support. On Debian/Ubuntu:
+  `sudo apt install pkgconf libpcsclite-dev` (Fedora: `pkgconf pcsc-lite-devel`,
+  Arch: `pkgconf pcsclite`). Without them `setup` fails building the wallet with
+  `Could not find a PCSC library`.
 
 Some workflows need more:
 

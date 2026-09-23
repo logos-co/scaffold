@@ -10,7 +10,8 @@ use crate::constants::{
 };
 use crate::doctor_checks::{
     check_binary, check_container_runtime, check_logos_blockchain_circuits, check_path,
-    check_port_warn, check_repo, check_standalone_support, one_line, print_rows,
+    check_pcsc_library, check_port_warn, check_repo, check_standalone_support, one_line,
+    print_rows,
 };
 use crate::model::{CheckRow, CheckStatus, DoctorReport, DoctorSummary, Project};
 use crate::process::{pid_running, run_capture, run_with_stdin, set_command_echo};
@@ -88,6 +89,7 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
     rows.push(check_binary("ps", true));
     rows.push(check_binary("kill", true));
     rows.push(check_container_runtime());
+    rows.push(check_pcsc_library());
     rows.push(check_binary("nix", false));
     rows.push(check_logos_blockchain_circuits(
         &project.root,
