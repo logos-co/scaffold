@@ -189,7 +189,7 @@ fn cmd_new_spel(
     fs::create_dir_all(target.join(".scaffold/state"))?;
     fs::create_dir_all(target.join(".scaffold/logs"))?;
 
-    let cfg = build_scaffold_config(cmd, FRAMEWORK_KIND_SPEL, bootstrap_cache);
+    let cfg = build_scaffold_config(cmd, FRAMEWORK_KIND_SPEL);
     write_text(&target.join("scaffold.toml"), &serialize_config(&cfg)?)?;
     ensure_scaffold_in_gitignore(target)?;
     apply_skills(target)?;
@@ -385,11 +385,7 @@ fn cmd_new_default(
     Ok(())
 }
 
-fn build_scaffold_config(
-    cmd: &NewCommand,
-    framework_kind: &str,
-    bootstrap_cache: &std::path::Path,
-) -> Config {
+fn build_scaffold_config(cmd: &NewCommand, framework_kind: &str) -> Config {
     let (lez_persisted_path, spel_persisted_path) = if cmd.vendor_deps {
         (
             ".scaffold/repos/lez".to_string(),
@@ -411,9 +407,14 @@ fn build_scaffold_config(
     let mut spel = default_spel_repo(DEFAULT_SPEL.sha);
     spel.path = spel_persisted_path;
 
+    // Persist only an explicitly requested cache root. Recording the derived
+    // bootstrap path here would bake a machine-specific absolute path
+    // (`/home/<user>/.cache/logos-scaffold`) into every committed
+    // scaffold.toml; left empty, `resolve_cache_root` derives it at runtime
+    // and the file stays portable. `cmd_new_default` does the same.
     let persisted_cache_root = match &cmd.cache_root {
         Some(p) => p.display().to_string(),
-        None => bootstrap_cache.display().to_string(),
+        None => String::new(),
     };
 
     Config {
@@ -471,7 +472,60 @@ pub(crate) fn to_cargo_crate_name(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::to_cargo_crate_name;
+    use super::{build_scaffold_config, to_cargo_crate_name, NewCommand};
+    use crate::constants::{DEFAULT_LEZ, DEFAULT_SPEL, FRAMEWORK_KIND_SPEL};
+
+    fn spel_cmd() -> NewCommand {
+        NewCommand {
+            name: "demo".to_string(),
+            template: FRAMEWORK_KIND_SPEL.to_string(),
+            vendor_deps: false,
+            lez_path: None,
+            cache_root: None,
+        }
+    }
+
+    /// Recording the derived bootstrap path would bake a machine-specific
+    /// absolute path into every committed scaffold.toml. Left empty, it is
+    /// resolved at runtime.
+    #[test]
+    fn scaffold_config_leaves_cache_root_empty_without_an_explicit_flag() {
+        let cfg = build_scaffold_config(&spel_cmd(), FRAMEWORK_KIND_SPEL);
+        assert_eq!(cfg.cache_root, "");
+    }
+
+    #[test]
+    fn scaffold_config_persists_an_explicit_cache_root() {
+        let mut cmd = spel_cmd();
+        cmd.cache_root = Some(std::path::PathBuf::from("/custom/cache"));
+        let cfg = build_scaffold_config(&cmd, FRAMEWORK_KIND_SPEL);
+        assert_eq!(cfg.cache_root, "/custom/cache");
+    }
+
+    /// Cache-managed projects leave `path` empty so scaffold.toml stays
+    /// portable; `--vendor-deps` records project-local relative paths.
+    #[test]
+    fn scaffold_config_records_vendored_repo_paths_only_when_asked() {
+        let cfg = build_scaffold_config(&spel_cmd(), FRAMEWORK_KIND_SPEL);
+        assert_eq!(cfg.lez.path, "");
+        assert_eq!(cfg.spel.path, "");
+
+        let mut vendored = spel_cmd();
+        vendored.vendor_deps = true;
+        let cfg = build_scaffold_config(&vendored, FRAMEWORK_KIND_SPEL);
+        assert_eq!(cfg.lez.path, ".scaffold/repos/lez");
+        assert_eq!(cfg.spel.path, ".scaffold/repos/spel");
+    }
+
+    /// The pins scaffold records must be the ones it passes to `spel init`,
+    /// or the project tracks one version while scaffold.toml claims another.
+    #[test]
+    fn scaffold_config_records_the_default_pins() {
+        let cfg = build_scaffold_config(&spel_cmd(), FRAMEWORK_KIND_SPEL);
+        assert_eq!(cfg.lez.pin, DEFAULT_LEZ.sha);
+        assert_eq!(cfg.spel.pin, DEFAULT_SPEL.sha);
+        assert_eq!(cfg.framework.kind, FRAMEWORK_KIND_SPEL);
+    }
 
     #[test]
     fn simple_name_is_lowercased() {
