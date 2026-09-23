@@ -85,9 +85,11 @@ pub(crate) fn create_project_in(base_dir: &Path, cmd: NewCommand) -> DynResult<P
 }
 
 fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> DynResult<()> {
-    fs::create_dir_all(target.join(".scaffold/state"))?;
-    fs::create_dir_all(target.join(".scaffold/logs"))?;
-
+    // NB: the project directory is deliberately NOT created here. `spel init`
+    // refuses to write into a directory that already exists, so creating
+    // `target/.scaffold/...` up front would break `--template spel` outright.
+    // Each path creates the project directory itself: `spel init` for spel,
+    // the template overlay for default.
     let bootstrap_cache = bootstrap_cache_root(cmd.cache_root.as_deref())?;
     fs::create_dir_all(bootstrap_cache.join("repos"))?;
     fs::create_dir_all(bootstrap_cache.join("state"))?;
@@ -138,15 +140,19 @@ fn cmd_new_spel(
         cmd.name, DEFAULT_LEZ.tag, DEFAULT_SPEL.tag
     );
     let cwd = env::current_dir()?;
+    // Flags MUST precede the project name. `spel init`'s parser walks
+    // arguments until the first non-flag, treats it as the name, and silently
+    // ignores everything after it — `spel init foo --spel-tag v0.7.0` exits 0
+    // having pinned nothing.
     let status = std::process::Command::new(&spel_bin)
         .arg("init")
-        .arg(&cmd.name)
         .arg("--lez-tag")
         .arg(DEFAULT_LEZ.tag)
         // `spel init` defaults the framework to branch `main`; pin it to the
         // same tag scaffold pins so the generated project is reproducible.
         .arg("--spel-tag")
         .arg(DEFAULT_SPEL.tag)
+        .arg(&cmd.name)
         .current_dir(&cwd)
         .status()
         .context("failed to launch spel init")?;
@@ -184,6 +190,9 @@ fn cmd_new_default(
     template_variant: &str,
     bootstrap_cache: &std::path::Path,
 ) -> DynResult<()> {
+    fs::create_dir_all(target.join(".scaffold/state"))?;
+    fs::create_dir_all(target.join(".scaffold/logs"))?;
+
     let crate_name = {
         let fallback = "app";
         let file_name = target
