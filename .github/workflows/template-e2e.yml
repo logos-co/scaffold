@@ -83,19 +83,6 @@ jobs:
           fi
           echo "LOGOS_BLOCKCHAIN_CIRCUITS=$dest" >> "$GITHUB_ENV"
 
-      # `lgs new --template spel` shells out to `spel init`, so the spel CLI
-      # has to be on PATH. Install the tag pinned in constants.rs so this can't
-      # drift from what scaffold records in the generated scaffold.toml.
-      - name: Install spel CLI (spel template only)
-        if: matrix.template == 'spel'
-        run: |
-          set -euo pipefail
-          sudo apt-get update && sudo apt-get install -y libpcsclite-dev
-          tag="$(sed -n '/DEFAULT_SPEL: GitRef/,/};/s/.*tag: "\([^"]*\)".*/\1/p' src/constants.rs)"
-          if [ -z "$tag" ]; then echo "could not parse DEFAULT_SPEL tag"; exit 1; fi
-          echo "installing spel $tag"
-          cargo install --git https://github.com/logos-co/spel.git --tag "$tag" spel
-
       - name: Render project from template
         run: |
           set -euo pipefail

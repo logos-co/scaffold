@@ -12,8 +12,10 @@ use crate::constants::{
     DEFAULT_BASECAMP_PIN, DEFAULT_FRAMEWORK_IDL_PATH, DEFAULT_FRAMEWORK_IDL_SPEC,
     DEFAULT_FRAMEWORK_VERSION, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL, FRAMEWORK_KIND_DEFAULT,
     FRAMEWORK_KIND_LEZ_FRAMEWORK, FRAMEWORK_KIND_SPEL, LEZ_SOURCE, SCAFFOLD_TOML_SCHEMA_VERSION,
+    SPEL_BIN_REL_PATH, SPEL_SOURCE,
 };
 use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RunConfig};
+use crate::process::{apply_host_cc_overrides, run_checked};
 use crate::project::bootstrap_cache_root;
 use crate::repo::{sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
 use crate::state::write_text;
@@ -105,6 +107,13 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
 
 /// Scaffold a `spel` project by delegating to the `spel init` CLI, then
 /// layering scaffold.toml and AI skills on top.
+///
+/// The CLI is bootstrapped from `DEFAULT_SPEL`, exactly the way the `default`
+/// template bootstraps LEZ: clone the pinned commit into the scaffold cache
+/// (or into the project with `--vendor-deps`) and build it there. Scaffold
+/// deliberately ignores any `spel` that happens to be on PATH — the pin
+/// recorded in scaffold.toml is the only version that matters, and `setup`
+/// reuses this same checkout, so nothing is built twice.
 fn cmd_new_spel(
     cmd: &NewCommand,
     target: &Path,
@@ -117,23 +126,39 @@ fn cmd_new_spel(
              Use `--template default` if you need a local LEZ checkout."
         );
     }
-    if cmd.vendor_deps {
-        anyhow::bail!(
-            "`--vendor-deps` is not supported with `--template spel`.\n\
-             Vendoring is managed by `spel init` and `lgs setup`, not by scaffold directly.\n\
-             Use `--template default` if you need vendored deps."
-        );
-    }
 
-    let spel_bin = find_spel_on_path().with_context(|| {
-        format!(
-            "spel binary not found on PATH.\n\
-             Install it first:\n  \
-             cargo install --git https://github.com/logos-co/spel.git --tag {} spel",
-            DEFAULT_SPEL.tag
-        )
-    })?;
-    check_spel_version(&spel_bin);
+    println!(
+        "Cloning spel at pin {} from {} (this may take a minute the first time)...",
+        DEFAULT_SPEL.sha, SPEL_SOURCE
+    );
+    let spel_repo = {
+        let _echo_guard = crate::process::EchoGuard::suppress();
+        if cmd.vendor_deps {
+            let root = target.join(".scaffold/repos");
+            fs::create_dir_all(&root)?;
+            let vendored = root.join("spel");
+            sync_repo_to_pin_at_path_with_opts(
+                &vendored,
+                SPEL_SOURCE,
+                DEFAULT_SPEL.sha,
+                "spel",
+                RepoSyncOptions::fail_on_source_mismatch(),
+            )?;
+            vendored
+        } else {
+            let cached = bootstrap_cache.join("repos/spel").join(DEFAULT_SPEL.sha);
+            sync_repo_to_pin_at_path_with_opts(
+                &cached,
+                SPEL_SOURCE,
+                DEFAULT_SPEL.sha,
+                "spel",
+                RepoSyncOptions::auto_reclone_cache_repo(),
+            )?;
+            cached
+        }
+    };
+
+    let spel_bin = build_spel_cli(&spel_repo)?;
 
     println!(
         "Running `spel init {}` (LEZ tag: {}, spel tag: {})...",
@@ -180,6 +205,33 @@ fn cmd_new_spel(
     println!("  lgs run         # build, start localnet, top up wallet, deploy");
 
     Ok(())
+}
+
+/// Build the `spel` CLI from a checkout already synced to its pin, returning
+/// the binary path. `setup` builds the same target in the same checkout, so a
+/// later `lgs setup` is a no-op rather than a rebuild.
+fn build_spel_cli(spel_repo: &Path) -> DynResult<PathBuf> {
+    let spel_bin = spel_repo.join(SPEL_BIN_REL_PATH);
+    if spel_bin.is_file() {
+        return Ok(spel_bin);
+    }
+    println!("Building the spel CLI (first run only)...");
+    let mut build = std::process::Command::new("cargo");
+    build
+        .current_dir(spel_repo)
+        .arg("build")
+        .arg("--release")
+        .arg("-p")
+        .arg("spel");
+    apply_host_cc_overrides(&mut build);
+    run_checked(&mut build, "build spel CLI")?;
+    if !spel_bin.is_file() {
+        anyhow::bail!(
+            "spel CLI was built but no binary appeared at {}",
+            spel_bin.display()
+        );
+    }
+    Ok(spel_bin)
 }
 
 /// Scaffold a `default` (bare LEZ) project by copying the LEZ example template
@@ -386,64 +438,6 @@ fn build_scaffold_config(
         basecamp: None,
         run: RunConfig::default(),
     }
-}
-
-/// Warn if the installed `spel` version does not match `DEFAULT_SPEL.tag`.
-/// A mismatch is non-fatal — the user may have a newer version — but silently
-/// using the wrong version produces hard-to-diagnose mismatches at first
-/// `lgs build idl` or `lgs setup`.
-fn check_spel_version(spel_bin: &std::path::Path) {
-    let output = match std::process::Command::new(spel_bin)
-        .arg("--version")
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return,
-    };
-    // No spel release through v0.7.0 implements `--version`: it exits 1 with
-    // an empty stdout and prints usage. Treat that as "cannot determine" and
-    // stay quiet — warning about a mismatch we never measured would fire on
-    // every single `lgs new --template spel`, against a correct install.
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let reported = stdout.trim();
-    if !output.status.success() || reported.is_empty() {
-        return;
-    }
-    // Cargo-built CLIs print `spel 0.7.0`, while the pin is the git tag
-    // `v0.7.0`; compare on the bare semver so the `v` doesn't cause a false
-    // mismatch.
-    let expected = DEFAULT_SPEL
-        .tag
-        .strip_prefix('v')
-        .unwrap_or(DEFAULT_SPEL.tag);
-    if !reported.contains(expected) {
-        eprintln!(
-            "warning: installed spel version ({}) does not match the expected {} pinned by scaffold.\n\
-             This may cause unexpected behaviour. Install the pinned version with:\n  \
-             cargo install --git https://github.com/logos-co/spel.git --tag {} spel",
-            reported, DEFAULT_SPEL.tag, DEFAULT_SPEL.tag,
-        );
-    }
-}
-
-/// Locate the `spel` binary by walking PATH entries.
-fn find_spel_on_path() -> anyhow::Result<std::path::PathBuf> {
-    let path_var = std::env::var_os("PATH").unwrap_or_default();
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join("spel");
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-        // On Windows executables carry a .exe suffix.
-        #[cfg(target_os = "windows")]
-        {
-            let candidate_exe = dir.join("spel.exe");
-            if candidate_exe.is_file() {
-                return Ok(candidate_exe);
-            }
-        }
-    }
-    anyhow::bail!("spel not found on PATH")
 }
 
 pub(crate) fn to_cargo_crate_name(input: &str) -> String {

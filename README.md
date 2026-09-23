@@ -14,16 +14,14 @@ against a local execution zone.
 
 ```bash
 cargo install logos-scaffold
-cargo install --git https://github.com/logos-co/spel.git --tag v0.7.0 spel
 lgs new my-app --template spel
 cd my-app
 lgs run
 lgs wallet -- check-health   # confirm wallet + localnet after the first pipeline
 ```
 
-The `spel` template delegates scaffolding to the `spel` CLI, so that binary
-has to be on `PATH` first. For a bare LEZ project with no framework and no
-extra install, drop the flag: `lgs new my-app`.
+For a bare LEZ project with no framework macros, drop the flag:
+`lgs new my-app`.
 
 `lgs run` builds your project, starts a local sequencer, funds a wallet, and
 deploys your programs. That is the whole inner loop in one command.
@@ -208,9 +206,12 @@ For a developer experience closer to Anchor on Solana, use the
 [SPEL](https://github.com/logos-co/spel) template:
 
 ```bash
-cargo install --git https://github.com/logos-co/spel.git --tag v0.7.0 spel
 lgs new my-app --template spel
 ```
+
+Scaffold clones and builds the pinned `spel` CLI itself, the same way it
+bootstraps LEZ — you do not install it separately, and a `spel` that happens
+to be on your `PATH` is ignored in favour of the pin.
 
 SPEL turns a Rust module into a LEZ program with `#[lez_program]`,
 `#[instruction]` and `#[account(...)]` macros, generates an IDL from it, and
