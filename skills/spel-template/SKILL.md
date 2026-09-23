@@ -103,7 +103,7 @@ make ffi            # generate FFI bindings → <name>_ffi/
 # or: lgs build client  (runs `make ffi-gen` with the vendored spel-client-gen)
 ```
 
-`lgs build` runs `make build` + IDL generation automatically. FFI/client gen is a separate step.
+`lgs build` runs `make build` (the Docker guest build) and then IDL generation. FFI/client gen is a separate step.
 
 ## Deploy & Interact
 
@@ -114,11 +114,11 @@ lgs deploy          # deploy the program
 lgs run             # start localnet, deploy, enter REPL
 
 # Interact using the spel CLI (reads spel.toml automatically):
-spel -- --help
+lgs spel -- --help
 # Instruction names are kebab-case on the CLI, and account ids carry their
 # privacy prefix — pass `Public/<id>`, not the bare id.
-spel -- initialize --owner Public/<SIGNER_ID>
-spel -- do-something --owner Public/<SIGNER_ID> --amount 42
+lgs spel -- initialize --owner Public/<SIGNER_ID>
+lgs spel -- do-something --owner Public/<SIGNER_ID> --amount 42
 ```
 
 ## IDL
@@ -154,7 +154,7 @@ Do **not** hand-edit `<name>-idl.json` or `<name>_ffi/generated/` — both are d
 1. Add `#[instruction] pub fn <name>(…) -> SpelResult { … }` inside `#[lez_program]` in `<name>_core/src/lib.rs`.
 2. `make idl` to regenerate the IDL.
 3. `make ffi` to regenerate FFI bindings.
-4. Test: `lgs build && lgs deploy && spel -- <name> …`.
+4. Test: `lgs build && lgs deploy && lgs spel -- <instruction> …`.
 
 ## Key Rules
 
