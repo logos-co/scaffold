@@ -177,7 +177,7 @@ fn cmd_new_spel(
     println!("Next steps:");
     println!("  cd {}", cmd.name);
     println!("  lgs setup       # clone LEZ, build sequencer + wallet + spel CLI");
-    println!("  lgs run         # start localnet, deploy, open REPL");
+    println!("  lgs run         # build, start localnet, top up wallet, deploy");
 
     Ok(())
 }
