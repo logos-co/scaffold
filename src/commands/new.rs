@@ -391,15 +391,21 @@ fn check_spel_version(spel_bin: &std::path::Path) {
         Ok(o) => o,
         Err(_) => return,
     };
+    // No spel release through v0.7.0 implements `--version`: it exits 1 with
+    // an empty stdout and prints usage. Treat that as "cannot determine" and
+    // stay quiet — warning about a mismatch we never measured would fire on
+    // every single `lgs new --template spel`, against a correct install.
     let stdout = String::from_utf8_lossy(&output.stdout);
-    if !stdout.contains(DEFAULT_SPEL.tag) {
+    let reported = stdout.trim();
+    if !output.status.success() || reported.is_empty() {
+        return;
+    }
+    if !reported.contains(DEFAULT_SPEL.tag) {
         eprintln!(
             "warning: installed spel version ({}) does not match the expected {} pinned by scaffold.\n\
              This may cause unexpected behaviour. Install the pinned version with:\n  \
              cargo install --git https://github.com/logos-co/spel.git --tag {} spel",
-            stdout.trim(),
-            DEFAULT_SPEL.tag,
-            DEFAULT_SPEL.tag,
+            reported, DEFAULT_SPEL.tag, DEFAULT_SPEL.tag,
         );
     }
 }
