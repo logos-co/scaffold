@@ -74,6 +74,29 @@ pub(crate) fn check_pcsc_library() -> CheckRow {
     }
 }
 
+/// `cargo risczero`, the guest-build driver for spel projects.
+pub(crate) fn check_cargo_risczero() -> CheckRow {
+    match which("cargo-risczero") {
+        Some(path) => CheckRow {
+            status: CheckStatus::Pass,
+            name: "cargo-risczero".to_string(),
+            detail: format!("found {}", path.display()),
+            remediation: None,
+        },
+        None => CheckRow {
+            status: CheckStatus::Warn,
+            name: "cargo-risczero".to_string(),
+            detail: "not found on PATH; `make build` will fail with `no such command: risczero`"
+                .to_string(),
+            remediation: Some(
+                "Install it with rzup: `curl -L https://risc0.com/install | bash` then \
+                 `rzup install cargo-risczero 3.0.5`"
+                    .to_string(),
+            ),
+        },
+    }
+}
+
 pub(crate) fn check_container_runtime() -> CheckRow {
     container_runtime_row(which("docker"), which("podman"))
 }

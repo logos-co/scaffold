@@ -168,7 +168,7 @@ pub(crate) fn ensure_default_wallet_seeded(
                 );
                 }
                 Err(err) => {
-                    println!("warning: could not seed default wallet automatically: {err}");
+                    println!("{}", seed_deferred_note(&err.to_string()));
                 }
             }
         }
@@ -178,6 +178,26 @@ pub(crate) fn ensure_default_wallet_seeded(
     }
 
     Ok(())
+}
+
+/// Explain a failed seeding attempt.
+///
+/// Since LEZ v0.2.4 every wallet invocation elects a sequencer leader in
+/// `WalletCore::from_env`, so seeding cannot work during `setup` — it runs
+/// before any node exists. That is expected, not a problem: `run` seeds again
+/// once localnet is up. Say so, rather than printing a bare `Failed to find
+/// leader` that reads like a broken install.
+fn seed_deferred_note(err: &str) -> String {
+    let no_node = err.contains("Failed to find leader")
+        || err.contains("Connection refused")
+        || err.contains("tcp connect error");
+    if no_node {
+        "default wallet seeding deferred: wallet commands need a running sequencer \
+         (LEZ v0.2.4+). `logos-scaffold run` seeds it once localnet is up."
+            .to_string()
+    } else {
+        format!("warning: could not seed default wallet automatically: {err}")
+    }
 }
 
 /// Seed the default wallet when the debug config ships no `initial_accounts`

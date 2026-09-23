@@ -6,12 +6,13 @@ use anyhow::bail;
 use super::wallet_support::{set_wallet_home_env, wallet_password};
 use crate::commands::wallet_support::WALLET_CONFIG_PRIMARY;
 use crate::constants::{
-    DEFAULT_LEZ, DEFAULT_SPEL, SEQUENCER_BIN_REL_PATH, SPEL_BIN_REL_PATH, WALLET_BIN_REL_PATH,
+    DEFAULT_LEZ, DEFAULT_SPEL, FRAMEWORK_KIND_SPEL, SEQUENCER_BIN_REL_PATH, SPEL_BIN_REL_PATH,
+    WALLET_BIN_REL_PATH,
 };
 use crate::doctor_checks::{
-    check_binary, check_container_runtime, check_logos_blockchain_circuits, check_path,
-    check_pcsc_library, check_port_warn, check_repo, check_standalone_support, one_line,
-    print_rows,
+    check_binary, check_cargo_risczero, check_container_runtime, check_logos_blockchain_circuits,
+    check_path, check_pcsc_library, check_port_warn, check_repo, check_standalone_support,
+    one_line, print_rows,
 };
 use crate::model::{CheckRow, CheckStatus, DoctorReport, DoctorSummary, Project};
 use crate::process::{pid_running, port_open, run_capture, run_with_stdin, set_command_echo};
@@ -154,6 +155,16 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
     ));
 
     rows.push(check_spel_lez_alignment(&spel));
+
+    // spel projects build their guest with `cargo risczero build` (`make
+    // build`). That subcommand is a separate rzup component from the risc0
+    // toolchains, and when it is missing the build dies as
+    // `error: no such command: risczero`, which names neither risc0 nor rzup.
+    // Only meaningful for spel projects — `default` guests build through
+    // risc0-build instead — so don't warn other projects about it.
+    if project.config.framework.kind == FRAMEWORK_KIND_SPEL {
+        rows.push(check_cargo_risczero());
+    }
 
     let (resolved_cache_root, cache_root_source) = resolve_cache_root(&project)?;
     rows.push(CheckRow {
