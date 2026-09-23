@@ -25,12 +25,12 @@ pub(crate) struct GitRef {
 // `commands/doctor.rs` enforces this at runtime — re-run `doctor` after
 // bumping either pin.
 pub(crate) const DEFAULT_LEZ: GitRef = GitRef {
-    sha: "cf3639d8252040d13b3d4e933feb19b42c76e14a",
-    tag: "v0.1.2",
+    sha: "47eba256479f6f785acbd138834340703cd03401",
+    tag: "v0.2.4",
 };
 pub(crate) const DEFAULT_SPEL: GitRef = GitRef {
-    sha: "73fc462eb8f0a4d00f1a846437c627ec2e523f83",
-    tag: "v0.5.0",
+    sha: "4107dcb14ec0eb64e9e80a9691a3df0b9acd3c2b",
+    tag: "v0.7.0",
 };
 
 /// `logos-blockchain-circuits` GitHub release version that contains the
@@ -49,7 +49,7 @@ pub(crate) const DEFAULT_SPEL: GitRef = GitRef {
 /// `circuits::ensure_circuits_for_project`. Override by setting
 /// `LOGOS_BLOCKCHAIN_CIRCUITS` to a populated checkout; the env var
 /// short-circuits the download.
-pub(crate) const DEFAULT_CIRCUITS_VERSION: &str = "0.4.1";
+pub(crate) const DEFAULT_CIRCUITS_VERSION: &str = "0.4.2";
 pub(crate) const LOGOS_BLOCKCHAIN_CIRCUITS_ENV: &str = "LOGOS_BLOCKCHAIN_CIRCUITS";
 pub(crate) const CIRCUITS_RELEASE_BASE_URL: &str =
     "https://github.com/logos-blockchain/logos-blockchain-circuits/releases/download";

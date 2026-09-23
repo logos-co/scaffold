@@ -85,15 +85,6 @@ pub(crate) fn create_project_in(base_dir: &Path, cmd: NewCommand) -> DynResult<P
 }
 
 fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> DynResult<()> {
-    let crate_name = {
-        let fallback = "app";
-        let file_name = target
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(fallback);
-        to_cargo_crate_name(file_name)
-    };
-
     fs::create_dir_all(target.join(".scaffold/state"))?;
     fs::create_dir_all(target.join(".scaffold/logs"))?;
 
@@ -143,8 +134,8 @@ fn cmd_new_spel(
     }
 
     println!(
-        "Running `spel init {}` (LEZ tag: {})...",
-        cmd.name, DEFAULT_LEZ.tag
+        "Running `spel init {}` (LEZ tag: {}, spel tag: {})...",
+        cmd.name, DEFAULT_LEZ.tag, DEFAULT_SPEL.tag
     );
     let cwd = env::current_dir()?;
     let status = std::process::Command::new(&spel_bin)
@@ -152,6 +143,10 @@ fn cmd_new_spel(
         .arg(&cmd.name)
         .arg("--lez-tag")
         .arg(DEFAULT_LEZ.tag)
+        // `spel init` defaults the framework to branch `main`; pin it to the
+        // same tag scaffold pins so the generated project is reproducible.
+        .arg("--spel-tag")
+        .arg(DEFAULT_SPEL.tag)
         .current_dir(&cwd)
         .status()
         .context("failed to launch spel init")?;
