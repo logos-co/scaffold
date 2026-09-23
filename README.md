@@ -82,6 +82,9 @@ Some workflows need more:
 - `curl`, used by the first `setup` to fetch the pinned
   `logos-blockchain-circuits` release
 - A container runtime, Docker or Podman, for guest builds
+- For `--template spel` projects, risc0's `cargo-risczero`, which `make build`
+  uses to produce the reproducible guest binary:
+  `curl -L https://risc0.com/install | bash && rzup install cargo-risczero 3.0.5`
 - `nix` with flakes enabled, for `basecamp` subcommands
 
 Circuits are not a manual step. Scaffold downloads the release pinned in

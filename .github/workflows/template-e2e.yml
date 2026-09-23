@@ -159,6 +159,12 @@ jobs:
           # (/no_risc0_cpp_toolchain_installed_run_rzup_install_cpp) and the
           # guest build dies in cc-rs compiler detection.
           "$HOME/.risc0/bin/rzup" install cpp
+          # spel projects build the guest with `cargo risczero build` (via
+          # `make build`), which is a separate rzup component from the
+          # toolchains above — without it the build dies with
+          # `error: no such command: risczero`. Pin it to the risc0-build
+          # version both templates depend on.
+          "$HOME/.risc0/bin/rzup" install cargo-risczero 3.0.5
 
       - name: Build rendered project workspace
         # HOST_CC/HOST_CXX are intentionally NOT set here: scaffold pins them
