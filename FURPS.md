@@ -7,7 +7,7 @@
 1. One public DevNet vertical slice: generate wallet, fund wallet, deploy contract, execute one transaction type, verify result.
 2. Integrate wallet generation as part of the scaffold workflow for bootstrap and interaction flows.
 3. Support native token topup for wallet operations on local and DevNet environments.
-4. Deploy command auto-discovers program binaries from `methods/target/` by matching program names, so non-template projects deploy without `--program-path`.
+4. Deploy command auto-discovers program binaries from the canonical workspace `target/riscv-guest/` layout and the supported sub-crate `methods/target/` compatibility layout by matching program names, so non-template projects deploy without `--program-path`.
 5. Build command auto-compiles `methods/Cargo.toml` when present, so projects whose parent workspace excludes the Risc0 guest crate produce guest binaries via `lgs build` without a separate `cargo build --manifest-path methods/Cargo.toml`.
 6. Deploy outputs the deployed program's on-chain ID (the risc0 image ID) for every successful submission, in both the human-readable output and the `--json` output, so users can hand the value to a client without rerunning a separate inspection tool. The value is computed locally from the submitted ELF; on-chain inclusion verification is future work and depends on LEZ exposing deploy receipts.
 7. Scaffold vendors the `spel` CLI per project — clones `logos-co/spel` to a project-local path, pinned via `[repos.spel]` in `scaffold.toml`, and builds it during `setup` — mirroring the LEZ vendoring pattern. `deploy` invokes the project-local binary; no global `spel` install is required. The default spel pin is selected so spel itself vendors the same LEZ commit scaffold pins; `doctor` enforces this alignment at runtime by inspecting `spel-cli/Cargo.toml` and warning if spel's vendored LEZ diverges from `DEFAULT_LEZ_PIN`.
@@ -53,7 +53,7 @@
 - Logos Core DevEx for overall developer journey alignment and terminology.
 - Logos Blockchain and Logos Execution Environment for functionality.
 - Wallet Module for interactions with Logos Execution Environment.
-- `logos-co/spel` CLI — vendored per project at a pinned commit (`DEFAULT_SPEL`, currently tag `v0.2.0-rc.5`); supplies the `spel inspect` output that `deploy` parses for the program ID.
+- `logos-co/spel` CLI — vendored per project at a pinned commit (`DEFAULT_SPEL`, currently tag `v0.2.0-rc.5`); supplies the `spel program-id` output that `deploy` parses for the program ID.
 
 #### Runtime Dependencies
 
@@ -70,9 +70,9 @@
 
 ### Functionality
 
-1. `lgs run` collapses the inner-loop sequence — build → IDL build → ensure-localnet → wallet topup → deploy → optional post-deploy hooks — into one command. Every step's failure aborts the pipeline with a numbered step header (`[3/N] …`) so the failing phase is unambiguous in console output.
+1. `lgs run` collapses the inner-loop sequence — build → IDL build → ensure-localnet → wallet topup → deploy → optional post-deploy hooks — into one command. Every step's failure aborts the pipeline with a numbered step header (`[3/N] …`) so the failing phase is unambiguous in console output. Step ordering is fixed, but a run profile may opt out of the two steps a project can own itself: `topup = false` skips wallet topup and `deploy = false` skips deploy. A skipped step keeps its slot and prints a header saying it was skipped, so the pipeline shape stays visible and step numbers do not shift.
 2. Source edits drive fresh on-chain program identity automatically: when the guest ELF changes, its risc0 image ID changes, and the new program's storage starts empty. Scaffold relies on this for the default cycle and adds no per-run reset.
-3. Post-deploy hooks: `[run].post_deploy` is a list of shell commands executed in order via `sh -c` with `cwd` set to the project root. Hooks see a documented env contract: `SEQUENCER_URL`, `NSSA_WALLET_HOME_DIR`, `SCAFFOLD_PROJECT_ROOT`, `SCAFFOLD_IDL_DIR`, plus single-program shortcuts `SCAFFOLD_PROGRAM_ID` / `SCAFFOLD_GUEST_BIN` (set only when exactly one program is deployable).
+3. Post-deploy hooks: `[run].post_deploy` is a list of shell commands executed in order via `sh -c` with `cwd` set to the project root. Hooks see a documented env contract: `SEQUENCER_URL`, `NSSA_WALLET_HOME_DIR` and `LEE_WALLET_HOME_DIR` (the same wallet home under both the pre-v0.2.0 and v0.2.0 LEZ names), `SCAFFOLD_PROJECT_ROOT`, `SCAFFOLD_IDL_DIR`, `SCAFFOLD_TOPUP_SKIPPED` and `SCAFFOLD_DEPLOY_SKIPPED` (`1`/`0`, always set, reporting whether each step ran on this invocation *for any reason* — a config knob such as `topup = false` / `deploy = false`, or deploy's own unchanged-inputs dedup — not whether a knob was set), plus single-program shortcuts `SCAFFOLD_PROGRAM_ID` / `SCAFFOLD_GUEST_BIN` (set only when exactly one program is deployable).
 4. CLI overrides: `--post-deploy <cmd>` (repeatable) replaces `[run].post_deploy` for one invocation. `--no-post-deploy` skips hooks entirely. The two flags conflict and are rejected at clap parse time.
 5. Localnet reuse: if a managed sequencer is already running, the run reuses it. If the configured port is held by an unrelated process, the run aborts with a diagnostic naming the foreign PID.
 6. Topup safety: a wallet-topup confirmation timeout aborts before deploy so the developer is never left wondering whether deploy used a half-funded wallet.
@@ -91,18 +91,18 @@
 ### Performance
 
 1. The run is bounded by the underlying tools (cargo build, IDL test harness, sequencer startup, wallet topup, wallet deploy-program); scaffold adds no waiting steps beyond what each underlying command already imposes.
-2. Single-program metadata (program ID, guest binary path) is resolved once per invocation and reused across every post-deploy hook, so multiple hooks don't multiply `spel inspect` cost.
+2. Single-program metadata (program ID, guest binary path) is resolved once per invocation and reused across every post-deploy hook, so multiple hooks don't multiply `spel program-id` cost.
 
 ### Supportability
 
 1. `[run]` round-trips cleanly through `parse_config` / `serialize_config`. Default values are omitted from the serialized output to keep diffs minimal.
-2. The hook env contract is documented in `README.md` and validated by unit and integration tests in `src/commands/run.rs::tests` and `tests/cli.rs`.
+2. The hook env contract is documented in `docs/configuration.md` and validated by unit and integration tests in `src/commands/run.rs::tests` and `tests/cli.rs`.
 3. Flag-conflict rejection messages list the conflicting flags and exit non-zero, matching clap's standard error format.
 
 ### + (Privacy, Anonymity, Censorship-Resistance)
 
 - Hooks run locally with the developer's own wallet; no network egress beyond what the deploy step already needs.
-- Post-deploy hooks have direct access to the deployer's wallet home via `NSSA_WALLET_HOME_DIR`. Hooks are user-authored and trusted — same threat model as `scaffold.toml` itself.
+- Post-deploy hooks have direct access to the deployer's wallet home via `NSSA_WALLET_HOME_DIR` and `LEE_WALLET_HOME_DIR`. Hooks are user-authored and trusted — same threat model as `scaffold.toml` itself.
 
 ### Dependencies
 
@@ -169,13 +169,14 @@
 ### Supportability
 
 1. `logos-scaffold doctor` gains a basecamp section when `.scaffold/basecamp/` exists, covering binary presence, profile integrity, and installed-module state.
-2. Basecamp and `lgpm` pinned commits are explicit in `scaffold.toml`.
+2. Basecamp and `lgpm` pinned commits are explicit in `scaffold.toml`, and the defaults move as a set: scaffold's default `lgpm` rev is the one the pinned basecamp release locks, because the app embeds that same package-manager library to read what `lgpm` installed. An existing project keeps whatever it pinned until it edits both and re-runs `setup`.
 3. `.scaffold/state/basecamp.state` is plain-text and line-oriented, matching existing scaffold state conventions.
 4. Dogfooding scenarios (`B1`–`B4` in `DOGFOODING.md`) cover setup, single-instance, multi-instance p2p, and clean-slate behaviors.
 5. `build-portable`'s manual load-into-AppImage step is explicit: scaffold stages browsable symlinks under `.scaffold/basecamp/portable/` but does not know or auto-feed the AppImage's install dialog. The AppImage lifecycle is intentionally outside scaffold's scope — see ADR "AppImage Path is Outside Scaffold's Scope".
 6. Known limitation: multi-sub-flake projects must unify transitive `logos-module-builder` references via `inputs.<dep>.inputs.logos-module-builder.follows = "logos-module-builder"`. Without it, `install` can fail via the overridden sibling's lock even when a direct `nix build` succeeds. Documented fully in `docs/basecamp-module-requirements.md`; expected to become obsolete once upstream `logos-module-builder` scaffolding emits this `follows` automatically.
 7. Assumption notes from Usability 7 are printed to stderr (not the captured log), so pasting them into a bug report is straightforward.
 8. `scaffold.toml` diffs in version control surface module-identity changes as explicit, reviewable edits — same footing as any other project config change.
+9. Known limitation: modules must be packaged by `logos-module-builder` 0.2.x (or `nix-bundle-lgx`). The pinned `lgpm` validates package structure and Merkle content hashes on install, which tutorial-era `.lgx` files do not carry; `install` surfaces that as a targeted hint rather than a bare exit status. Scaffold deliberately does not pass `--allow-unsigned` to work around it — that would disable the same validation basecamp itself performs.
 
 ### + (Privacy, Anonymity, Censorship-Resistance)
 

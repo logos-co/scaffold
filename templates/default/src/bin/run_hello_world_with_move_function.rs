@@ -1,4 +1,4 @@
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use clap::{Parser, Subcommand};
 use example_program_deployment_methods::HELLO_WORLD_WITH_MOVE_FUNCTION_ELF;
 use nssa::{PublicTransaction, program::Program, public_transaction};
@@ -59,14 +59,28 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let instruction: Instruction = (WRITE_FUNCTION_ID, greeting.into_bytes());
             let account_id = parse_account_id(&account_id)?;
+            // Same auth model as run_hello_world: the program claims the
+            // input account with `Claim::Authorized`, so the write must carry
+            // the account's signature and current nonce. An empty witness set
+            // is rejected by the sequencer with `InvalidProgramBehavior
+            // (ClaimedUnauthorizedAccount)`.
+            let signing_key = wallet_core
+                .storage()
+                .user_data
+                .get_pub_account_signing_key(account_id)
+                .ok_or_else(|| anyhow!("input account must be a self-owned public account"))?;
+            let nonces = wallet_core
+                .get_accounts_nonces(vec![account_id])
+                .await
+                .context("failed to query account nonce from sequencer")?;
             let message = public_transaction::Message::try_new(
                 program.id(),
                 vec![account_id],
-                vec![],
+                nonces,
                 instruction,
             )
             .context("failed to build write-public message")?;
-            let witness_set = public_transaction::WitnessSet::for_message(&message, &[]);
+            let witness_set = public_transaction::WitnessSet::for_message(&message, &[signing_key]);
             let tx = PublicTransaction::new(message, witness_set);
             let response = wallet_core
                 .sequencer_client
@@ -77,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
                 "submitted transaction: tx_hash={}",
                 hex::encode(response.0)
             );
-            println!("verification hint: wallet account get --account-id {account_id}");
+            println!("verification hint: wallet account get --account-id Public/{account_id}");
         }
         Command::WritePrivate {
             account_id,
@@ -105,14 +119,37 @@ async fn main() -> anyhow::Result<()> {
             let instruction: Instruction = (MOVE_DATA_FUNCTION_ID, vec![]);
             let from = parse_account_id(&from)?;
             let to = parse_account_id(&to)?;
+            // Both claimed accounts sign. This runner requires both `from`
+            // and `to` to be self-owned public accounts (it errors below when
+            // either key is missing from the local wallet): the sequencer's
+            // execution check demands a witness for any `Claim::Authorized`
+            // account the program does not already own — always true for a
+            // fresh `to`, and true for `from` until this program has claimed
+            // it. Signing with both keys covers every combination this
+            // example is meant to demonstrate.
+            let from_key = wallet_core
+                .storage()
+                .user_data
+                .get_pub_account_signing_key(from)
+                .ok_or_else(|| anyhow!("`from` account must be a self-owned public account"))?;
+            let to_key = wallet_core
+                .storage()
+                .user_data
+                .get_pub_account_signing_key(to)
+                .ok_or_else(|| anyhow!("`to` account must be a self-owned public account"))?;
+            let nonces = wallet_core
+                .get_accounts_nonces(vec![from, to])
+                .await
+                .context("failed to query account nonces from sequencer")?;
             let message = public_transaction::Message::try_new(
                 program.id(),
                 vec![from, to],
-                vec![],
+                nonces,
                 instruction,
             )
             .context("failed to build move-data-public-to-public message")?;
-            let witness_set = public_transaction::WitnessSet::for_message(&message, &[]);
+            let witness_set =
+                public_transaction::WitnessSet::for_message(&message, &[from_key, to_key]);
             let tx = PublicTransaction::new(message, witness_set);
             let response = wallet_core
                 .sequencer_client
@@ -123,8 +160,8 @@ async fn main() -> anyhow::Result<()> {
                 "submitted transaction: tx_hash={}",
                 hex::encode(response.0)
             );
-            println!("verification hint: wallet account get --account-id {from}");
-            println!("verification hint: wallet account get --account-id {to}");
+            println!("verification hint: wallet account get --account-id Public/{from}");
+            println!("verification hint: wallet account get --account-id Public/{to}");
         }
         Command::MoveDataPublicToPrivate { from, to } => {
             let instruction: Instruction = (MOVE_DATA_FUNCTION_ID, vec![]);

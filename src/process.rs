@@ -6,8 +6,7 @@ use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::bail;
-
+use crate::error::CommandFailed;
 use crate::model::Captured;
 use crate::DynResult;
 
@@ -45,6 +44,12 @@ fn should_echo() -> bool {
     ECHO_COMMANDS.load(Ordering::Relaxed)
 }
 
+/// Whether `$ <cmd>` echo lines are currently enabled. For call sites that
+/// hand-print an echo line instead of going through `run_*`.
+pub(crate) fn command_echo_enabled() -> bool {
+    should_echo()
+}
+
 pub(crate) fn render_command(cmd: &Command) -> String {
     let mut out = cmd.get_program().to_string_lossy().to_string();
     for arg in cmd.get_args() {
@@ -58,13 +63,51 @@ pub(crate) fn run_checked(cmd: &mut Command, label: &str) -> DynResult<()> {
     run_forwarded(cmd, label)
 }
 
+/// Keep host-target C compiles working inside risc0 guest builds.
+///
+/// When the risc0 C++ toolchain is installed, risc0-build exports plain
+/// `CC`/`CXX` pointing at `riscv32-unknown-elf-gcc` for the nested guest
+/// cargo build (and a bogus placeholder path when it is missing). cc-rs
+/// resolves compilers for host-target artifacts — build scripts and
+/// proc-macro dependencies compiled for the build machine inside the guest
+/// graph (e.g. `ring` pulled in via `spel-framework-macros` in the
+/// lez-framework template) — in the order `CC_<host-triple>` → `HOST_CC` →
+/// `CC`, so the riscv compiler leaks into host compiles and fails on
+/// host-only flags (`unrecognized command-line option '-m64'`). Pinning the
+/// `HOST_*` slots to the system defaults restores the pre-risc0 behavior for
+/// host artifacts while leaving guest-target compiles on the risc0 toolchain
+/// (those resolve `CC_<guest-triple>` → `TARGET_CC` → `CC` and never consult
+/// `HOST_CC`). Values the caller already exported always win. Must be applied
+/// to every project-workspace cargo invocation that can trigger the
+/// `methods/` guest embed: `build`, IDL generation, and client generation.
+/// CI's template-e2e workflow sets the same variable at the job level for
+/// its direct cargo calls.
+pub(crate) fn apply_host_cc_overrides(cmd: &mut Command) {
+    for (var, default) in [("HOST_CC", "cc"), ("HOST_CXX", "c++")] {
+        if std::env::var_os(var).is_none() {
+            cmd.env(var, default);
+        }
+    }
+}
+
 pub(crate) fn run_forwarded(cmd: &mut Command, label: &str) -> DynResult<()> {
+    // Render once and reuse for both the echo line and any `CommandFailed`.
+    let command = render_command(cmd);
     if should_echo() {
-        println!("$ {}", render_command(cmd));
+        println!("$ {command}");
     }
     let status = cmd.status()?;
     if !status.success() {
-        bail!("{label} failed with {status}");
+        return Err(CommandFailed {
+            message: format!("{label} failed with {status}"),
+            command,
+            label: label.to_string(),
+            exit_code: status.code(),
+            stdout: String::new(),
+            stderr: String::new(),
+            log_path: None,
+        }
+        .into());
     }
     Ok(())
 }
@@ -177,7 +220,16 @@ pub(crate) fn run_logged(cmd: &mut Command, step: &str, log_path: &Path) -> DynR
                 render_command(cmd)
             ));
         }
-        bail!("{detail}");
+        Err(CommandFailed {
+            message: detail,
+            command: render_command(cmd),
+            label: step.to_string(),
+            exit_code: status.code(),
+            stdout: String::new(),
+            stderr: String::new(),
+            log_path: Some(log_path.to_path_buf()),
+        }
+        .into())
     }
 }
 
@@ -194,7 +246,16 @@ fn run_forwarded_with_status(cmd: &mut Command, step: &str) -> DynResult<()> {
         Ok(())
     } else {
         println!("  ✗ {step} ({duration})");
-        bail!("{step} failed with {status}");
+        Err(CommandFailed {
+            message: format!("{step} failed with {status}"),
+            command: render_command(cmd),
+            label: step.to_string(),
+            exit_code: status.code(),
+            stdout: String::new(),
+            stderr: String::new(),
+            log_path: None,
+        }
+        .into())
     }
 }
 
@@ -485,11 +546,33 @@ mod logged_tests {
         assert!(parts[2].chars().all(|c| c.is_ascii_digit()));
         assert_eq!(parts[3], "install");
     }
+
+    #[test]
+    #[cfg(unix)]
+    fn daemonized_process_is_own_session_leader() {
+        use tempfile::tempdir;
+        let temp = tempdir().expect("tempdir");
+        let log_path = temp.path().join("test.log");
+
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("30");
+        let child_pid = spawn_to_log(&mut cmd, &log_path).expect("spawn failed");
+
+        let sid = unsafe { libc::getsid(child_pid as libc::pid_t) };
+        assert_eq!(
+            sid as u32, child_pid,
+            "spawned process should be own session leader (SID={sid}, PID={child_pid})"
+        );
+
+        unsafe { libc::kill(child_pid as libc::pid_t, libc::SIGTERM) };
+    }
 }
 
 pub(crate) fn run_capture(cmd: &mut Command, label: &str) -> DynResult<Captured> {
+    // Render once and reuse for both the echo line and any `CommandFailed`.
+    let command = render_command(cmd);
     if should_echo() {
-        println!("$ {}", render_command(cmd));
+        println!("$ {command}");
     }
     let Output {
         status,
@@ -504,7 +587,16 @@ pub(crate) fn run_capture(cmd: &mut Command, label: &str) -> DynResult<Captured>
     };
 
     if !captured.status.success() {
-        bail!("{label} failed: {}", captured.stderr);
+        return Err(CommandFailed {
+            message: format!("{label} failed: {}", captured.stderr),
+            command,
+            label: label.to_string(),
+            exit_code: captured.status.code(),
+            stdout: captured.stdout,
+            stderr: captured.stderr,
+            log_path: None,
+        }
+        .into());
     }
 
     Ok(captured)
@@ -540,7 +632,26 @@ pub(crate) fn spawn_to_log(cmd: &mut Command, log_path: &Path) -> DynResult<u32>
     }
     let file = File::create(log_path)?;
     let err_file = file.try_clone()?;
-    cmd.stdout(Stdio::from(file)).stderr(Stdio::from(err_file));
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::from(file))
+        .stderr(Stdio::from(err_file));
+
+    // Daemonize: detach from parent process group so the sequencer
+    // survives shell/tmux session closure
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            // Create a new session — detaches from controlling terminal.
+            // setsid() returns -1 on failure (e.g. process is already a group leader).
+            let ret = libc::setsid();
+            if ret == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
     let child = cmd.spawn()?;
     Ok(child.id())
 }
@@ -676,4 +787,34 @@ pub(crate) fn which(binary: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    #[test]
+    fn host_cc_overrides_fill_unset_slots_without_clobbering() {
+        // With HOST_CC absent from the process env, the override must be
+        // applied to the child command; a caller-exported value must win.
+        // (Reading the process env is inherently shared state — assert the
+        // matching branch instead of mutating the env under parallel tests.)
+        let mut cmd = Command::new("true");
+        super::apply_host_cc_overrides(&mut cmd);
+        let envs: Vec<_> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
+            .collect();
+        if std::env::var_os("HOST_CC").is_none() {
+            assert!(
+                envs.contains(&("HOST_CC".to_string(), "cc".to_string())),
+                "HOST_CC must default to the system compiler; got: {envs:?}"
+            );
+        } else {
+            assert!(
+                !envs.iter().any(|(k, _)| k == "HOST_CC"),
+                "caller-exported HOST_CC must not be overridden"
+            );
+        }
+    }
 }

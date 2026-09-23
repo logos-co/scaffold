@@ -12,6 +12,8 @@ static TEMPLATES_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templates");
 pub(crate) struct OverlayRenderContext<'a> {
     pub(crate) crate_name: &'a str,
     pub(crate) lez_pin: &'a str,
+    pub(crate) lez_tag: &'a str,
+    pub(crate) spel_pin: &'a str,
 }
 
 pub(crate) fn apply_overlay(
@@ -105,7 +107,9 @@ fn normalize_template_file_name(file_name: &std::ffi::OsStr) -> std::ffi::OsStri
 fn render_template_text(raw: &str, ctx: &OverlayRenderContext<'_>) -> DynResult<String> {
     let rendered = raw
         .replace("{{crate_name}}", ctx.crate_name)
-        .replace("{{lez_pin}}", ctx.lez_pin);
+        .replace("{{lez_pin}}", ctx.lez_pin)
+        .replace("{{lez_tag}}", ctx.lez_tag)
+        .replace("{{spel_pin}}", ctx.spel_pin);
 
     if let Some(token) = find_unresolved_placeholder(&rendered) {
         bail!("unresolved template token `{token}`");
@@ -174,6 +178,8 @@ mod tests {
         let ctx = OverlayRenderContext {
             crate_name: "my-app",
             lez_pin: "abc123",
+            lez_tag: "v1.2.3",
+            spel_pin: "def456",
         };
 
         apply_overlay(&target, "default", &ctx).expect("failed to apply default overlay");
@@ -211,6 +217,8 @@ mod tests {
         let ctx = OverlayRenderContext {
             crate_name: "example-name",
             lez_pin: "deadbeef",
+            lez_tag: "v1.2.3",
+            spel_pin: "feedface",
         };
 
         apply_overlay(&target, "default", &ctx).expect("failed to apply default overlay");
@@ -232,7 +240,7 @@ mod tests {
         // as a no-op and refuses to resolve, breaking `lgs build` on every
         // freshly-scaffolded project. The user-side build-script panic the
         // patch was meant to mitigate is now handled by
-        // `circuits::ensure_circuits_for_subprocess` (which exports
+        // `circuits::ensure_circuits_for_project` (which exports
         // `LOGOS_BLOCKCHAIN_CIRCUITS` and bypasses the version check inside
         // every `logos-blockchain` rev's circuits-utils crate).
         for variant in ["default"] {
@@ -240,6 +248,8 @@ mod tests {
             let ctx = OverlayRenderContext {
                 crate_name: "my-app",
                 lez_pin: "abc123",
+                lez_tag: "v1.2.3",
+                spel_pin: "def456",
             };
             apply_overlay(&target, variant, &ctx)
                 .unwrap_or_else(|e| panic!("apply_overlay({variant}) failed: {e}"));
@@ -265,6 +275,8 @@ mod tests {
         let ctx = OverlayRenderContext {
             crate_name: "my-app",
             lez_pin: "abc123",
+            lez_tag: "v1.2.3",
+            spel_pin: "def456",
         };
 
         apply_overlay(&target, "default", &ctx).expect("failed to apply default overlay");
@@ -296,6 +308,8 @@ mod tests {
         let ctx = OverlayRenderContext {
             crate_name: "my-app",
             lez_pin: "abc123",
+            lez_tag: "v1.2.3",
+            spel_pin: "def456",
         };
 
         apply_overlay(&target, "default", &ctx).expect("failed to apply default overlay");
@@ -339,6 +353,8 @@ mod tests {
         let ctx = OverlayRenderContext {
             crate_name: "my-app",
             lez_pin: "abc123",
+            lez_tag: "v1.2.3",
+            spel_pin: "def456",
         };
 
         let err = render_template_text("name = \"{{unknown_token}}\"", &ctx)

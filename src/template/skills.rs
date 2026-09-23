@@ -214,6 +214,85 @@ mod tests {
     }
 
     #[test]
+    fn basecamp_guidance_tracks_current_schema_and_command_surface() {
+        fn contains_command(skill: &str, verb: &str) -> bool {
+            let needle = format!("basecamp {verb}");
+            skill.match_indices(&needle).any(|(index, matched)| {
+                !skill[index + matched.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == '-')
+            })
+        }
+
+        let skills = [
+            ("basecamp", include_str!("../../skills/basecamp/SKILL.md")),
+            ("lgs-cli", include_str!("../../skills/lgs-cli/SKILL.md")),
+        ];
+        // `basecamp docs` ships this file verbatim, so it is a third surface
+        // that can drift out of sync with the CLI.
+        let embedded_docs = include_str!("../../docs/basecamp-module-requirements.md");
+
+        // Derive the verb set from clap so that adding a subcommand fails here
+        // until every shipped surface documents it.
+        let command = crate::cli::cli_command();
+        let basecamp = command
+            .get_subcommands()
+            .find(|command| command.get_name() == "basecamp")
+            .expect("basecamp subcommand");
+        let verbs: Vec<&str> = basecamp
+            .get_subcommands()
+            .map(|command| command.get_name())
+            .collect();
+
+        for (name, skill) in skills {
+            assert!(
+                skill.contains("[modules]") && !skill.contains("[basecamp.modules"),
+                "{name} must teach the current top-level [modules] schema"
+            );
+            for verb in &verbs {
+                assert!(
+                    contains_command(skill, verb),
+                    "{name} is missing the `basecamp {verb}` command"
+                );
+            }
+        }
+
+        // The migration note intentionally names the pre-0.2.0 layout, so the
+        // schema assertion is made against the rest of the document.
+        let schema_body = embedded_docs
+            .lines()
+            .filter(|line| !line.contains("The pre-0.2.0 schema used"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            schema_body.contains("[modules.") && !schema_body.contains("[basecamp.modules"),
+            "basecamp docs must teach the current top-level [modules] schema outside its migration note"
+        );
+
+        // Compare the opening canonical list exactly so missing, reordered, or
+        // phantom verbs cannot hide behind incidental mentions in later prose.
+        let verb_list = embedded_docs
+            .lines()
+            .find(|line| line.contains("`logos-scaffold basecamp` provides"))
+            .expect("basecamp docs must carry the canonical verb list");
+        let canonical_list = verb_list
+            .split_once(". This document")
+            .map(|(list, _)| list)
+            .expect("basecamp docs canonical verb list must be its opening sentence");
+        let documented_verbs: Vec<&str> = canonical_list
+            .split('`')
+            .enumerate()
+            .filter_map(|(index, value)| (index % 2 == 1).then_some(value))
+            .skip(1)
+            .collect();
+        assert_eq!(
+            documented_verbs, verbs,
+            "basecamp docs verb list must match the clap command surface exactly"
+        );
+    }
+
+    #[test]
     fn apply_skills_writes_claude_cursor_and_agents_layouts() {
         let temp = mk_temp_dir();
         let target = temp.path();

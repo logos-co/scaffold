@@ -12,7 +12,8 @@
 //!   they aren't basecamp's property — moved out from `[basecamp.modules.*]`
 //!   in 0.2.0.
 //! - `[<feature>]` — runtime config per feature: `[scaffold]`, `[wallet]`,
-//!   `[framework]`, `[localnet]`, `[basecamp]` (port allocation only).
+//!   `[framework]`, `[localnet]`, `[circuits]`, `[basecamp]`
+//!   (port allocation only).
 //!
 //! Pre-0.2.0 configs (with `[basecamp].pin` / `.source` / `.lgpm_flake`,
 //! `[basecamp.modules.*]`, or `[repos.{lez,spel}].url`) are rejected by
@@ -28,8 +29,9 @@ use crate::constants::{
     SCAFFOLD_TOML_SCHEMA_VERSION, SPEL_SOURCE,
 };
 use crate::model::{
-    BasecampConfig, Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, ModuleEntry,
-    ModuleRole, RepoBuild, RepoRef, RunConfig, RunProfile,
+    BasecampConfig, BasecampProfile, CircuitsConfig, Config, FrameworkConfig, FrameworkIdlConfig,
+    LocalnetConfig, ModuleEntry, ModuleRole, RepoBuild, RepoRef, RunConfig, RunProfile,
+    WatchConfig,
 };
 use crate::DynResult;
 
@@ -71,6 +73,7 @@ pub(crate) fn parse_config(text: &str) -> DynResult<Config> {
     let run = parse_run(&doc)?;
     let framework = parse_framework(&doc);
     let localnet = parse_localnet(&doc)?;
+    let circuits = parse_circuits(&doc)?;
     let wallet_home_dir = doc
         .get("wallet")
         .and_then(Item::as_table)
@@ -85,6 +88,7 @@ pub(crate) fn parse_config(text: &str) -> DynResult<Config> {
         basecamp_repo,
         lgpm_repo,
         wallet_home_dir,
+        circuits,
         framework,
         localnet,
         modules,
@@ -104,6 +108,16 @@ fn parse_run(doc: &DocumentMut) -> DynResult<RunConfig> {
         .and_then(Item::as_value)
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let inline_deploy = run_table
+        .get("deploy")
+        .and_then(Item::as_value)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let inline_topup = run_table
+        .get("topup")
+        .and_then(Item::as_value)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     let inline_post_deploy = parse_post_deploy(run_table.get("post_deploy"))?;
 
     let mut profiles: std::collections::BTreeMap<String, RunProfile> =
@@ -118,8 +132,26 @@ fn parse_run(doc: &DocumentMut) -> DynResult<RunConfig> {
                 .and_then(Item::as_value)
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let deploy = table
+                .get("deploy")
+                .and_then(Item::as_value)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let topup = table
+                .get("topup")
+                .and_then(Item::as_value)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
             let post_deploy = parse_post_deploy(table.get("post_deploy"))?;
-            profiles.insert(name.to_string(), RunProfile { reset, post_deploy });
+            profiles.insert(
+                name.to_string(),
+                RunProfile {
+                    reset,
+                    post_deploy,
+                    deploy,
+                    topup,
+                },
+            );
         }
     }
 
@@ -131,14 +163,70 @@ fn parse_run(doc: &DocumentMut) -> DynResult<RunConfig> {
         }
     }
 
+    let watch = parse_run_watch(run_table)?;
+
     Ok(RunConfig {
         default_profile,
         inline: RunProfile {
             reset: inline_reset,
             post_deploy: inline_post_deploy,
+            deploy: inline_deploy,
+            topup: inline_topup,
         },
         profiles,
+        watch,
     })
+}
+
+fn parse_run_watch(run_table: &Table) -> DynResult<WatchConfig> {
+    let Some(watch_table) = run_table.get("watch").and_then(Item::as_table) else {
+        return Ok(WatchConfig::default());
+    };
+    let include = parse_glob_list(watch_table.get("include"), "[run.watch].include")?;
+    let exclude = parse_glob_list(watch_table.get("exclude"), "[run.watch].exclude")?;
+    let debounce_ms = match watch_table.get("debounce_ms") {
+        None => None,
+        Some(item) => {
+            let n = item.as_integer().ok_or_else(|| {
+                anyhow!("invalid scaffold.toml: [run.watch].debounce_ms must be an integer")
+            })?;
+            if n < 0 {
+                bail!("invalid scaffold.toml: [run.watch].debounce_ms must be non-negative");
+            }
+            Some(n as u64)
+        }
+    };
+    Ok(WatchConfig {
+        include,
+        exclude,
+        debounce_ms,
+    })
+}
+
+/// `key` is the field label already formatted as `[table].field` (e.g.
+/// `[run.watch].include`), so error messages point at the actual key instead of
+/// a `[run.watch.include]`-looking pseudo-table.
+fn parse_glob_list(item: Option<&Item>, key: &str) -> DynResult<Vec<String>> {
+    let Some(item) = item else {
+        return Ok(Vec::new());
+    };
+    let arr = item
+        .as_array()
+        .ok_or_else(|| anyhow!("invalid scaffold.toml: {key} must be an array of strings"))?;
+    let mut out = Vec::with_capacity(arr.len());
+    for v in arr.iter() {
+        let s = v
+            .as_str()
+            .ok_or_else(|| anyhow!("invalid scaffold.toml: {key} entries must be strings"))?;
+        // Reject empty patterns: an empty glob normalizes to a match-all
+        // (`**/`), so an empty `exclude` entry would silently suppress *every*
+        // watch trigger. Fail fast with a targeted error instead.
+        if s.is_empty() {
+            bail!("invalid scaffold.toml: {key} entries must not be empty");
+        }
+        out.push(s.to_string());
+    }
+    Ok(out)
 }
 
 fn parse_post_deploy(item: Option<&Item>) -> DynResult<Vec<String>> {
@@ -263,7 +351,11 @@ fn parse_repo_ref(doc: &DocumentMut, name: &str) -> DynResult<Option<RepoRef>> {
         })?,
         None => RepoBuild::default(),
     };
+    // `attr` is either a scalar (`attr = "app"`) or a per-platform map
+    // (`[repos.<name>.attr]` / inline `attr = { aarch64-darwin = "…" }`).
+    // `read_string` returns None for the table form, leaving `attr` empty.
     let attr = read_string(table, "attr").unwrap_or_default();
+    let attr_platform = parse_attr_platform(table, name)?;
     let path = read_string(table, "path").unwrap_or_default();
 
     check_toml_value(&format!("repos.{name}.source"), &source)?;
@@ -277,8 +369,37 @@ fn parse_repo_ref(doc: &DocumentMut, name: &str) -> DynResult<Option<RepoRef>> {
         pin,
         build,
         attr,
+        attr_platform,
         path,
     }))
+}
+
+/// Parse a per-platform `[repos.<name>.attr]` map. Returns an empty map when
+/// `attr` is absent or given in scalar form (handled by the caller's
+/// `read_string`). Keys are nix system triples (`aarch64-darwin`, etc.).
+fn parse_attr_platform(
+    repo_table: &Table,
+    name: &str,
+) -> DynResult<std::collections::BTreeMap<String, String>> {
+    let mut out = std::collections::BTreeMap::new();
+    let Some(tbl) = repo_table.get("attr").and_then(Item::as_table_like) else {
+        return Ok(out);
+    };
+    for (system, v) in tbl.iter() {
+        if system.is_empty() {
+            bail!("invalid scaffold.toml: [repos.{name}.attr] has an empty system key");
+        }
+        // Validate the key, not just the value: a quoted TOML key carrying
+        // control characters would otherwise corrupt the line-oriented
+        // serializer on the next `save_project_config`.
+        check_toml_value(&format!("repos.{name}.attr system key {system:?}"), system)?;
+        let s = v.as_str().ok_or_else(|| {
+            anyhow!("invalid scaffold.toml: [repos.{name}.attr].{system} must be a string")
+        })?;
+        check_toml_value(&format!("repos.{name}.attr.{system}"), s)?;
+        out.insert(system.to_string(), s.to_string());
+    }
+    Ok(out)
 }
 
 /// Reject `[repos.<name>].source` values that would let a malicious
@@ -348,7 +469,18 @@ fn parse_modules(doc: &DocumentMut) -> DynResult<std::collections::BTreeMap<Stri
             ),
         };
         check_toml_value(&format!("modules.{name}.flake"), &flake)?;
-        out.insert(name.to_string(), ModuleEntry { flake, role });
+        let standalone_app = read_string(table, "standalone_app").filter(|s| !s.is_empty());
+        if let Some(app) = &standalone_app {
+            check_toml_value(&format!("modules.{name}.standalone_app"), app)?;
+        }
+        out.insert(
+            name.to_string(),
+            ModuleEntry {
+                flake,
+                role,
+                standalone_app,
+            },
+        );
     }
     Ok(out)
 }
@@ -378,7 +510,108 @@ fn parse_basecamp_runtime(doc: &DocumentMut) -> DynResult<Option<BasecampConfig>
             })?;
         any_field = true;
     }
+
+    // [basecamp.env] — plain string map.
+    if let Some(env_table) = table.get("env").and_then(Item::as_table) {
+        cfg.env = parse_string_map(env_table, "basecamp.env")?;
+        any_field = any_field || !cfg.env.is_empty();
+    }
+    // [basecamp.env_append] — map of string -> array<string>.
+    if let Some(append_table) = table.get("env_append").and_then(Item::as_table) {
+        for (key, item) in append_table.iter() {
+            validate_env_var_name(key, "basecamp.env_append")?;
+            let arr = item.as_array().ok_or_else(|| {
+                anyhow!("invalid scaffold.toml: [basecamp.env_append].{key} must be an array of strings")
+            })?;
+            let mut list = Vec::with_capacity(arr.len());
+            for v in arr.iter() {
+                let s = v.as_str().ok_or_else(|| {
+                    anyhow!("invalid scaffold.toml: [basecamp.env_append].{key} entries must be strings")
+                })?;
+                // Reject empty entries: `:`-joining them yields an empty path
+                // segment (e.g. `LD_LIBRARY_PATH=:`), which silently injects the
+                // current directory into search paths — surprising and unsafe.
+                if s.is_empty() {
+                    bail!("invalid scaffold.toml: [basecamp.env_append].{key} entries must not be empty");
+                }
+                list.push(s.to_string());
+            }
+            // Skip empty lists: they're a no-op at launch (apply_launch_env_
+            // overrides skips them) and would otherwise make `[basecamp]`
+            // non-empty and round-trip back into scaffold.toml — inconsistent
+            // with how empty per-profile env maps are dropped below.
+            if !list.is_empty() {
+                cfg.env_append.insert(key.to_string(), list);
+            }
+        }
+        any_field = any_field || !cfg.env_append.is_empty();
+    }
+    // [basecamp.profiles.<name>] — per-profile launch config.
+    if let Some(profiles) = table.get("profiles").and_then(Item::as_table) {
+        for (name, item) in profiles.iter() {
+            let ptable = item.as_table().ok_or_else(|| {
+                anyhow!("invalid scaffold.toml: [basecamp.profiles.{name}] is not a table")
+            })?;
+            let mut profile = BasecampProfile::default();
+            if let Some(env_table) = ptable.get("env").and_then(Item::as_table) {
+                profile.env =
+                    parse_string_map(env_table, &format!("basecamp.profiles.{name}.env"))?;
+            }
+            profile.env_file = read_string(ptable, "env_file");
+            if let Some(f) = &profile.env_file {
+                check_toml_value(&format!("basecamp.profiles.{name}.env_file"), f)?;
+            }
+            profile.runtime_dir = read_string(ptable, "runtime_dir");
+            if let Some(d) = &profile.runtime_dir {
+                check_toml_value(&format!("basecamp.profiles.{name}.runtime_dir"), d)?;
+            }
+            profile.log_file = read_string(ptable, "log_file");
+            if let Some(l) = &profile.log_file {
+                check_toml_value(&format!("basecamp.profiles.{name}.log_file"), l)?;
+            }
+            // Drop fully-default profiles so an empty `[basecamp.profiles.foo]`
+            // doesn't make `[basecamp]` non-empty and round-trip back.
+            if profile != BasecampProfile::default() {
+                cfg.profiles.insert(name.to_string(), profile);
+            }
+        }
+        any_field = any_field || !cfg.profiles.is_empty();
+    }
+
     Ok(if any_field { Some(cfg) } else { None })
+}
+
+fn parse_string_map(
+    table: &Table,
+    key: &str,
+) -> DynResult<std::collections::BTreeMap<String, String>> {
+    let mut out = std::collections::BTreeMap::new();
+    for (k, item) in table.iter() {
+        validate_env_var_name(k, key)?;
+        let v = item
+            .as_str()
+            .ok_or_else(|| anyhow!("invalid scaffold.toml: [{key}].{k} must be a string"))?;
+        out.insert(k.to_string(), v.to_string());
+    }
+    Ok(out)
+}
+
+/// Reject env var names that would only surface as an opaque `exec` /
+/// `Command::env` failure at launch: TOML quoted keys can be empty or contain
+/// `=` or control characters. Fail fast at parse with an actionable message.
+fn validate_env_var_name(name: &str, context: &str) -> DynResult<()> {
+    if name.is_empty() {
+        bail!("invalid scaffold.toml: [{context}] env var name must not be empty");
+    }
+    if name.contains('=') {
+        bail!("invalid scaffold.toml: [{context}] env var name {name:?} must not contain `=`");
+    }
+    if name.chars().any(char::is_control) {
+        bail!(
+            "invalid scaffold.toml: [{context}] env var name {name:?} must not contain control characters"
+        );
+    }
+    Ok(())
 }
 
 fn parse_framework(doc: &DocumentMut) -> FrameworkConfig {
@@ -430,6 +663,58 @@ fn parse_localnet(doc: &DocumentMut) -> DynResult<LocalnetConfig> {
     Ok(cfg)
 }
 
+fn parse_circuits(doc: &DocumentMut) -> DynResult<CircuitsConfig> {
+    let Some(table) = doc.get("circuits").and_then(Item::as_table) else {
+        return Ok(CircuitsConfig::default());
+    };
+
+    let version = read_string(table, "version")
+        .ok_or_else(|| anyhow!("invalid scaffold.toml: missing [circuits].version"))?;
+    let url_template = read_string(table, "url_template");
+    let install_dir =
+        read_string(table, "install_dir").unwrap_or_else(|| ".scaffold/circuits".to_string());
+
+    check_toml_value("circuits.version", &version)?;
+    if let Some(template) = &url_template {
+        check_toml_value("circuits.url_template", template)?;
+        check_circuits_url_template(template)?;
+    }
+    check_toml_value("circuits.install_dir", &install_dir)?;
+    // A relative `install_dir` is joined onto the project root (an absolute one
+    // is used as-is — see `circuits_install_dir`) and handed to `create_dir_all`
+    // + tarball extraction; a `..` component would let the config write outside
+    // the project. Reject parent-dir traversal.
+    if std::path::Path::new(&install_dir)
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        bail!(
+            "invalid scaffold.toml: [circuits].install_dir must not contain `..` \
+             components (would escape the project root): {install_dir:?}"
+        );
+    }
+
+    Ok(CircuitsConfig {
+        version,
+        url_template,
+        install_dir,
+    })
+}
+
+fn check_circuits_url_template(template: &str) -> DynResult<()> {
+    let scheme = template
+        .split_once("://")
+        .map(|(scheme, _)| scheme)
+        .unwrap_or_default();
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        bail!(
+            "invalid scaffold.toml: [circuits].url_template must use http:// or https://: \
+             {template:?}"
+        );
+    }
+    Ok(())
+}
+
 fn read_string(table: &Table, key: &str) -> Option<String> {
     table
         .get(key)
@@ -476,6 +761,10 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
         let table = ensure_subtable(&mut doc, "modules", name);
         table["flake"] = value(&entry.flake);
         table["role"] = value(role_str);
+        if let Some(app) = &entry.standalone_app {
+            check_toml_value(&format!("modules.{name}.standalone_app"), app)?;
+            table["standalone_app"] = value(app);
+        }
         // Defensive: the function's check above already covered both fields.
         let _ = path;
     }
@@ -507,12 +796,128 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
     localnet_table["port"] = value(i64::from(cfg.localnet.port));
     localnet_table["risc0_dev_mode"] = value(cfg.localnet.risc0_dev_mode);
 
+    // [circuits]
+    check_toml_value("circuits.version", &cfg.circuits.version)?;
+    if let Some(template) = &cfg.circuits.url_template {
+        check_toml_value("circuits.url_template", template)?;
+        check_circuits_url_template(template)?;
+    }
+    check_toml_value("circuits.install_dir", &cfg.circuits.install_dir)?;
+    let circuits = doc.entry("circuits").or_insert(Item::Table(Table::new()));
+    let circuits_table = circuits.as_table_mut().expect("circuits table");
+    circuits_table["version"] = value(&cfg.circuits.version);
+    if let Some(template) = &cfg.circuits.url_template {
+        circuits_table["url_template"] = value(template);
+    }
+    if cfg.circuits.install_dir != CircuitsConfig::default().install_dir {
+        circuits_table["install_dir"] = value(&cfg.circuits.install_dir);
+    }
+
     // [basecamp]
     if let Some(bc) = &cfg.basecamp {
+        // Validate all string values up front, before borrowing `doc` mutably.
+        for (k, v) in &bc.env {
+            check_toml_value(&format!("basecamp.env.{k}"), v)?;
+        }
+        for (k, list) in &bc.env_append {
+            for p in list {
+                check_toml_value(&format!("basecamp.env_append.{k}"), p)?;
+            }
+        }
+        for (profile, p) in &bc.profiles {
+            // The profile name is itself a serialized table header, so guard it
+            // like every other emitted name key (cf. `run.profiles.{name}`,
+            // `modules.{name}`) — a control char in the key would corrupt the
+            // line-oriented writer.
+            check_toml_value(&format!("basecamp.profiles.{profile}"), profile)?;
+            for (k, v) in &p.env {
+                check_toml_value(&format!("basecamp.profiles.{profile}.env.{k}"), v)?;
+            }
+            if let Some(f) = &p.env_file {
+                check_toml_value(&format!("basecamp.profiles.{profile}.env_file"), f)?;
+            }
+            if let Some(d) = &p.runtime_dir {
+                check_toml_value(&format!("basecamp.profiles.{profile}.runtime_dir"), d)?;
+            }
+            if let Some(l) = &p.log_file {
+                check_toml_value(&format!("basecamp.profiles.{profile}.log_file"), l)?;
+            }
+        }
+
         let basecamp = doc.entry("basecamp").or_insert(Item::Table(Table::new()));
         let basecamp_table = basecamp.as_table_mut().expect("basecamp table");
-        basecamp_table["port_base"] = value(i64::from(bc.port_base));
-        basecamp_table["port_stride"] = value(i64::from(bc.port_stride));
+        // Only emit port keys when they differ from the defaults, so setting
+        // just `[basecamp.env]` doesn't churn a user's scaffold.toml with
+        // default `port_base`/`port_stride` on the next `save_project_config`.
+        let default_bc = BasecampConfig::default();
+        let mut wrote_direct_key = false;
+        if bc.port_base != default_bc.port_base {
+            basecamp_table["port_base"] = value(i64::from(bc.port_base));
+            wrote_direct_key = true;
+        }
+        if bc.port_stride != default_bc.port_stride {
+            basecamp_table["port_stride"] = value(i64::from(bc.port_stride));
+            wrote_direct_key = true;
+        }
+        // With no direct keys, an explicit `[basecamp]` header would render
+        // empty — mark it implicit so only the child `[basecamp.env]` / etc.
+        // tables appear. (Safe here precisely because there are no keys to get
+        // dotted, which is the hazard the env subtables avoid via child_table.)
+        if !wrote_direct_key {
+            basecamp_table.set_implicit(true);
+        }
+
+        // Build the env subtables off `basecamp_table` directly. Routing
+        // through `doc` via `ensure_subtable` would mark `[basecamp]` implicit
+        // and render its real keys as dotted `basecamp.port_base = …` instead
+        // of an explicit `[basecamp]` table.
+        if !bc.env.is_empty() {
+            let env_table = child_table(basecamp_table, "env");
+            for (k, v) in &bc.env {
+                env_table[k] = value(v);
+            }
+        }
+        if !bc.env_append.is_empty() {
+            let append_table = child_table(basecamp_table, "env_append");
+            for (k, list) in &bc.env_append {
+                append_table[k] = string_array(list);
+            }
+        }
+        if !bc.profiles.is_empty() {
+            let profiles = child_table(basecamp_table, "profiles");
+            // Implicit so `[basecamp.profiles.<name>]` renders as the nested
+            // header without an empty `[basecamp.profiles]` line.
+            profiles.set_implicit(true);
+            for (profile, p) in &bc.profiles {
+                let profile_table = child_table(profiles, profile);
+                // Scalar keys (env_file) render under the
+                // `[basecamp.profiles.<name>]` header; the `env` child table
+                // follows. With no scalar key, keep the profile table implicit
+                // so only `[basecamp.profiles.<name>.env]` renders.
+                let mut wrote_scalar = false;
+                if let Some(f) = &p.env_file {
+                    profile_table["env_file"] = value(f);
+                    wrote_scalar = true;
+                }
+                if let Some(d) = &p.runtime_dir {
+                    profile_table["runtime_dir"] = value(d);
+                    wrote_scalar = true;
+                }
+                if let Some(l) = &p.log_file {
+                    profile_table["log_file"] = value(l);
+                    wrote_scalar = true;
+                }
+                if !p.env.is_empty() {
+                    let env_table = child_table(profile_table, "env");
+                    for (k, v) in &p.env {
+                        env_table[k] = value(v);
+                    }
+                }
+                if !wrote_scalar {
+                    profile_table.set_implicit(true);
+                }
+            }
+        }
     }
 
     // [run] — only emit when non-default to keep fresh scaffold.toml minimal.
@@ -522,10 +927,14 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
 }
 
 fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
-    let has_inline = run.inline.reset || !run.inline.post_deploy.is_empty();
+    let has_inline = run.inline.reset
+        || !run.inline.post_deploy.is_empty()
+        || !run.inline.deploy
+        || !run.inline.topup;
     let has_default_profile = run.default_profile.is_some();
     let has_profiles = !run.profiles.is_empty();
-    if !has_inline && !has_default_profile && !has_profiles {
+    let has_watch = run.watch != WatchConfig::default();
+    if !has_inline && !has_default_profile && !has_profiles && !has_watch {
         return Ok(());
     }
 
@@ -537,6 +946,14 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
     }
     if run.inline.reset {
         run_table["reset"] = value(true);
+    }
+    // Only emit `deploy`/`topup` when they deviate from the `true` default,
+    // to keep a fresh scaffold.toml minimal.
+    if !run.inline.deploy {
+        run_table["deploy"] = value(false);
+    }
+    if !run.inline.topup {
+        run_table["topup"] = value(false);
     }
     if !run.inline.post_deploy.is_empty() {
         for hook in &run.inline.post_deploy {
@@ -563,12 +980,42 @@ fn write_run_config(doc: &mut DocumentMut, run: &RunConfig) -> DynResult<()> {
             if profile.reset {
                 profile_table["reset"] = value(true);
             }
+            if !profile.deploy {
+                profile_table["deploy"] = value(false);
+            }
+            if !profile.topup {
+                profile_table["topup"] = value(false);
+            }
             if !profile.post_deploy.is_empty() {
                 profile_table["post_deploy"] = post_deploy_value(&profile.post_deploy);
             }
         }
     }
+
+    if has_watch {
+        for g in run.watch.include.iter().chain(run.watch.exclude.iter()) {
+            check_toml_value("run.watch", g)?;
+        }
+        let watch_table = ensure_subtable(doc, "run", "watch");
+        if !run.watch.include.is_empty() {
+            watch_table["include"] = string_array(&run.watch.include);
+        }
+        if !run.watch.exclude.is_empty() {
+            watch_table["exclude"] = string_array(&run.watch.exclude);
+        }
+        if let Some(ms) = run.watch.debounce_ms {
+            watch_table["debounce_ms"] = value(ms as i64);
+        }
+    }
     Ok(())
+}
+
+fn string_array(items: &[String]) -> Item {
+    let mut arr = toml_edit::Array::new();
+    for it in items {
+        arr.push(it.as_str());
+    }
+    value(arr)
 }
 
 fn post_deploy_value(hooks: &[String]) -> Item {
@@ -587,6 +1034,10 @@ fn write_repo_ref(doc: &mut DocumentMut, name: &str, repo: &RepoRef) -> DynResul
     check_toml_value(&format!("repos.{name}.source"), &repo.source)?;
     check_toml_value(&format!("repos.{name}.pin"), &repo.pin)?;
     check_toml_value(&format!("repos.{name}.attr"), &repo.attr)?;
+    for (system, a) in &repo.attr_platform {
+        check_toml_value(&format!("repos.{name}.attr system key {system:?}"), system)?;
+        check_toml_value(&format!("repos.{name}.attr.{system}"), a)?;
+    }
     check_toml_value(&format!("repos.{name}.path"), &repo.path)?;
     let table = ensure_subtable(doc, "repos", name);
     table["source"] = value(&repo.source);
@@ -596,7 +1047,16 @@ fn write_repo_ref(doc: &mut DocumentMut, name: &str, repo: &RepoRef) -> DynResul
     } else {
         table.remove("build");
     }
-    if !repo.attr.is_empty() {
+    // Per-platform map wins over the scalar form; render it as an inline table
+    // (`attr = { aarch64-darwin = "…" }`) so it stays a value under the
+    // `[repos.<name>]` header rather than a dotted/child table.
+    if !repo.attr_platform.is_empty() {
+        let mut inline = toml_edit::InlineTable::new();
+        for (system, a) in &repo.attr_platform {
+            inline.insert(system, a.as_str().into());
+        }
+        table["attr"] = value(inline);
+    } else if !repo.attr.is_empty() {
         table["attr"] = value(&repo.attr);
     } else {
         table.remove("attr");
@@ -607,6 +1067,17 @@ fn write_repo_ref(doc: &mut DocumentMut, name: &str, repo: &RepoRef) -> DynResul
         table.remove("path");
     }
     Ok(())
+}
+
+/// Get or create a child `Table` under an existing `Table` without touching the
+/// parent's implicit flag — unlike `ensure_subtable`, which marks its parent
+/// implicit (wrong when the parent has real keys, e.g. `[basecamp]`).
+fn child_table<'a>(parent: &'a mut Table, name: &str) -> &'a mut Table {
+    parent
+        .entry(name)
+        .or_insert(Item::Table(Table::new()))
+        .as_table_mut()
+        .expect("child is a table")
 }
 
 fn ensure_subtable<'a>(doc: &'a mut DocumentMut, parent: &str, child: &str) -> &'a mut Table {
@@ -657,6 +1128,7 @@ pub(crate) fn default_lez_repo(pin: &str) -> RepoRef {
         pin: pin.to_string(),
         build: RepoBuild::Cargo,
         attr: String::new(),
+        attr_platform: std::collections::BTreeMap::new(),
         path: String::new(),
     }
 }
@@ -667,6 +1139,7 @@ pub(crate) fn default_spel_repo(pin: &str) -> RepoRef {
         pin: pin.to_string(),
         build: RepoBuild::Cargo,
         attr: String::new(),
+        attr_platform: std::collections::BTreeMap::new(),
         path: String::new(),
     }
 }
@@ -677,6 +1150,7 @@ pub(crate) fn default_basecamp_repo(pin: &str) -> RepoRef {
         pin: pin.to_string(),
         build: RepoBuild::NixFlake,
         attr: BASECAMP_ATTR.to_string(),
+        attr_platform: std::collections::BTreeMap::new(),
         path: String::new(),
     }
 }
@@ -687,6 +1161,7 @@ pub(crate) fn default_lgpm_repo(pin: &str) -> RepoRef {
         pin: pin.to_string(),
         build: RepoBuild::NixFlake,
         attr: LGPM_ATTR.to_string(),
+        attr_platform: std::collections::BTreeMap::new(),
         path: String::new(),
     }
 }
@@ -699,7 +1174,9 @@ pub(crate) fn default_lgpm_repo(pin: &str) -> RepoRef {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{DEFAULT_BASECAMP_PIN, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL};
+    use crate::constants::{
+        DEFAULT_BASECAMP_PIN, DEFAULT_CIRCUITS_VERSION, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL,
+    };
 
     fn base_config() -> Config {
         parse_config(&minimal_v0_2_0()).expect("parse minimal v0.2.0")
@@ -753,6 +1230,100 @@ risc0_dev_mode = true
         assert!(cfg.lgpm_repo.is_none());
         assert!(cfg.modules.is_empty());
         assert!(cfg.basecamp.is_none());
+        assert_eq!(cfg.circuits.version, DEFAULT_CIRCUITS_VERSION);
+        assert_eq!(cfg.circuits.install_dir, ".scaffold/circuits");
+        assert_eq!(cfg.circuits.url_template, None);
+    }
+
+    #[test]
+    fn parses_circuits_section() {
+        let toml = minimal_v0_2_0()
+            + r#"
+[circuits]
+version = "9.9.9"
+url_template = "https://example.invalid/circuits-v{version}-{triple}.tar.gz"
+install_dir = "vendor/circuits"
+"#;
+        let cfg = parse_config(&toml).expect("parse");
+        assert_eq!(cfg.circuits.version, "9.9.9");
+        assert_eq!(
+            cfg.circuits.url_template.as_deref(),
+            Some("https://example.invalid/circuits-v{version}-{triple}.tar.gz")
+        );
+        assert_eq!(cfg.circuits.install_dir, "vendor/circuits");
+    }
+
+    #[test]
+    fn circuits_install_dir_rejects_parent_dir_traversal() {
+        // `install_dir` is create_dir_all'd + extracted into; a `..` component
+        // would escape the project root when joined.
+        let toml = minimal_v0_2_0()
+            + r#"
+[circuits]
+version = "9.9.9"
+install_dir = "../../etc/evil"
+"#;
+        let err = parse_config(&toml).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("install_dir"), "{msg}");
+        assert!(msg.contains(".."), "{msg}");
+    }
+
+    #[test]
+    fn circuits_url_template_rejects_non_http_schemes() {
+        for template in [
+            "file:///tmp/circuits-{version}-{triple}.tar.gz",
+            "ftp://example.invalid/circuits-{version}-{triple}.tar.gz",
+            "example.invalid/circuits-{version}-{triple}.tar.gz",
+        ] {
+            let toml = minimal_v0_2_0()
+                + &format!("[circuits]\nversion = \"9.9.9\"\nurl_template = {template:?}\n");
+            let err = parse_config(&toml).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("url_template"), "{msg}");
+            assert!(msg.contains("http:// or https://"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn circuits_url_template_accepts_http_and_https_case_insensitively() {
+        for template in [
+            "http://example.invalid/circuits-{version}-{triple}.tar.gz",
+            "HTTPS://example.invalid/circuits-{version}-{triple}.tar.gz",
+        ] {
+            let toml = minimal_v0_2_0()
+                + &format!("[circuits]\nversion = \"9.9.9\"\nurl_template = {template:?}\n");
+            parse_config(&toml).expect("http(s) template should parse");
+        }
+    }
+
+    #[test]
+    fn circuits_section_requires_version_when_present() {
+        let toml = minimal_v0_2_0() + "[circuits]\ninstall_dir = \"vendor/circuits\"\n";
+        let err = parse_config(&toml).unwrap_err();
+        assert!(err.to_string().contains("[circuits].version"), "{err}");
+    }
+
+    #[test]
+    fn circuits_round_trips_through_serialize() {
+        let toml = minimal_v0_2_0()
+            + r#"
+[circuits]
+version = "9.9.9"
+url_template = "https://example.invalid/circuits-v{version}-{triple}.tar.gz"
+install_dir = "vendor/circuits"
+"#;
+        let cfg1 = parse_config(&toml).expect("parse");
+        let serialized = serialize_config(&cfg1).expect("serialize");
+        assert!(serialized.contains("[circuits]"), "{serialized}");
+        assert!(serialized.contains("version = \"9.9.9\""), "{serialized}");
+        assert!(
+            serialized.contains("install_dir = \"vendor/circuits\""),
+            "{serialized}"
+        );
+        let cfg2 = parse_config(&serialized).expect("re-parse");
+        assert_eq!(cfg2.circuits.version, "9.9.9");
+        assert_eq!(cfg2.circuits.install_dir, "vendor/circuits");
     }
 
     #[test]
@@ -784,6 +1355,282 @@ attr = "cli"
     }
 
     #[test]
+    fn repos_basecamp_attr_per_platform_map_parses_resolves_and_round_trips() {
+        let toml = minimal_v0_2_0()
+            + &format!(
+                r#"
+[repos.basecamp]
+source = "{}"
+pin = "{}"
+build = "nix-flake"
+
+[repos.basecamp.attr]
+aarch64-darwin = "bin-macos-app"
+x86_64-linux = "app"
+"#,
+                BASECAMP_SOURCE, DEFAULT_BASECAMP_PIN,
+            );
+        let cfg = parse_config(&toml).expect("parse");
+        let bc = cfg.basecamp_repo.clone().expect("basecamp present");
+        // Scalar `attr` stays empty for the table form; the map carries the values.
+        assert!(bc.attr.is_empty());
+        assert_eq!(bc.effective_attr("aarch64-darwin"), "bin-macos-app");
+        assert_eq!(bc.effective_attr("x86_64-linux"), "app");
+        // Unmapped platform falls back to the (empty) scalar.
+        assert_eq!(bc.effective_attr("riscv64-linux"), "");
+
+        // The per-platform map survives a serialize -> parse round-trip so
+        // `save_project_config` (run by `setup`) never clobbers it.
+        let serialized = serialize_config(&cfg).expect("serialize");
+        let bc2 = parse_config(&serialized)
+            .expect("re-parse")
+            .basecamp_repo
+            .expect("basecamp present after round-trip");
+        assert_eq!(bc2.effective_attr("aarch64-darwin"), "bin-macos-app");
+        assert_eq!(bc2.effective_attr("x86_64-linux"), "app");
+        assert!(bc2.attr.is_empty());
+    }
+
+    #[test]
+    fn repos_basecamp_attr_map_rejects_control_char_system_key() {
+        // A quoted TOML key carrying a control char must be rejected at parse
+        // so it can't corrupt the line-oriented serializer on the next save.
+        let toml = minimal_v0_2_0()
+            + &format!(
+                "\n[repos.basecamp]\nsource = \"{}\"\npin = \"{}\"\nbuild = \"nix-flake\"\n",
+                BASECAMP_SOURCE, DEFAULT_BASECAMP_PIN,
+            )
+            + "\n[repos.basecamp.attr]\n\"bad\\nkey\" = \"app\"\n";
+        let err = parse_config(&toml).unwrap_err();
+        assert!(err.to_string().contains("attr"), "{err}");
+    }
+
+    #[test]
+    fn parses_basecamp_launch_env_sections() {
+        let toml = minimal_v0_2_0()
+            + r#"
+[basecamp.env]
+QT_DEBUG_PLUGINS = "1"
+
+[basecamp.env_append]
+QT_PLUGIN_PATH = ["/nix/store/a/plugins"]
+LD_LIBRARY_PATH = ["/nix/store/a/lib", "/nix/store/b/lib"]
+
+[basecamp.profiles.alice.env]
+LOGOS_STORAGE_API_PORT = "8081"
+
+[basecamp.profiles.bob.env]
+LOGOS_STORAGE_API_PORT = "8082"
+"#;
+        let cfg = parse_config(&toml).expect("parse");
+        let bc = cfg.basecamp.expect("basecamp config present");
+        assert_eq!(
+            bc.env.get("QT_DEBUG_PLUGINS").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            bc.env_append.get("LD_LIBRARY_PATH").map(Vec::as_slice),
+            Some(
+                &[
+                    "/nix/store/a/lib".to_string(),
+                    "/nix/store/b/lib".to_string()
+                ][..]
+            )
+        );
+        assert_eq!(
+            bc.profiles
+                .get("alice")
+                .and_then(|p| p.env.get("LOGOS_STORAGE_API_PORT"))
+                .map(String::as_str),
+            Some("8081")
+        );
+        assert_eq!(
+            bc.profiles
+                .get("bob")
+                .and_then(|p| p.env.get("LOGOS_STORAGE_API_PORT"))
+                .map(String::as_str),
+            Some("8082")
+        );
+    }
+
+    #[test]
+    fn basecamp_env_append_drops_empty_lists() {
+        // An empty list is a launch-time no-op; it must not be captured (so
+        // `[basecamp]` stays empty here and nothing round-trips back).
+        let toml = minimal_v0_2_0() + "[basecamp.env_append]\nQT_PLUGIN_PATH = []\n";
+        let cfg = parse_config(&toml).expect("parse");
+        assert!(
+            cfg.basecamp.is_none(),
+            "an empty env_append entry must not make [basecamp] non-empty: {:?}",
+            cfg.basecamp
+        );
+    }
+
+    #[test]
+    fn basecamp_launch_env_round_trips_through_serialize() {
+        let toml = minimal_v0_2_0()
+            + r#"
+[basecamp.env]
+QT_DEBUG_PLUGINS = "1"
+
+[basecamp.env_append]
+QT_PLUGIN_PATH = ["/nix/store/a/plugins"]
+
+[basecamp.profiles.alice.env]
+LOGOS_STORAGE_API_PORT = "8081"
+"#;
+        let cfg1 = parse_config(&toml).expect("parse");
+        let serialized = serialize_config(&cfg1).expect("serialize");
+        let cfg2 = parse_config(&serialized).expect("re-parse");
+        let bc = cfg2.basecamp.expect("basecamp present after round-trip");
+        assert_eq!(
+            bc.env.get("QT_DEBUG_PLUGINS").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            bc.env_append.get("QT_PLUGIN_PATH").map(Vec::as_slice),
+            Some(&["/nix/store/a/plugins".to_string()][..])
+        );
+        assert_eq!(
+            bc.profiles
+                .get("alice")
+                .and_then(|p| p.env.get("LOGOS_STORAGE_API_PORT"))
+                .map(String::as_str),
+            Some("8081")
+        );
+    }
+
+    #[test]
+    fn basecamp_profile_scalars_and_custom_name_round_trip() {
+        // A custom profile name (not alice/bob) carrying `env` plus all three
+        // per-profile scalars parses, exposes them, and survives serialize ->
+        // parse so `save_project_config` never drops them.
+        let toml = minimal_v0_2_0()
+            + r#"
+[basecamp.profiles.carol]
+env_file = ".scaffold/carol.env"
+runtime_dir = "/tmp/lgs-carol"
+log_file = ".scaffold/carol.log"
+
+[basecamp.profiles.carol.env]
+LOGOS_STORAGE_API_PORT = "8083"
+"#;
+        let assert_carol = |c: &BasecampProfile| {
+            assert_eq!(c.env_file.as_deref(), Some(".scaffold/carol.env"));
+            assert_eq!(c.runtime_dir.as_deref(), Some("/tmp/lgs-carol"));
+            assert_eq!(c.log_file.as_deref(), Some(".scaffold/carol.log"));
+            assert_eq!(
+                c.env.get("LOGOS_STORAGE_API_PORT").map(String::as_str),
+                Some("8083")
+            );
+        };
+        let cfg = parse_config(&toml).expect("parse");
+        assert_carol(
+            cfg.basecamp
+                .as_ref()
+                .and_then(|bc| bc.profiles.get("carol"))
+                .expect("carol profile"),
+        );
+
+        let serialized = serialize_config(&cfg).expect("serialize");
+        let carol2 = parse_config(&serialized)
+            .expect("re-parse")
+            .basecamp
+            .expect("basecamp present")
+            .profiles
+            .remove("carol")
+            .expect("carol after round-trip");
+        assert_carol(&carol2);
+    }
+
+    #[test]
+    fn basecamp_env_only_omits_default_port_keys_and_avoids_dotting() {
+        // Setting just [basecamp.env] (default ports) must NOT churn in
+        // default port_base/port_stride, and must never serialize them as
+        // dotted `basecamp.port_base = …` keys. Only [basecamp.env] renders.
+        let toml = minimal_v0_2_0() + "[basecamp.env]\nQT_DEBUG_PLUGINS = \"1\"\n";
+        let cfg = parse_config(&toml).expect("parse");
+        let serialized = serialize_config(&cfg).expect("serialize");
+        assert!(
+            !serialized.contains("port_base"),
+            "default port_base must be omitted (no churn), got:\n{serialized}"
+        );
+        assert!(
+            serialized.contains("[basecamp.env]"),
+            "expected [basecamp.env], got:\n{serialized}"
+        );
+        // Round-trips with env intact.
+        let cfg2 = parse_config(&serialized).expect("re-parse");
+        assert_eq!(
+            cfg2.basecamp
+                .and_then(|b| b.env.get("QT_DEBUG_PLUGINS").cloned())
+                .as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn basecamp_non_default_ports_serialize_as_explicit_table() {
+        // When a port differs from the default it is written under an explicit
+        // [basecamp] header (not dotted), even alongside [basecamp.env].
+        let toml = minimal_v0_2_0()
+            + "[basecamp]\nport_base = 50000\n\n[basecamp.env]\nQT_DEBUG_PLUGINS = \"1\"\n";
+        let cfg = parse_config(&toml).expect("parse");
+        let serialized = serialize_config(&cfg).expect("serialize");
+        assert!(
+            serialized.contains("[basecamp]") && serialized.contains("port_base = 50000"),
+            "expected explicit [basecamp] with port_base, got:\n{serialized}"
+        );
+        assert!(
+            !serialized.contains("basecamp.port_base"),
+            "port_base must not be a dotted key, got:\n{serialized}"
+        );
+        assert_eq!(
+            parse_config(&serialized)
+                .expect("re-parse")
+                .basecamp
+                .map(|b| b.port_base),
+            Some(50000)
+        );
+    }
+
+    #[test]
+    fn basecamp_env_append_rejects_empty_string_entry() {
+        // An empty path segment (`LD_LIBRARY_PATH=:`) silently injects CWD into
+        // search paths — reject it at parse.
+        let toml = minimal_v0_2_0() + "[basecamp.env_append]\nLD_LIBRARY_PATH = [\"\"]\n";
+        let err = parse_config(&toml).unwrap_err();
+        assert!(err.to_string().contains("must not be empty"), "{err}");
+    }
+
+    #[test]
+    fn basecamp_env_rejects_invalid_var_name() {
+        // `=` in an env var name would only surface as an opaque exec failure.
+        let toml = minimal_v0_2_0() + "[basecamp.env]\n\"FOO=BAR\" = \"1\"\n";
+        let err = parse_config(&toml).unwrap_err();
+        assert!(err.to_string().contains("must not contain `=`"), "{err}");
+
+        // Empty env var name is rejected too.
+        let toml2 = minimal_v0_2_0() + "[basecamp.profiles.alice.env]\n\"\" = \"1\"\n";
+        let err2 = parse_config(&toml2).unwrap_err();
+        assert!(err2.to_string().contains("must not be empty"), "{err2}");
+    }
+
+    #[test]
+    fn serialize_rejects_control_char_in_basecamp_profile_name() {
+        // Profile names aren't validated at parse, so a quoted key with a
+        // control char parses — but it must be rejected before it can corrupt
+        // the serializer, like every other emitted name key.
+        let toml = minimal_v0_2_0() + "[basecamp.profiles.\"bad\\nname\".env]\nFOO = \"1\"\n";
+        let cfg = parse_config(&toml).expect("parse accepts the unchecked profile name");
+        let err = serialize_config(&cfg).expect_err("serialize must reject the control-char name");
+        assert!(
+            err.to_string().contains("control character"),
+            "expected control-char rejection, got: {err}"
+        );
+    }
+
+    #[test]
     fn parses_modules_section() {
         let toml = minimal_v0_2_0()
             + r#"
@@ -802,6 +1649,50 @@ role = "dependency"
         assert_eq!(tic.role, ModuleRole::Project);
         let dm = cfg.modules.get("delivery_module").expect("dm");
         assert_eq!(dm.role, ModuleRole::Dependency);
+    }
+
+    #[test]
+    fn module_standalone_app_parses_and_round_trips() {
+        let toml = minimal_v0_2_0()
+            + r#"
+[modules.swap_ui]
+flake = "path:./swap-ui#lgx"
+role = "project"
+standalone_app = "swap-ui-standalone"
+
+[modules.swap]
+flake = "path:./swap#lgx"
+role = "project"
+"#;
+        let cfg = parse_config(toml.as_str()).expect("parse");
+        assert_eq!(
+            cfg.modules
+                .get("swap_ui")
+                .expect("swap_ui")
+                .standalone_app
+                .as_deref(),
+            Some("swap-ui-standalone")
+        );
+        // A module that omits the field must stay `None` (not `Some("")`).
+        assert_eq!(cfg.modules.get("swap").expect("swap").standalone_app, None);
+
+        let serialized = serialize_config(&cfg).expect("serialize");
+        let cfg2 = parse_config(&serialized).expect("re-parse");
+        assert_eq!(
+            cfg2.modules
+                .get("swap_ui")
+                .expect("swap_ui")
+                .standalone_app
+                .as_deref(),
+            Some("swap-ui-standalone"),
+            "standalone_app must survive serialize→parse so setup never clobbers it"
+        );
+        assert_eq!(cfg2.modules.get("swap").expect("swap").standalone_app, None);
+        // An omitted/empty value must not be persisted as `standalone_app = ""`.
+        assert!(
+            !serialized.contains("standalone_app = \"\""),
+            "empty standalone_app should be omitted: {serialized}"
+        );
     }
 
     #[test]
@@ -1015,6 +1906,50 @@ role = "project"
     }
 
     #[test]
+    fn parse_config_with_run_watch_section() {
+        let toml = minimal_v0_2_0()
+            + "[run.watch]\ninclude = [\"programs/**/guest/**\"]\nexclude = [\"**/*.md\", \"Cargo.lock\"]\ndebounce_ms = 1500\n";
+        let cfg = parse_config(&toml).expect("parse");
+        assert_eq!(
+            cfg.run.watch.include,
+            vec!["programs/**/guest/**".to_string()]
+        );
+        assert_eq!(
+            cfg.run.watch.exclude,
+            vec!["**/*.md".to_string(), "Cargo.lock".to_string()]
+        );
+        assert_eq!(cfg.run.watch.debounce_ms, Some(1500));
+    }
+
+    #[test]
+    fn parse_config_run_watch_rejects_empty_glob() {
+        // An empty pattern normalizes to match-all; an empty `exclude` would
+        // silently suppress every watch trigger, so it's rejected at parse.
+        let toml = minimal_v0_2_0() + "[run.watch]\nexclude = [\"\"]\n";
+        let err = parse_config(&toml).unwrap_err();
+        assert!(err.to_string().contains("must not be empty"), "{err}");
+    }
+
+    #[test]
+    fn parse_config_run_watch_rejects_negative_debounce() {
+        let toml = minimal_v0_2_0() + "[run.watch]\ndebounce_ms = -5\n";
+        let err = parse_config(&toml).unwrap_err();
+        assert!(err.to_string().contains("debounce_ms"), "{err}");
+    }
+
+    #[test]
+    fn run_watch_round_trips_through_parse_serialize() {
+        let toml = minimal_v0_2_0()
+            + "[run.watch]\ninclude = [\"src/**\"]\nexclude = [\"**/target/**\"]\ndebounce_ms = 750\n";
+        let cfg1 = parse_config(&toml).expect("parse");
+        let serialized = serialize_config(&cfg1).expect("serialize");
+        let cfg2 = parse_config(&serialized).expect("re-parse");
+        assert_eq!(cfg2.run.watch.include, vec!["src/**".to_string()]);
+        assert_eq!(cfg2.run.watch.exclude, vec!["**/target/**".to_string()]);
+        assert_eq!(cfg2.run.watch.debounce_ms, Some(750));
+    }
+
+    #[test]
     fn parse_config_default_profile_must_exist() {
         let toml = minimal_v0_2_0() + "[run]\ndefault_profile = \"missing\"\n";
         let err = parse_config(&toml).unwrap_err();
@@ -1096,6 +2031,116 @@ role = "project"
     }
 
     #[test]
+    fn run_profile_deploy_defaults_to_true() {
+        // Absent `deploy` key → deploy runs, preserving historical behavior.
+        let toml = minimal_v0_2_0() + "[run.profiles.demo]\npost_deploy = \"echo demo\"\n";
+        let cfg = parse_config(&toml).expect("parse");
+        assert!(cfg.run.profiles.get("demo").expect("demo present").deploy);
+        // The inline/default profile also defaults deploy to true.
+        assert!(RunProfile::default().deploy);
+        assert!(cfg.run.inline.deploy);
+    }
+
+    #[test]
+    fn parse_config_run_profile_deploy_false() {
+        let toml = minimal_v0_2_0()
+            + "[run.profiles.demo]\ndeploy = false\npost_deploy = [\"scripts/self-deploy.sh\"]\n";
+        let cfg = parse_config(&toml).expect("parse");
+        let demo = cfg.run.profiles.get("demo").expect("demo present");
+        assert!(!demo.deploy);
+        assert_eq!(demo.post_deploy, vec!["scripts/self-deploy.sh".to_string()]);
+    }
+
+    #[test]
+    fn parse_config_inline_run_deploy_false() {
+        let toml = minimal_v0_2_0() + "[run]\ndeploy = false\n";
+        let cfg = parse_config(&toml).expect("parse");
+        assert!(!cfg.run.inline.deploy);
+        let resolved = cfg.run.resolve_profile(None).expect("resolve");
+        assert!(!resolved.deploy);
+    }
+
+    #[test]
+    fn run_profile_deploy_round_trips_through_parse_serialize() {
+        let toml = minimal_v0_2_0()
+            + "[run]\ndeploy = false\n[run.profiles.demo]\ndeploy = false\npost_deploy = [\"echo demo\"]\n";
+        let cfg1 = parse_config(&toml).expect("parse");
+        let serialized = serialize_config(&cfg1).expect("serialize");
+        let cfg2 = parse_config(&serialized).expect("re-parse");
+        assert!(!cfg2.run.inline.deploy);
+        let demo = cfg2.run.profiles.get("demo").expect("demo present");
+        assert!(!demo.deploy);
+        assert_eq!(demo.post_deploy, vec!["echo demo".to_string()]);
+    }
+
+    #[test]
+    fn run_profile_deploy_true_is_not_serialized() {
+        // The `true` default must not be emitted, to keep scaffold.toml minimal.
+        let toml = minimal_v0_2_0() + "[run.profiles.demo]\npost_deploy = [\"echo demo\"]\n";
+        let cfg = parse_config(&toml).expect("parse");
+        let serialized = serialize_config(&cfg).expect("serialize");
+        assert!(
+            !serialized.contains("deploy = true"),
+            "default deploy=true should not be serialized:\n{serialized}"
+        );
+    }
+
+    #[test]
+    fn run_profile_topup_defaults_to_true() {
+        // Absent `topup` key → topup runs, preserving historical behavior.
+        let toml = minimal_v0_2_0() + "[run.profiles.demo]\npost_deploy = \"echo demo\"\n";
+        let cfg = parse_config(&toml).expect("parse");
+        assert!(cfg.run.profiles.get("demo").expect("demo present").topup);
+        // The inline/default profile also defaults topup to true.
+        assert!(RunProfile::default().topup);
+        assert!(cfg.run.inline.topup);
+    }
+
+    #[test]
+    fn parse_config_run_profile_topup_false() {
+        let toml = minimal_v0_2_0()
+            + "[run.profiles.demo]\ntopup = false\npost_deploy = [\"cargo run --bin demo\"]\n";
+        let cfg = parse_config(&toml).expect("parse");
+        let demo = cfg.run.profiles.get("demo").expect("demo present");
+        assert!(!demo.topup);
+        assert_eq!(demo.post_deploy, vec!["cargo run --bin demo".to_string()]);
+    }
+
+    #[test]
+    fn parse_config_inline_run_topup_false() {
+        let toml = minimal_v0_2_0() + "[run]\ntopup = false\n";
+        let cfg = parse_config(&toml).expect("parse");
+        assert!(!cfg.run.inline.topup);
+        let resolved = cfg.run.resolve_profile(None).expect("resolve");
+        assert!(!resolved.topup);
+    }
+
+    #[test]
+    fn run_profile_topup_round_trips_through_parse_serialize() {
+        let toml = minimal_v0_2_0()
+            + "[run]\ntopup = false\n[run.profiles.demo]\ntopup = false\npost_deploy = [\"echo demo\"]\n";
+        let cfg1 = parse_config(&toml).expect("parse");
+        let serialized = serialize_config(&cfg1).expect("serialize");
+        let cfg2 = parse_config(&serialized).expect("re-parse");
+        assert!(!cfg2.run.inline.topup);
+        let demo = cfg2.run.profiles.get("demo").expect("demo present");
+        assert!(!demo.topup);
+        assert_eq!(demo.post_deploy, vec!["echo demo".to_string()]);
+    }
+
+    #[test]
+    fn run_profile_topup_true_is_not_serialized() {
+        // The `true` default must not be emitted, to keep scaffold.toml minimal.
+        let toml = minimal_v0_2_0() + "[run.profiles.demo]\npost_deploy = [\"echo demo\"]\n";
+        let cfg = parse_config(&toml).expect("parse");
+        let serialized = serialize_config(&cfg).expect("serialize");
+        assert!(
+            !serialized.contains("topup = true"),
+            "default topup=true should not be serialized:\n{serialized}"
+        );
+    }
+
+    #[test]
     fn serialize_rejects_newline_in_profile_post_deploy() {
         let mut cfg = base_config();
         let mut profiles = std::collections::BTreeMap::new();
@@ -1104,6 +2149,8 @@ role = "project"
             RunProfile {
                 reset: false,
                 post_deploy: vec!["echo a\n[run.profiles.evil]".to_string()],
+                deploy: true,
+                topup: true,
             },
         );
         cfg.run = RunConfig {

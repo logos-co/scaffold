@@ -10,7 +10,7 @@ use crate::commands::build::cmd_build_shortcut;
 use crate::commands::deploy::{
     cmd_deploy, discover_deployable_programs, discover_program_binaries, extract_program_id,
 };
-use crate::commands::idl::build_idl_for_current_project;
+use crate::commands::idl::{build_idl_for_current_project, IDL_STATE_REL};
 use crate::commands::localnet::{
     build_localnet_status_for_project, cmd_localnet, cmd_localnet_reset, LocalnetAction,
 };
@@ -20,7 +20,11 @@ use crate::commands::run_state::{
 };
 use crate::commands::setup::ensure_default_wallet_seeded;
 use crate::commands::wallet::{cmd_wallet_topup_inner, TopupOutcome};
-use crate::constants::{DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, SPEL_BIN_REL_PATH};
+use crate::commands::wallet_support::set_wallet_home_env;
+use crate::constants::{
+    DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, FRAMEWORK_KIND_LEZ_FRAMEWORK, SPEL_BIN_REL_PATH,
+    WALLET_BIN_REL_PATH,
+};
 use crate::model::{LocalnetOwnership, Project, RunProfile};
 use crate::project::{load_project, resolve_repo_path, run_in_project_dir};
 use crate::state::prepare_wallet_home;
@@ -42,10 +46,20 @@ pub(crate) struct RunInvocation {
     pub(crate) post_deploy_override: Option<Vec<String>>,
     pub(crate) localnet_timeout_sec: Option<u64>,
     pub(crate) watch: bool,
+    /// Per-invocation override of the `--watch` debounce window (ms).
+    pub(crate) watch_debounce_ms: Option<u64>,
 }
 
 pub(crate) fn cmd_run(inv: RunInvocation) -> DynResult<()> {
     let project = load_project()?;
+    run_for_project(&project, inv)
+}
+
+/// Execute the `lgs run` pipeline (build → IDL → localnet → topup → deploy →
+/// hooks) for `project`. Streams step progress to stdout. With `inv.watch`
+/// set, blocks in the watch loop until interrupted — API callers normally
+/// leave `watch` off.
+pub(crate) fn run_for_project(project: &Project, inv: RunInvocation) -> DynResult<()> {
     let resolved = project.config.run.resolve_profile(inv.profile.as_deref())?;
     if let Some(name) = inv.profile.as_deref() {
         println!("Using [run.profiles.{name}]");
@@ -78,7 +92,13 @@ pub(crate) fn cmd_run(inv: RunInvocation) -> DynResult<()> {
             // never reset the localnet again — that would clobber the state
             // hook code is verifying.
             params.reset_override = Some(false);
-            watch_loop(&project, &params)?;
+            // CLI flag wins over `[run.watch].debounce_ms`, which wins over
+            // the built-in default.
+            let debounce_ms = inv
+                .watch_debounce_ms
+                .or(project.config.run.watch.debounce_ms)
+                .unwrap_or(WATCH_DEBOUNCE_MS);
+            watch_loop(&project, &params, debounce_ms)?;
         }
 
         Ok(())
@@ -110,13 +130,39 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
         );
     }
 
+    // A reset means "start fresh": clear the IDL cache *before* the IDL
+    // step (step 2) so it re-runs this invocation. The deploy cache is
+    // cleared later in step 3, after the on-chain wipe. Tolerate a missing
+    // file (no prior run).
+    if effective_reset {
+        let idl_state = project.root.join(IDL_STATE_REL);
+        match std::fs::remove_file(&idl_state) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("clear stale IDL cache at {}", idl_state.display()));
+            }
+        }
+    }
+
     // Step 1: Build (chains setup internally)
     println!("[1/{total_steps}] Building...");
     cmd_build_shortcut(None, false)?;
 
-    // Step 2: Build IDL (no-op for non-lez-framework projects)
+    // Step 2: Build IDL (no-op for non-lez-framework projects). `build_idl_for_current_project`
+    // deliberately bails when typed directly against a non-lez-framework project, so the
+    // pipeline must gate on framework kind here the same way `lgs build` does — otherwise
+    // `lgs run` aborts at this step for every `default`-template project.
     println!("[2/{total_steps}] Building IDL...");
-    build_idl_for_current_project()?;
+    if project.config.framework.kind == FRAMEWORK_KIND_LEZ_FRAMEWORK {
+        build_idl_for_current_project()?;
+    } else {
+        println!(
+            "Skipping IDL build for framework kind `{}`",
+            project.config.framework.kind
+        );
+    }
 
     // Step 3: Reset OR ensure localnet.
     if effective_reset {
@@ -140,50 +186,79 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
         ensure_localnet(project, params.localnet_timeout_sec)?;
     }
 
-    // Step 4: Wallet topup
-    println!("[4/{total_steps}] Topping up wallet...");
-    let outcome = cmd_wallet_topup_inner(project, None, false)?;
-    if let TopupOutcome::ConfirmationTimeout { message } = outcome {
-        bail!(
-            "{message}\n\
-             Run aborted before deploy to avoid deploying with uncertain funding.\n\
-             Hint: retry `logos-scaffold run` or run `logos-scaffold wallet topup` manually."
+    // Step 4: Wallet topup. Skipped entirely when the run profile sets
+    // `topup = false` (project funds its own accounts). The branch below and
+    // the value hooks read from `SCAFFOLD_TOPUP_SKIPPED` come from the same
+    // expression, so what the hook is told can't drift from what step 4 did.
+    let topup_skipped = topup_step_skipped(&params.resolved);
+    if topup_skipped {
+        // `topup = false`: the project funds its own accounts (e.g. claims
+        // from the faucet at runtime, from a demo binary or a post_deploy
+        // hook). Skip scaffold's topup — including its requirement that a
+        // destination address be resolvable — and proceed to deploy/hooks.
+        println!(
+            "[4/{total_steps}] Topup skipped (`topup = false` in the run profile; this project funds its own accounts — e.g. via faucet claims at runtime)"
         );
+    } else {
+        println!("[4/{total_steps}] Topping up wallet...");
+        let outcome = cmd_wallet_topup_inner(project, None, false, false)?;
+        if let TopupOutcome::ConfirmationTimeout { message } = outcome {
+            bail!(
+                "{message}\n\
+                 Run aborted before deploy to avoid deploying with uncertain funding.\n\
+                 Hint: retry `logos-scaffold run` or run `logos-scaffold wallet topup` manually."
+            );
+        }
     }
 
-    // Step 5: Deploy (idempotent: skip when guest .bin + IDL + deploy
-    // config hashes match the prior deploy AND the sequencer is the same
-    // instance that received it. A `lgs localnet stop && start` cycle
-    // changes the sequencer PID and wipes on-chain state, so PID equality
-    // is the gate that prevents stale-deploy false positives. To force a
-    // re-deploy without restarting localnet, use `--reset` (which also
-    // clears the cache) or delete `.scaffold/state/run_deploy.json`
-    // manually.
-    let current_hashes = compute_program_hashes(project)?;
-    let current_pid = current_localnet_pid(project);
-    let prior = load_state(project);
-    let deploy_skipped = if deploy_can_be_skipped(&current_hashes, current_pid, &prior) {
+    // Step 5: Deploy. Skipped entirely when the run profile sets
+    // `deploy = false` (project owns deployment); otherwise idempotent —
+    // see the branches below.
+    let deploy_skipped = if !params.resolved.deploy {
+        // `deploy = false`: the project owns program deployment itself (e.g.
+        // from a post_deploy hook, or with its guest program outside the
+        // scaffold-default `methods/guest/src/bin`). Skip scaffold's deploy —
+        // including the program-hash computation, which otherwise bails when
+        // the default program directory is absent — and go straight to hooks.
         println!(
-            "[5/{total_steps}] Deploy skipped (guest binaries + IDL + config + sequencer unchanged; pass `--reset` to wipe and re-deploy, or delete `.scaffold/state/run_deploy.json` to force a re-deploy without a wipe)"
+            "[5/{total_steps}] Deploy skipped (`deploy = false` in the run profile; this project owns program deployment — e.g. via a post_deploy hook)"
         );
         true
     } else {
-        println!("[5/{total_steps}] Deploying programs...");
-        cmd_deploy(None, None, false)?;
-        save_state(
-            project,
-            &RunDeployState {
-                program_hashes: current_hashes,
-                localnet_pid: current_pid,
-            },
-        )?;
-        false
+        // Step 5 deploy is idempotent: skip when guest .bin + IDL + deploy
+        // config hashes match the prior deploy AND the sequencer is the same
+        // instance that received it. A `lgs localnet stop && start` cycle
+        // changes the sequencer PID and wipes on-chain state, so PID equality
+        // is the gate that prevents stale-deploy false positives. To force a
+        // re-deploy without restarting localnet, use `--reset` (which also
+        // clears the cache) or delete `.scaffold/state/run_deploy.json`
+        // manually.
+        let current_hashes = compute_program_hashes(project)?;
+        let current_pid = current_localnet_pid(project);
+        let prior = load_state(project);
+        if deploy_can_be_skipped(&current_hashes, current_pid, &prior) {
+            println!(
+                "[5/{total_steps}] Deploy skipped (guest binaries + IDL + config + sequencer unchanged; pass `--reset` to wipe and re-deploy, or delete `.scaffold/state/run_deploy.json` to force a re-deploy without a wipe)"
+            );
+            true
+        } else {
+            println!("[5/{total_steps}] Deploying programs...");
+            cmd_deploy(None, None, false)?;
+            save_state(
+                project,
+                &RunDeployState {
+                    program_hashes: current_hashes,
+                    localnet_pid: current_pid,
+                },
+            )?;
+            false
+        }
     };
 
     // Collect deployed-program metadata for hook env injection regardless
     // of whether deploy ran or was skipped — hooks address programs by
     // name and shouldn't have to care about cache state.
-    // `extract_program_id` shells out to `spel inspect` once per program
+    // `extract_program_id` shells out to `spel program-id` once per program
     // here so the per-hook loop doesn't multiply latency by hook count.
     let deployed = collect_deployed_programs(project, deploy_skipped)?;
 
@@ -195,7 +270,7 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
         warn_on_rewritten_program_names(&deployed.programs);
         for (i, hook) in params.hooks.iter().enumerate() {
             println!("===> post_deploy[{}/{n}]: {hook}", i + 1);
-            run_post_deploy_hook(project, hook, &deployed)?;
+            run_post_deploy_hook(project, hook, &deployed, topup_skipped)?;
             println!("<=== post_deploy[{}/{n}] OK", i + 1);
         }
     } else {
@@ -203,6 +278,16 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
     }
 
     Ok(())
+}
+
+/// Whether step 4 skips scaffold's wallet topup for `resolved` — which is
+/// also the value hooks read from `SCAFFOLD_TOPUP_SKIPPED`.
+///
+/// Extracted as its own function so a unit test can pin the polarity
+/// directly: `run_pipeline_once` needs a real sequencer to drive, so an
+/// inverted signal here would otherwise reach every hook unchallenged.
+fn topup_step_skipped(resolved: &RunProfile) -> bool {
+    !resolved.topup
 }
 
 fn reset_for_run(project: &Project, verify_timeout_sec: u64) -> DynResult<()> {
@@ -235,12 +320,9 @@ fn reset_for_run(project: &Project, verify_timeout_sec: u64) -> DynResult<()> {
     Ok(())
 }
 
-/// Re-seed the project's default wallet after `cmd_localnet_reset` wiped
-/// it. Reuses the same primitives `cmd_setup` calls so the resulting
-/// `wallet.state` is byte-equivalent to a fresh `lgs setup`. Extracted as
-/// its own helper so the byte-equivalence test can drive it directly
-/// without booting a real sequencer.
-fn watch_loop(project: &Project, params: &PipelineParams) -> DynResult<()> {
+/// Re-run the pipeline on each filesystem change, coalescing bursts within
+/// `debounce_ms` into a single re-run.
+fn watch_loop(project: &Project, params: &PipelineParams, debounce_ms: u64) -> DynResult<()> {
     let (tx, rx) = mpsc::channel();
     let mut watcher = notify::recommended_watcher(move |res| {
         let _ = tx.send(res);
@@ -254,13 +336,21 @@ fn watch_loop(project: &Project, params: &PipelineParams) -> DynResult<()> {
     // iteration. Without ignoring that directory, those writes fire
     // their own notify events → infinite loop. Resolve once before
     // entering the loop. Use the project-relative form so we match
-    // both canonical and non-canonical event paths.
-    let idl_rel = PathBuf::from(&project.config.framework.idl.path);
-    let watch_ctx = WatchIgnore { idl_rel };
+    // both canonical and non-canonical event paths — and normalize an
+    // absolute `framework.idl.path` that points inside the project to its
+    // relative form, or the `rel.starts_with(idl_rel)` ignore check (which
+    // compares against the project-relative event path) would never match
+    // and watch mode would loop forever on IDL write-backs.
+    let idl_rel = normalize_idl_rel(&project.config.framework.idl.path, &project.root);
+    let watch_ctx = WatchIgnore {
+        idl_rel,
+        include: project.config.run.watch.include.clone(),
+        exclude: project.config.run.watch.exclude.clone(),
+    };
 
     println!();
     println!(
-        "===> watching {} for changes (Ctrl-C to exit)",
+        "===> watching {} for changes (debounce {debounce_ms}ms, Ctrl-C to exit)",
         project.root.display()
     );
 
@@ -280,7 +370,7 @@ fn watch_loop(project: &Project, params: &PipelineParams) -> DynResult<()> {
             continue;
         }
         // Debounce: sleep then drain the rest of the burst.
-        std::thread::sleep(Duration::from_millis(WATCH_DEBOUNCE_MS));
+        std::thread::sleep(Duration::from_millis(debounce_ms));
         while rx.try_recv().is_ok() {}
         println!();
         println!("===> change detected, re-running pipeline");
@@ -293,8 +383,25 @@ fn watch_loop(project: &Project, params: &PipelineParams) -> DynResult<()> {
     Ok(())
 }
 
+/// Resolve `framework.idl.path` to the project-relative form the watch ignore
+/// check compares against. A relative config value is used as-is; an absolute
+/// value pointing inside the project root is rewritten relative to it (so the
+/// `rel.starts_with(idl_rel)` ignore matches and watch mode doesn't loop on IDL
+/// write-backs). An absolute value outside the project passes through unchanged.
+fn normalize_idl_rel(idl_path: &str, root: &Path) -> PathBuf {
+    let configured = PathBuf::from(idl_path);
+    configured
+        .strip_prefix(root)
+        .map(Path::to_path_buf)
+        .unwrap_or(configured)
+}
+
 struct WatchIgnore {
     idl_rel: PathBuf,
+    /// `[run.watch].include` globs. Empty → match any path.
+    include: Vec<String>,
+    /// `[run.watch].exclude` globs. Always win over `include`.
+    exclude: Vec<String>,
 }
 
 fn is_watched_event(project: &Project, ctx: &WatchIgnore, event: &notify::Event) -> bool {
@@ -324,6 +431,8 @@ fn is_ignored_path(project_root: &Path, ctx: &WatchIgnore, path: &Path) -> bool 
         // — this is a notify event from outside the watched directory.
         return true;
     };
+    // Built-in ignores always win: these guard against the IDL/deploy
+    // write-back loop and obvious noise, and are not user-overridable.
     for component in rel.components() {
         let s = component.as_os_str().to_string_lossy();
         if matches!(s.as_ref(), ".scaffold" | "target" | ".git") {
@@ -333,18 +442,118 @@ fn is_ignored_path(project_root: &Path, ctx: &WatchIgnore, path: &Path) -> bool 
     if rel.starts_with(&ctx.idl_rel) {
         return true;
     }
-    false
+
+    // User `[run.watch]` filters. A path is *ignored* when it doesn't
+    // trigger a re-run under the include/exclude resolution rules.
+    let rel_str = rel.to_string_lossy().replace('\\', "/");
+    !watch_path_triggers(&rel_str, &ctx.include, &ctx.exclude)
 }
 
+/// Apply the `[run.watch]` resolution rules to a project-relative path:
+/// triggers a re-run iff it matches at least one `include` glob (or
+/// `include` is empty) AND matches zero `exclude` globs. `exclude` wins.
+fn watch_path_triggers(rel: &str, include: &[String], exclude: &[String]) -> bool {
+    if exclude.iter().any(|g| glob_match(g, rel)) {
+        return false;
+    }
+    include.is_empty() || include.iter().any(|g| glob_match(g, rel))
+}
+
+/// Minimal gitignore-style glob match against a `/`-separated, project-relative
+/// path. `**` spans zero or more path segments; `*` and `?` match within a
+/// single segment. A pattern containing no `/` matches at any depth (so
+/// `Cargo.lock` ≡ `**/Cargo.lock`).
+fn glob_match(pattern: &str, path: &str) -> bool {
+    let anchored;
+    let pattern = if pattern.contains('/') {
+        pattern
+    } else {
+        anchored = format!("**/{pattern}");
+        &anchored
+    };
+    let pat_segs: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
+    let path_segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    match_segments(&pat_segs, &path_segs)
+}
+
+/// Iterative two-pointer match of pattern segments against path segments,
+/// where `**` matches zero or more whole segments and any other segment must
+/// match exactly one path segment via `segment_match`. Linear-time
+/// (O(pat·path)) with single-star backtracking — so a pattern carrying several
+/// `**` can't trigger exponential recursive blowup in the watch loop.
+fn match_segments(pat: &[&str], path: &[&str]) -> bool {
+    let (mut p, mut s) = (0usize, 0usize);
+    // Position of the most recent `**` and the path index it started at.
+    let mut star: Option<usize> = None;
+    let mut star_s = 0usize;
+    while s < path.len() {
+        if p < pat.len() && pat[p] == "**" {
+            star = Some(p);
+            star_s = s;
+            p += 1;
+        } else if p < pat.len() && segment_match(pat[p].as_bytes(), path[s].as_bytes()) {
+            p += 1;
+            s += 1;
+        } else if let Some(sp) = star {
+            // Backtrack: let the last `**` swallow one more path segment.
+            p = sp + 1;
+            star_s += 1;
+            s = star_s;
+        } else {
+            return false;
+        }
+    }
+    // Trailing `**`s match the empty remainder.
+    while p < pat.len() && pat[p] == "**" {
+        p += 1;
+    }
+    p == pat.len()
+}
+
+/// Iterative `*` (any run within a segment) / `?` (single char) matcher. Never
+/// crosses a `/` (it only ever sees one already-split path segment). Uses the
+/// same single-star-backtrack scheme so a segment with many `*`s can't trigger
+/// exponential backtracking.
+fn segment_match(pat: &[u8], seg: &[u8]) -> bool {
+    let (mut p, mut s) = (0usize, 0usize);
+    let mut star: Option<usize> = None;
+    let mut star_s = 0usize;
+    while s < seg.len() {
+        if p < pat.len() && (pat[p] == b'?' || pat[p] == seg[s]) {
+            p += 1;
+            s += 1;
+        } else if p < pat.len() && pat[p] == b'*' {
+            star = Some(p);
+            star_s = s;
+            p += 1;
+        } else if let Some(sp) = star {
+            p = sp + 1;
+            star_s += 1;
+            s = star_s;
+        } else {
+            return false;
+        }
+    }
+    while p < pat.len() && pat[p] == b'*' {
+        p += 1;
+    }
+    p == pat.len()
+}
+
+/// Re-seed the project's default wallet after `cmd_localnet_reset` wiped
+/// it. Reuses the same primitives `cmd_setup` calls so the resulting
+/// `wallet.state` is byte-equivalent to a fresh `lgs setup`. Extracted as
+/// its own helper so the byte-equivalence test can drive it directly
+/// without booting a real sequencer.
 fn reseed_after_wipe(project: &Project) -> DynResult<()> {
     let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
     let wallet_home = project.root.join(&project.config.wallet_home_dir);
     prepare_wallet_home(&lez, &wallet_home)?;
-    ensure_default_wallet_seeded(&project.root, &wallet_home)
+    ensure_default_wallet_seeded(&project.root, &wallet_home, &lez.join(WALLET_BIN_REL_PATH))
 }
 
 /// Per-program metadata exposed to post-deploy hooks via env vars.
-/// `program_id` may be `None` when `spel inspect` fails (missing vendored
+/// `program_id` may be `None` when `spel program-id` fails (missing vendored
 /// binary, unreadable ELF).
 #[derive(Clone, Debug)]
 pub(crate) struct DeployedProgram {
@@ -540,20 +749,29 @@ fn print_deploy_summary(project: &Project) -> DynResult<()> {
         }
     }
 
-    let port = project.config.localnet.port;
+    // Use the same URL construction as build_hook_command and wallet_support
+    // so the summary always reflects the address the wallet actually targets,
+    // rather than the raw localnet.port value which may differ when
+    // wallet_config.json overrides sequencer_addr (issue #161).
+    let sequencer_url =
+        crate::commands::wallet_support::default_sequencer_http_url_for_project(project);
     println!();
-    println!("Sequencer: http://127.0.0.1:{port}");
+    println!("Sequencer: {sequencer_url}");
 
     Ok(())
 }
 
+/// `topup_skipped` is threaded in as its own parameter rather than carried
+/// on `DeployedPrograms`: step 4's outcome has no per-program dimension, so
+/// it does not belong on a struct that describes deployed programs.
 fn build_hook_command(
     project: &Project,
     hook_command: &str,
     deployed: &DeployedPrograms,
+    topup_skipped: bool,
 ) -> Command {
-    let port = project.config.localnet.port;
-    let sequencer_url = format!("http://127.0.0.1:{port}");
+    let sequencer_url =
+        crate::commands::wallet_support::default_sequencer_http_url_for_project(project);
     let wallet_home = project
         .root
         .join(&project.config.wallet_home_dir)
@@ -575,7 +793,6 @@ fn build_hook_command(
     cmd.arg("-c")
         .arg(hook_command)
         .env("SEQUENCER_URL", &sequencer_url)
-        .env("NSSA_WALLET_HOME_DIR", &wallet_home)
         .env("SCAFFOLD_PROJECT_ROOT", &project_root)
         .env("SCAFFOLD_IDL_DIR", &idl_dir)
         // Always-on: deploy-skip state is run-level (it's the same for
@@ -585,7 +802,21 @@ fn build_hook_command(
             "SCAFFOLD_DEPLOY_SKIPPED",
             if run_deploy_skipped { "1" } else { "0" },
         )
+        // Always-on for the same reason: topup-skip is run-level state with
+        // no per-program dimension at all. A hook that funds accounts itself
+        // (the `topup = false` case) needs it to decide whether to claim,
+        // rather than always claiming and tolerating an already-funded wallet.
+        .env(
+            "SCAFFOLD_TOPUP_SKIPPED",
+            if topup_skipped { "1" } else { "0" },
+        )
         .current_dir(&project.root);
+    // Both wallet home names (old NSSA_*, v0.2.0 LEE_*) so hook-spawned
+    // wallet CLIs target the project wallet regardless of the LEZ pin. Routed
+    // through the same helper every wallet subprocess uses rather than
+    // iterating `WALLET_HOME_ENV_VARS` here, so the "every wallet-home consumer
+    // gets every name" invariant is greppable by one function name.
+    set_wallet_home_env(&mut cmd, &wallet_home);
 
     // Per-program metadata: `SCAFFOLD_PROGRAMS` holds the space-separated
     // list of names, with parallel `SCAFFOLD_PROGRAM_ID_<name>`,
@@ -606,8 +837,8 @@ fn build_hook_command(
     }
     // Single-program shortcut: only set when there's exactly one program.
     // Hooks that handle multi-program projects must use the indexed forms.
-    // `SCAFFOLD_DEPLOY_SKIPPED` is set unconditionally above (run-level),
-    // so it's not duplicated here.
+    // `SCAFFOLD_DEPLOY_SKIPPED` and `SCAFFOLD_TOPUP_SKIPPED` are set
+    // unconditionally above (run-level), so they're not duplicated here.
     if let [single] = deployed.programs.as_slice() {
         cmd.env("SCAFFOLD_PROGRAM_NAME", &single.name);
         if let Some(id) = &single.program_id {
@@ -622,8 +853,9 @@ fn run_post_deploy_hook(
     project: &Project,
     hook_command: &str,
     deployed: &DeployedPrograms,
+    topup_skipped: bool,
 ) -> DynResult<()> {
-    let status = build_hook_command(project, hook_command, deployed)
+    let status = build_hook_command(project, hook_command, deployed, topup_skipped)
         .status()
         .context("failed to execute post-deploy hook")?;
 
@@ -642,6 +874,123 @@ mod tests {
         Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, Project, RepoRef, RunConfig,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn glob_double_star_spans_segments() {
+        assert!(glob_match(
+            "programs/**/guest/**",
+            "programs/lez-htlc/methods/guest/src/lib.rs"
+        ));
+        // `**` also matches zero segments between fixed parts.
+        assert!(glob_match("programs/**/guest/**", "programs/guest/x.rs"));
+        assert!(!glob_match("programs/**/guest/**", "src/main.rs"));
+    }
+
+    #[test]
+    fn glob_handles_multiple_stars_without_blowup() {
+        // Multiple `**` across segments and multiple `*` within a segment must
+        // resolve correctly under the iterative matcher (and not hang).
+        assert!(glob_match("**/a/**/b/**", "x/a/y/z/b/c/d"));
+        assert!(!glob_match("**/a/**/b/**", "x/a/y/z/c"));
+        assert!(glob_match("src/*a*b*.rs", "src/xxaxxbxx.rs"));
+        assert!(!glob_match("src/*a*b*.rs", "src/xxbxxaxx.rs"));
+        // A long segment against many `*` should be fast (linear), not
+        // exponential — exercised here purely for correctness.
+        assert!(glob_match(
+            "**/*x*x*x*x*x*",
+            "deep/path/xxxxxxxxxxxxxxxxxxxx"
+        ));
+    }
+
+    #[test]
+    fn glob_single_star_stays_within_a_segment() {
+        assert!(glob_match("**/*.md", "docs/readme.md"));
+        assert!(glob_match("**/*.md", "readme.md"));
+        // `*` must not cross a `/`: `*.sol` can't match a nested path here.
+        assert!(!glob_match("contracts/*.sol", "contracts/sub/a.sol"));
+        assert!(glob_match("contracts/*.sol", "contracts/a.sol"));
+    }
+
+    #[test]
+    fn glob_slashless_pattern_matches_at_any_depth() {
+        assert!(glob_match("Cargo.lock", "Cargo.lock"));
+        assert!(glob_match("Cargo.lock", "crates/foo/Cargo.lock"));
+        assert!(!glob_match("Cargo.lock", "Cargo.toml"));
+    }
+
+    #[test]
+    fn glob_question_mark_matches_one_char() {
+        assert!(glob_match("src/a?.rs", "src/ab.rs"));
+        assert!(!glob_match("src/a?.rs", "src/abc.rs"));
+    }
+
+    #[test]
+    fn watch_resolution_exclude_wins_over_include() {
+        let include = vec!["programs/**".to_string()];
+        let exclude = vec!["**/*.md".to_string()];
+        // matches include, not excluded → triggers
+        assert!(watch_path_triggers(
+            "programs/htlc/guest/lib.rs",
+            &include,
+            &exclude
+        ));
+        // matches include AND exclude → excluded wins, no trigger
+        assert!(!watch_path_triggers(
+            "programs/htlc/README.md",
+            &include,
+            &exclude
+        ));
+        // outside include set → no trigger
+        assert!(!watch_path_triggers("src/main.rs", &include, &exclude));
+    }
+
+    #[test]
+    fn watch_resolution_empty_include_means_any_path() {
+        let exclude = vec!["**/target/**".to_string()];
+        assert!(watch_path_triggers("src/main.rs", &[], &exclude));
+        assert!(!watch_path_triggers("a/target/debug/x", &[], &exclude));
+        // No filters at all → everything triggers (default behaviour).
+        assert!(watch_path_triggers("anything/at/all.rs", &[], &[]));
+    }
+
+    #[test]
+    fn is_ignored_path_keeps_builtin_ignores_with_filters() {
+        let ctx = WatchIgnore {
+            idl_rel: PathBuf::from("idl"),
+            include: vec!["src/**".to_string()],
+            exclude: vec![],
+        };
+        let root = Path::new("/proj");
+        // Built-in ignores apply even though they'd match neither filter.
+        assert!(is_ignored_path(root, &ctx, &root.join("target/debug/x")));
+        assert!(is_ignored_path(root, &ctx, &root.join(".scaffold/state/x")));
+        assert!(is_ignored_path(root, &ctx, &root.join("idl/counter.json")));
+        // An included source path is watched (not ignored)...
+        assert!(!is_ignored_path(root, &ctx, &root.join("src/main.rs")));
+        // ...while a path outside the include set is ignored.
+        assert!(is_ignored_path(root, &ctx, &root.join("docs/readme.md")));
+    }
+
+    #[test]
+    fn normalize_idl_rel_handles_relative_and_absolute_paths() {
+        let root = Path::new("/proj");
+        // Relative config value is used as-is.
+        assert_eq!(normalize_idl_rel("idl", root), PathBuf::from("idl"));
+        // Absolute value inside the project is rewritten relative to root, so
+        // the ignore check matches the project-relative event path.
+        let ctx = WatchIgnore {
+            idl_rel: normalize_idl_rel("/proj/idl", root),
+            include: vec![],
+            exclude: vec![],
+        };
+        assert_eq!(ctx.idl_rel, PathBuf::from("idl"));
+        assert!(is_ignored_path(root, &ctx, &root.join("idl/counter.json")));
+        // Absolute value outside the project passes through unchanged.
+        assert_eq!(
+            normalize_idl_rel("/elsewhere/idl", root),
+            PathBuf::from("/elsewhere/idl")
+        );
+    }
 
     fn make_test_project(root: PathBuf) -> Project {
         Project {
@@ -664,6 +1013,7 @@ mod tests {
                 basecamp_repo: None,
                 lgpm_repo: None,
                 wallet_home_dir: ".scaffold/wallet".to_string(),
+                circuits: crate::model::CircuitsConfig::default(),
                 framework: FrameworkConfig {
                     kind: "default".to_string(),
                     version: "0.1.0".to_string(),
@@ -690,7 +1040,7 @@ mod tests {
         let project = make_test_project(temp.path().to_path_buf());
 
         let hook = format!("echo \"$SEQUENCER_URL\" > '{}'", env_file.display());
-        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default(), false)
             .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
@@ -703,15 +1053,25 @@ mod tests {
         let env_file = temp.path().join("env_out.txt");
         let project = make_test_project(temp.path().to_path_buf());
 
-        let hook = format!("echo \"$NSSA_WALLET_HOME_DIR\" > '{}'", env_file.display());
-        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+        // Both wallet home names must reach the hook: older wallet binaries
+        // read NSSA_WALLET_HOME_DIR, LEZ v0.2.0 reads LEE_WALLET_HOME_DIR.
+        let hook = format!(
+            "printf '%s\\n' \"$NSSA_WALLET_HOME_DIR\" \"$LEE_WALLET_HOME_DIR\" > '{}'",
+            env_file.display()
+        );
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default(), false)
             .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
-        assert!(
-            content.trim().ends_with(".scaffold/wallet"),
-            "expected wallet home to end with .scaffold/wallet, got: {content}"
-        );
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2, "expected both wallet home vars: {content}");
+        for line in &lines {
+            assert!(
+                line.ends_with(".scaffold/wallet"),
+                "expected wallet home to end with .scaffold/wallet, got: {content}"
+            );
+        }
+        assert_eq!(lines[0], lines[1], "both vars must agree: {content}");
     }
 
     #[test]
@@ -721,7 +1081,7 @@ mod tests {
         let project = make_test_project(temp.path().to_path_buf());
 
         let hook = format!("echo \"$SCAFFOLD_PROJECT_ROOT\" > '{}'", env_file.display());
-        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default(), false)
             .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
@@ -739,7 +1099,7 @@ mod tests {
         let project = make_test_project(temp.path().to_path_buf());
 
         let hook = format!("echo \"$SCAFFOLD_IDL_DIR\" > '{}'", env_file.display());
-        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default(), false)
             .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
@@ -757,7 +1117,7 @@ mod tests {
         project.config.localnet.port = 9999;
 
         let hook = format!("echo \"$SEQUENCER_URL\" > '{}'", env_file.display());
-        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default(), false)
             .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
@@ -769,7 +1129,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let project = make_test_project(temp.path().to_path_buf());
 
-        let result = run_post_deploy_hook(&project, "exit 42", &DeployedPrograms::default());
+        let result = run_post_deploy_hook(&project, "exit 42", &DeployedPrograms::default(), false);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -785,7 +1145,7 @@ mod tests {
         let project = make_test_project(temp.path().to_path_buf());
 
         let hook = format!("pwd > '{}'", pwd_file.display());
-        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default(), false)
             .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&pwd_file).expect("read pwd output");
@@ -841,6 +1201,14 @@ mod tests {
         // Integration-style assertion: every documented always-on env var
         // reaches the hook in a single shell invocation, in the same form
         // `cmd_run` would produce.
+        //
+        // The two skip flags belong here even though dedicated tests cover
+        // their *values* (`hook_receives_topup_skipped_env_for_multiprogram_run`
+        // and friends). README, FURPS, the ADR and DOGFOODING D7 all document
+        // them as always set / never absent — D7 calls an unset one the
+        // regression by itself — so the one test whose stated job is the
+        // contract *as a whole* has to enumerate them, or it drifts from the
+        // contract while every individual behavior stays guarded.
         let temp = tempfile::tempdir().expect("tempdir");
         let env_file = temp.path().join("env_out.txt");
         let project = make_test_project(temp.path().to_path_buf());
@@ -849,12 +1217,15 @@ mod tests {
             "{{ \
                 echo \"SEQUENCER_URL=$SEQUENCER_URL\"; \
                 echo \"NSSA_WALLET_HOME_DIR=$NSSA_WALLET_HOME_DIR\"; \
+                echo \"LEE_WALLET_HOME_DIR=$LEE_WALLET_HOME_DIR\"; \
                 echo \"SCAFFOLD_PROJECT_ROOT=$SCAFFOLD_PROJECT_ROOT\"; \
                 echo \"SCAFFOLD_IDL_DIR=$SCAFFOLD_IDL_DIR\"; \
+                echo \"SCAFFOLD_TOPUP_SKIPPED=$SCAFFOLD_TOPUP_SKIPPED\"; \
+                echo \"SCAFFOLD_DEPLOY_SKIPPED=$SCAFFOLD_DEPLOY_SKIPPED\"; \
             }} > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default(), false)
             .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
@@ -870,14 +1241,31 @@ mod tests {
             "wallet home line was: {}",
             lines[1]
         );
+        assert!(
+            lines[2].starts_with("LEE_WALLET_HOME_DIR=") && lines[2].ends_with(".scaffold/wallet"),
+            "v0.2.0 wallet home line was: {}",
+            lines[2]
+        );
         assert_eq!(
-            lines[2],
+            lines[3],
             format!("SCAFFOLD_PROJECT_ROOT={}", canonical.display())
         );
         assert!(
-            lines[3].starts_with("SCAFFOLD_IDL_DIR=") && lines[3].ends_with("/idl"),
+            lines[4].starts_with("SCAFFOLD_IDL_DIR=") && lines[4].ends_with("/idl"),
             "idl dir line was: {}",
-            lines[3]
+            lines[4]
+        );
+        // `=0`, not merely "present": an empty value is what an unset variable
+        // expands to in the hook shell, so asserting the concrete not-skipped
+        // value is what distinguishes "scaffold reported the step ran" from
+        // "scaffold reported nothing".
+        assert_eq!(
+            lines[5], "SCAFFOLD_TOPUP_SKIPPED=0",
+            "topup-skip flag must be set, and 0 for this not-skipped run"
+        );
+        assert_eq!(
+            lines[6], "SCAFFOLD_DEPLOY_SKIPPED=0",
+            "deploy-skip flag must be set, and 0 for this not-skipped run"
         );
     }
 
@@ -917,7 +1305,7 @@ mod tests {
             "echo \"$SCAFFOLD_PROGRAM_ID|$SCAFFOLD_GUEST_BIN\" > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, &deployed).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &deployed, false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         let expected_bin = temp.path().join("counter.bin");
@@ -949,7 +1337,7 @@ mod tests {
             "if [ -z \"${{SCAFFOLD_PROGRAM_ID+set}}\" ]; then echo unset; else echo set; fi > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, &deployed).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &deployed, false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content.trim(), "unset");
@@ -967,7 +1355,7 @@ mod tests {
             "echo \"id=${{SCAFFOLD_PROGRAM_ID+set}}|bin=${{SCAFFOLD_GUEST_BIN+set}}\" > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default(), false)
             .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
@@ -995,7 +1383,7 @@ mod tests {
             "echo \"$SCAFFOLD_DEPLOY_SKIPPED\" > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, &deployed).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &deployed, false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content.trim(), "1");
@@ -1014,11 +1402,77 @@ mod tests {
             "echo \"$SCAFFOLD_DEPLOY_SKIPPED\" > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default())
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default(), false)
             .expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content.trim(), "0");
+    }
+
+    #[test]
+    fn hook_receives_topup_skipped_env_for_multiprogram_run() {
+        // `SCAFFOLD_TOPUP_SKIPPED` is run-level state (step 4 has no
+        // per-program dimension), so it must reach multi-program hooks too —
+        // a self-funding hook decides whether to claim based on it.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env_file = temp.path().join("env_out.txt");
+        let project = make_test_project(temp.path().to_path_buf());
+        let deployed = programs(
+            vec![
+                fake_deployed("a", Some("h1")),
+                fake_deployed("b", Some("h2")),
+            ],
+            false,
+        );
+
+        let hook = format!(
+            "echo \"$SCAFFOLD_TOPUP_SKIPPED\" > '{}'",
+            env_file.display()
+        );
+        run_post_deploy_hook(&project, &hook, &deployed, true).expect("hook should succeed");
+
+        let content = std::fs::read_to_string(&env_file).expect("read env output");
+        assert_eq!(content.trim(), "1");
+    }
+
+    #[test]
+    fn hook_receives_topup_skipped_zero_when_topup_ran() {
+        // The var is always set, so a hook can branch on it directly rather
+        // than treating "unset" as "scaffold topped up".
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env_file = temp.path().join("env_out.txt");
+        let project = make_test_project(temp.path().to_path_buf());
+
+        let hook = format!(
+            "echo \"$SCAFFOLD_TOPUP_SKIPPED\" > '{}'",
+            env_file.display()
+        );
+        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default(), false)
+            .expect("hook should succeed");
+
+        let content = std::fs::read_to_string(&env_file).expect("read env output");
+        assert_eq!(content.trim(), "0");
+    }
+
+    /// The two tests above pass `topup_skipped` in explicitly, so they pin
+    /// how `build_hook_command` renders the flag but not how step 4 decides
+    /// it. This one pins the decision: swapping the polarity would hand every
+    /// hook the exact inverse of what the pipeline did, and no test that
+    /// stops at `build_hook_command` can notice.
+    #[test]
+    fn topup_step_skipped_follows_the_profile_flag() {
+        // Default profile (`topup = true`) tops up, so nothing was skipped.
+        assert!(
+            !topup_step_skipped(&RunProfile::default()),
+            "`topup = true` must report SCAFFOLD_TOPUP_SKIPPED=0"
+        );
+        assert!(
+            topup_step_skipped(&RunProfile {
+                topup: false,
+                ..RunProfile::default()
+            }),
+            "`topup = false` must report SCAFFOLD_TOPUP_SKIPPED=1"
+        );
     }
 
     #[test]
@@ -1032,7 +1486,7 @@ mod tests {
             "echo \"$SCAFFOLD_PROGRAM_ID_counter\" > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, &deployed).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &deployed, false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content.trim(), "deadbeef");
@@ -1049,7 +1503,7 @@ mod tests {
             "printf '%s|%s|%s' \"$SCAFFOLD_PROGRAM_NAME\" \"$SCAFFOLD_PROGRAM_ID\" \"$SCAFFOLD_DEPLOY_SKIPPED\" > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, &deployed).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &deployed, false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content, "counter|abc123|0");
@@ -1072,7 +1526,7 @@ mod tests {
             "echo \"[${{SCAFFOLD_PROGRAM_NAME:-unset}}]\" > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, &deployed).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &deployed, false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content.trim(), "[unset]");
@@ -1092,7 +1546,7 @@ mod tests {
             "printf '%s|%s|%s' \"$SCAFFOLD_PROGRAMS\" \"$SCAFFOLD_DEPLOY_SKIPPED_a\" \"$SCAFFOLD_DEPLOY_SKIPPED_b\" > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, &deployed).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &deployed, false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content, "a b|1|1");
@@ -1109,7 +1563,7 @@ mod tests {
             "echo \"[${{SCAFFOLD_PROGRAM_ID_noid:-unset}}]\" > '{}'",
             env_file.display()
         );
-        run_post_deploy_hook(&project, &hook, &deployed).expect("hook should succeed");
+        run_post_deploy_hook(&project, &hook, &deployed, false).expect("hook should succeed");
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         assert_eq!(content.trim(), "[unset]");
@@ -1255,7 +1709,12 @@ mod tests {
             let lez = baseline.path().join("lez");
             let wallet_home = baseline.path().join(".scaffold/wallet");
             prepare_wallet_home(&lez, &wallet_home).expect("baseline prepare");
-            ensure_default_wallet_seeded(baseline.path(), &wallet_home).expect("baseline seed");
+            ensure_default_wallet_seeded(
+                baseline.path(),
+                &wallet_home,
+                &lez.join(crate::constants::WALLET_BIN_REL_PATH),
+            )
+            .expect("baseline seed");
         }
 
         // Post-reset: drive `reseed_after_wipe` directly.

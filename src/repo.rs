@@ -191,11 +191,17 @@ fn reconcile_repo_source(
 }
 
 fn git_origin_url(repo: &Path) -> DynResult<Option<String>> {
+    // Read the raw configured URL rather than `git remote get-url origin`:
+    // get-url expands `url.<base>.insteadOf` rewrites, so under a global
+    // rewrite (token injection or a git proxy, both common in CI containers)
+    // the reported origin never matches the source scaffold cloned from.
+    // That mismatch re-clones the cache on every sync — discarding built
+    // artifacts under the checkout — and hard-fails vendored checkouts.
     let output = Command::new("git")
         .current_dir(repo)
-        .arg("remote")
-        .arg("get-url")
-        .arg("origin")
+        .arg("config")
+        .arg("--get")
+        .arg("remote.origin.url")
         .output()?;
 
     if !output.status.success() {
@@ -446,6 +452,45 @@ mod tests {
 
         let head = git_head_sha(&cache_repo).expect("head");
         assert_eq!(head, sha, "HEAD must resolve to the tagged commit");
+    }
+
+    #[test]
+    fn insteadof_rewrite_does_not_trigger_source_mismatch() {
+        // Regression: origin comparison used `git remote get-url origin`,
+        // which expands `url.<base>.insteadOf` rewrites. Under a rewrite
+        // (git proxies / token injection in CI), the expanded URL never
+        // matched the requested source, so every sync re-cloned the cache
+        // (auto-reclone policy) or hard-failed (fail policy). The raw
+        // configured URL is what scaffold cloned from; compare that instead.
+        let temp = tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let cache_repo = temp.path().join("cache/repo");
+
+        let pin = init_repo_with_commit(&source, "a.txt", "a");
+        git_clone(&source, &cache_repo);
+
+        // Repo-local insteadOf rule rewriting the source prefix, so
+        // `git remote get-url origin` reports a URL that cannot match.
+        run_git(
+            &cache_repo,
+            &[
+                "config",
+                "url.http://rewritten.invalid/.insteadOf",
+                &format!("{}/", temp.path().display()),
+            ],
+        );
+
+        sync_repo_to_pin_at_path_with_opts(
+            &cache_repo,
+            &source.display().to_string(),
+            &pin,
+            "lez",
+            RepoSyncOptions::fail_on_source_mismatch(),
+        )
+        .expect("sync must reuse the checkout despite the insteadOf rewrite");
+
+        let head = git_head_sha(&cache_repo).expect("head");
+        assert_eq!(head, pin);
     }
 
     #[test]

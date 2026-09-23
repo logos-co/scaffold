@@ -1,17 +1,18 @@
 [package]
 name = "logos-scaffold"
-version = "0.1.1"
-description = "Rust CLI for bootstrapping LSSA program_deployment projects in standalone mode"
+version = "0.3.1"
+description = "Command-line toolkit for building, running, and deploying Logos programs against a local execution zone"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
-repository = "https://github.com/logos-co/logos-scaffold"
+repository = "https://github.com/logos-co/scaffold"
 rust-version = "1.81"
 include = [
   "/src/**",
   "/templates/**",
   "/templates/**/.*",
   "/skills/**",
+  "/docs/**",
   "/tests/**",
   "/Cargo.toml",
   "/Cargo.lock",
@@ -28,7 +29,9 @@ name = "lgs"
 path = "src/bin/lgs.rs"
 
 [dependencies]
+libc = "0.2"
 anyhow = "1.0"
+base64 = "0.22"
 bs58 = "0.5"
 clap = { version = "4.5", features = ["derive"] }
 clap_complete = "4.5"

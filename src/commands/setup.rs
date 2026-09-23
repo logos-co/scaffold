@@ -1,21 +1,38 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::bail;
-
-use crate::circuits::ensure_circuits_for_subprocess;
-use crate::doctor_checks::check_logos_blockchain_circuits;
-use crate::model::{CheckStatus, RepoRef};
-use crate::process::run_checked;
-use crate::project::{ensure_dir_exists, load_project, resolve_cache_root, resolve_repo_path};
+use crate::circuits::ensure_circuits_for_project;
+use crate::constants::WALLET_BIN_REL_PATH;
+use crate::model::RepoRef;
+use crate::process::{run_checked, run_with_stdin};
+use crate::project::{ensure_dir_exists, load_project, resolve_repo_path};
 use crate::repo::{sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
 use crate::state::prepare_wallet_home;
 use crate::DynResult;
 
 use super::wallet_support::{
-    first_public_wallet_address, read_default_wallet_address, wallet_state_path,
+    first_public_address_in_listing, first_public_wallet_address, read_default_wallet_address,
+    set_wallet_home_env, summarize_command_failure, wallet_password, wallet_state_path,
     write_default_wallet_address,
 };
+
+/// Cargo args for the standalone sequencer build. `--features standalone`
+/// is load-bearing (#101): it swaps `SequencerCore`'s real
+/// `IndexerClient` / `BlockSettlementClient` for the no-op mocks. Without it,
+/// `sequencer_core::start_from_config` does `IndexerClient::new(ws://…8779)`
+/// and `BlockSettlementClient::new(http://…8080)` and `.expect()`s on the
+/// connection — so `localnet start` aborts with "Failed to create Indexer
+/// Client" on any host that isn't already running a Bedrock + Indexer stack
+/// (i.e. every standalone dev box). Pinned as a const so the unit test below
+/// fails loudly if the feature is ever dropped from the build invocation.
+pub(crate) const SEQUENCER_BUILD_ARGS: &[&str] = &[
+    "build",
+    "--release",
+    "--features",
+    "standalone",
+    "-p",
+    "sequencer_service",
+];
 
 pub(crate) fn cmd_setup(prebuilt: bool) -> DynResult<()> {
     // Load project first so an outdated scaffold.toml gets the canonical
@@ -23,17 +40,22 @@ pub(crate) fn cmd_setup(prebuilt: bool) -> DynResult<()> {
     // gripes (circuits artifact, etc.). Tests assert the migration hint
     // wins on pre-v0.2.0 configs.
     let project = load_project()?;
-    ensure_logos_blockchain_circuits_present()?;
-    let lez = resolve_repo_path(&project, &project.config.lez, "lez")?;
-    let spel = resolve_repo_path(&project, &project.config.spel, "spel")?;
+    setup_for_project(&project, prebuilt)
+}
+
+/// Sync pinned repos and build project-local binaries (sequencer, wallet,
+/// spel) for `project`. Streams build progress to stdout; failures surface as
+/// typed `CommandFailed` errors where an external command is at fault.
+pub(crate) fn setup_for_project(project: &crate::model::Project, prebuilt: bool) -> DynResult<()> {
+    let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
+    let spel = resolve_repo_path(project, &project.config.spel, "spel")?;
 
     // Both the LEZ standalone-sequencer build below and (downstream) the
     // user-project workspace build pull in `logos-blockchain-{pol,poc,poq,zksign}`
     // build scripts, which panic when their circuits release isn't visible.
     // Materialise it once before any cargo invocation; the export propagates
     // to every subprocess for the rest of the process.
-    let (cache_root, _) = resolve_cache_root(&project)?;
-    ensure_circuits_for_subprocess(&cache_root)?;
+    ensure_circuits_for_project(project)?;
 
     sync_pinned_repo(&project.config.lez, &lez, "lez")?;
     ensure_dir_exists(&lez, "lez")?;
@@ -45,17 +67,9 @@ pub(crate) fn cmd_setup(prebuilt: bool) -> DynResult<()> {
     };
 
     if !built_from_prebuilt {
-        run_checked(
-            Command::new("cargo")
-                .current_dir(&lez)
-                .arg("build")
-                .arg("--release")
-                .arg("--features")
-                .arg("standalone")
-                .arg("-p")
-                .arg("sequencer_service"),
-            "build sequencer_service (standalone)",
-        )?;
+        let mut sequencer_cmd = Command::new("cargo");
+        sequencer_cmd.current_dir(&lez).args(SEQUENCER_BUILD_ARGS);
+        run_checked(&mut sequencer_cmd, "build sequencer_service (standalone)")?;
     }
 
     // wallet is always built from source — prebuilt download only covers sequencer_service
@@ -83,28 +97,10 @@ pub(crate) fn cmd_setup(prebuilt: bool) -> DynResult<()> {
 
     let wallet_home = project.root.join(&project.config.wallet_home_dir);
     prepare_wallet_home(&lez, &wallet_home)?;
-    ensure_default_wallet_seeded(&project.root, &wallet_home)?;
+    ensure_default_wallet_seeded(&project.root, &wallet_home, &lez.join(WALLET_BIN_REL_PATH))?;
 
     println!("setup complete");
 
-    Ok(())
-}
-
-/// Bail before any cargo work if the `logos-blockchain-circuits` artifact
-/// the LEZ build chain depends on isn't reachable. Without this the build
-/// fails deep inside `logos-blockchain-pol`'s build script with a raw
-/// panic backtrace; the user has no signal that the missing piece is a
-/// scaffold prerequisite.
-fn ensure_logos_blockchain_circuits_present() -> DynResult<()> {
-    let row = check_logos_blockchain_circuits();
-    if matches!(row.status, CheckStatus::Fail) {
-        let remediation = row.remediation.as_deref().unwrap_or("");
-        bail!(
-            "{}. {} Run `logos-scaffold doctor` for the full prerequisite list.",
-            row.detail,
-            remediation
-        );
-    }
     Ok(())
 }
 
@@ -126,6 +122,7 @@ fn sync_pinned_repo(repo: &RepoRef, path: &Path, label: &str) -> DynResult<()> {
 pub(crate) fn ensure_default_wallet_seeded(
     project_root: &Path,
     wallet_home: &Path,
+    wallet_binary: &Path,
 ) -> DynResult<()> {
     let should_seed = match read_default_wallet_address(project_root) {
         Ok(Some(existing)) => {
@@ -154,9 +151,24 @@ pub(crate) fn ensure_default_wallet_seeded(
             println!("  State file: {}", state_path.display());
         }
         Ok(None) => {
-            println!(
-                "warning: could not seed default wallet automatically (no preconfigured public account found)"
-            );
+            match seed_default_wallet_by_initializing(project_root, wallet_home, wallet_binary) {
+                Ok(Some(normalized)) => {
+                    let state_path = wallet_state_path(project_root);
+                    println!(
+                    "default wallet seeded by initializing wallet storage (config ships no preconfigured account)"
+                );
+                    println!("  Address: {normalized}");
+                    println!("  State file: {}", state_path.display());
+                }
+                Ok(None) => {
+                    println!(
+                    "warning: could not seed default wallet automatically (no preconfigured public account found)"
+                );
+                }
+                Err(err) => {
+                    println!("warning: could not seed default wallet automatically: {err}");
+                }
+            }
         }
         Err(err) => {
             println!("warning: could not seed default wallet automatically: {err}");
@@ -164,6 +176,43 @@ pub(crate) fn ensure_default_wallet_seeded(
     }
 
     Ok(())
+}
+
+/// Seed the default wallet when the debug config ships no `initial_accounts`
+/// (LEZ v0.2.0+): run `wallet account list` against the project wallet home —
+/// the wallet CLI initializes its persistent storage on first use, creating a
+/// default Public/Private account pair — then register the first Public
+/// account through the same state write `wallet default set` performs. Without
+/// this, `.scaffold/state/wallet.state` never gains a `default_address=` line
+/// and `lgs run`'s mandatory topup step fails (scaffold#240).
+///
+/// Returns `Ok(None)` when seeding is not possible (no wallet binary yet, or
+/// no Public account in the listing); the caller downgrades that to a warning.
+fn seed_default_wallet_by_initializing(
+    project_root: &Path,
+    wallet_home: &Path,
+    wallet_binary: &Path,
+) -> DynResult<Option<String>> {
+    if !wallet_binary.exists() {
+        return Ok(None);
+    }
+
+    let mut command = Command::new(wallet_binary);
+    set_wallet_home_env(&mut command, wallet_home);
+    command.arg("account").arg("list");
+    let output = run_with_stdin(command, format!("{}\n", wallet_password()))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "wallet account list failed while initializing wallet storage: {}",
+            summarize_command_failure(&output.stdout, &output.stderr)
+        );
+    }
+
+    let Some(address) = first_public_address_in_listing(&output.stdout) else {
+        return Ok(None);
+    };
+
+    Ok(Some(write_default_wallet_address(project_root, &address)?))
 }
 
 #[cfg(test)]
@@ -178,6 +227,36 @@ mod tests {
 
     const PUBLIC_ACCOUNT_ID: &str = "6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV";
     const PRIVATE_ACCOUNT_ID: &str = "2ECgkFTaXzwjJBXR7ZKmXYQtpHbvTTHK9Auma4NL9AUo";
+
+    /// Wallet binary path for tests exercising the preconfigured-account
+    /// path: it must not exist, so the storage-initialization fallback can
+    /// never run.
+    fn missing_wallet_binary(temp: &tempfile::TempDir) -> std::path::PathBuf {
+        temp.path().join("lez/target/release/wallet")
+    }
+
+    /// Regression guard for #101: `setup` must build `sequencer_service` with
+    /// `--features standalone`. Dropping it rewires the sequencer to the real
+    /// Indexer/Bedrock clients, which `.expect()` on a connection at startup —
+    /// so `localnet start` aborts ("Failed to create Indexer Client") on any
+    /// host without a running Bedrock+Indexer stack. Verified end-to-end: with
+    /// the flag, the standalone sequencer boots with nothing on :8779/:8080.
+    #[test]
+    fn sequencer_build_uses_standalone_feature() {
+        let args = super::SEQUENCER_BUILD_ARGS;
+        // `--features standalone` must appear as adjacent args.
+        let has_standalone = args.windows(2).any(|w| w == ["--features", "standalone"]);
+        assert!(
+            has_standalone,
+            "sequencer build must pass `--features standalone` (#101); got {args:?}"
+        );
+        assert!(args.contains(&"-p"), "must target a specific package");
+        assert!(
+            args.contains(&"sequencer_service"),
+            "must build the sequencer_service package"
+        );
+        assert!(args.contains(&"--release"), "must be a release build");
+    }
 
     #[test]
     fn ensure_default_wallet_seeded_writes_first_public_account() {
@@ -197,7 +276,8 @@ mod tests {
         )
         .expect("write wallet config");
 
-        ensure_default_wallet_seeded(temp.path(), &wallet_home).expect("seed default wallet");
+        ensure_default_wallet_seeded(temp.path(), &wallet_home, &missing_wallet_binary(&temp))
+            .expect("seed default wallet");
 
         let state = fs::read_to_string(wallet_state_path(temp.path())).expect("read wallet.state");
         assert_eq!(
@@ -231,12 +311,91 @@ mod tests {
         )
         .expect("write wallet config");
 
-        ensure_default_wallet_seeded(temp.path(), &wallet_home).expect("seed default wallet");
+        ensure_default_wallet_seeded(temp.path(), &wallet_home, &missing_wallet_binary(&temp))
+            .expect("seed default wallet");
 
         let state = fs::read_to_string(state_path).expect("read wallet.state");
         assert_eq!(
             state,
             "default_address=Public/8zxWNm1qh6FLsJpVBuDxdxcTm55qHPgFEdqJpPVu1fuy\n"
+        );
+    }
+
+    /// LEZ v0.2.0 debug wallet configs ship no `initial_accounts`: seeding
+    /// must fall back to initializing the wallet storage via the wallet
+    /// binary and registering the first Public account it reports. The fake
+    /// wallet script mirrors the v0.2.0 `account list` first-use output and
+    /// records its environment so the test also locks in that the seeding
+    /// subprocess receives both wallet-home env var names.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_default_wallet_seeded_initializes_storage_without_preconfigured_accounts() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("tempdir");
+        let wallet_home = temp.path().join(".scaffold/wallet");
+        fs::create_dir_all(&wallet_home).expect("mkdir wallet home");
+        fs::write(
+            wallet_home.join(WALLET_CONFIG_PRIMARY),
+            r#"{ "sequencer_addr": "http://127.0.0.1:3040" }"#,
+        )
+        .expect("write wallet config");
+
+        let env_file = temp.path().join("wallet-env.txt");
+        let wallet_binary = temp.path().join("fake-wallet");
+        fs::write(
+            &wallet_binary,
+            format!(
+                "#!/bin/sh\n\
+                 printf '%s\\n' \"$NSSA_WALLET_HOME_DIR\" \"$LEE_WALLET_HOME_DIR\" > '{}'\n\
+                 echo 'Persistent storage not found, need to execute setup'\n\
+                 echo 'Input password: '\n\
+                 echo '/ Public/{PUBLIC_ACCOUNT_ID}'\n\
+                 echo '/ Private/{PRIVATE_ACCOUNT_ID}'\n",
+                env_file.display()
+            ),
+        )
+        .expect("write fake wallet");
+        fs::set_permissions(&wallet_binary, fs::Permissions::from_mode(0o755))
+            .expect("chmod fake wallet");
+
+        ensure_default_wallet_seeded(temp.path(), &wallet_home, &wallet_binary)
+            .expect("seed default wallet");
+
+        let state = fs::read_to_string(wallet_state_path(temp.path())).expect("read wallet.state");
+        assert_eq!(
+            state,
+            format!("default_address=Public/{PUBLIC_ACCOUNT_ID}\n")
+        );
+
+        let env_lines = fs::read_to_string(&env_file).expect("read wallet env capture");
+        let expected = format!("{}\n{}\n", wallet_home.display(), wallet_home.display());
+        assert_eq!(
+            env_lines, expected,
+            "wallet subprocess must see both NSSA_WALLET_HOME_DIR and LEE_WALLET_HOME_DIR"
+        );
+    }
+
+    /// Without a built wallet binary the storage-initialization fallback must
+    /// degrade to the pre-existing warning (no error, no state file) — e.g. a
+    /// project whose setup failed before the wallet build completed.
+    #[test]
+    fn ensure_default_wallet_seeded_warns_when_fallback_has_no_wallet_binary() {
+        let temp = tempdir().expect("tempdir");
+        let wallet_home = temp.path().join(".scaffold/wallet");
+        fs::create_dir_all(&wallet_home).expect("mkdir wallet home");
+        fs::write(
+            wallet_home.join(WALLET_CONFIG_PRIMARY),
+            r#"{ "sequencer_addr": "http://127.0.0.1:3040" }"#,
+        )
+        .expect("write wallet config");
+
+        ensure_default_wallet_seeded(temp.path(), &wallet_home, &missing_wallet_binary(&temp))
+            .expect("seeding must not hard-fail");
+
+        assert!(
+            !wallet_state_path(temp.path()).exists(),
+            "no default address should be written without a wallet binary"
         );
     }
 

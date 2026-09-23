@@ -32,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
         "tail_call_with_pda",
     )?;
 
-    let pda = AccountId::from((&program.id(), &PDA_SEED));
+    let pda = AccountId::for_public_pda(&program.id(), &PDA_SEED);
     let message = Message::try_new(program.id(), vec![pda], vec![], ())
         .context("failed to build pda transaction message")?;
     let witness_set = WitnessSet::for_message(&message, &[]);

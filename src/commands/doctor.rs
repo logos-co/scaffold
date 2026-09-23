@@ -3,7 +3,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::bail;
 
-use super::wallet_support::wallet_password;
+use super::wallet_support::{set_wallet_home_env, wallet_password};
 use crate::commands::wallet_support::WALLET_CONFIG_PRIMARY;
 use crate::constants::{
     DEFAULT_LEZ, DEFAULT_SPEL, SEQUENCER_BIN_REL_PATH, SPEL_BIN_REL_PATH, WALLET_BIN_REL_PATH,
@@ -12,7 +12,7 @@ use crate::doctor_checks::{
     check_binary, check_container_runtime, check_logos_blockchain_circuits, check_path,
     check_port_warn, check_repo, check_standalone_support, one_line, print_rows,
 };
-use crate::model::{CheckRow, CheckStatus, DoctorReport, DoctorSummary};
+use crate::model::{CheckRow, CheckStatus, DoctorReport, DoctorSummary, Project};
 use crate::process::{pid_running, run_capture, run_with_stdin, set_command_echo};
 use crate::project::{load_project, resolve_cache_root, resolve_repo_path};
 use crate::state::read_localnet_state;
@@ -20,7 +20,10 @@ use crate::DynResult;
 
 const STEP_SETUP: &str = "logos-scaffold setup";
 const STEP_LOCALNET_START: &str = "logos-scaffold localnet start";
-const STEP_EXPORT_WALLET_HOME: &str = "export NSSA_WALLET_HOME_DIR=$(pwd)/.scaffold/wallet";
+// Both wallet home names in one export: older wallet binaries read NSSA_*,
+// LEZ v0.2.0 reads LEE_* (see `WALLET_HOME_ENV_VARS`).
+const STEP_EXPORT_WALLET_HOME: &str =
+    "export NSSA_WALLET_HOME_DIR=$(pwd)/.scaffold/wallet LEE_WALLET_HOME_DIR=$(pwd)/.scaffold/wallet";
 const STEP_DOCTOR: &str = "logos-scaffold doctor";
 
 pub(crate) fn cmd_doctor(as_json: bool) -> DynResult<()> {
@@ -38,7 +41,8 @@ pub(crate) fn cmd_doctor(as_json: bool) -> DynResult<()> {
 }
 
 fn cmd_doctor_inner(as_json: bool) -> DynResult<()> {
-    let report = build_doctor_report()?;
+    let project = load_project()?;
+    let report = build_doctor_report(&project)?;
 
     if as_json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -69,9 +73,8 @@ fn cmd_doctor_inner(as_json: bool) -> DynResult<()> {
     Ok(())
 }
 
-pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
-    let project = load_project()?;
-    let lez = resolve_repo_path(&project, &project.config.lez, "lez")?;
+pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> {
+    let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
     let spel = resolve_repo_path(&project, &project.config.spel, "spel")?;
     let wallet_home = project.root.join(&project.config.wallet_home_dir);
     let localnet_state_path = project.root.join(".scaffold/state/localnet.state");
@@ -86,7 +89,10 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
     rows.push(check_binary("kill", true));
     rows.push(check_container_runtime());
     rows.push(check_binary("nix", false));
-    rows.push(check_logos_blockchain_circuits());
+    rows.push(check_logos_blockchain_circuits(
+        &project.root,
+        &project.config.circuits,
+    ));
 
     rows.push(check_repo("lez", &lez, &project.config.lez.pin));
 
@@ -287,8 +293,8 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
         }
 
         let mut health_cmd = Command::new(&wallet_binary_path);
+        set_wallet_home_env(&mut health_cmd, &wallet_home);
         health_cmd
-            .env("NSSA_WALLET_HOME_DIR", wallet_home.display().to_string())
             .arg("check-health")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -303,7 +309,8 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
                         detail: "wallet check-health succeeded".to_string(),
                         remediation: None,
                     });
-                } else if is_localnet_connectivity_failure(&out.stdout, &out.stderr) {
+                } else if is_localnet_connectivity_failure(&out.stdout, &out.stderr, localnet_port)
+                {
                     rows.push(CheckRow {
                         status: CheckStatus::Warn,
                         name: "wallet usability".to_string(),
@@ -321,8 +328,7 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
                         name: "wallet usability".to_string(),
                         detail: one_line(&out.stderr),
                         remediation: Some(
-                            "Verify wallet config and run `export NSSA_WALLET_HOME_DIR=$(pwd)/.scaffold/wallet`, then `logos-scaffold doctor`"
-                                .to_string(),
+                            format!("Verify wallet config and run `{STEP_EXPORT_WALLET_HOME}`, then `logos-scaffold doctor`"),
                         ),
                     });
                 }
@@ -332,8 +338,7 @@ pub(crate) fn build_doctor_report() -> DynResult<DoctorReport> {
                 name: "wallet usability".to_string(),
                 detail: err.to_string(),
                 remediation: Some(
-                    "Verify wallet binary and run `export NSSA_WALLET_HOME_DIR=$(pwd)/.scaffold/wallet`, then `logos-scaffold doctor`"
-                        .to_string(),
+                    format!("Verify wallet binary and run `{STEP_EXPORT_WALLET_HOME}`, then `logos-scaffold doctor`"),
                 ),
             }),
         }
@@ -401,7 +406,7 @@ pub(crate) fn print_report(report: &DoctorReport) {
 /// `DEFAULT_LEZ.tag`). When the two diverge, spel's sequencer-RPC client
 /// speaks a different LEZ protocol than the sequencer scaffold builds,
 /// which can break `lgs spel -- ...` subcommands that hit the sequencer
-/// (image-ID computation via `spel inspect` is unaffected — it only
+/// (image-ID computation via `spel program-id` is unaffected — it only
 /// touches the guest ELF).
 ///
 /// Reads `<spel_path>/spel-cli/Cargo.toml` and looks for either the SHA
@@ -474,11 +479,11 @@ fn check_spel_lez_alignment(spel_path: &std::path::Path) -> CheckRow {
 // error contexts (RPC rejection, signature mismatch, malformed payload).
 // We require *both* an explicit transport-error token *and* the address,
 // so an unrelated failure that happens to print the URL is left as Fail.
-fn is_localnet_connectivity_failure(stdout: &str, stderr: &str) -> bool {
+fn is_localnet_connectivity_failure(stdout: &str, stderr: &str, localnet_port: u16) -> bool {
     let text = format!("{stdout}\n{stderr}").to_lowercase();
 
-    let mentions_localnet_address =
-        text.contains("127.0.0.1:3040") || text.contains("localhost:3040");
+    let mentions_localnet_address = text.contains(&format!("127.0.0.1:{localnet_port}"))
+        || text.contains(&format!("localhost:{localnet_port}"));
 
     let has_transport_error_token = text.contains("connection refused")
         || text.contains("econnrefused")
@@ -498,6 +503,12 @@ fn derive_next_steps(rows: &[CheckRow]) -> Vec<String> {
     let mut include_setup = false;
     let mut include_localnet_start = false;
     let mut include_wallet_home = false;
+    // Remediations that map to none of the canonical steps above (`Install
+    // `nix``, ``run `logos-scaffold basecamp setup``, …). Without these the
+    // list collapses to the trailing re-run step alone, i.e. "next step: run
+    // the command you just ran" — the check row carries the only actionable
+    // text and the section that exists to surface it says nothing.
+    let mut unmapped: Vec<String> = Vec::new();
 
     for row in rows {
         if !matches!(row.status, CheckStatus::Warn | CheckStatus::Fail) {
@@ -506,17 +517,28 @@ fn derive_next_steps(rows: &[CheckRow]) -> Vec<String> {
 
         has_warn_or_fail = true;
 
-        let remediation = row.remediation.as_deref().unwrap_or("");
+        let Some(remediation) = row.remediation.as_deref() else {
+            continue;
+        };
+        let mut mapped = false;
         if remediation.contains(STEP_SETUP) {
             include_setup = true;
+            mapped = true;
         }
         if remediation.contains(STEP_LOCALNET_START) {
             include_localnet_start = true;
+            mapped = true;
         }
         if remediation.contains(STEP_EXPORT_WALLET_HOME)
             || remediation.contains("NSSA_WALLET_HOME_DIR")
         {
             include_wallet_home = true;
+            mapped = true;
+        }
+        // Two rows can share one remediation (e.g. a missing tool reported by
+        // more than one check); emit it once.
+        if !mapped && !unmapped.iter().any(|seen| seen == remediation) {
+            unmapped.push(remediation.to_string());
         }
     }
 
@@ -530,6 +552,7 @@ fn derive_next_steps(rows: &[CheckRow]) -> Vec<String> {
     if include_wallet_home {
         out.push(STEP_EXPORT_WALLET_HOME.to_string());
     }
+    out.extend(unmapped);
     if has_warn_or_fail {
         out.push(STEP_DOCTOR.to_string());
     }
@@ -540,6 +563,77 @@ fn derive_next_steps(rows: &[CheckRow]) -> Vec<String> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn warn_row(name: &str, remediation: Option<&str>) -> CheckRow {
+        CheckRow {
+            status: CheckStatus::Warn,
+            name: name.to_string(),
+            detail: String::new(),
+            remediation: remediation.map(str::to_string),
+        }
+    }
+
+    /// A warn whose remediation is none of the three canonical steps used to
+    /// produce `["logos-scaffold doctor"]` and nothing else — telling the
+    /// reader to re-run the command that just printed the advice, while the
+    /// only actionable text sat in the check row. `basecamp doctor` on an
+    /// un-set-up project is the standing case: its sole warn remediates with
+    /// `basecamp setup`.
+    #[test]
+    fn next_steps_carry_a_remediation_that_maps_to_no_canonical_step() {
+        let steps = derive_next_steps(&[warn_row(
+            "basecamp state",
+            Some("run `logos-scaffold basecamp setup`"),
+        )]);
+        assert_eq!(
+            steps,
+            vec![
+                "run `logos-scaffold basecamp setup`".to_string(),
+                STEP_DOCTOR.to_string(),
+            ],
+            "an unmapped remediation must reach the next-steps list, not be dropped in favor of a bare re-run"
+        );
+    }
+
+    /// Canonical steps keep leading (they are the ordered recovery path);
+    /// unmapped remediations follow, deduplicated, and the re-run stays last.
+    #[test]
+    fn next_steps_keep_canonical_order_and_dedupe_unmapped_remediations() {
+        let steps = derive_next_steps(&[
+            warn_row("tool nix", Some("Install `nix`")),
+            warn_row(
+                "wallet usability",
+                Some(format!("Run `{STEP_LOCALNET_START}`, then `{STEP_DOCTOR}`").as_str()),
+            ),
+            warn_row("another nix consumer", Some("Install `nix`")),
+        ]);
+        assert_eq!(
+            steps,
+            vec![
+                STEP_LOCALNET_START.to_string(),
+                "Install `nix`".to_string(),
+                STEP_DOCTOR.to_string(),
+            ]
+        );
+    }
+
+    /// An all-clear report still yields no next steps, and a warn with no
+    /// remediation at all still yields the re-run only — neither path gains a
+    /// spurious entry from the unmapped branch.
+    #[test]
+    fn next_steps_stay_empty_when_every_check_passes() {
+        let pass = CheckRow {
+            status: CheckStatus::Pass,
+            name: "tool git".to_string(),
+            detail: "found".to_string(),
+            remediation: None,
+        };
+        assert!(derive_next_steps(&[pass]).is_empty());
+        assert_eq!(
+            derive_next_steps(&[warn_row("no advice", None)]),
+            vec![STEP_DOCTOR.to_string()]
+        );
+    }
 
     fn write_spel_cargo(spel_root: &std::path::Path, contents: &str) {
         let dir = spel_root.join("spel-cli");
@@ -609,13 +703,13 @@ mod tests {
         let stderr = "Error: reqwest::Error { kind: Request, url: \"http://127.0.0.1:3040/\", \
                       source: hyper::Error(Connect, ConnectError(\"tcp connect error\", \
                       Os { code: 111, kind: ConnectionRefused, message: \"Connection refused\" })) }";
-        assert!(is_localnet_connectivity_failure("", stderr));
+        assert!(is_localnet_connectivity_failure("", stderr, 3040));
     }
 
     #[test]
     fn connectivity_heuristic_triggers_on_localhost_alias_with_econnrefused() {
         let stderr = "wallet: rpc call to http://localhost:3040 failed: ECONNREFUSED";
-        assert!(is_localnet_connectivity_failure("", stderr));
+        assert!(is_localnet_connectivity_failure("", stderr, 3040));
     }
 
     #[test]
@@ -625,7 +719,7 @@ mod tests {
         // context. This must stay Fail, not get downgraded to Warn.
         let stderr = "Error: rpc call to http://127.0.0.1:3040/ failed: \
                       signature mismatch for sender 0xabcd...";
-        assert!(!is_localnet_connectivity_failure("", stderr));
+        assert!(!is_localnet_connectivity_failure("", stderr, 3040));
     }
 
     #[test]
@@ -633,7 +727,7 @@ mod tests {
         // Another genuine failure shape: sequencer rejected a malformed
         // request and the URL appears in the trace. Must stay Fail.
         let stdout = "POST http://localhost:3040/ -> 400 Bad Request: invalid abi-encoded calldata";
-        assert!(!is_localnet_connectivity_failure(stdout, ""));
+        assert!(!is_localnet_connectivity_failure(stdout, "", 3040));
     }
 
     #[test]
@@ -641,7 +735,7 @@ mod tests {
         // Bare address mention with no transport-error token is the exact
         // false-positive shape we are tightening against. Issue #113.
         let stdout = "wallet check-health: target http://127.0.0.1:3040/, sender 0xdead";
-        assert!(!is_localnet_connectivity_failure(stdout, ""));
+        assert!(!is_localnet_connectivity_failure(stdout, "", 3040));
     }
 
     #[test]
@@ -650,13 +744,25 @@ mod tests {
         // not be classified as a localnet-connectivity failure: it could
         // be a different network call entirely (proxy, external RPC).
         let stderr = "io error: connection refused while reaching https://example.com/";
-        assert!(!is_localnet_connectivity_failure("", stderr));
+        assert!(!is_localnet_connectivity_failure("", stderr, 3040));
     }
 
     #[test]
     fn connectivity_heuristic_is_case_insensitive() {
         // Some toolchains emit Title-Case error variants.
         let stderr = "Connection Refused (os error 111) talking to http://127.0.0.1:3040/";
-        assert!(is_localnet_connectivity_failure("", stderr));
+        assert!(is_localnet_connectivity_failure("", stderr, 3040));
+    }
+
+    #[test]
+    fn connectivity_heuristic_honors_configured_port() {
+        // Issue #40: a project on a non-default port must still get the
+        // friendly "start localnet" downgrade. A refused connection to the
+        // configured port (14321) is a connectivity failure...
+        let stderr = "tcp connect error talking to http://127.0.0.1:14321/: Connection refused";
+        assert!(is_localnet_connectivity_failure("", stderr, 14321));
+        // ...but the same error must NOT be mistaken for a localnet failure
+        // when doctor is checking the default port 3040 — different endpoint.
+        assert!(!is_localnet_connectivity_failure("", stderr, 3040));
     }
 }

@@ -1,0 +1,74 @@
+name: Bug report
+description: Something in the CLI does not work as documented
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, run `lgs doctor`. It catches most environment problems
+        on its own and will tell you what is missing.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you ran, and what you got instead of what you expected.
+      placeholder: |
+        I ran `lgs run` in a fresh lez-framework project.
+        Step 3 failed with ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The shortest sequence of commands that shows the problem.
+      render: shell
+      placeholder: |
+        lgs new my-app --template lez-framework
+        cd my-app
+        lgs run
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Scaffold version
+      description: Output of `lgs --version`.
+      placeholder: logos-scaffold 0.3.0
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS and architecture. The CLI is Unix-only.
+      placeholder: macOS 15.3 arm64 / Ubuntu 24.04 x86_64
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics bundle
+      description: |
+        Run `lgs report` and attach the generated `.tar.gz`. It collects logs
+        and config through an allowlist with redaction, and reports anything it
+        skipped. Paste `lgs doctor --json` output here if you cannot attach the
+        bundle.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: project
+    attributes:
+      label: Project context
+      description: |
+        Which template, and whether you use a `[run]` profile, `basecamp`, or
+        `test-node`. Paste `scaffold.toml` if you can share it.
+    validations:
+      required: false

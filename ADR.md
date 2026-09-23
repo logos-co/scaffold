@@ -122,6 +122,47 @@ captured module set becomes reviewable in version control and diff tooling
 lookups become deterministic key matches — the "is this dep covered by
 something I already captured?" question has an unambiguous answer.
 
+## Basecamp Pin Bumps Move as a Set
+
+`[repos.basecamp]`, `[repos.lgpm]`, `BASECAMP_DEPENDENCIES` and
+`BASECAMP_PREINSTALLED_MODULES` look like four independent knobs. They are one.
+
+Scaffold installs modules by shelling out to the `lgpm` CLI it builds from
+`[repos.lgpm]`, and basecamp then scans and loads what landed in the profile
+using `logos-package-manager-module` — which is built from the *same*
+`logos-package-manager` source, at whatever rev the basecamp release locks. The
+writer and the reader are two builds of one library. Letting the two pins drift
+means the installer and the app disagree about package format, validation and
+install layout, and the failure mode is a profile that comes up with zero
+modules rather than an error at install time.
+
+The rule, therefore: **scaffold's default `lgpm` pin is the rev the default
+basecamp pin locks**, read out of that release's `flake.lock` rather than chosen
+independently. Two corollaries follow from the same coupling:
+
+- **Companion pins are release-scoped too.** The pinned `lgpm` validates
+  package structure and Merkle content hashes on install, so a companion module
+  whose `.lgx` predates that tooling stops installing. `BASECAMP_DEPENDENCIES`
+  entries move with the pair.
+- **The bundled-module list is read off the release.** Which modules basecamp
+  ships itself changed between 0.1.x and 0.2.x (`counter`, `counter_qml`,
+  `webview_app` left; `package_downloader` arrived), and dep resolution skips
+  exactly those names. A stale list either sends `basecamp modules` hunting for
+  a flake that does not exist, or captures a module basecamp already provides.
+
+Rejected alternative: pinning `lgpm` to the last pre-validation rev so older
+`.lgx` files keep installing. It buys nothing — the validating library is inside
+the basecamp binary either way, so a package that fails validation at install
+time would fail to load at runtime instead, with less signal. For the same
+reason scaffold does not pass `--allow-unsigned`: silencing the installer's copy
+of a check the app also performs converts a clear error into a mystery. `install`
+turns the validation failure into a hint naming the rebuild instead.
+
+Cost: a basecamp bump is never a one-line change, and the pins cannot be updated
+by a dependency bot that treats each repo separately. That is the honest shape of
+the dependency, and `DOGFOODING.md` re-opens the whole `B` series when any member
+of the set changes.
+
 ## Sibling `--override-input` Resolves By Declared Input Name
 
 Multi-sub-flake projects rely on `--override-input <input> path:<sibling-abs>` so a sub-flake's `path:../<sibling>` inputs resolve to the developer's working tree instead of whatever `github:` ref is in its lock. The first implementation keyed overrides by the **sibling directory name on disk** — a convention where input names are expected to match directory names. Two problems:
@@ -155,7 +196,7 @@ Three options were considered:
 1. Compute the image ID in-process by depending on a risc0 crate
    (`risc0-binfmt` / `risc0-zkvm`).
 2. Re-implement the SHA-256 + page-tree construction directly in scaffold.
-3. Shell out to `spel inspect` and parse its output.
+3. Shell out to `spel program-id` and parse its output.
 
 Option (1) ties scaffold's image-ID computation to a specific risc0 release;
 version skew with the user's project's risc0 dependency would silently
@@ -339,8 +380,27 @@ the env contract that hooks see is uniform across projects.
 
 The pipeline composes the existing primitives (`cmd_build_shortcut`,
 `build_idl_for_current_project`, `cmd_localnet`, `cmd_wallet_topup_inner`,
-`cmd_deploy`) — no parallel implementation. Step ordering is fixed; if a
-new step is needed, it joins the chain rather than offering a knob.
+`cmd_deploy`) — no parallel implementation. Step *ordering* is fixed: a new
+step joins the chain rather than being sequenced by configuration.
+
+Individual steps may, however, expose a boolean skip — `deploy = false`
+(step 5) and `topup = false` (step 4) both do. The boundary is ownership,
+not convenience: a step becomes skippable only when the project can
+legitimately own that concern itself (it deploys from a `post_deploy` hook;
+its demo binary claims from the faucet at runtime), and never to work around
+a scaffold bug. Three constraints keep the pipeline shape visible even when
+a step is skipped:
+
+- The step header still prints, in its own slot, saying it was skipped and
+  why — `total_steps` does not shrink and the remaining steps are not
+  renumbered.
+- The skip defaults to *not skipping*, written as a hand-rolled `Default`
+  rather than `derive(Default)`, so an existing project's behavior cannot
+  change by adding the field.
+- The decision is exported to hooks (below), so a project that took over a
+  concern can tell whether scaffold acted on this run.
+
+A step whose skip cannot satisfy all three does not get a knob.
 
 ## Hook Env Contract is a Documented Public Surface
 
@@ -348,22 +408,48 @@ Post-deploy hooks run via `sh -c` with `cwd` at the project root. The env
 they see is stable, documented in README, and validated by unit and
 integration tests:
 
-- `SEQUENCER_URL` / `NSSA_WALLET_HOME_DIR` / `SCAFFOLD_PROJECT_ROOT` /
-  `SCAFFOLD_IDL_DIR` — pipeline state.
+- `SEQUENCER_URL` / `NSSA_WALLET_HOME_DIR` / `LEE_WALLET_HOME_DIR` /
+  `SCAFFOLD_PROJECT_ROOT` / `SCAFFOLD_IDL_DIR` — pipeline state. The two
+  wallet-home vars always carry the same path.
+- `SCAFFOLD_TOPUP_SKIPPED` / `SCAFFOLD_DEPLOY_SKIPPED` — run-level outcome
+  of the two skippable steps, `1` or `0`. Always set, never absent: a hook
+  that had to treat "unset" as "scaffold did it" could not distinguish that
+  from an older scaffold that cannot report. Each is produced by the same
+  expression that executes or skips its step, so what a hook is told cannot
+  drift from what ran. Both describe the run rather than a program;
+  `SCAFFOLD_TOPUP_SKIPPED` has no per-program form at all, and the deploy
+  one's suffixed spelling is not an independent per-program signal (below).
+- `SCAFFOLD_DEPLOY_SKIPPED_<name>` — the run-level `SCAFFOLD_DEPLOY_SKIPPED`
+  value repeated under each program's suffix, so the per-program family
+  (`SCAFFOLD_PROGRAMS` / `SCAFFOLD_PROGRAM_ID_<name>` /
+  `SCAFFOLD_GUEST_BIN_<name>`) stays parallel and a hook iterating
+  `$SCAFFOLD_PROGRAMS` never hits a missing var. Deploy is skipped for the
+  whole invocation or none of it, so every program's copy carries the same
+  value — do not read a per-program outcome into it.
 - `SCAFFOLD_PROGRAM_ID` / `SCAFFOLD_GUEST_BIN` — single-program shortcuts.
   Set only when exactly one program is deployable; absent for
   multi-program projects so hooks fail loudly rather than silently
   picking up the wrong program.
 
-`NSSA_WALLET_HOME_DIR` keeps its upstream-wallet name rather than being
-renamed to a `SCAFFOLD_*` prefix: hooks that exec the wallet binary
-(directly or via `cargo run --bin run_*`) need the var under the name the
-binary's `WalletCore::from_env()` reads. Renaming for hook ergonomics
-would silently break those hooks.
+The wallet home is exported under its upstream-wallet names rather than
+under a `SCAFFOLD_*` prefix: hooks that exec the wallet binary (directly
+or via `cargo run --bin run_*`) need the var under the name the binary's
+`WalletCore::from_env()` reads. Renaming for hook ergonomics would
+silently break those hooks. That reasoning is unchanged — but upstream
+now has two such names. LEZ v0.2.0 renamed `NSSA_WALLET_HOME_DIR` to
+`LEE_WALLET_HOME_DIR`, and a v0.2.0 wallet that sees only the old name
+does not error: it falls back to `~/.lee/wallet`. Scaffold therefore
+sets *both* names, to the same path, on every wallet subprocess that
+touches the wallet home and on every hook — the exception is doctor's
+`wallet --version` probe, which only reads the binary's version string.
+The list lives in `WALLET_HOME_ENV_VARS` (`constants.rs`); wallet
+subprocesses apply it through `set_wallet_home_env`. Follow that
+pattern for any future rename: add the new name, keep the old one,
+never swap.
 
 The single-program metadata is resolved once per `lgs run` invocation
 and reused across every hook so multiple hooks don't multiply the cost
-of `spel inspect`.
+of `spel program-id`.
 
 ## Build Output Discovery
 

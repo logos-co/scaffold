@@ -15,6 +15,15 @@ use predicates::prelude::*;
 use tar::Archive;
 use tempfile::tempdir;
 
+#[cfg(unix)]
+mod common;
+
+#[cfg(unix)]
+use common::test_node::{
+    assert_test_node_launched_with_config, setup_test_node_project, test_node_observed_config_path,
+    TestNodeFixtures,
+};
+
 const TEST_PIN: &str = "767b5afd388c7981bcdf6f5b5c80159607e07e5b";
 const VALID_ACCOUNT_ID: &str = "6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV";
 const VALID_PUBLIC_ADDRESS: &str = "Public/6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV";
@@ -830,6 +839,95 @@ fn localnet_status_json_is_parseable() {
 }
 
 #[test]
+fn localnet_logs_json_tails_and_is_parseable() {
+    let temp = tempdir().expect("tempdir");
+    let lez_path = temp.path().join("lez");
+    fs::create_dir_all(&lez_path).expect("create lez path");
+    write_scaffold_toml(temp.path(), &lez_path);
+    fs::create_dir_all(temp.path().join(".scaffold/logs")).expect("create logs dir");
+    fs::write(
+        temp.path().join(".scaffold/logs/sequencer.log"),
+        "line one\nline two\nline three\n",
+    )
+    .expect("write sequencer log");
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["localnet", "logs", "--tail", "2", "--json"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    assert_eq!(value.get("exists").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(value.get("tail").and_then(|v| v.as_u64()), Some(2));
+    let lines = value
+        .get("lines")
+        .and_then(|v| v.as_array())
+        .expect("lines array");
+    assert_eq!(
+        lines.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>(),
+        vec!["line two", "line three"],
+        "should return the last two lines"
+    );
+}
+
+#[test]
+fn localnet_logs_json_reports_missing_log_without_failing() {
+    let temp = tempdir().expect("tempdir");
+    let lez_path = temp.path().join("lez");
+    fs::create_dir_all(&lez_path).expect("create lez path");
+    write_scaffold_toml(temp.path(), &lez_path);
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["localnet", "logs", "--json"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    assert_eq!(value.get("exists").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(
+        value.get("lines").and_then(|v| v.as_array()).map(Vec::len),
+        Some(0),
+        "missing log should yield an empty lines array"
+    );
+}
+
+#[test]
+fn localnet_logs_json_treats_whitespace_only_log_as_empty() {
+    // A log file that exists but holds only newlines/whitespace must report
+    // exists=true with an empty `lines` array — `content.lines()` on "\n\n"
+    // would otherwise yield ["", ""]. Mirrors the plain-text "empty" branch.
+    let temp = tempdir().expect("tempdir");
+    let lez_path = temp.path().join("lez");
+    fs::create_dir_all(&lez_path).expect("create lez path");
+    write_scaffold_toml(temp.path(), &lez_path);
+    fs::create_dir_all(temp.path().join(".scaffold/logs")).expect("create logs dir");
+    fs::write(temp.path().join(".scaffold/logs/sequencer.log"), "\n\n  \n")
+        .expect("write whitespace-only log");
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["localnet", "logs", "--json"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    assert_eq!(value.get("exists").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        value.get("lines").and_then(|v| v.as_array()).map(Vec::len),
+        Some(0),
+        "whitespace-only log must yield an empty lines array, not [\"\"]"
+    );
+}
+
+#[test]
 fn doctor_json_outputs_machine_readable_report() {
     let temp = tempdir().expect("tempdir");
     let lez_path = temp.path().join("lez");
@@ -980,7 +1078,14 @@ fn localnet_start_fails_when_process_exits_before_ready() {
         .stderr(
             predicate::str::contains("sequencer process exited before becoming ready")
                 .or(predicate::str::contains("localnet start timed out after")),
-        );
+        )
+        // The fake sequencer above exits before writing a line, so the printed
+        // tail is `<no log output yet>` — the shape this failure takes in the
+        // wild when the spawned sequencer cannot bind the port. Without a next
+        // step the message is a dead end: every other `LocalnetError` carries
+        // one, and `localnet status` is what names the actual conflict.
+        .stderr(predicate::str::contains("<no log output yet>"))
+        .stderr(predicate::str::contains("logos-scaffold localnet status"));
 
     assert!(
         !temp.path().join(".scaffold/state/localnet.state").exists(),
@@ -1098,6 +1203,218 @@ fn localnet_start_patches_config_and_uses_configured_port() {
     assert_eq!(env, "0", "expected risc0 dev mode override to be passed");
 }
 
+#[cfg(unix)]
+#[test]
+fn test_node_start_patches_block_timing_flags() {
+    let temp = tempdir().expect("tempdir");
+    let fixtures = setup_test_node_project(temp.path());
+    let work_dir = temp.path().join("node-work");
+
+    let runtime_json = start_test_node_and_read_runtime_config(
+        temp.path(),
+        &fixtures,
+        &work_dir,
+        &[
+            "--block-create-timeout-ms",
+            "100",
+            "--retry-pending-blocks-timeout-ms",
+            "250",
+        ],
+    );
+    assert_eq!(
+        runtime_json["block_create_timeout"],
+        serde_json::json!("100ms")
+    );
+    assert_eq!(
+        runtime_json["retry_pending_blocks_timeout"],
+        serde_json::json!("250ms")
+    );
+
+    assert_vendored_test_node_timing_preserved(&fixtures);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_node_start_preserves_block_timing_without_flags() {
+    let temp = tempdir().expect("tempdir");
+    let fixtures = setup_test_node_project(temp.path());
+    let work_dir = temp.path().join("node-work");
+
+    let runtime_json =
+        start_test_node_and_read_runtime_config(temp.path(), &fixtures, &work_dir, &[]);
+    assert_eq!(
+        runtime_json["block_create_timeout"],
+        serde_json::json!("2s")
+    );
+    assert_eq!(
+        runtime_json["retry_pending_blocks_timeout"],
+        serde_json::json!("3s")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_node_start_preserves_unset_block_timing_field() {
+    let temp = tempdir().expect("tempdir");
+    let fixtures = setup_test_node_project(temp.path());
+    let work_dir = temp.path().join("node-work");
+
+    let runtime_json = start_test_node_and_read_runtime_config(
+        temp.path(),
+        &fixtures,
+        &work_dir,
+        &["--block-create-timeout-ms", "100"],
+    );
+    assert_eq!(
+        runtime_json["block_create_timeout"],
+        serde_json::json!("100ms")
+    );
+    assert_eq!(
+        runtime_json["retry_pending_blocks_timeout"],
+        serde_json::json!("3s")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_node_run_patches_block_timing_flags_for_child_command() {
+    let temp = tempdir().expect("tempdir");
+    let fixtures = setup_test_node_project(temp.path());
+
+    let observed_json = run_test_node_and_observe_config(
+        temp.path(),
+        &fixtures,
+        &[
+            "--block-create-timeout-ms",
+            "101",
+            "--retry-pending-blocks-timeout-ms",
+            "251",
+        ],
+    );
+    assert_eq!(
+        observed_json["block_create_timeout"],
+        serde_json::json!("101ms")
+    );
+    assert_eq!(
+        observed_json["retry_pending_blocks_timeout"],
+        serde_json::json!("251ms")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_node_run_preserves_block_timing_without_flags_for_child_command() {
+    let temp = tempdir().expect("tempdir");
+    let fixtures = setup_test_node_project(temp.path());
+
+    let observed_json = run_test_node_and_observe_config(temp.path(), &fixtures, &[]);
+    assert_eq!(
+        observed_json["block_create_timeout"],
+        serde_json::json!("2s")
+    );
+    assert_eq!(
+        observed_json["retry_pending_blocks_timeout"],
+        serde_json::json!("3s")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_node_run_preserves_unset_block_timing_field_for_child_command() {
+    let temp = tempdir().expect("tempdir");
+    let fixtures = setup_test_node_project(temp.path());
+
+    let observed_json = run_test_node_and_observe_config(
+        temp.path(),
+        &fixtures,
+        &["--retry-pending-blocks-timeout-ms", "251"],
+    );
+    assert_eq!(
+        observed_json["block_create_timeout"],
+        serde_json::json!("2s")
+    );
+    assert_eq!(
+        observed_json["retry_pending_blocks_timeout"],
+        serde_json::json!("251ms")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_node_run_forwards_child_exit_status_with_block_timing_flags() {
+    let temp = tempdir().expect("tempdir");
+    let fixtures = setup_test_node_project(temp.path());
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .env("LOGOS_BLOCKCHAIN_CIRCUITS", &fixtures.circuits_path)
+        .arg("test-node")
+        .arg("run")
+        .arg("--block-create-timeout-ms")
+        .arg("100")
+        .arg("--retry-pending-blocks-timeout-ms")
+        .arg("100")
+        .arg("--timeout-sec")
+        .arg("5")
+        .arg("--")
+        .arg(&fixtures.python_path)
+        .arg("-c")
+        .arg("import sys; sys.exit(7)")
+        .assert()
+        .code(7);
+}
+
+#[test]
+fn test_node_timing_flags_reject_duration_suffixes() {
+    for subcommand in ["start", "run"] {
+        for flag in [
+            "--block-create-timeout-ms",
+            "--retry-pending-blocks-timeout-ms",
+        ] {
+            for value in ["100ms", "1s", "1m", "1h"] {
+                let mut command = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"));
+                command
+                    .arg("test-node")
+                    .arg(subcommand)
+                    .arg(flag)
+                    .arg(value);
+                if subcommand == "run" {
+                    command.arg("--").arg("not-executed");
+                }
+                command
+                    .assert()
+                    .failure()
+                    .stderr(predicate::str::contains(flag));
+            }
+        }
+    }
+}
+
+#[test]
+fn test_node_timing_flags_reject_out_of_range_milliseconds() {
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .arg("test-node")
+        .arg("start")
+        .arg("--block-create-timeout-ms")
+        .arg("0")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--block-create-timeout-ms"));
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .arg("test-node")
+        .arg("run")
+        .arg("--retry-pending-blocks-timeout-ms")
+        .arg("3600001")
+        .arg("--")
+        .arg("not-executed")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--retry-pending-blocks-timeout-ms",
+        ));
+}
+
 #[test]
 fn localnet_stop_outside_project_succeeds() {
     let temp = tempdir().expect("tempdir");
@@ -1167,6 +1484,148 @@ fn wallet_list_proxies_account_list() {
             predicate::str::contains("account list")
                 .and(predicate::str::contains("Preconfigured Public/")),
         );
+}
+
+#[test]
+fn wallet_list_json_emits_structured_envelope() {
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["wallet", "list", "--json"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    assert_eq!(value.get("exit_code").and_then(|v| v.as_i64()), Some(0));
+    let accounts = value
+        .get("accounts")
+        .and_then(|v| v.as_array())
+        .expect("accounts array");
+    assert_eq!(accounts.len(), 2, "stub lists two accounts: {stdout}");
+    assert!(accounts.iter().any(|a| a
+        .as_str()
+        .is_some_and(|s| s.contains("Preconfigured Public/"))));
+}
+
+#[test]
+fn wallet_topup_json_dry_run_is_structured() {
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args([
+            "wallet",
+            "topup",
+            "--address",
+            VALID_PUBLIC_ADDRESS,
+            "--dry-run",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    assert_eq!(
+        value.get("status").and_then(|v| v.as_str()),
+        Some("dry_run")
+    );
+    assert!(value
+        .get("address")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s.contains("Public/")));
+    assert_eq!(
+        value.get("method").and_then(|v| v.as_str()),
+        Some("pinata faucet claim")
+    );
+    // Stable schema: `tx` key is always present (null for a dry run).
+    assert!(value.get("tx").is_some_and(serde_json::Value::is_null));
+}
+
+#[test]
+fn wallet_topup_json_success_reports_tx() {
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args([
+            "wallet",
+            "topup",
+            "--address",
+            VALID_PUBLIC_ADDRESS,
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    assert_eq!(
+        value.get("status").and_then(|v| v.as_str()),
+        Some("success")
+    );
+    assert_eq!(
+        value.get("tx").and_then(|v| v.as_str()),
+        Some("pinata-topup-hash"),
+        "stub emits tx_hash=pinata-topup-hash"
+    );
+    // stdout must be a single clean JSON object — no `$ <cmd>` echo lines.
+    assert!(
+        stdout.trim_start().starts_with('{'),
+        "json mode must not echo commands before the object: {stdout}"
+    );
+}
+
+#[test]
+fn wallet_topup_json_connectivity_failure_categorizes_reason() {
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .env("TOPUP_FAIL_CONNECT", "1")
+        .args([
+            "wallet",
+            "topup",
+            "--address",
+            VALID_PUBLIC_ADDRESS,
+            "--json",
+        ])
+        .assert()
+        .failure();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    assert_eq!(value.get("status").and_then(|v| v.as_str()), Some("error"));
+    assert_eq!(
+        value.get("reason").and_then(|v| v.as_str()),
+        Some("connectivity")
+    );
+    // Error objects carry the same attempt context as success/pending, so
+    // consumers don't lose what was attempted on failure.
+    assert!(value
+        .get("address")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s.contains("Public/")));
+    assert_eq!(
+        value.get("method").and_then(|v| v.as_str()),
+        Some("pinata faucet claim")
+    );
+    assert_eq!(
+        value.get("network").and_then(|v| v.as_str()),
+        Some("http://127.0.0.1:3040")
+    );
+    // Stable schema: `tx` is always present (null in the error case).
+    assert!(value.get("tx").is_some_and(serde_json::Value::is_null));
 }
 
 #[test]
@@ -1550,6 +2009,40 @@ fn wallet_topup_timeout_exits_non_zero_with_pending_status() {
 }
 
 #[test]
+fn wallet_topup_timeout_with_transport_token_reports_pending_not_connectivity() {
+    // Blocking guard finding: once the classifier sees stdout+stderr combined,
+    // a sequencer dying mid-claim can carry BOTH the confirmation-timeout line
+    // AND a transport token ("connection refused"). The tx reached the
+    // sequencer but did not settle, so the confirmation-timeout branch must win
+    // (status: pending, with the tx id) rather than the connectivity hint.
+    //
+    // `sequencer_connectivity_failure` no longer excludes the confirmation
+    // phrase itself, so the ONLY thing keeping this correct is the check
+    // ordering at the pinata-claim site (is_confirmation_timeout_failure before
+    // the connectivity check). Reverting that order makes this fail: the
+    // connectivity classifier matches "connection refused" and prints
+    // "sequencer appears unavailable" instead, dropping the pending tx id.
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .env("TOPUP_FAIL_TIMEOUT_TRANSPORT", "1")
+        .arg("wallet")
+        .arg("topup")
+        .arg("--address")
+        .arg(VALID_PUBLIC_ADDRESS)
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("wallet topup submitted, but confirmation timed out")
+                .and(predicate::str::contains("status: pending"))
+                .and(predicate::str::contains("Tx: pinata-topup-hash"))
+                .and(predicate::str::contains("sequencer appears unavailable").not()),
+        );
+}
+
+#[test]
 fn wallet_topup_fails_outside_project_with_project_scoped_message() {
     let temp = tempdir().expect("tempdir");
 
@@ -1779,6 +2272,51 @@ fn deploy_shows_hint_when_sequencer_is_unreachable_with_fallback_addr() {
 }
 
 #[test]
+fn deploy_classifies_mid_deploy_both_tokens_failure_as_connectivity() {
+    // Restores master behaviour at deploy's per-program failure arm
+    // (deploy.rs:243). The sequencer is reachable at preflight (RpcStub
+    // answers), then dies mid-deploy: the wallet subprocess fails with BOTH the
+    // confirmation-timeout line AND a transport token ("connection refused") in
+    // its combined output. deploy has no confirmation-timeout branch of its
+    // own, so it must classify this as connectivity and print the
+    // sequencer-unavailable hint — not "inspect sequencer logs and retry".
+    //
+    // This is the case the shipped branch (6f2ed30) dropped: the shared
+    // helper's `is_confirmation_timeout_failure` early-return made the combined
+    // message read as non-connectivity here. Removing that early-return re-arms
+    // this path — re-adding it makes this test fail (hint reverts to the
+    // generic retry line).
+    let temp = tempdir().expect("tempdir");
+    let rpc = RpcStub::start();
+    setup_wallet_project(temp.path(), Some(&rpc.url));
+    write_guest_program(temp.path(), "hello");
+    write_guest_binary(temp.path(), "hello");
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .env("DEPLOY_FAIL_TIMEOUT_TRANSPORT", "hello.bin")
+        .arg("deploy")
+        .arg("hello")
+        .output()
+        .expect("run deploy against a sequencer that dies mid-deploy");
+
+    assert!(
+        !output.status.success(),
+        "a failed deploy must exit non-zero"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("sequencer appears unavailable"),
+        "a mid-deploy both-tokens failure must classify as connectivity and show \
+         the sequencer-unavailable hint; stdout:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("inspect sequencer logs and retry"),
+        "connectivity classification must replace the generic retry hint; stdout:\n{stdout}"
+    );
+}
+
+#[test]
 fn deploy_prints_program_id_from_vendored_spel() {
     let temp = tempdir().expect("tempdir");
     let rpc = RpcStub::start();
@@ -1828,6 +2366,47 @@ fn deploy_plain_output_has_single_program_id_line_per_program() {
     assert_eq!(
         count, 2,
         "expected exactly one `  program_id:` line per deployed program (2 total); got {count} in:\n{stdout}"
+    );
+}
+
+#[test]
+fn deploy_aborts_remaining_programs_when_head_stalls() {
+    // PR #241 review: a pacing timeout must gate the next submission.
+    // Continuing unpaced after a stalled head can batch the remaining ELFs
+    // into one block and recreate the fatal oversized-inscription sequencer
+    // crash, so the deploy aborts fail-closed: first program submitted,
+    // every remaining program marked failed, non-zero exit.
+    let temp = tempdir().expect("tempdir");
+    let rpc = RpcStub::start_stalled();
+    setup_wallet_project(temp.path(), Some(&rpc.url));
+    write_guest_program(temp.path(), "alpha");
+    write_guest_program(temp.path(), "beta");
+    write_guest_binary(temp.path(), "alpha");
+    write_guest_binary(temp.path(), "beta");
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .env("LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS", "200")
+        .arg("deploy")
+        .output()
+        .expect("run deploy against a stalled head");
+
+    assert!(
+        !output.status.success(),
+        "a pacing abort must exit non-zero"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("OK  alpha submitted"),
+        "first program must be submitted before the stall is detected:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("FAIL beta not submitted") && stdout.contains("deploy pacing aborted"),
+        "remaining program must be aborted fail-closed, not submitted unpaced:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Succeeded: 1") && stdout.contains("Failed: 1"),
+        "summary must reflect one submitted + one aborted program:\n{stdout}"
     );
 }
 
@@ -1911,6 +2490,52 @@ fn deploy_json_output_is_pure_json_no_command_echo() {
         stdout.lines().filter(|l| !l.is_empty()).count(),
         1,
         "stdout must be a single non-empty JSON line; got:\n{stdout}"
+    );
+}
+
+#[test]
+fn deploy_json_stdout_stays_pure_json_when_preflight_probe_returns_other() {
+    // A foreign HTTP responder (404) squatting on the sequencer port maps to
+    // RpcReachabilityError::Other, so `preflight_sequencer_reachability` warns
+    // and continues instead of bailing. That warning runs BEFORE the `--json`
+    // echo guard is installed, so it must be written to stderr: a `println!`
+    // there interleaves non-JSON HTML into the `--json` stdout stream and
+    // breaks `jq`. Pins the `eprintln!` fix — reverting it to `println!` makes
+    // the JSON-parse assertion below fail.
+    let temp = tempdir().expect("tempdir");
+    let rpc = RpcStub::start_http_error();
+    setup_wallet_project(temp.path(), Some(&rpc.url));
+    let custom = temp.path().join("custom.bin");
+    fs::write(&custom, b"stub-program-bin").expect("write custom bin");
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("deploy")
+        .arg("--program-path")
+        .arg(&custom)
+        .arg("--json")
+        .output()
+        .expect("run deploy --json");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // stdout must be a single, valid JSON object — this is what a `println!`
+    // warning breaks (the HTML body lands ahead of the JSON on stdout).
+    let trimmed = stdout.trim();
+    serde_json::from_str::<serde_json::Value>(trimmed).unwrap_or_else(|err| {
+        panic!("deploy --json stdout must be valid JSON; parse error: {err}\nstdout:\n{stdout}")
+    });
+
+    // And the Other arm actually fired (otherwise this test proves nothing):
+    // its warning landed on stderr, not stdout.
+    assert!(
+        stderr.contains("sequencer reachability probe failed"),
+        "the preflight Other-arm warning must be emitted on stderr; stderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("sequencer reachability probe failed"),
+        "the warning must NOT appear on stdout; stdout:\n{stdout}"
     );
 }
 
@@ -2143,7 +2768,7 @@ fn spel_proxy_forwards_args_to_vendored_binary() {
         .current_dir(temp.path())
         .arg("spel")
         .arg("--")
-        .arg("inspect")
+        .arg("program-id")
         .arg("methods/guest/foo.bin")
         .assert()
         .success()
@@ -2165,7 +2790,7 @@ fn spel_proxy_works_with_leading_quiet_flag() {
         .arg("--quiet")
         .arg("spel")
         .arg("--")
-        .arg("inspect")
+        .arg("program-id")
         .arg("methods/guest/foo.bin")
         .assert()
         .success()
@@ -2176,7 +2801,7 @@ fn spel_proxy_works_with_leading_quiet_flag() {
         .arg("-q")
         .arg("spel")
         .arg("--")
-        .arg("inspect")
+        .arg("program-id")
         .arg("methods/guest/foo.bin")
         .assert()
         .success();
@@ -2196,7 +2821,7 @@ fn spel_proxy_accepts_quiet_between_subcommand_and_separator() {
         .arg("spel")
         .arg("-q")
         .arg("--")
-        .arg("inspect")
+        .arg("program-id")
         .arg("methods/guest/foo.bin")
         .assert()
         .success()
@@ -2212,7 +2837,7 @@ fn spel_proxy_accepts_quiet_between_subcommand_and_separator() {
         .arg("spel")
         .arg("--quiet")
         .arg("--")
-        .arg("inspect")
+        .arg("program-id")
         .arg("methods/guest/foo.bin")
         .assert()
         .success();
@@ -2228,7 +2853,7 @@ fn spel_proxy_forwards_nonzero_exit_code() {
         .env("SPEL_FAIL", "1")
         .arg("spel")
         .arg("--")
-        .arg("inspect")
+        .arg("program-id")
         .arg("foo.bin")
         .assert()
         .failure();
@@ -2244,7 +2869,7 @@ fn spel_proxy_hints_when_binary_missing() {
         .current_dir(temp.path())
         .arg("spel")
         .arg("--")
-        .arg("inspect")
+        .arg("program-id")
         .arg("foo.bin")
         .assert()
         .failure()
@@ -2275,13 +2900,14 @@ fn spel_without_dash_dash_suggests_passthrough_form() {
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(temp.path())
         .arg("spel")
-        .arg("inspect")
+        .arg("program-id")
         .arg("foo.bin")
         .assert()
         .failure()
         .stderr(
-            predicate::str::contains("Did you mean")
-                .and(predicate::str::contains("logos-scaffold spel -- inspect")),
+            predicate::str::contains("Did you mean").and(predicate::str::contains(
+                "logos-scaffold spel -- program-id",
+            )),
         );
 }
 
@@ -2375,6 +3001,96 @@ fn basecamp_launch_without_profile_errors() {
         .arg("launch")
         .assert()
         .failure();
+}
+
+#[test]
+fn basecamp_develop_help_lists_module_and_dev_shell() {
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .args(["basecamp", "develop", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MODULE").and(predicate::str::contains("--dev-shell")));
+}
+
+#[test]
+fn basecamp_develop_unknown_module_errors_with_known_list() {
+    // Module lookup runs before the `nix` presence check, so this is
+    // deterministic in CI (no Nix needed): an unknown module name fails fast
+    // and lists the captured modules.
+    let temp = tempdir().expect("tempdir");
+    let toml = format!(
+        "{MINIMAL_SCAFFOLD_TOML}\n[modules.swap_module]\nflake = \"github:logos-co/swap-module#lgx\"\nrole = \"project\"\n"
+    );
+    fs::write(temp.path().join("scaffold.toml"), toml).expect("write scaffold.toml");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["basecamp", "develop", "nonexistent"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("no module `nonexistent`")
+                .and(predicate::str::contains("swap_module")),
+        );
+}
+
+#[test]
+fn basecamp_build_without_captured_modules_errors_before_nix() {
+    // The empty-modules guard runs before the `nix` presence check, so this is
+    // deterministic in CI: `build` never discovers, it only builds captured
+    // project sources.
+    let temp = tempdir().expect("tempdir");
+    fs::write(temp.path().join("scaffold.toml"), MINIMAL_SCAFFOLD_TOML)
+        .expect("write scaffold.toml");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["basecamp", "build"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no project modules captured"));
+}
+
+#[test]
+fn basecamp_build_unknown_module_errors_with_project_list() {
+    // The `--module` filter is validated before the `nix` presence check, so
+    // an unknown name fails fast and lists the captured project modules.
+    let temp = tempdir().expect("tempdir");
+    let toml = format!(
+        "{MINIMAL_SCAFFOLD_TOML}\n[modules.swap_module]\nflake = \"github:logos-co/swap-module#lgx\"\nrole = \"project\"\n"
+    );
+    fs::write(temp.path().join("scaffold.toml"), toml).expect("write scaffold.toml");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["basecamp", "build", "--module", "nonexistent"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("no project module `nonexistent`")
+                .and(predicate::str::contains("swap_module")),
+        );
+}
+
+#[test]
+fn basecamp_run_unknown_module_errors_with_known_list() {
+    // `run`'s module lookup runs before the `nix` presence check (mirrors
+    // `develop`), so an unknown module name is deterministic in CI.
+    let temp = tempdir().expect("tempdir");
+    let toml = format!(
+        "{MINIMAL_SCAFFOLD_TOML}\n[modules.swap_module]\nflake = \"github:logos-co/swap-module#lgx\"\nrole = \"project\"\n"
+    );
+    fs::write(temp.path().join("scaffold.toml"), toml).expect("write scaffold.toml");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["basecamp", "run", "nonexistent"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("no module `nonexistent`")
+                .and(predicate::str::contains("swap_module")),
+        );
 }
 
 #[cfg(unix)]
@@ -2682,13 +3398,14 @@ fn basecamp_launch_setup_hint_takes_precedence_over_profile_validation() {
 
 #[cfg(unix)]
 #[test]
-fn basecamp_launch_rejects_unknown_profile() {
+fn basecamp_launch_accepts_custom_profile_name() {
     let temp = tempdir().expect("tempdir");
     let project = temp.path();
     fs::write(project.join("scaffold.toml"), MINIMAL_SCAFFOLD_TOML).expect("write scaffold.toml");
 
-    // Fake a completed setup so we get past the first gate and reach profile
-    // validation. Launch never reaches `exec` because the profile check fails first.
+    // Fake a completed setup so we get past the first gate. A custom profile
+    // name (not alice/bob) is now accepted: launch advances to the
+    // modules-captured check instead of rejecting the name outright.
     let state_dir = project.join(".scaffold/state");
     fs::create_dir_all(&state_dir).expect("mkdir state");
     fs::write(state_dir.join("basecamp.state"), fake_basecamp_state()).expect("write state");
@@ -2700,13 +3417,17 @@ fn basecamp_launch_rejects_unknown_profile() {
         .arg("charlie")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("unknown profile `charlie`"));
+        .stderr(
+            predicate::str::contains("unknown profile")
+                .not()
+                .and(predicate::str::contains("no modules captured")),
+        );
 }
 
 #[cfg(unix)]
 #[test]
 fn basecamp_launch_bails_when_no_modules_captured() {
-    // launch scrubs and replays the captured module set. If [basecamp.modules]
+    // launch scrubs and replays the captured module set. If [modules]
     // is empty, the replay is silently a no-op — the profile comes up with
     // zero modules installed, which violates the clean-slate guarantee.
     // Surface as an error with a concrete hint.
@@ -2832,6 +3553,177 @@ fn write_scaffold_toml(project_root: &Path, lez_path: &Path) {
     write_scaffold_toml_with_localnet(project_root, lez_path, None, None);
 }
 
+#[cfg(unix)]
+fn start_test_node_and_read_runtime_config(
+    project_root: &Path,
+    fixtures: &TestNodeFixtures,
+    work_dir: &Path,
+    extra_args: &[&str],
+) -> serde_json::Value {
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"));
+    command
+        .current_dir(project_root)
+        .env("LOGOS_BLOCKCHAIN_CIRCUITS", &fixtures.circuits_path)
+        .arg("test-node")
+        .arg("start")
+        .arg("--work-dir")
+        .arg(work_dir)
+        .arg("--preserve-work-dir");
+    command.args(extra_args);
+    command
+        .arg("--timeout-sec")
+        .arg("5")
+        .arg("--json")
+        .assert()
+        .success();
+
+    TestNodeStopGuard::new(project_root, work_dir, true).stop();
+
+    let runtime_config_path = work_dir.join("sequencer_config.json");
+    assert_test_node_launched_with_config(
+        &fixtures.sequencer_observation_path,
+        &runtime_config_path,
+    );
+    let runtime_config =
+        fs::read_to_string(&runtime_config_path).expect("read runtime sequencer config");
+    serde_json::from_str(&runtime_config).expect("parse runtime sequencer config")
+}
+
+#[cfg(unix)]
+fn run_test_node_and_observe_config(
+    project_root: &Path,
+    fixtures: &TestNodeFixtures,
+    extra_args: &[&str],
+) -> serde_json::Value {
+    let observed_path = project_root.join("observed-config.json");
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"));
+    command
+        .current_dir(project_root)
+        .env("LOGOS_BLOCKCHAIN_CIRCUITS", &fixtures.circuits_path)
+        .arg("test-node")
+        .arg("run");
+    command.args(extra_args);
+    command
+        .arg("--timeout-sec")
+        .arg("5")
+        .arg("--")
+        .arg(&fixtures.python_path)
+        .arg("-c")
+        .arg(
+            "import json, os, sys\n\
+             cfg = json.load(open(os.environ['LGS_TEST_NODE_CONFIG_PATH'], encoding='utf-8'))\n\
+             json.dump({\n\
+                 'config_path': os.environ['LGS_TEST_NODE_CONFIG_PATH'],\n\
+                 'block_create_timeout': cfg.get('block_create_timeout'),\n\
+                 'retry_pending_blocks_timeout': cfg.get('retry_pending_blocks_timeout'),\n\
+             }, open(sys.argv[1], 'w', encoding='utf-8'))\n",
+        )
+        .arg(&observed_path)
+        .assert()
+        .success();
+
+    let observed = fs::read_to_string(&observed_path).expect("read observed config");
+    let observed_json: serde_json::Value =
+        serde_json::from_str(&observed).expect("parse observed config");
+    let sequencer_config_path =
+        test_node_observed_config_path(&fixtures.sequencer_observation_path);
+    assert_eq!(
+        observed_json["config_path"],
+        serde_json::json!(sequencer_config_path.display().to_string())
+    );
+    observed_json
+}
+
+#[cfg(unix)]
+fn assert_vendored_test_node_timing_preserved(fixtures: &TestNodeFixtures) {
+    let vendored_config =
+        fs::read_to_string(&fixtures.config_path).expect("read vendored sequencer config");
+    let vendored_json: serde_json::Value =
+        serde_json::from_str(&vendored_config).expect("parse vendored sequencer config");
+    assert_eq!(
+        vendored_json["block_create_timeout"],
+        serde_json::json!("2s")
+    );
+    assert_eq!(
+        vendored_json["retry_pending_blocks_timeout"],
+        serde_json::json!("3s")
+    );
+}
+
+#[cfg(unix)]
+struct TestNodeStopGuard {
+    project_root: PathBuf,
+    work_dir: PathBuf,
+    preserve_work_dir: bool,
+    active: bool,
+}
+
+#[cfg(unix)]
+impl TestNodeStopGuard {
+    fn new(project_root: &Path, work_dir: &Path, preserve_work_dir: bool) -> Self {
+        Self {
+            project_root: project_root.to_path_buf(),
+            work_dir: work_dir.to_path_buf(),
+            preserve_work_dir,
+            active: true,
+        }
+    }
+
+    fn stop(mut self) {
+        test_node_stop_command(&self.project_root, &self.work_dir, self.preserve_work_dir)
+            .assert()
+            .success();
+        self.active = false;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for TestNodeStopGuard {
+    fn drop(&mut self) {
+        if self.active {
+            match test_node_stop_command(&self.project_root, &self.work_dir, self.preserve_work_dir)
+                .output()
+            {
+                Ok(output) if output.status.success() => {}
+                Ok(output) => {
+                    eprintln!(
+                        "test-node cleanup failed for {}: status={}\nstdout:\n{}\nstderr:\n{}",
+                        self.work_dir.display(),
+                        output.status,
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                Err(err) => {
+                    eprintln!(
+                        "test-node cleanup failed for {}: {err}",
+                        self.work_dir.display()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn test_node_stop_command(
+    project_root: &Path,
+    work_dir: &Path,
+    preserve_work_dir: bool,
+) -> Command {
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"));
+    command
+        .current_dir(project_root)
+        .arg("test-node")
+        .arg("stop")
+        .arg("--node")
+        .arg(work_dir);
+    if preserve_work_dir {
+        command.arg("--preserve-work-dir");
+    }
+    command
+}
+
 fn write_scaffold_toml_with_localnet(
     project_root: &Path,
     lez_path: &Path,
@@ -2879,9 +3771,10 @@ fn setup_wallet_project(project_root: &Path, sequencer_addr: Option<&str>) {
 }
 
 /// Place a minimal `spel` stub at `<spel_path>/target/release/spel`. It
-/// emits the canonical `   ImageID (hex bytes): <hex>` line that
-/// `extract_program_id` parses, with a deterministic-per-binary hash so
-/// tests can assert exact values. Honors:
+/// mirrors the spel v0.5.0 surface: `program-id <FILE>` emits the canonical
+/// `   ImageID (hex bytes): <hex>` line that `extract_program_id` parses,
+/// with a deterministic-per-binary hash so tests can assert exact values.
+/// Honors:
 ///   `SPEL_FAIL=1`              → exit non-zero (proxy exit-code test)
 ///   `SPEL_PROGRAM_ID_FAIL=<n>` → exit non-zero only when arg2 basename
 ///                                contains `<n>` (program-id-unavailable
@@ -2897,13 +3790,13 @@ if [ "${SPEL_FAIL:-0}" = "1" ]; then
   exit 7
 fi
 
-if [ "$#" -ge 2 ] && [ "$1" = "inspect" ]; then
+if [ "$#" -ge 2 ] && [ "$1" = "program-id" ]; then
   bin_path="$2"
   bin_name="$(basename "$bin_path")"
   if [ -n "${SPEL_PROGRAM_ID_FAIL:-}" ]; then
     case "$bin_name" in
       *"$SPEL_PROGRAM_ID_FAIL"*)
-        echo "spel stub: forced inspect failure for $bin_name" >&2
+        echo "spel stub: forced program-id failure for $bin_name" >&2
         exit 8
         ;;
     esac
@@ -3036,6 +3929,16 @@ if [ "$#" -ge 2 ] && [ "$1" = "pinata" ] && [ "$2" = "claim" ]; then
     echo "Error: Transaction not found in preconfigured amount of blocks" >&2
     exit 1
   fi
+  if [ "${TOPUP_FAIL_TIMEOUT_TRANSPORT:-0}" = "1" ]; then
+    # A sequencer dying mid-claim: the tx was submitted (tx_hash on stdout) and
+    # the poller then failed with BOTH the confirmation-timeout line AND a
+    # transport token in the same combined output. The confirmation-timeout
+    # branch must own this (status: pending), not the connectivity classifier.
+    echo "tx_hash=pinata-topup-hash"
+    echo "Error: Transaction not found in preconfigured amount of blocks" >&2
+    echo "error sending request for url (http://127.0.0.1:3040/): Connection refused (os error 111)" >&2
+    exit 1
+  fi
   echo "tx_hash=pinata-topup-hash"
   exit 0
 fi
@@ -3047,6 +3950,15 @@ if [ "$#" -ge 2 ] && [ "$1" = "deploy-program" ]; then
   if [ "${FAIL_PROGRAM:-}" = "$bin_name" ]; then
     echo "simulated deploy failure for $bin_name" >&2
     exit 2
+  fi
+  if [ "${DEPLOY_FAIL_TIMEOUT_TRANSPORT:-}" = "$bin_name" ]; then
+    # Sequencer dying mid-deploy: the submission failed with BOTH the
+    # confirmation-timeout line AND a transport token in the combined output.
+    # deploy's loop must classify this as connectivity (sequencer-unavailable
+    # hint), not "inspect sequencer logs and retry".
+    echo "Error: Transaction not found in preconfigured amount of blocks" >&2
+    echo "error sending request for url (http://127.0.0.1:3040/): Connection refused (os error 111)" >&2
+    exit 1
   fi
   # WALLET_NO_TX=1: simulate the wallet not surfacing a tx identifier so
   # tests can assert the deploy JSON omits the `tx` key when None.
@@ -3102,7 +4014,64 @@ struct RpcStub {
 }
 
 impl RpcStub {
+    /// Monotonically increasing head: deploy pacing waits for the block id
+    /// to advance between submissions, so a constant value would park every
+    /// multi-program deploy test in the pacing timeout. Incrementing per
+    /// poll mirrors a live sequencer.
     fn start() -> Self {
+        Self::start_with_advance(true)
+    }
+
+    /// Constant head: models a sequencer whose block production has stalled,
+    /// for asserting that deploy pacing aborts fail-closed instead of
+    /// batching the remaining ELFs unpaced.
+    fn start_stalled() -> Self {
+        Self::start_with_advance(false)
+    }
+
+    fn start_with_advance(advance: bool) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind rpc stub");
+        let addr = listener.local_addr().expect("local addr");
+        let addr_str = addr.to_string();
+        listener
+            .set_nonblocking(true)
+            .expect("set nonblocking rpc stub");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_flag = Arc::clone(&stop);
+
+        let handle = thread::spawn(move || {
+            let mut block_id: u64 = 123;
+            while !stop_flag.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        respond_last_block(&mut stream, block_id);
+                        if advance {
+                            block_id += 1;
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Self {
+            url: format!("http://{addr_str}"),
+            stop,
+            addr: addr_str,
+            handle: Some(handle),
+        }
+    }
+
+    /// Foreign HTTP responder squatting on the sequencer port: answers every
+    /// request with a 404 and an HTML body. `map_ureq_error` maps this to
+    /// `RpcReachabilityError::Other`, so `preflight_sequencer_reachability`
+    /// takes its warn-and-continue arm rather than bailing — the exact arm
+    /// whose warning must land on stderr and not the `--json` stdout stream.
+    fn start_http_error() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind rpc stub");
         let addr = listener.local_addr().expect("local addr");
         let addr_str = addr.to_string();
@@ -3116,9 +4085,7 @@ impl RpcStub {
         let handle = thread::spawn(move || {
             while !stop_flag.load(Ordering::Relaxed) {
                 match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        respond_last_block(&mut stream);
-                    }
+                    Ok((mut stream, _)) => respond_http_404(&mut stream),
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
                     }
@@ -3146,11 +4113,27 @@ impl Drop for RpcStub {
     }
 }
 
-fn respond_last_block(stream: &mut TcpStream) {
+fn respond_http_404(stream: &mut TcpStream) {
     let mut buf = [0_u8; 4096];
     let _ = stream.read(&mut buf);
 
-    let body = r#"{"jsonrpc":"2.0","result":123,"id":1}"#;
+    // HTML with a leading `<`: if this body ever reaches `--json` stdout, `jq`
+    // fails on the first byte ("Invalid numeric literal at line 1, column 8").
+    let body = "<!DOCTYPE HTML><html><body><p>Error code 404: Nothing matches the given URI.</p></body></html>";
+    let response = format!(
+        "HTTP/1.1 404 Not Found\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.flush();
+}
+
+fn respond_last_block(stream: &mut TcpStream, block_id: u64) {
+    let mut buf = [0_u8; 4096];
+    let _ = stream.read(&mut buf);
+
+    let body = format!(r#"{{"jsonrpc":"2.0","result":{block_id},"id":1}}"#);
     let response = format!(
         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
         body.len(),
@@ -3821,33 +4804,24 @@ fn setup_hard_fails_on_pre_v0_2_0_scaffold_toml() {
     assert_pre_v0_2_0_rejection(&["setup"]);
 }
 
-/// F1: `setup` must bail with the scaffold-styled circuits-prereq error
-/// before any cargo work when neither `LOGOS_BLOCKCHAIN_CIRCUITS` nor
-/// `~/.logos-blockchain-circuits/` is reachable. End-to-end check that the
-/// `check_logos_blockchain_circuits` precheck is wired into `cmd_setup`.
+/// F1: `doctor` must surface the configured circuits install directory when
+/// the release has not been fetched yet.
 #[test]
-fn setup_bails_with_scaffold_styled_error_when_circuits_missing() {
+fn doctor_reports_configured_circuits_missing() {
     let temp = tempdir().expect("tempdir");
     let project = temp.path();
     fs::write(project.join("scaffold.toml"), MINIMAL_SCAFFOLD_TOML).expect("write scaffold.toml");
 
-    // Point HOME at a directory with no `.logos-blockchain-circuits` so the
-    // home-dir fallback also fails — otherwise the developer running the
-    // suite would silently pass via their real $HOME.
-    let fake_home = project.join("fake-home");
-    fs::create_dir_all(&fake_home).expect("mkdir fake home");
-
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(project)
-        .env("HOME", &fake_home)
         .env_remove("LOGOS_BLOCKCHAIN_CIRCUITS")
-        .arg("setup")
+        .arg("doctor")
         .assert()
         .failure()
-        .stderr(
+        .stdout(
             predicate::str::contains("logos-blockchain-circuits")
-                .and(predicate::str::contains("$LOGOS_BLOCKCHAIN_CIRCUITS unset"))
-                .and(predicate::str::contains("logos-scaffold doctor"))
+                .and(predicate::str::contains(".scaffold/circuits"))
+                .and(predicate::str::contains("logos-scaffold setup"))
                 // Must NOT surface a raw cargo build-script panic.
                 .and(predicate::str::contains("logos-blockchain-pol").not())
                 .and(predicate::str::contains("build script").not()),
@@ -4046,7 +5020,7 @@ fn run_help_lists_command_summary() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Build, start localnet, top up wallet, deploy, and run post-deploy hook",
+            "Build, start localnet, top up wallet, deploy, and run post-deploy hooks (topup/deploy skippable)",
         ));
 }
 
@@ -4274,4 +5248,78 @@ fn run_no_reset_flag_overrides_config_reset_true() {
         .failure()
         .stdout(predicate::str::contains("[1/5] Building..."))
         .stderr(predicate::str::contains("scaffold.toml requested reset = true").not());
+}
+
+#[test]
+fn basecamp_paths_json_resolves_custom_profile_manifest() {
+    // `basecamp paths` is pure path resolution: it needs only a loadable
+    // project (no setup, no nix) and accepts any profile name.
+    let temp = tempdir().expect("tempdir");
+    let lez_path = temp.path().join("lez");
+    fs::create_dir_all(&lez_path).expect("create lez path");
+    write_scaffold_toml(temp.path(), &lez_path);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("basecamp")
+        .arg("paths")
+        .arg("carol")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("\"profile\": \"carol\"")
+                .and(predicate::str::contains("\"modules_dir\""))
+                .and(predicate::str::contains(
+                    ".scaffold/basecamp/profiles/carol",
+                )),
+        );
+}
+
+/// Basecamp 0.2.x keeps two more trees under its base directory —
+/// `module_data/` (per-module persisted state) and `logs/` (its own rotated
+/// session logs) — and both sit inside the tree `launch` scrubs, so a relaunch
+/// discards them. `paths` is where that becomes visible: without these fields a
+/// developer hunting for module state or an app log has no way to learn either
+/// where it lives or that it will not survive the next launch.
+#[test]
+fn basecamp_paths_json_lists_the_0_2_x_base_dir_children() {
+    let temp = tempdir().expect("tempdir");
+    let lez_path = temp.path().join("lez");
+    fs::create_dir_all(&lez_path).expect("create lez path");
+    write_scaffold_toml(temp.path(), &lez_path);
+
+    let out = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("basecamp")
+        .arg("paths")
+        .arg("alice")
+        .arg("--json")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    let module_root = parsed["module_root"].as_str().expect("module_root");
+    for (field, child) in [
+        ("modules_dir", "modules"),
+        ("plugins_dir", "plugins"),
+        ("module_data_dir", "module_data"),
+        ("app_logs_dir", "logs"),
+    ] {
+        let value = parsed[field]
+            .as_str()
+            .unwrap_or_else(|| panic!("{field} must be present"));
+        assert_eq!(
+            value,
+            format!("{module_root}/{child}"),
+            "{field} must be the `{child}` child of the module root"
+        );
+    }
+    // The module root is basecamp's own base directory, so everything under it
+    // is inside the scrubbed profile tree rather than a user-global location.
+    assert!(
+        module_root.contains(".scaffold/basecamp/profiles/alice/xdg-data"),
+        "module root must sit inside the profile's scrubbed tree, got: {module_root}"
+    );
 }

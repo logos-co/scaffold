@@ -1,5 +1,7 @@
 pub(crate) type DynResult<T> = anyhow::Result<T>;
 
+pub mod api;
+
 pub(crate) mod circuits;
 pub(crate) mod cli;
 pub(crate) mod cli_help;
@@ -8,13 +10,16 @@ pub(crate) mod config;
 pub(crate) mod constants;
 pub(crate) mod doctor_checks;
 pub(crate) mod error;
+pub(crate) mod lez_layout;
 pub(crate) mod migrate;
 pub(crate) mod model;
 pub(crate) mod process;
 pub(crate) mod project;
 pub(crate) mod repo;
+pub(crate) mod sequencer_config;
 pub(crate) mod state;
 pub(crate) mod template;
+pub(crate) mod testnode;
 
 pub fn run(args: Vec<String>) -> DynResult<()> {
     cli::run(args)

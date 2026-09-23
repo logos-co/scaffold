@@ -6,16 +6,19 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context};
-use serde_json::Value;
 
-use crate::circuits::ensure_circuits_for_subprocess;
-use crate::constants::{SEQUENCER_BIN_REL_PATH, SEQUENCER_CONFIG_REL_PATH};
+use crate::circuits::ensure_circuits_for_project;
+use crate::constants::SEQUENCER_BIN_REL_PATH;
 use crate::error::{LocalnetError, ResetError};
-use crate::model::{LocalnetOwnership, LocalnetState, LocalnetStatusReport, Project};
-use crate::process::{listener_pid, pid_alive, pid_command, pid_running, port_open, spawn_to_log};
-use crate::project::{
-    ensure_dir_exists, find_project_root, load_project, resolve_cache_root, resolve_repo_path,
+use crate::model::{
+    LocalnetLogsReport, LocalnetOwnership, LocalnetState, LocalnetStatusReport, Project,
 };
+use crate::process::{
+    command_echo_enabled, listener_pid, pid_alive, pid_command, pid_running, port_open,
+    spawn_to_log,
+};
+use crate::project::{ensure_dir_exists, find_project_root, load_project, resolve_repo_path};
+use crate::sequencer_config::{apply_common_runtime_overrides, patch_runtime_sequencer_config};
 use crate::state::{read_localnet_state, write_localnet_state};
 use crate::DynResult;
 
@@ -34,6 +37,7 @@ pub(crate) enum LocalnetAction {
     },
     Logs {
         tail: usize,
+        json: bool,
     },
     Reset {
         dry_run: bool,
@@ -72,60 +76,173 @@ pub(crate) fn build_localnet_status_for_project(project: &Project) -> LocalnetSt
     )
 }
 
-fn cmd_localnet_in_project(project: &Project, action: LocalnetAction) -> DynResult<()> {
-    let localnet_port = project.config.localnet.port;
-    let risc0_dev_mode = project.config.localnet.risc0_dev_mode;
-    let localnet_addr = format!("127.0.0.1:{localnet_port}");
-    let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
-    let state_path = project.root.join(".scaffold/state/localnet.state");
-    let logs_dir = project.root.join(".scaffold/logs");
-    let log_path = logs_dir.join("sequencer.log");
-    fs::create_dir_all(&logs_dir)?;
+/// Project-derived paths and addresses every localnet operation needs.
+pub(crate) struct LocalnetContext {
+    pub(crate) lez: PathBuf,
+    pub(crate) state_path: PathBuf,
+    pub(crate) log_path: PathBuf,
+    pub(crate) localnet_addr: String,
+    pub(crate) localnet_port: u16,
+    pub(crate) risc0_dev_mode: bool,
+}
 
-    // The standalone `sequencer_service` binary calls into the
-    // `logos-blockchain-zksign` runtime, which loads circuit witness
-    // generators from `LOGOS_BLOCKCHAIN_CIRCUITS` (or `~/.logos-blockchain-circuits`)
-    // and panics if neither exists. Materialise the release if absent and
-    // export the env var so any subprocess we spawn here inherits it.
-    if matches!(
-        action,
-        LocalnetAction::Start { .. } | LocalnetAction::Reset { .. }
-    ) {
-        let (cache_root, _) = resolve_cache_root(project)?;
-        ensure_circuits_for_subprocess(&cache_root)?;
-    }
+pub(crate) fn localnet_context(project: &Project) -> DynResult<LocalnetContext> {
+    let localnet_port = project.config.localnet.port;
+    let logs_dir = project.root.join(".scaffold/logs");
+    fs::create_dir_all(&logs_dir)?;
+    Ok(LocalnetContext {
+        lez: resolve_repo_path(project, &project.config.lez, "lez")?,
+        state_path: project.root.join(".scaffold/state/localnet.state"),
+        log_path: logs_dir.join("sequencer.log"),
+        localnet_addr: format!("127.0.0.1:{localnet_port}"),
+        localnet_port,
+        risc0_dev_mode: project.config.localnet.risc0_dev_mode,
+    })
+}
+
+/// Result of a localnet start, exposed through the public API.
+#[derive(Clone, Debug)]
+pub(crate) struct LocalnetStartOutcome {
+    pub(crate) pid: u32,
+    /// `true` when a tracked sequencer was already running and was reused
+    /// instead of spawning a new process.
+    pub(crate) reused: bool,
+    pub(crate) rpc_url: String,
+    pub(crate) state_path: PathBuf,
+    pub(crate) log_path: PathBuf,
+}
+
+/// Result of a localnet stop, exposed through the public API.
+#[derive(Clone, Debug)]
+pub enum LocalnetStopOutcome {
+    /// The tracked sequencer was sent TERM and exited.
+    Stopped { pid: u32 },
+    /// State tracked a pid that is no longer running; the stale state file
+    /// was removed.
+    ClearedStaleState { pid: u32 },
+    /// An unmanaged process is listening on the localnet port; it was left
+    /// alone.
+    ForeignListener { addr: String, pid: Option<u32> },
+    /// Nothing tracked and nothing listening.
+    NotRunning,
+}
+
+/// Start (or reuse) the project's localnet sequencer. Non-printing core used
+/// by both the CLI command and the public API.
+pub(crate) fn localnet_start_for_project(
+    project: &Project,
+    timeout_sec: u64,
+) -> DynResult<LocalnetStartOutcome> {
+    let ctx = localnet_context(project)?;
+    ensure_circuits_for_project(project)?;
+    let (pid, reused) = start_localnet(
+        &ctx.lez,
+        &ctx.state_path,
+        &ctx.log_path,
+        timeout_sec,
+        ctx.localnet_port,
+        ctx.risc0_dev_mode,
+        &ctx.localnet_addr,
+    )?;
+    Ok(LocalnetStartOutcome {
+        pid,
+        reused,
+        rpc_url: format!("http://{}", ctx.localnet_addr),
+        state_path: ctx.state_path,
+        log_path: ctx.log_path,
+    })
+}
+
+/// Stop the project's localnet sequencer. Non-printing core used by both the
+/// CLI command and the public API.
+pub(crate) fn localnet_stop_for_project(project: &Project) -> DynResult<LocalnetStopOutcome> {
+    let ctx = localnet_context(project)?;
+    stop_localnet(&ctx.state_path, ctx.localnet_port)
+}
+
+/// Build the logs report for the public API / `--json` output.
+pub(crate) fn localnet_logs_for_project(
+    project: &Project,
+    tail: usize,
+) -> DynResult<LocalnetLogsReport> {
+    let log_path = project.root.join(".scaffold/logs/sequencer.log");
+    build_logs_report(&log_path, tail)
+}
+
+/// Reset the project's localnet (stop, wipe chain DB, restart, verify block
+/// production). Used by the public API; always operates non-interactively.
+pub(crate) fn localnet_reset_for_project(
+    project: &Project,
+    reset_wallet: bool,
+    verify_timeout_sec: u64,
+) -> DynResult<()> {
+    let ctx = localnet_context(project)?;
+    ensure_circuits_for_project(project)?;
+    cmd_localnet_reset(
+        project,
+        &ctx.lez,
+        &ctx.state_path,
+        &ctx.log_path,
+        &ctx.localnet_addr,
+        false,
+        true,
+        reset_wallet,
+        verify_timeout_sec,
+    )
+}
+
+fn cmd_localnet_in_project(project: &Project, action: LocalnetAction) -> DynResult<()> {
+    let ctx = localnet_context(project)?;
 
     match action {
-        LocalnetAction::Start { timeout_sec } => cmd_localnet_start(
-            &lez,
-            &state_path,
-            &log_path,
-            timeout_sec,
-            localnet_port,
-            risc0_dev_mode,
-            &localnet_addr,
-        ),
-        LocalnetAction::Stop => cmd_localnet_stop(&state_path, localnet_port),
-        LocalnetAction::Status { json } => {
-            cmd_localnet_status(&state_path, &log_path, json, &localnet_addr, localnet_port)
+        LocalnetAction::Start { timeout_sec } => {
+            ensure_circuits_for_project(project)?;
+            let (pid, _) = start_localnet(
+                &ctx.lez,
+                &ctx.state_path,
+                &ctx.log_path,
+                timeout_sec,
+                ctx.localnet_port,
+                ctx.risc0_dev_mode,
+                &ctx.localnet_addr,
+            )?;
+            println!("localnet ready (sequencer pid={pid})");
+            Ok(())
         }
-        LocalnetAction::Logs { tail } => cmd_localnet_logs(&log_path, tail),
+        LocalnetAction::Stop => {
+            let outcome = stop_localnet(&ctx.state_path, ctx.localnet_port)?;
+            print_stop_outcome(&outcome, &ctx.localnet_addr);
+            Ok(())
+        }
+        LocalnetAction::Status { json } => cmd_localnet_status(
+            &ctx.state_path,
+            &ctx.log_path,
+            json,
+            &ctx.localnet_addr,
+            ctx.localnet_port,
+        ),
+        LocalnetAction::Logs { tail, json } => cmd_localnet_logs(&ctx.log_path, tail, json),
         LocalnetAction::Reset {
             dry_run,
             yes,
             reset_wallet,
             verify_timeout_sec,
-        } => cmd_localnet_reset(
-            project,
-            &lez,
-            &state_path,
-            &log_path,
-            &localnet_addr,
-            dry_run,
-            yes,
-            reset_wallet,
-            verify_timeout_sec,
-        ),
+        } => {
+            if yes && !dry_run {
+                ensure_circuits_for_project(project)?;
+            }
+            cmd_localnet_reset(
+                project,
+                &ctx.lez,
+                &ctx.state_path,
+                &ctx.log_path,
+                &ctx.localnet_addr,
+                dry_run,
+                yes,
+                reset_wallet,
+                verify_timeout_sec,
+            )
+        }
     }
 }
 
@@ -162,7 +279,10 @@ fn cmd_localnet_stop_outside_project() -> DynResult<()> {
     Ok(())
 }
 
-fn cmd_localnet_start(
+/// Spawn (or reuse) the sequencer and wait for readiness. Returns
+/// `(pid, reused)`; does not print success lines so the public API stays
+/// quiet — callers print their own confirmation.
+fn start_localnet(
     lez: &Path,
     state_path: &Path,
     log_path: &Path,
@@ -170,7 +290,7 @@ fn cmd_localnet_start(
     localnet_port: u16,
     risc0_dev_mode: bool,
     localnet_addr: &str,
-) -> DynResult<()> {
+) -> DynResult<(u32, bool)> {
     ensure_dir_exists(lez, "lez")?;
     let sequencer_bin = lez.join(SEQUENCER_BIN_REL_PATH);
     if !sequencer_bin.exists() {
@@ -184,8 +304,7 @@ fn cmd_localnet_start(
     if let Some(pid) = state.sequencer_pid {
         if pid_running(pid) {
             wait_for_readiness(pid, timeout_sec, log_path, localnet_addr)?;
-            println!("localnet ready (sequencer pid={pid})");
-            return Ok(());
+            return Ok((pid, true));
         }
 
         if state_path.exists() {
@@ -265,8 +384,7 @@ fn cmd_localnet_start(
         return Err(err);
     }
 
-    println!("localnet ready (sequencer pid={sequencer_pid})");
-    Ok(())
+    Ok((sequencer_pid, false))
 }
 
 fn wait_for_readiness(
@@ -305,7 +423,10 @@ fn wait_for_readiness(
     }
 }
 
-fn cmd_localnet_stop(state_path: &Path, localnet_port: u16) -> DynResult<()> {
+/// Stop the tracked sequencer (if any). Non-printing core shared by the CLI
+/// command, the reset flow, and the public API. Informational text lives in
+/// `print_stop_outcome`; the `$ kill` echo follows the global echo setting.
+fn stop_localnet(state_path: &Path, localnet_port: u16) -> DynResult<LocalnetStopOutcome> {
     let localnet_addr = format!("127.0.0.1:{localnet_port}");
     let report = build_status_report(
         state_path,
@@ -314,8 +435,10 @@ fn cmd_localnet_stop(state_path: &Path, localnet_port: u16) -> DynResult<()> {
         localnet_port,
     );
     if let Some(pid) = report.tracked_pid {
-        if report.tracked_running {
-            println!("$ kill {pid} # sequencer");
+        let outcome = if report.tracked_running {
+            if command_echo_enabled() {
+                println!("$ kill {pid} # sequencer");
+            }
             let kill_output = Command::new("kill")
                 .arg(pid.to_string())
                 .output()
@@ -348,30 +471,44 @@ fn cmd_localnet_stop(state_path: &Path, localnet_port: u16) -> DynResult<()> {
             // foreign listener that survived our sequencer, and `localnet
             // start` will surface that with a more specific error.
             let _ = wait_for_port_free(&localnet_addr, Duration::from_secs(5));
+            LocalnetStopOutcome::Stopped { pid }
         } else {
-            println!("sequencer state is stale (pid={pid} not running)");
-        }
+            LocalnetStopOutcome::ClearedStaleState { pid }
+        };
 
         if state_path.exists() {
             fs::remove_file(state_path)?;
         }
-        println!("localnet stopped");
-        return Ok(());
+        return Ok(outcome);
     }
 
     if report.listener_present {
-        let pid_text = report
-            .listener_pid
-            .map(|pid| pid.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        println!(
-            "foreign listener detected on {localnet_addr} (pid={pid_text}); not stopping unmanaged process"
-        );
-        return Ok(());
+        return Ok(LocalnetStopOutcome::ForeignListener {
+            addr: localnet_addr,
+            pid: report.listener_pid,
+        });
     }
 
-    println!("localnet not running");
-    Ok(())
+    Ok(LocalnetStopOutcome::NotRunning)
+}
+
+fn print_stop_outcome(outcome: &LocalnetStopOutcome, _localnet_addr: &str) {
+    match outcome {
+        LocalnetStopOutcome::Stopped { .. } => println!("localnet stopped"),
+        LocalnetStopOutcome::ClearedStaleState { pid } => {
+            println!("sequencer state is stale (pid={pid} not running)");
+            println!("localnet stopped");
+        }
+        LocalnetStopOutcome::ForeignListener { addr, pid } => {
+            let pid_text = pid
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            println!(
+                "foreign listener detected on {addr} (pid={pid_text}); not stopping unmanaged process"
+            );
+        }
+        LocalnetStopOutcome::NotRunning => println!("localnet not running"),
+    }
 }
 
 fn cmd_localnet_status(
@@ -397,14 +534,15 @@ fn cmd_localnet_status(
         println!("tracked sequencer: not tracked");
     }
 
+    let sequencer_url = format!("http://{localnet_addr}");
     if report.listener_present {
         let pid_text = report
             .listener_pid
             .map(|pid| pid.to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        println!("listener {localnet_addr}: reachable (pid={pid_text})");
+        println!("listener {sequencer_url}: reachable (pid={pid_text})");
     } else {
-        println!("listener {localnet_addr}: not reachable");
+        println!("listener {sequencer_url}: not reachable");
     }
 
     println!("ownership: {}", ownership_label(report.ownership));
@@ -429,27 +567,66 @@ fn ownership_label(ownership: LocalnetOwnership) -> &'static str {
     }
 }
 
-fn cmd_localnet_logs(log_path: &Path, tail: usize) -> DynResult<()> {
-    if !log_path.exists() {
+fn cmd_localnet_logs(log_path: &Path, tail: usize, json: bool) -> DynResult<()> {
+    let report = build_logs_report(log_path, tail)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    if !report.exists {
         println!("log file does not exist yet: {}", log_path.display());
         return Ok(());
     }
 
-    let content = fs::read_to_string(log_path)
-        .with_context(|| format!("failed to read log file {}", log_path.display()))?;
-
-    if content.trim().is_empty() {
+    if report.lines.is_empty() {
         println!("log file is empty: {}", log_path.display());
         return Ok(());
     }
 
-    let lines: Vec<&str> = content.lines().collect();
-    let start = lines.len().saturating_sub(tail);
-    for line in &lines[start..] {
+    for line in &report.lines {
         println!("{line}");
     }
 
     Ok(())
+}
+
+/// Build the `LocalnetLogsReport` for a sequencer log file. A whitespace-only
+/// log reports as existing-but-empty (`lines` empty) so JSON consumers can
+/// tell an absent log apart from an empty one without parsing prose.
+fn build_logs_report(log_path: &Path, tail: usize) -> DynResult<LocalnetLogsReport> {
+    let mut report = LocalnetLogsReport {
+        log_path: log_path.display().to_string(),
+        exists: false,
+        tail,
+        lines: Vec::new(),
+    };
+
+    // `try_exists()` (not `exists()`): an unreadable log (permission/IO error)
+    // must surface as an error, not be reported as a missing log file.
+    if !log_path
+        .try_exists()
+        .with_context(|| format!("checking sequencer log at {}", log_path.display()))?
+    {
+        return Ok(report);
+    }
+    report.exists = true;
+
+    let content = fs::read_to_string(log_path)
+        .with_context(|| format!("failed to read log file {}", log_path.display()))?;
+
+    // Treat a whitespace-only log as empty. Without this, a log containing
+    // only newlines yields `content.lines() == [""]`, so JSON would report a
+    // non-empty `lines` array — contradicting the LocalnetLogsReport contract.
+    if content.trim().is_empty() {
+        return Ok(report);
+    }
+
+    let all_lines: Vec<&str> = content.lines().collect();
+    let start = all_lines.len().saturating_sub(tail);
+    report.lines = all_lines[start..].iter().map(|l| l.to_string()).collect();
+    Ok(report)
 }
 
 fn build_status_report(
@@ -539,30 +716,10 @@ fn build_status_report(
 /// deferral, scaffold widens the limit so the documented first-success path
 /// fits in a single block.
 fn prepare_sequencer_config(lez: &Path, dest_dir: &Path, port: u16) -> DynResult<PathBuf> {
-    let src_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
-    let text = fs::read_to_string(&src_path)
-        .with_context(|| format!("failed to read {}", src_path.display()))?;
-    let mut doc: Value =
-        serde_json::from_str(&text).context("failed to parse sequencer_config.json")?;
-
-    let Some(obj) = doc.as_object_mut() else {
-        bail!(
-            "sequencer_config.json is not a JSON object: {}",
-            src_path.display()
-        );
-    };
-    obj.insert("port".to_string(), Value::Number(port.into()));
-    obj.insert(
-        "max_block_size".to_string(),
-        Value::String("8 MiB".to_string()),
-    );
-
-    fs::create_dir_all(dest_dir)
-        .with_context(|| format!("failed to create {}", dest_dir.display()))?;
-    let dest_path = dest_dir.join("sequencer_config.json");
-    let updated = serde_json::to_string_pretty(&doc).context("failed to serialize config")?;
-    fs::write(&dest_path, format!("{updated}\n"))
-        .with_context(|| format!("failed to write {}", dest_path.display()))?;
+    let (dest_path, _) = patch_runtime_sequencer_config(lez, dest_dir, |obj| {
+        apply_common_runtime_overrides(obj, port);
+        Ok(())
+    })?;
     Ok(dest_path)
 }
 
@@ -736,7 +893,8 @@ pub(crate) fn cmd_localnet_reset(
     }
 
     println!("stopping sequencer…");
-    cmd_localnet_stop(state_path, localnet_port)?;
+    let stop_outcome = stop_localnet(state_path, localnet_port)?;
+    print_stop_outcome(&stop_outcome, localnet_addr);
 
     // `cmd_localnet_stop` sends SIGTERM without waiting, so the port may still
     // be held by our own sequencer for a short window. Poll briefly for it to
@@ -752,7 +910,7 @@ pub(crate) fn cmd_localnet_reset(
     reset_cleanup(project, lez, state_path, reset_wallet)?;
 
     println!("starting sequencer…");
-    cmd_localnet_start(
+    let (pid, _) = start_localnet(
         lez,
         state_path,
         log_path,
@@ -761,6 +919,7 @@ pub(crate) fn cmd_localnet_reset(
         project.config.localnet.risc0_dev_mode,
         localnet_addr,
     )?;
+    println!("localnet ready (sequencer pid={pid})");
 
     println!("waiting for block production…");
     verify_block_production(localnet_addr, verify_timeout_sec)
@@ -876,7 +1035,7 @@ fn verify_block_production(localnet_addr: &str, timeout_sec: u64) -> DynResult<(
 /// rzup-managed extension dir: ~/.risc0/extensions/v<version>-cargo-risczero-<arch>-<os>/r0vm.
 /// Returns None (without guessing) if the version cannot be determined or the exact path
 /// does not exist. The caller should error with a clear diagnostic if None is returned.
-fn find_r0vm_path_for_lez(lez: &std::path::Path) -> Option<std::path::PathBuf> {
+pub(crate) fn find_r0vm_path_for_lez(lez: &std::path::Path) -> Option<std::path::PathBuf> {
     // Read risc0-zkvm version from LEZ Cargo.lock
     let lockfile = lez.join("Cargo.lock");
     let lock_content = std::fs::read_to_string(&lockfile).ok()?;
@@ -972,12 +1131,14 @@ mod tests {
                 pin: String::new(),
                 build: crate::model::RepoBuild::Cargo,
                 attr: String::new(),
+                attr_platform: std::collections::BTreeMap::new(),
                 path: lez_dir.display().to_string(),
             },
             spel: RepoRef::default(),
             basecamp_repo: None,
             lgpm_repo: None,
             wallet_home_dir: ".scaffold/wallet".to_string(),
+            circuits: crate::model::CircuitsConfig::default(),
             framework: FrameworkConfig {
                 kind: String::new(),
                 version: String::new(),
@@ -1172,6 +1333,27 @@ mod tests {
             git_clean(&lez).unwrap(),
             "lez tree must remain clean after prepare_sequencer_config"
         );
+    }
+
+    #[test]
+    fn prepare_sequencer_config_accepts_nested_lez_layout() {
+        let temp = tempdir().unwrap();
+        let lez = temp.path().join("lez");
+        let state_dir = temp.path().join(".scaffold/state");
+
+        // Newer LEZ pins moved the repository payload under a `lez/` prefix.
+        // `localnet start` must find that config instead of only probing the
+        // pre-reorg flat path.
+        let config_path = lez.join("lez/sequencer/service/configs/debug/sequencer_config.json");
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(&config_path, "{\n  \"port\": 3040\n}\n").unwrap();
+
+        let dest = prepare_sequencer_config(&lez, &state_dir, 4050).unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
+
+        assert_eq!(doc["port"], serde_json::json!(4050));
+        assert_eq!(doc["max_block_size"], serde_json::json!("8 MiB"));
     }
 
     #[test]

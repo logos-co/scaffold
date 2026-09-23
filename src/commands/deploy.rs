@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 use walkdir::WalkDir;
@@ -12,9 +13,10 @@ use crate::project::{load_project, resolve_repo_path};
 use crate::DynResult;
 
 use super::wallet_support::{
-    default_sequencer_http_url_for_project, extract_tx_identifier, is_connectivity_failure,
-    load_wallet_runtime, rpc_get_last_block_id, sequencer_unreachable_hint,
-    summarize_command_failure, wallet_password, RpcReachabilityError,
+    default_sequencer_http_url_for_project, extract_tx_identifier, load_wallet_runtime,
+    probe_sequencer_reachable, rpc_get_last_block_id, sequencer_connectivity_failure_with_probe,
+    sequencer_unreachable_hint, set_wallet_home_env, summarize_command_failure, wallet_password,
+    RpcReachabilityError,
 };
 
 /// Roots searched (in order) for guest `.bin` artefacts. Both layouts exist in
@@ -26,10 +28,48 @@ use super::wallet_support::{
 /// compiles via `crate::constants::METHODS_DIR`; keep them in sync.
 const GUEST_BIN_SEARCH_ROOTS: &[&str] = &["target/riscv-guest", "methods/target"];
 
-/// `spel inspect` line prefix that carries the risc0 image ID — the value the
-/// sequencer uses as the on-chain program ID. Format is whitespace-tolerant:
+/// `spel program-id` line prefix that carries the risc0 image ID — the value
+/// the sequencer uses as the on-chain program ID. Format is whitespace-tolerant:
 /// `   ImageID (hex bytes): <64 hex chars>`.
 const SPEL_IMAGE_ID_PREFIX: &str = "ImageID (hex bytes):";
+
+/// Multi-program deploys are paced to one program per sequencer block.
+///
+/// The pinned LEZ sequencer settles every produced block to bedrock as a
+/// single channel inscription with a hard payload cap (917_504 bytes at the
+/// current pin). A block that batches several deployment transactions — each
+/// carrying a full guest ELF, ~370 KiB per template program — exceeds that
+/// cap and the sequencer panics fatally in `encode_channel_inscribe`, taking
+/// the localnet down mid-deploy. Until LEZ splits or rejects oversized
+/// inscriptions gracefully, wait after each successful submission for the
+/// head block id to advance (block production drains the mempool) before
+/// submitting the next program, so each deployment lands in its own block.
+///
+/// Pacing fails CLOSED: if the head cannot be confirmed to advance (stalled
+/// block production, or the post-submission baseline read keeps erroring),
+/// the remaining programs are marked failed instead of being submitted
+/// unpaced — continuing blind is exactly the batch-into-one-block crash this
+/// exists to prevent. Scope: pacing is per-process. Concurrent deploy
+/// processes (or any other client submitting deployment transactions to the
+/// same sequencer) are not serialized by scaffold; the sequencer itself is
+/// the only place that invariant can be enforced, tracked upstream.
+const DEPLOY_PACING_POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// Generous ceiling: covers the 15s localnet default `block_create_timeout`
+/// with margin. On expiry the deploy aborts fail-closed (see above); raise
+/// via `LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS` when a project runs blocks
+/// longer than this ceiling.
+const DEPLOY_PACING_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// `LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS` overrides the pacing ceiling —
+/// integration tests and fast-block test-node setups (500ms blocks) have no
+/// reason to sit out the full localnet-sized wait when a head never advances.
+fn deploy_pacing_timeout() -> Duration {
+    std::env::var("LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(DEPLOY_PACING_TIMEOUT)
+}
 
 pub(crate) fn cmd_deploy(
     program_name: Option<String>,
@@ -37,14 +77,41 @@ pub(crate) fn cmd_deploy(
     json: bool,
 ) -> DynResult<()> {
     let project = load_project()?;
-    let wallet = load_wallet_runtime(&project)?;
+    let results = deploy_for_project(&project, program_name, program_path, json)?;
+
+    let failed_count = results
+        .iter()
+        .filter(|result| matches!(result.status, DeployStatus::Failed))
+        .count();
+    if failed_count > 0 {
+        if results.len() == 1 {
+            bail!("deploy failed: {}", results[0].detail);
+        }
+        bail!("deploy completed with {failed_count} failed program(s)");
+    }
+
+    Ok(())
+}
+
+/// Deploy guest programs for `project`. Returns one `DeployResult` per
+/// attempted program; the caller decides whether failures are fatal. With
+/// `json = true` the CLI JSON object is printed and `$ <cmd>` echoes are
+/// suppressed; with `json = false` per-program progress lines stream to
+/// stdout (API callers should read the returned results, not the output).
+pub(crate) fn deploy_for_project(
+    project: &crate::model::Project,
+    program_name: Option<String>,
+    program_path: Option<PathBuf>,
+    json: bool,
+) -> DynResult<Vec<DeployResult>> {
+    let wallet = load_wallet_runtime(project)?;
     let spel_bin =
-        resolve_repo_path(&project, &project.config.spel, "spel")?.join(SPEL_BIN_REL_PATH);
+        resolve_repo_path(project, &project.config.spel, "spel")?.join(SPEL_BIN_REL_PATH);
 
     let sequencer_addr = wallet
         .sequencer_addr
         .clone()
-        .unwrap_or_else(|| default_sequencer_http_url_for_project(&project));
+        .unwrap_or_else(|| default_sequencer_http_url_for_project(project));
 
     // --program-path: deploy a single custom ELF directly, skip auto-discovery
     if let Some(custom_path) = program_path {
@@ -56,14 +123,15 @@ pub(crate) fn cmd_deploy(
             .and_then(|s| s.to_str())
             .unwrap_or("unknown")
             .to_string();
-        return deploy_single_program(
+        let result = deploy_single_program(
             &wallet,
             &program_name,
             &custom_path,
             &sequencer_addr,
             &spel_bin,
             json,
-        );
+        )?;
+        return Ok(vec![result]);
     }
 
     let available_programs = discover_deployable_programs(&project.root)?;
@@ -84,8 +152,59 @@ pub(crate) fn cmd_deploy(
     // state on scope exit even if a `?` or panic interrupts the loop.
     let _echo_guard = json.then(EchoGuard::suppress);
 
+    // One program per block (see DEPLOY_PACING_* docs). Single-program
+    // deploys never pace; the head read after each successful submission is
+    // what the next iteration waits on. Both pacing failure modes abort the
+    // remaining submissions (fail-closed) rather than continue unpaced.
+    let pace_deploys = selected_programs.len() > 1;
+    let mut prev_submission_head: Option<u64> = None;
+
+    // The reachability probe asks a network-level question whose answer is the
+    // same for every program in this run, so cache it: if the sequencer dies
+    // mid-deploy and several programs fail in a row, they issue at most one
+    // probe between them and cannot disagree with each other. The per-program
+    // text classification still runs per program; only the socket probe is
+    // memoized here.
+    let cached_reachable: std::cell::Cell<Option<bool>> = std::cell::Cell::new(None);
+    let probe_once = |addr: &str| match cached_reachable.get() {
+        Some(reachable) => reachable,
+        None => {
+            let reachable = probe_sequencer_reachable(addr);
+            cached_reachable.set(Some(reachable));
+            reachable
+        }
+    };
+
     let mut results = Vec::new();
-    for program in selected_programs {
+    let mut remaining = selected_programs.into_iter();
+    while let Some(program) = remaining.next() {
+        if let Some(prev_head) = prev_submission_head.take() {
+            if !json {
+                println!(
+                    "Waiting for a new block past {prev_head} before the next deployment \
+                     (one program per block; bedrock inscription size cap)..."
+                );
+            }
+            if !wait_for_block_past(
+                &sequencer_addr,
+                prev_head,
+                deploy_pacing_timeout(),
+                DEPLOY_PACING_POLL_INTERVAL,
+            ) {
+                let detail = format!(
+                    "deploy pacing aborted: sequencer head did not advance past block \
+                     {prev_head} within {}s; refusing to submit further program ELFs into \
+                     the same block (the pinned sequencer crashes on oversized bedrock \
+                     inscriptions). Raise LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS if this \
+                     project's block interval exceeds the ceiling, then re-run \
+                     `logos-scaffold deploy` for the remaining programs.",
+                    deploy_pacing_timeout().as_secs()
+                );
+                abort_remaining_programs(program, &mut remaining, &detail, json, &mut results);
+                break;
+            }
+        }
+
         let Some(binary_path) = discovered.get(&program).cloned() else {
             if !json {
                 let searched = GUEST_BIN_SEARCH_ROOTS
@@ -108,13 +227,8 @@ pub(crate) fn cmd_deploy(
         };
 
         let mut command = Command::new(&wallet.wallet_binary);
-        command
-            .env(
-                "NSSA_WALLET_HOME_DIR",
-                wallet.wallet_home.as_os_str().to_string_lossy().to_string(),
-            )
-            .arg("deploy-program")
-            .arg(&binary_path);
+        set_wallet_home_env(&mut command, &wallet.wallet_home);
+        command.arg("deploy-program").arg(&binary_path);
 
         let output = match run_with_stdin(command, format!("{}\n", wallet_password())) {
             Ok(output) => output,
@@ -139,7 +253,14 @@ pub(crate) fn cmd_deploy(
         if !output.status.success() {
             let summary = summarize_command_failure(&output.stdout, &output.stderr);
             let combined = format!("{}\n{}", output.stdout, output.stderr);
-            let connectivity_failure = is_connectivity_failure(&combined);
+            // `preflight_sequencer_reachability` already bails on a
+            // Connectivity error before this loop starts, so by the time we
+            // get here the sequencer answered RPC moments ago. This call
+            // mainly earns its keep if the sequencer dies mid-deploy. The probe
+            // is memoized via `probe_once`, so a mid-deploy death costs one
+            // probe for the whole run rather than one per remaining program.
+            let connectivity_failure =
+                sequencer_connectivity_failure_with_probe(&combined, &sequencer_addr, &probe_once);
             if !json {
                 println!("FAIL {program} deployment failed");
                 println!("  Error: {summary}");
@@ -180,6 +301,48 @@ pub(crate) fn cmd_deploy(
             tx,
             program_id,
         });
+
+        if pace_deploys {
+            // Head is read AFTER the wallet reported mempool admission: the
+            // next iteration then waits for a strictly newer block, which is
+            // guaranteed to have drained this submission from the mempool.
+            // (Racing a just-sealed block costs one extra wait interval, never
+            // a lost pacing guarantee.) Transient RPC errors are retried up to
+            // the pacing deadline; if no baseline can be established the
+            // remaining programs are aborted — submitting the next ELF without
+            // a baseline would skip the pacing wait entirely and can recreate
+            // the oversized-block crash.
+            match read_head_with_retry(
+                &sequencer_addr,
+                deploy_pacing_timeout(),
+                DEPLOY_PACING_POLL_INTERVAL,
+            ) {
+                Some(head) => prev_submission_head = Some(head),
+                None => {
+                    let detail = format!(
+                        "deploy pacing aborted: could not read the sequencer head after \
+                         submitting the previous program (retried for {}s); refusing to \
+                         submit further program ELFs without a pacing baseline (the pinned \
+                         sequencer crashes on oversized bedrock inscriptions). Check \
+                         `logos-scaffold localnet status`, then re-run `logos-scaffold \
+                         deploy` for the remaining programs.",
+                        deploy_pacing_timeout().as_secs()
+                    );
+                    // When this was the last program there is nothing left to
+                    // guard — the submission above already succeeded.
+                    if let Some(next_program) = remaining.next() {
+                        abort_remaining_programs(
+                            next_program,
+                            &mut remaining,
+                            &detail,
+                            json,
+                            &mut results,
+                        );
+                    }
+                    break;
+                }
+            }
+        }
     }
 
     let success_count = results
@@ -215,11 +378,7 @@ pub(crate) fn cmd_deploy(
         }
     }
 
-    if failed_count > 0 {
-        bail!("deploy completed with {failed_count} failed program(s)");
-    }
-
-    Ok(())
+    Ok(results)
 }
 
 pub(crate) fn render_deploy_result_json(result: &DeployResult) -> serde_json::Value {
@@ -258,6 +417,79 @@ pub(crate) fn render_deploy_result_json(result: &DeployResult) -> serde_json::Va
     serde_json::Value::Object(obj)
 }
 
+/// Poll the sequencer until its last block id exceeds `submitted_at_head`,
+/// i.e. at least one block was produced after the caller's submission was
+/// admitted. Returns `true` when the head advanced and `false` on timeout —
+/// the caller decides the consequence (deploy aborts fail-closed). RPC
+/// hiccups are retried until the deadline rather than treated as fatal.
+fn wait_for_block_past(
+    sequencer_addr: &str,
+    submitted_at_head: u64,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(head) = rpc_get_last_block_id(sequencer_addr) {
+            if head > submitted_at_head {
+                return true;
+            }
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(poll_interval);
+    }
+}
+
+/// Read the sequencer head, retrying transient RPC failures until `timeout`.
+/// Used for the post-submission pacing baseline: a single blip must not
+/// silently disable pacing for the next program (fail-open), so the read is
+/// retried and `None` — returned only after the full deadline of consecutive
+/// failures — makes the caller abort the remaining submissions instead.
+fn read_head_with_retry(
+    sequencer_addr: &str,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> Option<u64> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(head) = rpc_get_last_block_id(sequencer_addr) {
+            return Some(head);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(poll_interval);
+    }
+}
+
+/// Fail-closed tail of a paced deploy: mark `first_unsubmitted` and every
+/// program still queued behind it as failed with `detail`, printing the
+/// per-program FAIL lines unless in `--json` mode. Submitting them without a
+/// confirmed pacing boundary is what this refuses to do.
+fn abort_remaining_programs(
+    first_unsubmitted: String,
+    remaining: &mut std::vec::IntoIter<String>,
+    detail: &str,
+    json: bool,
+    results: &mut Vec<DeployResult>,
+) {
+    for program in std::iter::once(first_unsubmitted).chain(remaining) {
+        if !json {
+            println!("FAIL {program} not submitted");
+            println!("  Error: {detail}");
+        }
+        results.push(DeployResult {
+            program,
+            status: DeployStatus::Failed,
+            detail: detail.to_string(),
+            tx: None,
+            program_id: None,
+        });
+    }
+}
+
 fn preflight_sequencer_reachability(sequencer_addr: &str) -> DynResult<()> {
     match rpc_get_last_block_id(sequencer_addr) {
         Ok(_) => Ok(()),
@@ -268,7 +500,12 @@ fn preflight_sequencer_reachability(sequencer_addr: &str) -> DynResult<()> {
             )
         }
         Err(err) => {
-            println!(
+            // stderr, not stdout: this runs before the `--json` echo guard is
+            // installed at both call sites, so a `println!` here interleaves a
+            // non-JSON warning into a `--json` stdout stream and breaks `jq`.
+            // The warning is diagnostic, so stderr is the right sink regardless
+            // of `--json`.
+            eprintln!(
                 "warning: sequencer reachability probe failed ({err}); continuing with wallet submission mode"
             );
             Ok(())
@@ -338,17 +575,12 @@ fn deploy_single_program(
     sequencer_addr: &str,
     spel_bin: &Path,
     json: bool,
-) -> DynResult<()> {
+) -> DynResult<DeployResult> {
     preflight_sequencer_reachability(sequencer_addr)?;
 
     let mut command = std::process::Command::new(&wallet.wallet_binary);
-    command
-        .env(
-            "NSSA_WALLET_HOME_DIR",
-            wallet.wallet_home.as_os_str().to_string_lossy().to_string(),
-        )
-        .arg("deploy-program")
-        .arg(binary_path);
+    set_wallet_home_env(&mut command, &wallet.wallet_home);
+    command.arg("deploy-program").arg(binary_path);
 
     // Suppress the `$ <cmd>` echo on stdout for --json so the output is a
     // pure JSON object that pipes cleanly into `jq`. RAII guard restores echo
@@ -372,7 +604,13 @@ fn deploy_single_program(
             println!("FAIL {program_name} deployment failed");
             println!("  Error: {summary}");
         }
-        bail!("deploy failed: {summary}");
+        return Ok(DeployResult {
+            program: program_name.to_string(),
+            status: DeployStatus::Failed,
+            detail: summary,
+            tx,
+            program_id: None,
+        });
     }
 
     let program_id = extract_program_id(spel_bin, binary_path);
@@ -415,16 +653,27 @@ fn deploy_single_program(
         );
     }
 
-    Ok(())
+    Ok(DeployResult {
+        program: program_name.to_string(),
+        status: DeployStatus::Submitted,
+        detail: "wallet submission command exited successfully".to_string(),
+        tx,
+        program_id,
+    })
 }
 
-/// Wall-clock cap for `spel inspect`. The CLI typically returns in
+/// Wall-clock cap for `spel program-id`. The CLI typically returns in
 /// milliseconds; a hung binary should not block the deploy summary.
-/// Override with `LOGOS_SCAFFOLD_SPEL_INSPECT_TIMEOUT_MS` if needed.
+/// Override with `LOGOS_SCAFFOLD_SPEL_INSPECT_TIMEOUT_MS` if needed (name
+/// kept from the pre-v0.5.0 `spel inspect` era for compatibility).
 const SPEL_INSPECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// Run the project-vendored `spel inspect <binary>` and return the risc0
-/// image ID parsed from its output. Returns `None` on any failure (binary
+/// Run the project-vendored `spel program-id <binary>` and return the risc0
+/// image ID parsed from its output. (spel v0.5.0 renamed ELF image-ID
+/// extraction from `inspect <file>` to `program-id <file>`; `inspect` now
+/// decodes account data and requires `--idl`, so the old invocation fails
+/// against the pinned spel and every deploy reported
+/// `program_id: unavailable`.) Returns `None` on any failure (binary
 /// missing, non-zero exit, output unparseable, timeout). Callers print an
 /// "unavailable" hint instead of failing the deploy — the deploy itself has
 /// already succeeded by the time this runs.
@@ -440,7 +689,7 @@ pub(crate) fn extract_program_id(spel_bin: &Path, binary_path: &Path) -> Option<
         .unwrap_or(SPEL_INSPECT_TIMEOUT);
 
     let mut child = Command::new(spel_bin)
-        .arg("inspect")
+        .arg("program-id")
         .arg(binary_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -493,17 +742,24 @@ fn print_program_id_line(program_id: &Option<String>) {
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct DeployResult {
-    pub(crate) program: String,
-    pub(crate) status: DeployStatus,
-    pub(crate) detail: String,
-    pub(crate) tx: Option<String>,
-    pub(crate) program_id: Option<String>,
+/// Outcome of one program deployment attempt.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct DeployResult {
+    pub program: String,
+    pub status: DeployStatus,
+    pub detail: String,
+    /// Transaction identifier extracted from the wallet output, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx: Option<String>,
+    /// Locally computed risc0 image ID (the on-chain program ID), when the
+    /// vendored `spel` binary was available to compute it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub program_id: Option<String>,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) enum DeployStatus {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeployStatus {
     Submitted,
     Failed,
 }
@@ -611,11 +867,101 @@ pub(crate) fn discover_program_binaries(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::test_support::drain_http_request;
     use std::fs;
     use tempfile::TempDir;
 
     fn lookup(root: &Path, program: &str) -> Option<PathBuf> {
         discover_program_binaries(root, &[program.to_string()]).remove(program)
+    }
+
+    /// Serve one scripted `getLastBlockId` response per incoming connection,
+    /// then stop accepting. `Some(id)` answers with a valid JSON-RPC result;
+    /// `None` answers with a 500 and no body (a transient RPC failure).
+    /// Uses the same complete-request drain as the wallet-support stub, but
+    /// extends it to a response sequence so pacing can observe heads that
+    /// advance — or reads that fail and then recover — between polls.
+    fn spawn_scripted_block_id_server(
+        responses: Vec<Option<u64>>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub server");
+        let url = format!("http://{}", listener.local_addr().expect("local addr"));
+        let handle = std::thread::spawn(move || {
+            for response in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                drain_http_request(&mut stream);
+                let payload = match response {
+                    Some(block_id) => {
+                        let body = format!(r#"{{"jsonrpc":"2.0","result":{block_id},"id":1}}"#);
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                    }
+                    None => "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n"
+                        .to_string(),
+                };
+                let _ = stream.write_all(payload.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (url, handle)
+    }
+
+    #[test]
+    fn wait_for_block_past_returns_true_once_head_advances() {
+        let (url, handle) = spawn_scripted_block_id_server(vec![Some(5), Some(5), Some(6)]);
+        let advanced =
+            wait_for_block_past(&url, 5, Duration::from_secs(10), Duration::from_millis(10));
+        assert!(advanced, "head reached 6 > 5, pacing wait must succeed");
+        handle.join().expect("server thread");
+    }
+
+    #[test]
+    fn wait_for_block_past_times_out_when_head_stalls() {
+        let (url, handle) = spawn_scripted_block_id_server(vec![Some(5); 64]);
+        let advanced = wait_for_block_past(
+            &url,
+            5,
+            Duration::from_millis(200),
+            Duration::from_millis(10),
+        );
+        assert!(
+            !advanced,
+            "stalled head must report timeout, not spin forever"
+        );
+        drop(handle); // server thread parks in accept(); do not join.
+    }
+
+    #[test]
+    fn read_head_with_retry_recovers_after_transient_failure() {
+        // Reviewer scenario (PR #241): the post-submission baseline read
+        // fails once and then recovers — pacing must keep its baseline
+        // instead of failing open (pre-fix) or aborting prematurely.
+        let (url, handle) = spawn_scripted_block_id_server(vec![None, Some(7)]);
+        let head = read_head_with_retry(&url, Duration::from_secs(10), Duration::from_millis(10));
+        assert_eq!(
+            head,
+            Some(7),
+            "one transient 500 must not lose the baseline"
+        );
+        handle.join().expect("server thread");
+    }
+
+    #[test]
+    fn read_head_with_retry_gives_up_after_deadline_of_failures() {
+        let (url, handle) = spawn_scripted_block_id_server(vec![None; 64]);
+        let head =
+            read_head_with_retry(&url, Duration::from_millis(200), Duration::from_millis(10));
+        assert_eq!(
+            head, None,
+            "persistent RPC failure must surface as no-baseline so the deploy aborts fail-closed"
+        );
+        drop(handle); // server thread parks in accept(); do not join.
     }
 
     #[test]
