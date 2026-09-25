@@ -297,6 +297,7 @@ If the scenario begins with localnet stopped, run `"$SCAFFOLD_BIN" localnet star
 - `doctor --json` returns parseable JSON with at least `status`, `summary`, `checks`, and `next_steps`.
 - `localnet logs --tail 200` returns useful recent log lines when logs exist.
 - `localnet stop` succeeds cleanly and subsequent status reflects the stopped state.
+- The chain is project-local: the runtime `sequencer_config.json` under `.scaffold/state/` names `home` = `<project>/.scaffold/localnet`, which holds `rocksdb/` and `bedrock_signing_key`. A second project on the same LEZ pin (same cache checkout) starts from genesis and sees none of the first project's programs or accounts, and `localnet reset` deletes only `<project>/.scaffold/localnet/rocksdb`. A `rocksdb/` growing inside `<cache_root>/repos/lez/<pin>/` is the regression — it means localnet runs the sequencer against the shared checkout again.
 - The sequencer survives shell/tmux closure: after `localnet start`, detaching the terminal or tmux session should not kill the sequencer. Verify with `localnet status` from a new shell — `running=true` confirms daemon behavior.
 
 ### Failure Signals / Common Pitfalls
