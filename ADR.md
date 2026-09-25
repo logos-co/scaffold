@@ -187,6 +187,38 @@ that any resolver fix automatically applies to both commands, and the "only
 `.#lgx-portable` found" and "only `.#lgx` found" error paths are symmetric by
 construction.
 
+## Bootstrapping the `spel` CLI at `new` Time
+
+`--template spel` delegates project generation to `spel init`, which raised the
+question of where that binary comes from. The first implementation looked it up
+on `PATH` and failed with an install hint when absent, with a version probe to
+warn on mismatch.
+
+That was wrong in the same way for every user: it made the *ambient* `spel` the
+one that scaffolds the project, while `scaffold.toml` recorded `DEFAULT_SPEL`.
+The two can disagree, and the probe could not even detect it — no spel release
+implements `--version`, so the check compared against an empty string and warned
+on every run.
+
+Scaffold now clones `DEFAULT_SPEL.sha` into the cache (`<cache>/repos/spel/<sha>`)
+and builds the CLI there, exactly as it already bootstraps LEZ, basecamp and
+lgpm. Consequences:
+
+- Nothing has to be installed first; a `spel` on `PATH` is irrelevant.
+- The pin is the only version that can be used, so "scaffolded with one spel,
+  pinned to another" stops being a failure mode rather than being detected.
+  `find_spel_on_path` and `check_spel_version` were deleted with it.
+- It is the same checkout and target directory `setup` uses, so a later
+  `lgs setup` reuses the build instead of repeating it.
+
+Ordering matters and is easy to get wrong: `spel init` refuses to write into a
+directory that already exists, so **nothing** may be created under the project
+directory before the delegation — including the vendored repo for
+`--vendor-deps`, which is therefore cloned after `spel init` returns. The
+delegation also has to run in the target's *parent*, not the process working
+directory, or `api::create_project` (which takes an explicit parent) scatters
+the spel project and scaffold's overlay across two locations.
+
 ## Vendoring `spel` Per-Project for Program ID Surfacing
 
 `deploy` needs to print the deployed program's on-chain ID (the risc0 image
@@ -477,3 +509,30 @@ regardless of whether it is a workspace member. The probe is a single stat; abse
 so non-Risc0 projects pay nothing. Release mode is chosen so the produced `.bin` lands in the
 same `release/` path component the deploy-side discovery requires — the two halves are designed
 together. The shared `methods` directory name lives in `crate::constants::METHODS_DIR`.
+
+### Addendum: a second producer for `spel` projects
+
+The above describes the `default` template. `spel` projects do not build their
+guest this way, for two independent reasons:
+
+1. `cargo build --workspace` *panics* on a `spel init`-generated project. Its
+   `methods/Cargo.toml` runs `risc0_build::embed_methods()` from a build script
+   but carries no `[package.metadata.risc0]` section, which that function
+   unwraps (reported upstream as logos-co/spel#287).
+2. More fundamentally, a host `cargo build` does not produce the artefact that
+   gets deployed. `make build` runs `cargo risczero build`, whose Docker output
+   under `methods/guest/target/<triple>/docker/<name>.bin` is the reproducible
+   binary whose ImageID **is** the ProgramId. A host-side build never creates it.
+
+So `build` delegates spel projects to their own Makefile, and discovery gained a
+third search root (`methods/guest/target`) plus a second release-equivalent path
+component (`docker`, ranked with `release` rather than as a debug fallback).
+The invariant is unchanged and still designed as a pair — there are simply now
+two producers, and both land somewhere discovery looks.
+
+The same reasoning applies to IDL and FFI generation: `spel generate-idl` writes
+to *stdout*, and the Makefile's `idl:` recipe is what redirects it to the file
+`spel.toml` names; `spel-client-gen` is a separate binary with no `spel`
+subcommand. Scaffold drives `make idl` / `make ffi-gen` rather than restating
+either layout, pointing `SPEL_CLIENT_GEN` at the vendored build so the project
+never depends on what happens to be on `PATH`.

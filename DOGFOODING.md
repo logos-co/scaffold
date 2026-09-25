@@ -717,6 +717,27 @@ The `ls` step verifies the SPEL layout was scaffolded before the build runs.
 - The `spel-framework` line from `methods/guest/Cargo.toml`.
 - `setup`, `localnet start`, `doctor`, and `build` excerpts.
 
+### Also cover `--vendor-deps`
+
+```bash
+cd "$SCRATCH_ROOT"
+"$SCAFFOLD_BIN" new dogfood-spel-vendored --template spel --vendor-deps
+git -C dogfood-spel-vendored/.scaffold/repos/spel rev-parse HEAD
+grep -A3 'repos.spel' dogfood-spel-vendored/scaffold.toml
+```
+
+The vendored repo must exist at `.scaffold/repos/spel`, checked out at the same
+SHA `scaffold.toml` records under `[repos.spel] pin`, with
+`path = ".scaffold/repos/spel"` alongside it.
+
+This is worth a separate step because it exercises an ordering constraint the
+happy path does not: `spel init` refuses to write into an existing directory, so
+anything created under the project directory *before* the delegation breaks the
+whole command — and it would break several minutes in, after the clone and the
+CLI build. Vendoring therefore has to happen after `spel init` returns. The
+symptom if that regresses is `❌ Directory '<name>' already exists` followed by
+scaffold removing the directory, leaving a long wait and no project.
+
 ### Execution Notes
 
 - Keep SPEL runs separate from default-template runs.
