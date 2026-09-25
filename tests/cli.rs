@@ -4512,12 +4512,7 @@ fn init_refreshes_skills_when_already_at_v0_2_0_scaffold_toml() {
         "init must not overwrite an already-migrated scaffold.toml"
     );
 
-    for skill in [
-        "lgs-cli",
-        "lez-template",
-        "lez-framework-template",
-        "basecamp",
-    ] {
+    for skill in ["lgs-cli", "lez-template", "spel-template", "basecamp"] {
         assert!(
             temp.path()
                 .join(format!(".claude/skills/{skill}/SKILL.md"))
@@ -4912,8 +4907,10 @@ fn build_idl_fails_loudly_on_default_framework() {
         .assert()
         .failure()
         .stderr(
-            predicate::str::contains("`build idl` is only supported for `lez-framework`")
-                .and(predicate::str::contains("framework.kind = `default`")),
+            predicate::str::contains(
+                "`build idl` is only supported for `spel` and `lez-framework`",
+            )
+            .and(predicate::str::contains("framework.kind = `default`")),
         );
 }
 
@@ -4931,8 +4928,10 @@ fn build_client_fails_loudly_on_default_framework() {
         .assert()
         .failure()
         .stderr(
-            predicate::str::contains("`build client` is only supported for `lez-framework`")
-                .and(predicate::str::contains("framework.kind = `default`")),
+            predicate::str::contains(
+                "`build client` is only supported for `spel` and `lez-framework`",
+            )
+            .and(predicate::str::contains("framework.kind = `default`")),
         );
 }
 
@@ -5323,4 +5322,81 @@ fn basecamp_paths_json_lists_the_0_2_x_base_dir_children() {
         module_root.contains(".scaffold/basecamp/profiles/alice/xdg-data"),
         "module root must sit inside the profile's scrubbed tree, got: {module_root}"
     );
+}
+
+// --- `new --template` dispatch -------------------------------------------
+//
+// These cover the argument-handling half of the spel path, which is the part
+// that must fail fast and say something useful. They deliberately stop before
+// anything that would clone or build, so they need no network and no `spel`
+// on PATH.
+
+#[test]
+fn new_rejects_an_unknown_template_and_names_the_valid_ones() {
+    let temp = tempdir().expect("tempdir");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["new", "demo", "--template", "lez-frmework"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unsupported template"))
+        .stderr(predicate::str::contains("`default` or `spel`"))
+        // A typo close to the deprecated alias must not be told the option
+        // does not exist at all — the alias is still accepted.
+        .stderr(predicate::str::contains("lez-framework"));
+}
+
+#[test]
+fn new_spel_rejects_lez_path_before_touching_the_environment() {
+    let temp = tempdir().expect("tempdir");
+
+    // User error takes priority over environment error: this must report the
+    // unsupported flag, not "spel not found", and must not leave a directory
+    // behind.
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args([
+            "new",
+            "demo",
+            "--template",
+            "spel",
+            "--lez-path",
+            temp.path().to_str().expect("utf8 path"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "`--lez-path` is not supported with `--template spel`",
+        ));
+
+    assert!(
+        !temp.path().join("demo").exists(),
+        "a failed `new` must not leave a partial project directory behind"
+    );
+}
+
+#[test]
+fn new_lez_framework_warns_and_maps_to_spel() {
+    let temp = tempdir().expect("tempdir");
+
+    // `--lez-path` makes the spel path bail immediately, so this asserts the
+    // deprecation warning without cloning anything. Reaching the spel-only
+    // error at all is what proves the alias mapped to `spel`.
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args([
+            "new",
+            "demo",
+            "--template",
+            "lez-framework",
+            "--lez-path",
+            temp.path().to_str().expect("utf8 path"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "template `lez-framework` is deprecated; use `--template spel` instead",
+        ))
+        .stderr(predicate::str::contains("`--template spel`"));
 }

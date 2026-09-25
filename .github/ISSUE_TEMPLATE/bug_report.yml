@@ -14,7 +14,7 @@ body:
       label: What happened
       description: What you ran, and what you got instead of what you expected.
       placeholder: |
-        I ran `lgs run` in a fresh lez-framework project.
+        I ran `lgs run` in a fresh spel project.
         Step 3 failed with ...
     validations:
       required: true
@@ -26,7 +26,7 @@ body:
       description: The shortest sequence of commands that shows the problem.
       render: shell
       placeholder: |
-        lgs new my-app --template lez-framework
+        lgs new my-app --template spel
         cd my-app
         lgs run
     validations:

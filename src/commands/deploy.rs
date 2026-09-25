@@ -26,7 +26,13 @@ use super::wallet_support::{
 /// regardless of which layout cargo/risc0 chose. The `methods/...` half of
 /// this constant is the same project-relative directory that `build.rs`
 /// compiles via `crate::constants::METHODS_DIR`; keep them in sync.
-const GUEST_BIN_SEARCH_ROOTS: &[&str] = &["target/riscv-guest", "methods/target"];
+// `methods/guest/target` is where `cargo risczero build` (spel projects)
+// writes, under a `docker/` directory rather than `release/`.
+const GUEST_BIN_SEARCH_ROOTS: &[&str] = &[
+    "target/riscv-guest",
+    "methods/target",
+    "methods/guest/target",
+];
 
 /// `spel program-id` line prefix that carries the risc0 image ID — the value
 /// the sequencer uses as the on-chain program ID. Format is whitespace-tolerant:
@@ -830,7 +836,11 @@ pub(crate) fn discover_program_binaries(
                         if name.starts_with("riscv32im") {
                             has_riscv32im = true;
                         }
-                        if name == "release" {
+                        // `docker` is `cargo risczero build`'s output
+                        // directory and is the reproducible build, so treat
+                        // it the same as `release` rather than as a debug
+                        // fallback.
+                        if name == "release" || name == "docker" {
                             has_release = true;
                         }
                     }
@@ -975,6 +985,49 @@ mod tests {
 
         let result = lookup(tmp.path(), "my_program").unwrap();
         assert!(result.ends_with("my_program.bin"));
+    }
+
+    /// `cargo risczero build` (spel projects, via `make build`) writes the
+    /// Docker-reproducible guest under `methods/guest/target/<triple>/docker/`.
+    /// That is the binary whose ImageID *is* the ProgramId, so discovery has to
+    /// find it — neither the root nor the `docker` component existed before.
+    #[test]
+    fn finds_binary_in_spel_docker_layout() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp
+            .path()
+            .join("methods/guest/target/riscv32im-risc0-zkvm-elf/docker");
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(bin_dir.join("my_program.bin"), b"fake").unwrap();
+
+        let result = lookup(tmp.path(), "my_program")
+            .expect("the cargo-risczero docker layout must be discoverable");
+        assert!(result.ends_with("my_program.bin"));
+    }
+
+    /// `docker/` is the reproducible build, so it must rank with `release/`
+    /// rather than as a debug fallback: given both, neither may be discarded
+    /// and the one that wins must not be the debug build.
+    #[test]
+    fn spel_docker_binary_outranks_a_debug_build() {
+        let tmp = TempDir::new().unwrap();
+        let docker_dir = tmp
+            .path()
+            .join("methods/guest/target/riscv32im-risc0-zkvm-elf/docker");
+        let debug_dir = tmp
+            .path()
+            .join("methods/target/x/riscv32im-risc0-zkvm-elf/debug");
+        fs::create_dir_all(&docker_dir).unwrap();
+        fs::create_dir_all(&debug_dir).unwrap();
+        fs::write(docker_dir.join("my_program.bin"), b"docker").unwrap();
+        fs::write(debug_dir.join("my_program.bin"), b"debug").unwrap();
+
+        let result = lookup(tmp.path(), "my_program").unwrap();
+        assert_eq!(
+            fs::read(&result).unwrap(),
+            b"docker",
+            "the docker build is release-grade and must win over debug"
+        );
     }
 
     /// Regression test for issue #59: a project named anything other than

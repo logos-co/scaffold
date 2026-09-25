@@ -1,9 +1,10 @@
 use anyhow::{Context, anyhow};
 use clap::{Parser, Subcommand};
+use common::transaction::LeeTransaction;
 use example_program_deployment_methods::HELLO_WORLD_WITH_MOVE_FUNCTION_ELF;
-use nssa::{PublicTransaction, program::Program, public_transaction};
+use lee::{PublicTransaction, program::Program, public_transaction};
 use sequencer_service_rpc::RpcClient as _;
-use wallet::{PrivacyPreservingAccount, WalletCore};
+use wallet::{AccountIdentity, WalletCore};
 
 #[path = "../lib.rs"]
 mod scaffold_lib;
@@ -50,7 +51,9 @@ async fn main() -> anyhow::Result<()> {
         HELLO_WORLD_WITH_MOVE_FUNCTION_ELF,
         "hello_world_with_move_function",
     )?;
-    let wallet_core = WalletCore::from_env().context("failed to initialize wallet from environment")?;
+    let wallet_core = WalletCore::from_env()
+        .await
+        .context("failed to initialize wallet from environment")?;
 
     match cli.command {
         Command::WritePublic {
@@ -65,12 +68,10 @@ async fn main() -> anyhow::Result<()> {
             // is rejected by the sequencer with `InvalidProgramBehavior
             // (ClaimedUnauthorizedAccount)`.
             let signing_key = wallet_core
-                .storage()
-                .user_data
-                .get_pub_account_signing_key(account_id)
+                .get_account_public_signing_key(account_id)
                 .ok_or_else(|| anyhow!("input account must be a self-owned public account"))?;
             let nonces = wallet_core
-                .get_accounts_nonces(vec![account_id])
+                .get_accounts_nonces(&[account_id])
                 .await
                 .context("failed to query account nonce from sequencer")?;
             let message = public_transaction::Message::try_new(
@@ -83,8 +84,8 @@ async fn main() -> anyhow::Result<()> {
             let witness_set = public_transaction::WitnessSet::for_message(&message, &[signing_key]);
             let tx = PublicTransaction::new(message, witness_set);
             let response = wallet_core
-                .sequencer_client
-                .send_transaction(tx.into())
+                .helm_owned()
+                .send_transaction(LeeTransaction::Public(tx))
                 .await
                 .context("failed to submit public transaction to localnet")?;
             println!(
@@ -99,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let instruction: Instruction = (WRITE_FUNCTION_ID, greeting.into_bytes());
             let account_id = parse_account_id(&account_id)?;
-            let accounts = vec![PrivacyPreservingAccount::PrivateOwned(account_id)];
+            let accounts = vec![AccountIdentity::PrivateOwned(account_id)];
             let (response, _) = wallet_core
                 .send_privacy_preserving_tx(
                     accounts,
@@ -128,17 +129,13 @@ async fn main() -> anyhow::Result<()> {
             // it. Signing with both keys covers every combination this
             // example is meant to demonstrate.
             let from_key = wallet_core
-                .storage()
-                .user_data
-                .get_pub_account_signing_key(from)
+                .get_account_public_signing_key(from)
                 .ok_or_else(|| anyhow!("`from` account must be a self-owned public account"))?;
             let to_key = wallet_core
-                .storage()
-                .user_data
-                .get_pub_account_signing_key(to)
+                .get_account_public_signing_key(to)
                 .ok_or_else(|| anyhow!("`to` account must be a self-owned public account"))?;
             let nonces = wallet_core
-                .get_accounts_nonces(vec![from, to])
+                .get_accounts_nonces(&[from, to])
                 .await
                 .context("failed to query account nonces from sequencer")?;
             let message = public_transaction::Message::try_new(
@@ -152,8 +149,8 @@ async fn main() -> anyhow::Result<()> {
                 public_transaction::WitnessSet::for_message(&message, &[from_key, to_key]);
             let tx = PublicTransaction::new(message, witness_set);
             let response = wallet_core
-                .sequencer_client
-                .send_transaction(tx.into())
+                .helm_owned()
+                .send_transaction(LeeTransaction::Public(tx))
                 .await
                 .context("failed to submit public transaction to localnet")?;
             println!(
@@ -168,8 +165,8 @@ async fn main() -> anyhow::Result<()> {
             let from = parse_account_id(&from)?;
             let to = parse_account_id(&to)?;
             let accounts = vec![
-                PrivacyPreservingAccount::Public(from),
-                PrivacyPreservingAccount::PrivateOwned(to),
+                AccountIdentity::Public(from),
+                AccountIdentity::PrivateOwned(to),
             ];
             let (response, _) = wallet_core
                 .send_privacy_preserving_tx(
