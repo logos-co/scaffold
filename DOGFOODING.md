@@ -231,7 +231,7 @@ Use `new` for the main runnable project and `create` as the lightweight alias-pa
 
 ### Expected Success Signals
 
-- Project creation succeeds and prints the destination path, pinned LEZ commit, and cache root.
+- Project creation succeeds and prints the destination path, pinned LEZ commit, and template variant. The cache root in use is visible in the `Created … from template <cache-root>/repos/lez/<pin>/examples/program_deployment` line (`doctor` names it and its source as the `cache root` row).
 - Generated `scaffold.toml` includes a `[circuits]` table. The default install dir is project-local (`.scaffold/circuits`), and the configured version/download template/install dir become the single source of truth for commands that need `logos-blockchain-circuits`.
 - `setup` completes after syncing LEZ to the configured pin, building both `sequencer_service` and `wallet` inside the project's LEZ tree, and either seeding the default wallet or reporting that a default wallet is already configured. Both seeding paths are a PASS: `default wallet seeded from preconfigured account` when the pinned LEZ debug config ships an `initial_accounts` entry, and `default wallet seeded by initializing wallet storage (config ships no preconfigured account)` on LEZ v0.2.0, whose debug config ships none — there `setup` runs the freshly built `wallet` to create its persistent storage and adopts the first `Public/` account on a `/ `-prefixed listing line, ignoring `Public/` addresses on lines that are not `/ `-prefixed — notably the wallet's own `Preconfigured …` entries, which it prints above the stored accounts even when the config ships no `initial_accounts`, and which a first-token scan would adopt instead of the account the wallet just created. Only if no `/ `-prefixed line yields a usable `Public/` address does it fall back to the first `Public/` token anywhere in the output; if the wallet ever stops `/ `-prefixing stored accounts, that fallback starts adopting a preconfigured address, so a seeded address matching a `Preconfigured` line rather than a `/ ` one is worth reporting. Either line is followed by `  Address:` and `  State file:`. Only `warning: could not seed default wallet automatically` is a failure. With `--prebuilt`: `sequencer_service` is downloaded instead of built from source (falls back to source build if no artifact is published); `wallet` is always built from source regardless of `--prebuilt`.
 - `localnet start` reports a ready localnet rather than only a spawned PID.
@@ -628,7 +628,7 @@ post_deploy = ["echo 'topup skipped:' $SCAFFOLD_TOPUP_SKIPPED"]
 
 - The first `run` (no hooks configured) prints a numbered step header for each phase (`[1/5] Building...` through `[5/5] Deploying...`) and ends with a deployed-programs summary.
 - A second `run` reuses the running localnet (`localnet already running (sequencer pid=...)`) instead of starting a new sequencer, and — when guest binaries, IDL, config, and sequencer are all unchanged — replaces `[5/N] Deploying...` with `[5/N] Deploy skipped (guest binaries + IDL + config + sequencer unchanged; pass --reset ...)`. Post-deploy hooks still fire after a dedup-skipped deploy. Use `--reset` (or delete `.scaffold/state/run_deploy.json`) when the scenario needs to force a real re-deploy.
-- After adding the `[run]` block, `run` reports `[6/6] Running N post-deploy hook(s)` and each hook prints a non-empty value for its env var. `cwd` for each hook is the project root (verifiable with a `pwd` hook). For a single-program project, `$SCAFFOLD_PROGRAM_ID` is the deployed program's risc0 image ID and `$SCAFFOLD_GUEST_BIN` is the absolute path to the guest binary.
+- After adding the `[run]` block, `run` reports `[6/6] Running N post-deploy hook(s)` and each hook prints a non-empty value for its env var. `cwd` for each hook is the project root (verifiable with a `pwd` hook). For a single-program project, `$SCAFFOLD_PROGRAM_ID` is the deployed program's risc0 image ID and `$SCAFFOLD_GUEST_BIN` is the absolute path to the guest binary. The default template deploys five programs, so there those two print `unavailable` by design; check the per-program form instead — `$SCAFFOLD_PROGRAMS` lists the names and `$SCAFFOLD_PROGRAM_ID_hello_world` / `$SCAFFOLD_GUEST_BIN_hello_world` carry the values (e.g. `lgs run --post-deploy 'echo $SCAFFOLD_PROGRAMS $SCAFFOLD_PROGRAM_ID_hello_world'`).
 - `--post-deploy "echo override"` ignores `[run].post_deploy` and runs only the override.
 - `--no-post-deploy` skips the post-deploy step entirely; the run prints the deployed-programs summary instead.
 - `--post-deploy` with `--no-post-deploy` errors at clap parse time with a `cannot be used with` message; exit code is non-zero.
@@ -795,7 +795,7 @@ Validate that the LEZ counter program can be deployed and that the generated run
 
 - LEZ project exists with L1 completed (setup, build, localnet running).
 - `wallet -- check-health` succeeds.
-- At least one public account exists. If not:
+- A self-owned public account to sign with (`<account-id>`, the bare base58 part):
 
 ```bash
 "$SCAFFOLD_BIN" wallet -- account new public
@@ -809,31 +809,38 @@ From the LEZ project root:
 "$SCAFFOLD_BIN" deploy
 export NSSA_WALLET_HOME_DIR="$PWD/.scaffold/wallet" LEE_WALLET_HOME_DIR="$PWD/.scaffold/wallet"
 export HOST_CC=cc HOST_CXX=c++
-cargo run --bin run_lez_counter -- init --to <account-id>
-cargo run --bin run_lez_counter -- increment --counter <account-id> --authority <account-id> --amount 5
+cargo run --bin run_lez_counter -- init --authority <account-id>
+cargo run --bin run_lez_counter -- show                      # poll until `= 0`
+cargo run --bin run_lez_counter -- increment --authority <account-id> --amount 5
+cargo run --bin run_lez_counter -- show                      # poll until `= 5`
+"$SCAFFOLD_BIN" spel -- --idl idl/lez_counter.json --program "$(find target/riscv-guest -name lez_counter.bin)" -- increment --amount 2 --authority <account-id>
+cargo run --bin run_lez_counter -- show                      # poll until `= 7`
 ```
+
+The counter is not a user account: both instructions derive it as the PDA `[program_id, "counter"]`, so the runner computes the address itself and there is one counter per deployment. The `spel` line drives the same program from its IDL with no Rust, through the vendored `spel` CLI; `lgs spel` exports the project wallet home, as `lgs wallet` does.
 
 `HOST_CC`/`HOST_CXX` matter for direct `cargo run` in lez-framework projects when the risc0 C++ toolchain is installed: the guest embed refingerprints under your shell env, risc0-build exports plain `CC` = riscv gcc, and the guest graph's host-side proc-macro deps (`spel-framework-macros` → … → `ring`) then compile host C with the riscv compiler and die on `-m64`. Scaffold's own `build`/IDL/client commands pin these automatically; direct cargo invocations need the export (CI's template-e2e does the same at the job level).
 
 ### Expected Success Signals
 
 - `deploy` submits the `lez_counter` program and prints a success summary.
-- `run_lez_counter init` prints confirmation that the counter was initialized at the target account.
-- `run_lez_counter increment` prints confirmation of the increment operation.
-
-Note: as of this writing, the LEZ counter runner contains `TODO` placeholders for actual transaction submission. If the runner only prints diagnostic messages without submitting transactions, record that as the current state. When transaction submission is implemented, update this scenario with account-state verification steps matching D6.
+- `run_lez_counter init` and `increment` each print `submitted transaction: tx_hash=…` and a `verification hint:` naming the counter PDA, and exit 0.
+- `show` reads the counter through the sequencer: `not initialized` before `init` lands, then `counter <pda> = 0`, `= 5` after the increment, and `= 7` after the spel increment. Reads follow block production (15s default), so poll.
+- The `spel` increment prints `Transaction confirmed — included in a block.`
+- `"$SCAFFOLD_BIN" wallet -- account get --account-id Public/<pda>` shows the counter's `data` as the little-endian u64 (`0500000000000000` for 5) and `program_owner` set to the program.
 
 ### Failure Signals / Common Pitfalls
 
 - If `deploy` cannot find `lez_counter` in the discovered program list, record the actual discovered list.
 - If the runner panics on wallet initialization, the name this pin reads is unset: either neither name was exported, or only `LEE_WALLET_HOME_DIR` was exported against a pre-v0.2.0 pin. If it instead starts against an empty wallet, the pin is v0.2.0 and only `NSSA_WALLET_HOME_DIR` was exported — that wallet ignores the old name and falls back to `~/.lee/wallet` without an error.
-- If the runner accepts the subcommand but does nothing (due to TODO stubs), record the output and note the gap.
+- A runner that exits 0 while `show` never moves means the transaction was rejected at execution; check the sequencer log (`localnet logs`) for `failed execution check`. `increment` before `init` is that case (`AccountNotInitialized`), and so is a second `init` against an existing counter.
+- `lgs spel -- … <instruction>` failing with `Failed to read persistent storage at ~/.nssa/wallet/storage.json` means the passthrough lost the project wallet home — a regression.
 
 ### Evidence to Capture
 
 - `deploy` output for the LEZ project.
 - `run_lez_counter init` and `increment` output.
-- Whether the runner actually submitted transactions or only printed placeholder messages.
+- `show` output after each step, and the spel increment output.
 
 ### Execution Notes
 
