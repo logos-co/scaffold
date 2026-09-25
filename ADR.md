@@ -145,8 +145,9 @@ independently. Two corollaries follow from the same coupling:
   whose `.lgx` predates that tooling stops installing. `BASECAMP_DEPENDENCIES`
   entries move with the pair.
 - **The bundled-module list is read off the release.** Which modules basecamp
-  ships itself changed between 0.1.x and 0.2.x (`counter`, `counter_qml`,
-  `webview_app` left; `package_downloader` arrived), and dep resolution skips
+  ships itself changes between releases (0.2.x dropped `counter`,
+  `counter_qml` and `webview_app` and added `package_downloader`; 0.3.0 folded
+  `main_ui` into the app and added `modules_state`), and dep resolution skips
   exactly those names. A stale list either sends `basecamp modules` hunting for
   a flake that does not exist, or captures a module basecamp already provides.
 
@@ -162,6 +163,40 @@ Cost: a basecamp bump is never a one-line change, and the pins cannot be updated
 by a dependency bot that treats each repo separately. That is the honest shape of
 the dependency, and `DOGFOODING.md` re-opens the whole `B` series when any member
 of the set changes.
+
+## Scaffold Supports One Basecamp Release
+
+Until 0.2.3 scaffold kept compatibility code for every basecamp generation it
+had ever pinned: two launcher names (`bin/logos-basecamp` for 0.1.x,
+`bin/LogosBasecamp` for 0.2.x), two data-tree env vars (`LOGOS_DATA_DIR` and
+`LOGOS_USER_DIR`, gated differently per host and stack), and a process-name
+table mapping each generation's launcher onto what it execs. None of it was
+exercised: the `B` series only ever runs against the default pin, and a
+compatibility branch nobody runs is a claim, not a feature.
+
+With the move to basecamp 0.3.0 scaffold supports **exactly one basecamp
+release — the one `DEFAULT_BASECAMP_PIN` names**. Launcher resolution, the
+process-name candidates, the exported env and the bundled-module list describe
+that release and nothing older. A project may still pin another rev (a fork,
+an unreleased commit); scaffold builds it, and `basecamp doctor` names the
+release it actually supports, but it carries no code for the difference.
+
+That only works if projects do not silently stay behind. `new`, `init` and
+`setup` write the literal default pins into `scaffold.toml`, and `basecamp
+modules` writes default companion flakes into `[modules]`, so a pin bump alone
+never reaches an existing project. Scaffold therefore keeps a short table of
+the *retired defaults* it wrote (`RETIRED_BASECAMP_PIN_SETS`,
+`RETIRED_DEPENDENCY_FLAKES`): `basecamp setup` rewrites a value that is exactly
+one of them to the current default and prints each rewrite, and `basecamp
+doctor` warns until it has. Values a user chose are never touched — the table
+matches whole revs from scaffold's default source only.
+
+Rejected alternative: keep the compat branches "because they are cheap". They
+were not: each one came with its own doc paragraph, test and DOGFOODING caveat,
+and the 0.2.x → 0.3.0 research had to re-verify every one before it could be
+trusted or deleted. The cost of the rule is that a user who deliberately stays
+on an older basecamp gets no help from scaffold with its quirks; that user can
+stay on the scaffold release that shipped with it.
 
 ## Sibling `--override-input` Resolves By Declared Input Name
 

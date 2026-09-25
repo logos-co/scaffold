@@ -5277,14 +5277,14 @@ fn basecamp_paths_json_resolves_custom_profile_manifest() {
         );
 }
 
-/// Basecamp 0.2.x keeps two more trees under its base directory —
+/// Basecamp keeps two more trees under its base directory —
 /// `module_data/` (per-module persisted state) and `logs/` (its own rotated
 /// session logs) — and both sit inside the tree `launch` scrubs, so a relaunch
 /// discards them. `paths` is where that becomes visible: without these fields a
 /// developer hunting for module state or an app log has no way to learn either
 /// where it lives or that it will not survive the next launch.
 #[test]
-fn basecamp_paths_json_lists_the_0_2_x_base_dir_children() {
+fn basecamp_paths_json_lists_the_base_dir_children() {
     let temp = tempdir().expect("tempdir");
     let lez_path = temp.path().join("lez");
     fs::create_dir_all(&lez_path).expect("create lez path");

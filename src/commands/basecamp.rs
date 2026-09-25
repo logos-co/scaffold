@@ -13,12 +13,12 @@ use crate::config::{default_basecamp_repo, default_lgpm_repo};
 use crate::constants::{
     BASECAMP_ATTR, BASECAMP_AUTODISCOVER_SKIP_SUBDIRS, BASECAMP_BASE_DIR_LOGS,
     BASECAMP_BASE_DIR_MODULES, BASECAMP_BASE_DIR_MODULE_DATA, BASECAMP_BASE_DIR_PLUGINS,
-    BASECAMP_BIN_LAUNCHER_V01, BASECAMP_BIN_V01_TARGET, BASECAMP_DEPENDENCIES,
-    BASECAMP_MODULE_ROOT_ENV_VAR_DATA_DIR, BASECAMP_MODULE_ROOT_ENV_VAR_USER_DIR,
+    BASECAMP_BIN, BASECAMP_DEPENDENCIES, BASECAMP_MODULE_ROOT_ENV_VAR_USER_DIR,
     BASECAMP_PORTABLE_ATTRS, BASECAMP_PREINSTALLED_MODULES, BASECAMP_PROFILES_REL,
     BASECAMP_PROFILE_ALICE, BASECAMP_PROFILE_BOB, BASECAMP_SOURCE, BASECAMP_XDG_APP_SUBPATH_DEV,
-    BASECAMP_XDG_APP_SUBPATH_PORTABLE, DEFAULT_BASECAMP_PIN, DEFAULT_LGPM_PIN, LGPM_ATTR,
-    LGPM_ATTR_PORTABLE, LGPM_SOURCE,
+    BASECAMP_XDG_APP_SUBPATH_PORTABLE, DEFAULT_BASECAMP_PIN, DEFAULT_BASECAMP_RELEASE,
+    DEFAULT_LGPM_PIN, LGPM_ATTR, LGPM_ATTR_PORTABLE, LGPM_SOURCE, RETIRED_BASECAMP_PIN_SETS,
+    RETIRED_DEPENDENCY_FLAKES,
 };
 use crate::model::{
     BasecampConfig, BasecampSource, BasecampState, ModuleEntry, ModuleRole, Project, RepoBuild,
@@ -220,6 +220,14 @@ fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
         .to_string();
     }
 
+    for moved in upgrade_retired_pins(
+        &mut basecamp_repo,
+        &mut lgpm_repo,
+        &mut project.config.modules,
+    ) {
+        println!("{moved}");
+    }
+
     let (cache_root, _) = resolve_cache_root(&project)?;
     let basecamp_repo_path = cache_root.join("repos/basecamp").join(&basecamp_repo.pin);
 
@@ -241,6 +249,7 @@ fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
         &basecamp_repo_path,
         basecamp_repo.effective_attr(nix_current_system()),
         &pin_artifacts,
+        is_commit_sha(&basecamp_repo.pin),
     )?;
     // lgpm is built from a flake ref derived from [repos.lgpm].
     let lgpm_flake_ref = format_flake_ref(&lgpm_repo);
@@ -314,13 +323,172 @@ pub(crate) fn platform_variant_key(basecamp_repo: Option<&RepoRef>) -> Option<&'
     }
 }
 
+/// `Some(message)` when the binaries `basecamp.state` records were built for
+/// a different basecamp pin than `scaffold.toml` now names — after a pin edit,
+/// or after a scaffold upgrade whose `setup` has not run yet. Installing with
+/// that `lgpm` or launching that app would silently run the old release under
+/// scaffold's assumptions about the new one.
+fn stale_setup(project: &Project, state: &BasecampState) -> Option<String> {
+    // `setup` always writes `[repos.basecamp]`; without one (or with a blank
+    // pin) there is no configured pin to be stale against.
+    let configured = project
+        .config
+        .basecamp_repo
+        .as_ref()
+        .map(|r| r.pin.as_str())
+        .filter(|p| !p.is_empty())?;
+    (!state.pin.is_empty() && state.pin != configured).then(|| {
+        format!(
+            "basecamp was set up for pin {} but scaffold.toml now pins {configured}; \
+             run: logos-scaffold basecamp setup",
+            state.pin
+        )
+    })
+}
+
+/// Where a project stands relative to scaffold's retired default pins (see
+/// [`RETIRED_BASECAMP_PIN_SETS`]). Decided in one place so `setup` (which acts
+/// on it) and `doctor` (which reports it) cannot disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetiredPins {
+    /// Neither pin is a retired default.
+    None,
+    /// The pair is a retired default set (or one half is, and the other is
+    /// already current); `setup` moves both to the current defaults. Carries
+    /// the retired release label.
+    Upgradable(&'static str),
+    /// Basecamp is a retired default but `[repos.lgpm]` was pinned elsewhere
+    /// on purpose. Moving only basecamp would split the pair, so `setup`
+    /// leaves both alone and `doctor` says so.
+    Stuck(&'static str),
+}
+
+fn retired_pin_status(basecamp_repo: &RepoRef, lgpm_repo: &RepoRef) -> RetiredPins {
+    let retired_basecamp = (basecamp_repo.source == BASECAMP_SOURCE)
+        .then(|| {
+            RETIRED_BASECAMP_PIN_SETS
+                .iter()
+                .find(|(_, pin, _)| *pin == basecamp_repo.pin)
+        })
+        .flatten();
+    let retired_lgpm = (lgpm_repo.source == LGPM_SOURCE)
+        .then(|| {
+            RETIRED_BASECAMP_PIN_SETS
+                .iter()
+                .find(|(_, _, pin)| *pin == lgpm_repo.pin)
+        })
+        .flatten();
+    let lgpm_current = lgpm_repo.pin.is_empty() || lgpm_repo.pin == DEFAULT_LGPM_PIN;
+    let basecamp_current =
+        basecamp_repo.pin.is_empty() || basecamp_repo.pin == DEFAULT_BASECAMP_PIN;
+    match (retired_basecamp, retired_lgpm) {
+        (Some((label, _, _)), Some(_)) => RetiredPins::Upgradable(label),
+        (Some((label, _, _)), None) if lgpm_current => RetiredPins::Upgradable(label),
+        (Some((label, _, _)), None) => RetiredPins::Stuck(label),
+        (None, Some((label, _, _))) if basecamp_current => RetiredPins::Upgradable(label),
+        _ => RetiredPins::None,
+    }
+}
+
+/// Move a project off scaffold's retired default pins and return one line per
+/// change for `setup` to print. The basecamp/`lgpm` pair only ever moves
+/// together (see [`retired_pin_status`]), and a captured default companion
+/// flake from [`RETIRED_DEPENDENCY_FLAKES`] is rewritten only when basecamp
+/// ends up on the current default — the companion pins are built for it.
+/// Values a user chose are left as they are.
+fn upgrade_retired_pins(
+    basecamp_repo: &mut RepoRef,
+    lgpm_repo: &mut RepoRef,
+    modules: &mut std::collections::BTreeMap<String, ModuleEntry>,
+) -> Vec<String> {
+    let mut moved = Vec::new();
+    if let RetiredPins::Upgradable(label) = retired_pin_status(basecamp_repo, lgpm_repo) {
+        for (section, repo, current) in [
+            ("repos.basecamp", &mut *basecamp_repo, DEFAULT_BASECAMP_PIN),
+            ("repos.lgpm", &mut *lgpm_repo, DEFAULT_LGPM_PIN),
+        ] {
+            if repo.pin != current {
+                moved.push(format!(
+                    "[{section}].pin: {} (basecamp {label} default, retired) -> {current} \
+                     (basecamp {DEFAULT_BASECAMP_RELEASE})",
+                    repo.pin
+                ));
+                repo.pin = current.to_string();
+            }
+        }
+    }
+    if basecamp_repo.pin != DEFAULT_BASECAMP_PIN {
+        return moved;
+    }
+    for (name, entry) in modules.iter_mut() {
+        if entry.role != ModuleRole::Dependency {
+            continue;
+        }
+        let retired = RETIRED_DEPENDENCY_FLAKES
+            .iter()
+            .any(|(n, flake)| n == name && *flake == entry.flake);
+        let current = BASECAMP_DEPENDENCIES.iter().find(|(n, _)| n == name);
+        if let (true, Some((_, current))) = (retired, current) {
+            moved.push(format!(
+                "[modules.{name}].flake: {} (retired default) -> {current}",
+                entry.flake
+            ));
+            entry.flake = (*current).to_string();
+        }
+    }
+    moved
+}
+
+/// Whether `bin` is the kind of entry point `.#<attr>` produces, so a reused
+/// build result can never hand the dev stack a portable bundle (or the
+/// reverse) — the XDG subpath and variant scaffold derive from `attr` would
+/// then describe a different app than the one launched.
+fn entry_point_matches_attr(bin: &Path, attr: &str) -> bool {
+    let is_appimage = bin.extension().is_some_and(|e| e == "AppImage");
+    let is_macos_bundle = bin.to_string_lossy().contains(".app/Contents/MacOS/");
+    match attr {
+        "bin-appimage" => is_appimage,
+        "bin-macos-app" => is_macos_bundle,
+        _ => !is_appimage && !is_macos_bundle,
+    }
+}
+
+/// A full 40-hex git commit id. Only such a pin names immutable flake inputs;
+/// a tag or branch pin can move under the same name.
+fn is_commit_sha(pin: &str) -> bool {
+    pin.len() == 40 && pin.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Build basecamp's `.#<attr>` into `<out_dir>/<attr>-result` and return the
+/// entry point inside it.
+///
+/// `out_dir` is keyed by pin, so when `pin_is_immutable` and that link already
+/// resolves to a basecamp entry point, the result cannot differ and the build
+/// is skipped. That is not just speed: evaluating the basecamp flake alone
+/// takes minutes and ~5 GB of RAM even when every output is already in the
+/// store, so a re-run of `setup` that re-evaluates is neither idempotent in
+/// cost nor always possible on a small machine.
 fn build_basecamp_app(
     project_root: &Path,
     repo: &Path,
     attr: &str,
     out_dir: &Path,
+    pin_is_immutable: bool,
 ) -> DynResult<PathBuf> {
-    let link = out_dir.join("app-result");
+    let link = out_dir.join(format!("{attr}-result"));
+    if pin_is_immutable && link.exists() {
+        if let Some(bin) = resolve_basecamp_binary(&link)
+            .ok()
+            .filter(|bin| entry_point_matches_attr(bin, attr))
+        {
+            let target = fs::read_link(&link).unwrap_or_else(|_| link.clone());
+            println!(
+                "basecamp (.#{attr}) already built at {}; skipping nix build",
+                target.display()
+            );
+            return Ok(bin);
+        }
+    }
     let log = derive_log_path(project_root, "setup-basecamp");
     let mut cmd = Command::new("nix");
     cmd.current_dir(repo)
@@ -342,52 +510,45 @@ fn build_lgpm(project_root: &Path, out_dir: &Path, flake_ref: &str) -> DynResult
 }
 
 fn resolve_basecamp_binary(app_link: &Path) -> DynResult<PathBuf> {
-    // Both generations ship a `/bin/sh` launcher that exports `QT_PLUGIN_PATH`,
-    // `QML2_IMPORT_PATH` and `LD_LIBRARY_PATH` before exec'ing the real binary —
-    // neither build wraps the Qt app itself (`wrapQtApps` is skipped so the
-    // process name stays `LogosBasecamp` for the macOS Dock). Launching the raw
-    // binary instead of its launcher starts an app that cannot find its Qt
-    // platform plugin or QML imports, so which name we pick is not cosmetic.
+    // Entry points basecamp 0.3.0 ships, per `[repos.basecamp].attr`:
     //
-    // The catch is that the two generations give the launcher *different* names,
-    // and each generation's launcher name is the other's raw binary:
-    //
-    //   path                  | 0.1.x `#app`     | 0.2.x dev `#app`    | 0.2.x portable
-    //   ----------------------|------------------|---------------------|----------------
-    //   bin/logos-basecamp    | launcher         | absent              | absent
-    //   bin/LogosBasecamp     | raw binary       | launcher (execs     | raw binary
-    //                         |                  | bin/.LogosBasecamp) | (bundle sets Qt)
-    //
-    // `bin/logos-basecamp` therefore goes first: it exists *only* on 0.1.x, so
-    // it can never shadow a 0.2.x build, and when it does exist it is the only
-    // correct entry point. Probing `bin/LogosBasecamp` ahead of it would silently
-    // pick 0.1.x's unwrapped binary — the app comes up with no Qt environment.
-    //
-    // Portable bundle layouts (no launcher; the bundle supplies Qt paths):
-    //   - bin/LogosBasecamp (Linux portable / AppImage internals, bin-bundle-dir)
-    //   - LogosBasecamp.app/Contents/MacOS/LogosBasecamp (macOS bin-macos-app)
+    //   - `#app` (dev): `bin/LogosBasecamp` is a `/bin/sh` launcher that
+    //     exports `QT_PLUGIN_PATH` / `QML2_IMPORT_PATH` / `LD_LIBRARY_PATH` and
+    //     execs the hidden `bin/.LogosBasecamp`. Launching the hidden binary
+    //     directly starts an app that cannot find its Qt platform plugin or QML
+    //     imports, so the launcher is the only correct entry point.
+    //   - `#bin-bundle-dir` (Linux portable): same name, a bundle launcher over
+    //     `bin/.LogosBasecamp.elf`.
+    //   - `#bin-macos-app`: `LogosBasecamp.app/Contents/MacOS/LogosBasecamp`.
+    //   - `#bin-appimage`: a single `*.AppImage` at the output root, no `bin/`.
     for rel in [
-        &format!("bin/{BASECAMP_BIN_LAUNCHER_V01}"),
-        &format!("bin/{BASECAMP_BIN_V01_TARGET}"),
-        &format!("{BASECAMP_BIN_V01_TARGET}.app/Contents/MacOS/{BASECAMP_BIN_V01_TARGET}"),
-        "bin/basecamp",
+        format!("bin/{BASECAMP_BIN}"),
+        format!("{BASECAMP_BIN}.app/Contents/MacOS/{BASECAMP_BIN}"),
     ] {
         let candidate = app_link.join(rel);
         if candidate.exists() {
             return Ok(candidate);
         }
     }
-    let platform_hint = if cfg!(target_os = "macos") {
-        "\nNote: on macOS a basecamp pin older than 0.2.0 does not expose a CLI-invocable \
-         binary from the dev `.#app` build; set `[repos.basecamp].attr = \"bin-macos-app\"` \
-         to build the portable app bundle."
-    } else {
-        ""
-    };
+    if let Some(appimage) = find_appimage(app_link) {
+        return Ok(appimage);
+    }
     bail!(
-        "could not locate basecamp binary inside nix build result {}{platform_hint}",
+        "could not locate basecamp binary inside nix build result {} \
+         (expected bin/{BASECAMP_BIN}, {BASECAMP_BIN}.app or a *.AppImage)",
         app_link.display()
     )
+}
+
+/// The single `*.AppImage` file at the root of a `#bin-appimage` build result,
+/// if there is one.
+fn find_appimage(app_link: &Path) -> Option<PathBuf> {
+    let mut found = fs::read_dir(app_link)
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file() && p.extension().is_some_and(|ext| ext == "AppImage"));
+    let first = found.next()?;
+    found.next().is_none().then_some(first)
 }
 
 /// Reject a profile name that isn't exactly one normal path component, so it
@@ -429,6 +590,9 @@ fn cmd_basecamp_launch(
     };
     if !Path::new(&state.basecamp_bin).exists() || !Path::new(&state.lgpm_bin).exists() {
         bail!("basecamp not set up yet; run: logos-scaffold basecamp setup");
+    }
+    if let Some(stale) = stale_setup(&project, &state) {
+        bail!("{stale}");
     }
 
     // Any profile name is accepted (custom profiles beyond the alice/bob pair
@@ -543,16 +707,10 @@ fn cmd_basecamp_launch(
             std::env::var_os(k)
         });
     }
-    // Point basecamp's data-tree override(s) at this profile. Runs after the
+    // Point basecamp's data-tree override at this profile. Runs after the
     // scaffold.toml env layering so a user-supplied relative value is
     // absolutized too.
-    set_module_root_env(
-        &mut env,
-        &project.root,
-        &profile_dir,
-        basecamp_repo,
-        cfg!(target_os = "macos"),
-    );
+    set_module_root_env(&mut env, &project.root, &profile_dir, basecamp_repo);
     println!("launching basecamp for profile {profile}");
     let mut cmd = Command::new(&state.basecamp_bin);
     for (k, v) in &env {
@@ -672,15 +830,14 @@ struct BasecampProfilePaths {
     /// [`resolve_profile_runtime_dir`].
     xdg_runtime_dir: String,
     /// Basecamp's own data-tree root for this profile — the value `launch`
-    /// exports as `LOGOS_USER_DIR` (and, on the macOS portable stack, as the
-    /// 0.1.x `LOGOS_DATA_DIR`). Every directory below is a child of it.
+    /// exports as `LOGOS_USER_DIR`. Every directory below is a child of it.
     module_root: String,
     modules_dir: String,
     plugins_dir: String,
-    /// Where basecamp 0.2.x persists per-module state. Inside the scrubbed
+    /// Where basecamp persists per-module state. Inside the scrubbed
     /// tree, so a relaunch discards it — see `scrub_profile_data_and_cache`.
     module_data_dir: String,
-    /// Where basecamp 0.2.x writes its own rotated session logs (distinct from
+    /// Where basecamp writes its own per-session logs (distinct from
     /// scaffold's `--log-file` tee below). Also scrubbed on relaunch.
     app_logs_dir: String,
     launch_state: String,
@@ -802,86 +959,25 @@ fn launch_env(
     env
 }
 
-/// Write the data-tree override key(s) `launch` exports for a profile.
-///
-/// Basecamp loads its modules and UI plugins from a base directory that XDG
-/// does not always reach, and which key names that directory depends on the
-/// pinned generation: 0.2.x reads `LOGOS_USER_DIR`, 0.1.x read `LOGOS_DATA_DIR`.
-/// The keys are read by disjoint generations, so writing both keeps `launch`
-/// pin-agnostic — but they are *not* written under the same conditions:
-///
-///   * `LOGOS_USER_DIR` — always. 0.2.x otherwise resolves its base directory
-///     from `QStandardPaths::AppDataLocation`, which on macOS ignores
-///     `XDG_DATA_HOME` entirely and collapses every profile onto one shared
-///     tree. Under 0.1.x only the portable stack could reach that path (the dev
-///     `.#app` build exposed no macOS-invocable binary); 0.2.x installs a
-///     launcher for every platform, so the dev stack needs it too. On hosts
-///     that do honor XDG the value written is the same root `XDG_DATA_HOME`
-///     already implies, so writing it unconditionally costs nothing and keeps
-///     one code path.
-///   * `LOGOS_DATA_DIR` — macOS portable only. The key is 0.1.x-only and that
-///     is the one stack where a 0.1.x basecamp was observed to ignore
-///     `XDG_DATA_HOME`. Widening it is not purely additive: it would also start
-///     rewriting relative `LOGOS_DATA_DIR` values declared in `[basecamp.env]`
-///     on hosts where the key does nothing at all.
-///
-/// `host_is_macos` is a parameter rather than a `cfg!` so both branches stay
-/// testable from either host.
-fn set_module_root_env(
-    env: &mut BTreeMap<String, OsString>,
-    project_root: &Path,
-    profile_dir: &Path,
-    basecamp_repo: Option<&RepoRef>,
-    host_is_macos: bool,
-) {
-    set_absolute_module_root_var(
-        env,
-        BASECAMP_MODULE_ROOT_ENV_VAR_USER_DIR,
-        project_root,
-        profile_dir,
-        basecamp_repo,
-    );
-    if host_is_macos && is_portable_basecamp(basecamp_repo) {
-        set_absolute_module_root_var(
-            env,
-            BASECAMP_MODULE_ROOT_ENV_VAR_DATA_DIR,
-            project_root,
-            profile_dir,
-            basecamp_repo,
-        );
-    }
-}
-
-/// Ensure one basecamp data-tree override key
-/// ([`BASECAMP_MODULE_ROOT_ENV_VAR_USER_DIR`] for 0.2.x,
-/// [`BASECAMP_MODULE_ROOT_ENV_VAR_DATA_DIR`] for 0.1.x) holds an **absolute**
-/// path pointing at the profile's installed module/plugin root.
+/// Ensure basecamp's data-tree override ([`BASECAMP_MODULE_ROOT_ENV_VAR_USER_DIR`])
+/// holds an **absolute** path pointing at the profile's installed module/plugin
+/// root. Written on every host and stack.
 ///
 /// Basecamp does not always honor `XDG_DATA_HOME`: it loads its
-/// modules/plugins from the data-tree override env var, falling back to a
+/// modules/plugins from `LOGOS_USER_DIR`, falling back to a
 /// `QStandardPaths::AppDataLocation` path (on macOS
 /// `~/Library/Application Support/Logos/LogosBasecamp[Dev]/`) when that is
 /// unset. So although `launch_env` isolates the profile via `XDG_DATA_HOME` and
 /// scaffold installs the profile's modules under `<profile>/xdg-data/<subpath>`,
-/// the app never sees them unless the override points there.
-///
-/// Which env var *is* the override depends on the Basecamp generation: 0.1.x
-/// reads `LOGOS_DATA_DIR`; 0.2.x renamed it to `LOGOS_USER_DIR` / `--user-dir`
-/// (basecamp #164, resolved in `LogosBasecampPaths.h::baseDirectory()`) and
-/// drops `LOGOS_DATA_DIR` entirely — with only the old key set, every 0.2.x
+/// the app never sees them on macOS unless the override points there — every
 /// profile silently collapses onto the shared fallback dir and none of the
-/// project's modules appear. The two keys are read by disjoint basecamp
-/// versions, so `launch` writes both and stays pin-agnostic; only the
-/// *condition* differs (see the call site).
+/// project's modules appear. On hosts that do honor XDG the value written is
+/// the same root `XDG_DATA_HOME` already implies, so writing it
+/// unconditionally costs nothing and keeps one code path.
 ///
-/// The value **must be absolute**, for a different reason per generation:
-///   * 0.1.x: with a *relative* `LOGOS_DATA_DIR` the app loads the backend
-///     modules but the dlopen'd `main_ui` / `package_manager_ui` dylibs fail
-///     `@rpath` resolution ("shared library was not found") and the shell UI
-///     never renders.
-///   * 0.2.x: basecamp absolutizes the `--user-dir` *flag* but consumes the
-///     `LOGOS_USER_DIR` *env var* verbatim, so a relative value scatters the
-///     app's state under whatever cwd it was launched from.
+/// The value **must be absolute**: basecamp absolutizes its `--user-dir`
+/// *flag* but consumes the `LOGOS_USER_DIR` *env var* verbatim, so a relative
+/// value scatters the app's state under whatever cwd it was launched from.
 ///
 /// This finalizer therefore:
 ///   * defaults the key to the profile's absolute module root
@@ -893,15 +989,15 @@ fn set_module_root_env(
 ///   * treats an empty (or whitespace-only) caller value as unset — absolutizing
 ///     `""` would collapse to the project root, which is not a module root.
 ///
-/// The transform is platform-independent (the caller owns the gating), so it
-/// stays unit-testable on any host.
-fn set_absolute_module_root_var(
+/// The transform is platform-independent, so it stays unit-testable on any
+/// host.
+fn set_module_root_env(
     env: &mut BTreeMap<String, OsString>,
-    key: &str,
     project_root: &Path,
     profile_dir: &Path,
     basecamp_repo: Option<&RepoRef>,
 ) {
+    let key = BASECAMP_MODULE_ROOT_ENV_VAR_USER_DIR;
     match env
         .get(key)
         .filter(|v| !v.to_string_lossy().trim().is_empty())
@@ -1106,6 +1202,7 @@ fn cmd_basecamp_develop(
     cmd.current_dir(&project.root)
         .arg("develop")
         .arg(&target)
+        .args(sibling_override_args(&project, entry, &target))
         // The dev shell starts in the project root (current_dir above), so an
         // in-shell `lgs` already discovers this project via its normal
         // cwd-upward search. These vars are exported as extra context for
@@ -1118,6 +1215,26 @@ fn cmd_basecamp_develop(
     let err = cmd.exec();
     // exec() only returns on failure.
     bail!("failed to exec `nix develop {target}`: {err}");
+}
+
+/// `--override-input <name> path:<sibling>` arguments for running `entry`'s
+/// flake directly (`nix run` / `nix develop`), the same rewrite `install` and
+/// `build` apply: a `path:../<sibling>` input resolves inside the store copy
+/// of the flake otherwise, and pure evaluation refuses it. Every captured
+/// project module is a candidate sibling.
+fn sibling_override_args(project: &Project, entry: &ModuleEntry, target: &str) -> Vec<String> {
+    let src = module_entry_to_source(&project.root, entry);
+    let siblings: Vec<BasecampSource> = project
+        .config
+        .modules
+        .values()
+        .filter(|e| e.role == ModuleRole::Project)
+        .map(|e| module_entry_to_source(&project.root, e))
+        .collect();
+    resolve_sibling_overrides(&src, &siblings, target)
+        .into_iter()
+        .flat_map(|(name, value)| ["--override-input".to_string(), name, value])
+        .collect()
 }
 
 /// Build a `nix develop`/`nix run` target from a module's stored flake ref.
@@ -1188,7 +1305,10 @@ fn cmd_basecamp_run(project: Project, module: String, host: Option<String>) -> D
                 nix_flake_target(&project.root, &entry.flake, entry.standalone_app.as_deref());
             println!("running module `{module}` (standalone host: {target})");
             let mut cmd = Command::new("nix");
-            cmd.current_dir(&project.root).arg("run").arg(&target);
+            cmd.current_dir(&project.root)
+                .arg("run")
+                .arg(&target)
+                .args(sibling_override_args(&project, entry, &target));
             let err = cmd.exec();
             // exec() only returns on failure.
             bail!("failed to exec `nix run {target}`: {err}");
@@ -1377,24 +1497,24 @@ fn write_launch_pid(path: &Path, pid: u32) -> DynResult<()> {
 /// to match `/proc/<pid>/comm` semantics on Linux so [`pid_comm_matches`] can
 /// compare directly.
 ///
-/// Two names, because what scaffold execs is not always what ends up running.
-/// Every stack we support installs its entry point under a launcher name, and
-/// some of those launchers are shell wrappers that set Qt env and then `exec`
-/// a hidden sibling binary:
+/// Several names, because what scaffold execs is not always what ends up
+/// running. Basecamp's Linux entry points are shell launchers that set Qt env
+/// and then `exec` a hidden sibling binary:
 ///
-///   * basecamp 0.2.x dev (`.#app`): `bin/LogosBasecamp` is the wrapper,
-///     `bin/.LogosBasecamp` is the real binary — the live process reports
-///     `.LogosBasecamp`.
-///   * basecamp 0.1.x dev: `bin/logos-basecamp` is the wrapper and it execs
-///     `bin/LogosBasecamp`, which is also a probe candidate in its own right.
-///   * portable stacks: no wrapper, the resolved path is the process.
+///   * dev (`.#app`): `bin/LogosBasecamp` execs `bin/.LogosBasecamp` — the
+///     live process reports `.LogosBasecamp`.
+///   * Linux portable (`.#bin-bundle-dir`): `bin/LogosBasecamp` execs
+///     `bin/.LogosBasecamp.elf` — reported as `.LogosBasecamp.` (15 bytes).
+///   * `#bin-appimage`: the AppImage runtime runs the bundled
+///     `usr/bin/LogosBasecamp` launcher, so the process reports the portable
+///     bundle's names, never the `*.AppImage` file name.
+///   * macOS bundle: no launcher, the resolved path is the process.
 ///
-/// Matching only the resolved basename therefore misses the wrapper cases, and
-/// the miss is silent: `launch` skips the kill and the previous instance keeps
-/// the profile's sockets and ports while a second one starts. So the candidate
-/// set is the basename plus every name a launcher of that basename is known to
-/// `exec` — the two hide-the-real-binary conventions upstream uses — rather
-/// than loosening the comparison to a prefix match.
+/// Matching only the resolved basename therefore misses the launcher cases,
+/// and the miss is silent: `launch` skips the kill and the previous instance
+/// keeps the profile's sockets and ports while a second one starts. So the
+/// candidate set is the basename plus every name a launcher of that basename
+/// is known to `exec`, rather than loosening the comparison to a prefix match.
 fn basecamp_comm_candidates(basecamp_bin: &str) -> Vec<String> {
     let base = Path::new(basecamp_bin)
         .file_name()
@@ -1407,19 +1527,23 @@ fn basecamp_comm_candidates(basecamp_bin: &str) -> Vec<String> {
             candidates.push(name);
         }
     };
+    // An AppImage never reports its own file name: its runtime starts
+    // `AppRun`, which runs the bundled `usr/bin/LogosBasecamp` launcher over
+    // `.LogosBasecamp.elf`.
+    let base = if base.ends_with(".AppImage") {
+        add(truncate(BASECAMP_BIN));
+        BASECAMP_BIN
+    } else {
+        base
+    };
     // A dotted resolved name (we execed the hidden binary directly) needs the
-    // undotted twin instead; anything else needs the dotted one added.
+    // undotted twin instead; anything else needs the hidden twins added.
     match base.strip_prefix('.') {
-        Some(undotted) => add(truncate(undotted)),
-        None => add(truncate(&format!(".{base}"))),
-    }
-    // The 0.1.x indirection is a *rename*, not a dot: `bin/logos-basecamp`
-    // execs its sibling `bin/LogosBasecamp`, so the live process reports a name
-    // that shares no prefix with what we execed. Without this the kill path
-    // silently no-ops on every 0.1.x-pinned project — the same defect the
-    // dotted twin fixes for 0.2.x, which the dot rule alone does not cover.
-    if base == BASECAMP_BIN_LAUNCHER_V01 {
-        add(truncate(BASECAMP_BIN_V01_TARGET));
+        Some(undotted) => add(truncate(undotted.trim_end_matches(".elf"))),
+        None => {
+            add(truncate(&format!(".{base}")));
+            add(truncate(&format!(".{base}.elf")));
+        }
     }
     candidates
 }
@@ -1475,31 +1599,30 @@ fn kill_process_tree(pid: u32, expected_comm: &[String]) {
     // children get reparented to init and we lose the ppid linkage.
     let descendants = collect_descendant_pids(pid);
     for child in &descendants {
-        let _ = Command::new("kill")
-            .arg("-TERM")
-            .arg(child.to_string())
-            .status();
+        send_signal(*child, "-TERM");
     }
     if pid_comm_matches(pid, expected_comm) {
-        let _ = Command::new("kill")
-            .arg("-TERM")
-            .arg(pid.to_string())
-            .status();
+        send_signal(pid, "-TERM");
     }
     let parent_exited = wait_for_exit(pid, Duration::from_millis(1500));
     for child in &descendants {
-        let _ = Command::new("kill")
-            .arg("-KILL")
-            .arg(child.to_string())
-            .status();
+        send_signal(*child, "-KILL");
     }
     if !parent_exited && pid_comm_matches(pid, expected_comm) {
-        let _ = Command::new("kill")
-            .arg("-KILL")
-            .arg(pid.to_string())
-            .status();
+        send_signal(pid, "-KILL");
         let _ = wait_for_exit(pid, Duration::from_millis(500));
     }
+}
+
+/// Best-effort `kill <signal> <pid>`. Most descendants have already exited by
+/// the time the `-KILL` sweep reaches them, so `kill`'s "No such process" is
+/// the expected outcome, not an error worth printing.
+fn send_signal(pid: u32, signal: &str) {
+    let _ = Command::new("kill")
+        .arg(signal)
+        .arg(pid.to_string())
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 /// BFS over `/proc/<pid>/stat` to collect every descendant PID rooted at
@@ -1578,7 +1701,11 @@ fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         // `kill -0` returns non-zero when the PID no longer exists (or we lack perms).
-        let status = Command::new("kill").arg("-0").arg(pid.to_string()).status();
+        let status = Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stderr(std::process::Stdio::null())
+            .status();
         if matches!(status, Ok(s) if !s.success()) || status.is_err() {
             return true;
         }
@@ -1638,6 +1765,11 @@ fn cmd_basecamp_build(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
+    // `--module` narrows what gets *built*, not what counts as a local
+    // sibling: a selected module's `path:../<sibling>` inputs still have to be
+    // overridden to the sibling's working tree, or nix resolves them inside
+    // the store copy and fails under pure evaluation.
+    let sibling_modules = project_modules.clone();
     if let Some(name) = &module {
         if !project_modules.contains_key(name) {
             let known: Vec<&str> = project_modules.keys().map(String::as_str).collect();
@@ -1676,7 +1808,13 @@ fn cmd_basecamp_build(
     let ordered_names = topo_order_project_modules(&project.root, &project_modules);
 
     for variant in &variants {
-        build_modules_for_variant(&project, &project_modules, &ordered_names, variant)?;
+        build_modules_for_variant(
+            &project,
+            &project_modules,
+            &sibling_modules,
+            &ordered_names,
+            variant,
+        )?;
     }
     Ok(())
 }
@@ -1689,23 +1827,24 @@ fn cmd_basecamp_build(
 fn build_modules_for_variant(
     project: &Project,
     project_modules: &std::collections::BTreeMap<String, ModuleEntry>,
+    sibling_modules: &std::collections::BTreeMap<String, ModuleEntry>,
     ordered_names: &[String],
     variant: &str,
 ) -> DynResult<()> {
     // Rewrite each project source for this variant: attr-swap `#lgx` →
     // `#<variant>` on flake refs; pass Path sources through unchanged (they're
     // pre-built). The swap is a no-op when variant == "lgx".
+    let for_variant = |entry: &ModuleEntry| match module_entry_to_source(&project.root, entry) {
+        BasecampSource::Path(p) => BasecampSource::Path(p),
+        BasecampSource::Flake(f) => BasecampSource::Flake(swap_flake_attr(&f, "lgx", variant)),
+    };
     let sources: Vec<BasecampSource> = ordered_names
         .iter()
-        .map(
-            |name| match module_entry_to_source(&project.root, &project_modules[name]) {
-                BasecampSource::Path(p) => BasecampSource::Path(p),
-                BasecampSource::Flake(f) => {
-                    BasecampSource::Flake(swap_flake_attr(&f, "lgx", variant))
-                }
-            },
-        )
+        .map(|name| for_variant(&project_modules[name]))
         .collect();
+    // Every captured project module is a candidate sibling, including ones
+    // `--module` left out of `sources`.
+    let siblings: Vec<BasecampSource> = sibling_modules.values().map(for_variant).collect();
 
     // Local symlink dir: basecamp's AppImage "install lgx" button opens a
     // file picker starting in the project, and /nix/store/…-source paths
@@ -1724,7 +1863,7 @@ fn build_modules_for_variant(
             BasecampSource::Flake(flake_ref) => {
                 // Sibling overrides computed against the post-swap set so
                 // path-sibling inputs resolve locally like they do at install.
-                let overrides = resolve_sibling_overrides(src, &sources, flake_ref);
+                let overrides = resolve_sibling_overrides(src, &siblings, flake_ref);
                 let inv = build_portable_nix_invocation(flake_ref, &overrides, variant);
                 run_build_portable_nix(&project.root, flake_ref, &inv, variant)?
             }
@@ -1798,6 +1937,7 @@ fn topo_order_project_modules(
             let declared = read_source_metadata_dependencies(&src);
             let project_internal_deps: Vec<String> = declared
                 .into_iter()
+                .map(|d| d.name)
                 .filter(|d| d != name && project_modules.contains_key(d))
                 .collect();
             (name.clone(), project_internal_deps)
@@ -2312,7 +2452,7 @@ fn guess_name_from_github_ref(flake_ref: &str) -> Option<String> {
 /// collect its `dependencies: [...]` array. Returns empty for remote flakes
 /// (no local path to read) or path-sources (`.lgx` files are build artefacts,
 /// not source directories).
-fn read_source_metadata_dependencies(src: &BasecampSource) -> Vec<String> {
+fn read_source_metadata_dependencies(src: &BasecampSource) -> Vec<DeclaredDependency> {
     let BasecampSource::Flake(flake_ref) = src else {
         return Vec::new();
     };
@@ -2330,14 +2470,45 @@ fn read_source_metadata_dependencies(src: &BasecampSource) -> Vec<String> {
         );
         return Vec::new();
     };
-    json.get("dependencies")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default()
+    let mut deps: Vec<DeclaredDependency> = Vec::new();
+    for (key, optional) in [("dependencies", false), ("optional_dependencies", true)] {
+        let Some(arr) = json.get(key).and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for entry in arr {
+            // Basecamp 0.3.0 accepts both `"name"` and
+            // `{"name": …, "version": …, "signer": …}` entries; only the name
+            // matters for resolving a flake to install.
+            let name = entry
+                .as_str()
+                .or_else(|| entry.get("name").and_then(|n| n.as_str()))
+                .map(str::trim)
+                .filter(|n| !n.is_empty());
+            match name {
+                Some(name) if !deps.iter().any(|d| d.name == name) => {
+                    deps.push(DeclaredDependency {
+                        name: name.to_string(),
+                        optional,
+                    });
+                }
+                Some(_) => {}
+                None => eprintln!(
+                    "warning: {} has a `{key}` entry without a name ({entry}); \
+                     it names no module, so it is skipped (packaging rejects it too)",
+                    metadata_path.display()
+                ),
+            }
+        }
+    }
+    deps
+}
+
+/// One entry of a `metadata.json` `dependencies` / `optional_dependencies`
+/// array. A name listed under both counts as required.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeclaredDependency {
+    name: String,
+    optional: bool,
 }
 
 /// Resolve dependencies declared in project sources' `metadata.json` into
@@ -2351,8 +2522,10 @@ fn read_source_metadata_dependencies(src: &BasecampSource) -> Vec<String> {
 /// 3. the declaring source's own `flake.lock` input of the same name,
 /// 4. the scaffold-default `BASECAMP_DEPENDENCIES` pin table.
 ///
-/// No warn-and-skip path: if nothing resolves, the capture is aborted with
-/// a targeted error naming both user-side fixes.
+/// No warn-and-skip path for required deps: if nothing resolves, the capture
+/// is aborted with a targeted error naming both user-side fixes. An
+/// `optional_dependencies` entry that does not resolve is skipped with a note —
+/// basecamp loads the module without it.
 fn resolve_manifest_dependencies(
     project_sources: &[BasecampSource],
     captured: &std::collections::BTreeMap<String, ModuleEntry>,
@@ -2360,7 +2533,7 @@ fn resolve_manifest_dependencies(
     // Union of declared dep names across project sources, annotated with the
     // declaring source's flake ref (for error messages) and local path (used
     // to consult that source's own flake.lock).
-    let mut declared: std::collections::BTreeMap<String, (String, Option<PathBuf>)> =
+    let mut declared: std::collections::BTreeMap<String, (String, Option<PathBuf>, bool)> =
         std::collections::BTreeMap::new();
     for src in project_sources {
         let via = flake_ref(src);
@@ -2368,10 +2541,15 @@ fn resolve_manifest_dependencies(
             BasecampSource::Flake(f) => flake_path_prefix(f).map(PathBuf::from),
             BasecampSource::Path(_) => None,
         };
-        for dep_name in read_source_metadata_dependencies(src) {
-            declared
-                .entry(dep_name)
-                .or_insert_with(|| (via.clone(), local_path.clone()));
+        for dep in read_source_metadata_dependencies(src) {
+            let slot = declared
+                .entry(dep.name)
+                .or_insert_with(|| (via.clone(), local_path.clone(), dep.optional));
+            // Required anywhere wins over optional elsewhere — and the source
+            // that requires it is the one to resolve through and to blame.
+            if slot.2 && !dep.optional {
+                *slot = (via.clone(), local_path.clone(), false);
+            }
         }
     }
 
@@ -2379,7 +2557,7 @@ fn resolve_manifest_dependencies(
         std::collections::BTreeMap::new();
     let mut unresolved: Vec<(String, String)> = Vec::new();
 
-    for (name, (via, local_path)) in declared {
+    for (name, (via, local_path, optional)) in declared {
         if captured.contains_key(&name) {
             continue;
         }
@@ -2407,6 +2585,13 @@ fn resolve_manifest_dependencies(
                     role: ModuleRole::Dependency,
                     standalone_app: None,
                 },
+            );
+            continue;
+        }
+        if optional {
+            println!(
+                "note: optional dependency `{name}` (declared by `{via}`) has no known flake; \
+                 skipping it. Add [modules.{name}] with role = \"dependency\" to install it."
             );
             continue;
         }
@@ -2456,6 +2641,9 @@ fn cmd_basecamp_install(project: Project, probe: &dyn LgxFlakeProbe) -> DynResul
 
     if !Path::new(&state.basecamp_bin).exists() || !Path::new(&state.lgpm_bin).exists() {
         bail!("basecamp not set up yet; run: logos-scaffold basecamp setup");
+    }
+    if let Some(stale) = stale_setup(&project, &state) {
+        bail!("{stale}");
     }
 
     // Nix preflight comes after the setup-state guard so a user without
@@ -2785,11 +2973,11 @@ fn sibling_overrides_for(target: &BasecampSource, all: &[BasecampSource]) -> Vec
 ///
 /// This is the *reader* side of the layout — install targets, module counts and
 /// manifest checks all resolve through here so the knowledge lives in one
-/// place. `set_absolute_module_root_var` deliberately builds the exported value
-/// through its own join chain instead of calling this: keeping the exporter and
-/// the reader independent is what lets
-/// `set_absolute_basecamp_data_dirs_defaults_to_the_dir_install_writes_into`
-/// catch a depth change on either side.
+/// place. `set_module_root_env` deliberately builds the exported value through
+/// its own join chain instead of calling this: keeping the exporter and the
+/// reader independent is what lets
+/// `set_module_root_env_defaults_to_the_dir_install_writes_into` catch a depth
+/// change on either side.
 fn profile_module_root(profile_dir: &Path, basecamp_repo: Option<&RepoRef>) -> PathBuf {
     profile_dir
         .join("xdg-data")
@@ -2906,9 +3094,9 @@ fn lgpm_install_args(
 /// the failure isn't one scaffold can say anything useful about (then the
 /// captured stderr speaks for itself).
 ///
-/// Both cases below are contract mismatches between the `.lgx` and the pinned
-/// `lgpm`, not bugs in the module — and neither error names the fix, so the
-/// raw message sends people looking in the wrong place.
+/// Every case below is a contract mismatch between the `.lgx` and the pinned
+/// `lgpm`, not a bug in the module — and no error names the fix, so the raw
+/// message sends people looking in the wrong place.
 fn lgpm_install_hint(err: &anyhow::Error) -> Option<&'static str> {
     let text = err
         .downcast_ref::<crate::error::CommandFailed>()
@@ -2931,10 +3119,20 @@ fn lgpm_install_hint(err: &anyhow::Error) -> Option<&'static str> {
         // Packages from pre-0.2 module tooling carry no hashes at all.
         return Some(
             "this `.lgx` predates the content hashes the pinned `lgpm` validates on install. \
-             Rebuild the module with `logos-module-builder` 0.2.x (or bundle it with \
+             Rebuild the module with `logos-module-builder` 0.3.0 (or bundle it with \
              `nix-bundle-lgx`), or pin an `[modules.<name>].flake` rev that does. \
              Overriding `[repos.lgpm].pin` to a pre-validation rev is not a fix: basecamp \
-             0.2.x embeds the validating library too.",
+             0.3.0 embeds the validating library too.",
+        );
+    }
+    if text.contains("Forbidden root entry") {
+        // The reverse skew: the package is *newer* than the installer. An lgpm
+        // older than basecamp 0.3.0's rejects the `assets/` directory (package
+        // icons) that `logos-module-builder` 0.3.x adds at the archive root.
+        return Some(
+            "this `.lgx` carries a root entry the pinned `lgpm` does not know — it was built \
+             by newer module tooling than the installer. Run `logos-scaffold basecamp doctor` \
+             and move `[repos.basecamp]` / `[repos.lgpm]` back to scaffold's default pin set.",
         );
     }
     if text.contains("does not contain variant") {
@@ -3103,7 +3301,18 @@ pub(crate) fn count_installed_modules(
     let Ok(entries) = fs::read_dir(&modules_root) else {
         return 0;
     };
-    entries.flatten().filter(|e| e.path().is_dir()).count()
+    entries
+        .flatten()
+        .filter(|e| e.path().is_dir() && !is_hidden_entry(e))
+        .count()
+}
+
+/// `lgpm` stages a reinstall in `.lgpm-staging-*` / `.lgpm-retired-*`
+/// siblings of the module directories and can leave them behind when an
+/// install fails. Basecamp ignores hidden entries, so scaffold's per-profile
+/// module walks must too, or a failed install shows up as an extra module.
+fn is_hidden_entry(entry: &fs::DirEntry) -> bool {
+    entry.file_name().to_string_lossy().starts_with('.')
 }
 
 /// Walk `<profile_dir>/xdg-data/<xdg_subpath>/modules/*/manifest.json` and
@@ -3124,7 +3333,7 @@ pub(crate) fn check_manifest_variants(
     let mut issues = Vec::new();
     for entry in entries.flatten() {
         let module_dir = entry.path();
-        if !module_dir.is_dir() {
+        if !module_dir.is_dir() || is_hidden_entry(&entry) {
             continue;
         }
         let manifest_path = module_dir.join("manifest.json");
@@ -3293,6 +3502,14 @@ fn push_basecamp_doctor_rows(project: &Project, rows: &mut Vec<crate::model::Che
     // profiles it seeds. Without these a green `setup` produced a doctor with
     // no PASS rows at all, so a user had no way to confirm setup actually
     // landed before moving on to `modules` / `install`.
+    if let Some(stale) = stale_setup(project, &state) {
+        rows.push(CheckRow {
+            status: CheckStatus::Warn,
+            name: "basecamp build pin".to_string(),
+            detail: stale,
+            remediation: Some("run `logos-scaffold basecamp setup`".to_string()),
+        });
+    }
     for (label, recorded) in [
         ("basecamp binary", state.basecamp_bin.as_str()),
         ("lgpm binary", state.lgpm_bin.as_str()),
@@ -3364,7 +3581,11 @@ fn push_basecamp_doctor_rows(project: &Project, rows: &mut Vec<crate::model::Che
             .as_ref()
             .map(|r| r.pin.as_str())
             .unwrap_or_default();
-        let (status, detail, remediation) = describe_pin_set(basecamp_pin, lgpm_pin);
+        let default_lgpm = default_lgpm_repo(DEFAULT_LGPM_PIN);
+        let lgpm_repo = project.config.lgpm_repo.as_ref().unwrap_or(&default_lgpm);
+        let (status, detail, remediation) = basecamp_repo
+            .and_then(|b| describe_retired_pins(b, lgpm_repo))
+            .unwrap_or_else(|| describe_pin_set(basecamp_pin, lgpm_pin));
         rows.push(CheckRow {
             status,
             name: "basecamp pin set".to_string(),
@@ -3398,11 +3619,22 @@ fn push_basecamp_doctor_rows(project: &Project, rows: &mut Vec<crate::model::Che
                     captured_rev.unwrap_or(&entry.flake),
                     default_rev.unwrap_or(default_ref),
                 ),
-                remediation: Some(format!(
-                    "module may not work against a basecamp release built with the scaffold \
-                     default. Update `[modules.{name}].flake` in scaffold.toml to \
-                     a compatible rev."
-                )),
+                remediation: Some(
+                    if RETIRED_DEPENDENCY_FLAKES
+                        .iter()
+                        .any(|(n, flake)| n == name && *flake == entry.flake)
+                    {
+                        "this is a retired scaffold default; run `logos-scaffold basecamp setup` \
+                         to move it to the current one."
+                            .to_string()
+                    } else {
+                        format!(
+                            "module may not work against a basecamp release built with the \
+                             scaffold default. Update `[modules.{name}].flake` in scaffold.toml \
+                             to a compatible rev."
+                        )
+                    },
+                ),
             });
         }
     }
@@ -3462,11 +3694,14 @@ fn push_basecamp_doctor_rows(project: &Project, rows: &mut Vec<crate::model::Che
 /// where it was, which is how an installer and an app end up disagreeing about
 /// package format with no error at install time.
 ///
-/// Deliberately *not* a warning: a project pinned away from both defaults. That
-/// is a supported choice (an older basecamp, a fork, a release scaffold has not
-/// caught up with yet), and warning on it every run would train people to
-/// ignore the row that matters. It still gets a line, so which pins are in play
-/// is visible in the report.
+/// Retired default pins are reported separately, by [`describe_retired_pins`],
+/// which takes precedence over this row.
+///
+/// Deliberately *not* a warning: a project pinned away from both defaults to a
+/// rev scaffold never shipped (a fork, a release scaffold has not caught up
+/// with yet). Warning on it every run would train people to ignore the row
+/// that matters. It still gets a line naming the supported release, so which
+/// pins are in play is visible in the report.
 fn describe_pin_set(
     basecamp_pin: &str,
     lgpm_pin: &str,
@@ -3502,7 +3737,10 @@ fn describe_pin_set(
         ),
         (false, false) => (
             CheckStatus::Pass,
-            format!("{summary} — both pinned away from the scaffold defaults"),
+            format!(
+                "{summary} — both pinned away from the scaffold defaults (scaffold supports \
+                 basecamp {DEFAULT_BASECAMP_RELEASE})"
+            ),
             None,
         ),
         (matched_basecamp, _) => {
@@ -3526,6 +3764,50 @@ fn describe_pin_set(
                 )),
             )
         }
+    }
+}
+
+/// Doctor row for a project still on scaffold's retired default pins, or
+/// `None` when it is not. Scaffold supports only the current basecamp release,
+/// so this is a warning either way; the remediation depends on whether
+/// `basecamp setup` can move the pair on its own.
+fn describe_retired_pins(
+    basecamp_repo: &RepoRef,
+    lgpm_repo: &RepoRef,
+) -> Option<(crate::model::CheckStatus, String, Option<String>)> {
+    use crate::model::CheckStatus;
+    let summary = format!(
+        "basecamp {} / lgpm {}",
+        basecamp_repo.pin.chars().take(12).collect::<String>(),
+        lgpm_repo.pin.chars().take(12).collect::<String>()
+    );
+    match retired_pin_status(basecamp_repo, lgpm_repo) {
+        RetiredPins::None => None,
+        RetiredPins::Upgradable(label) => Some((
+            CheckStatus::Warn,
+            format!(
+                "{summary} — basecamp {label}, a retired scaffold default; scaffold supports \
+                 basecamp {DEFAULT_BASECAMP_RELEASE} only"
+            ),
+            Some(
+                "run `logos-scaffold basecamp setup`: it moves a project on a retired default \
+                 pin set to the current one (and rewrites captured default dependency pins), \
+                 then rebuilds."
+                    .to_string(),
+            ),
+        )),
+        RetiredPins::Stuck(label) => Some((
+            CheckStatus::Warn,
+            format!(
+                "{summary} — basecamp {label}, a retired scaffold default, with `lgpm` pinned \
+                 elsewhere; scaffold supports basecamp {DEFAULT_BASECAMP_RELEASE} only"
+            ),
+            Some(format!(
+                "`basecamp setup` will not move one half of a pair it did not write. Set \
+                 `[repos.basecamp].pin` to `{DEFAULT_BASECAMP_PIN}` and `[repos.lgpm].pin` to \
+                 `{DEFAULT_LGPM_PIN}`, then re-run `logos-scaffold basecamp setup`."
+            )),
+        )),
     }
 }
 
@@ -4235,6 +4517,282 @@ mod tests {
         );
     }
 
+    /// The reverse skew of the hash case: an `lgpm` older than basecamp 0.3.0's
+    /// rejects the `assets/` root entry (package icons) newer module tooling
+    /// writes. The fix is the pin set, not the package.
+    #[test]
+    fn lgpm_install_hint_explains_a_package_newer_than_the_installer() {
+        let err = lgpm_failure("Error: Package validation failed: Forbidden root entry: assets");
+        let hint = lgpm_install_hint(&err).expect("forbidden root entries must carry a hint");
+        assert!(
+            hint.contains("basecamp doctor") && hint.contains("[repos.lgpm]"),
+            "hint must point at the pin set, got: {hint}"
+        );
+    }
+
+    #[test]
+    fn upgrade_retired_pins_moves_exact_retired_defaults_only() {
+        for (label, basecamp_pin, lgpm_pin) in RETIRED_BASECAMP_PIN_SETS {
+            let mut basecamp = default_basecamp_repo(basecamp_pin);
+            let mut lgpm = default_lgpm_repo(lgpm_pin);
+            let mut modules = BTreeMap::new();
+            modules.insert(
+                "delivery_module".to_string(),
+                ModuleEntry {
+                    flake: RETIRED_DEPENDENCY_FLAKES[0].1.to_string(),
+                    role: ModuleRole::Dependency,
+                    standalone_app: None,
+                },
+            );
+            modules.insert(
+                "mymod".to_string(),
+                ModuleEntry {
+                    flake: RETIRED_DEPENDENCY_FLAKES[0].1.to_string(),
+                    role: ModuleRole::Project,
+                    standalone_app: None,
+                },
+            );
+            let moved = upgrade_retired_pins(&mut basecamp, &mut lgpm, &mut modules);
+            assert_eq!(basecamp.pin, DEFAULT_BASECAMP_PIN, "{label}");
+            assert_eq!(lgpm.pin, DEFAULT_LGPM_PIN, "{label}");
+            assert_eq!(
+                modules["delivery_module"].flake, BASECAMP_DEPENDENCIES[0].1,
+                "{label}: a captured retired default dependency must move"
+            );
+            assert_eq!(
+                modules["mymod"].flake, RETIRED_DEPENDENCY_FLAKES[0].1,
+                "{label}: project sources are the user's, never rewritten"
+            );
+            assert_eq!(
+                moved.len(),
+                3,
+                "{label}: one line per change, got {moved:?}"
+            );
+        }
+
+        // A deliberate custom pin — or a retired rev from a fork — is left alone.
+        let custom = "0123456789012345678901234567890123456789";
+        let mut basecamp = default_basecamp_repo(custom);
+        let mut lgpm = default_lgpm_repo(custom);
+        let mut forked = default_basecamp_repo(RETIRED_BASECAMP_PIN_SETS[0].1);
+        forked.source = "https://example.com/fork/logos-basecamp.git".to_string();
+        let mut modules = BTreeMap::new();
+        assert!(upgrade_retired_pins(&mut basecamp, &mut lgpm, &mut modules).is_empty());
+        assert!(upgrade_retired_pins(&mut forked, &mut lgpm, &mut modules).is_empty());
+        assert_eq!(basecamp.pin, custom);
+        assert_eq!(forked.pin, RETIRED_BASECAMP_PIN_SETS[0].1);
+    }
+
+    #[test]
+    fn describe_retired_pins_warns_and_names_the_right_fix() {
+        use crate::model::CheckStatus;
+        for (label, basecamp_pin, lgpm_pin) in RETIRED_BASECAMP_PIN_SETS {
+            let (status, detail, remediation) = describe_retired_pins(
+                &default_basecamp_repo(basecamp_pin),
+                &default_lgpm_repo(lgpm_pin),
+            )
+            .expect("a retired default set must be reported");
+            assert_eq!(status, CheckStatus::Warn, "{label}: {detail}");
+            assert!(detail.contains("retired"), "got: {detail}");
+            assert!(
+                remediation.is_some_and(|r| r.contains("basecamp setup")),
+                "remediation must name the command that upgrades"
+            );
+        }
+
+        // Retired basecamp with a hand-picked lgpm: setup will not move it, so
+        // the remediation must not promise that it will.
+        let custom = "0123456789012345678901234567890123456789";
+        let (_, detail, remediation) = describe_retired_pins(
+            &default_basecamp_repo(RETIRED_BASECAMP_PIN_SETS[0].1),
+            &default_lgpm_repo(custom),
+        )
+        .expect("still reported");
+        assert!(detail.contains("pinned elsewhere"), "got: {detail}");
+        assert!(
+            remediation.is_some_and(|r| r.contains(DEFAULT_BASECAMP_PIN)),
+            "must spell out the pins to set by hand"
+        );
+
+        assert!(describe_retired_pins(
+            &default_basecamp_repo(DEFAULT_BASECAMP_PIN),
+            &default_lgpm_repo(DEFAULT_LGPM_PIN)
+        )
+        .is_none());
+    }
+
+    /// The pair only moves together: moving one half of a pair the user
+    /// half-customised would manufacture exactly the split `doctor` warns
+    /// about.
+    #[test]
+    fn upgrade_retired_pins_never_splits_a_pair() {
+        let custom = "0123456789012345678901234567890123456789";
+        let (_, retired_basecamp, retired_lgpm) = RETIRED_BASECAMP_PIN_SETS[0];
+        let dep = || {
+            let mut modules = BTreeMap::new();
+            modules.insert(
+                "delivery_module".to_string(),
+                ModuleEntry {
+                    flake: RETIRED_DEPENDENCY_FLAKES[0].1.to_string(),
+                    role: ModuleRole::Dependency,
+                    standalone_app: None,
+                },
+            );
+            modules
+        };
+
+        // Retired basecamp + custom lgpm: nothing moves, not even the
+        // companion flake (it is built for the current basecamp).
+        let mut basecamp = default_basecamp_repo(retired_basecamp);
+        let mut lgpm = default_lgpm_repo(custom);
+        let mut modules = dep();
+        assert!(upgrade_retired_pins(&mut basecamp, &mut lgpm, &mut modules).is_empty());
+        assert_eq!(
+            (basecamp.pin.as_str(), lgpm.pin.as_str()),
+            (retired_basecamp, custom)
+        );
+        assert_eq!(
+            modules["delivery_module"].flake,
+            RETIRED_DEPENDENCY_FLAKES[0].1
+        );
+
+        // Custom basecamp + retired lgpm: nothing moves either.
+        let mut basecamp = default_basecamp_repo(custom);
+        let mut lgpm = default_lgpm_repo(retired_lgpm);
+        assert!(upgrade_retired_pins(&mut basecamp, &mut lgpm, &mut dep()).is_empty());
+        assert_eq!(lgpm.pin, retired_lgpm);
+
+        // Current basecamp + retired lgpm (a half-finished manual bump): lgpm
+        // catches up, which *closes* a split.
+        let mut basecamp = default_basecamp_repo(DEFAULT_BASECAMP_PIN);
+        let mut lgpm = default_lgpm_repo(retired_lgpm);
+        let moved = upgrade_retired_pins(&mut basecamp, &mut lgpm, &mut BTreeMap::new());
+        assert_eq!(lgpm.pin, DEFAULT_LGPM_PIN);
+        assert_eq!(moved.len(), 1, "{moved:?}");
+
+        // Retired basecamp + lgpm already current: basecamp catches up.
+        let mut basecamp = default_basecamp_repo(retired_basecamp);
+        let mut lgpm = default_lgpm_repo(DEFAULT_LGPM_PIN);
+        upgrade_retired_pins(&mut basecamp, &mut lgpm, &mut BTreeMap::new());
+        assert_eq!(basecamp.pin, DEFAULT_BASECAMP_PIN);
+    }
+
+    #[test]
+    fn stale_setup_flags_binaries_built_for_another_pin() {
+        let tmp = tempdir().expect("tempdir");
+        let mut project = seed_basecamp_project(tmp.path());
+        project.config.basecamp_repo = Some(default_basecamp_repo(DEFAULT_BASECAMP_PIN));
+        let state = |pin: &str| BasecampState {
+            pin: pin.to_string(),
+            ..Default::default()
+        };
+        assert!(stale_setup(&project, &state(DEFAULT_BASECAMP_PIN)).is_none());
+        assert!(
+            stale_setup(&project, &state("")).is_none(),
+            "pre-pin state files pass"
+        );
+        let msg = stale_setup(&project, &state(RETIRED_BASECAMP_PIN_SETS[0].1))
+            .expect("a different pin is stale");
+        assert!(msg.contains("basecamp setup"), "got: {msg}");
+    }
+
+    #[test]
+    fn entry_point_matches_attr_keeps_stacks_apart() {
+        let dev = Path::new("/r/bin/LogosBasecamp");
+        let appimage = Path::new("/r/logos-basecamp.AppImage");
+        let mac = Path::new("/r/LogosBasecamp.app/Contents/MacOS/LogosBasecamp");
+        assert!(entry_point_matches_attr(dev, "app"));
+        assert!(entry_point_matches_attr(dev, "bin-bundle-dir"));
+        assert!(!entry_point_matches_attr(appimage, "app"));
+        assert!(entry_point_matches_attr(appimage, "bin-appimage"));
+        assert!(!entry_point_matches_attr(dev, "bin-appimage"));
+        assert!(entry_point_matches_attr(mac, "bin-macos-app"));
+        assert!(!entry_point_matches_attr(mac, "app"));
+    }
+
+    #[test]
+    fn build_basecamp_app_does_not_reuse_a_result_for_another_stack_or_a_dead_link() {
+        let tmp = tempdir().expect("tempdir");
+        let out_dir = tmp.path().join("pin");
+        fs::create_dir_all(&out_dir).unwrap();
+        // An AppImage result sitting at the dev attr's link name must not be
+        // reused: the skip would launch a portable app as the dev stack.
+        let appimage = tmp.path().join("appimage-output");
+        touch_exe(&appimage, "logos-basecamp.AppImage");
+        std::os::unix::fs::symlink(&appimage, out_dir.join("app-result")).unwrap();
+        // A link whose store path was garbage-collected must not be reused.
+        std::os::unix::fs::symlink(
+            tmp.path().join("gone"),
+            out_dir.join("bin-bundle-dir-result"),
+        )
+        .unwrap();
+        for attr in ["app", "bin-bundle-dir"] {
+            // Falls through to `nix build` in a repo dir that does not exist,
+            // which fails — proving the skip did not fire.
+            assert!(
+                build_basecamp_app(
+                    tmp.path(),
+                    &tmp.path().join("missing"),
+                    attr,
+                    &out_dir,
+                    true
+                )
+                .is_err(),
+                "attr={attr} must not reuse the existing link"
+            );
+        }
+    }
+
+    #[test]
+    fn basecamp_comm_candidates_map_an_appimage_onto_the_bundled_launcher() {
+        let candidates = basecamp_comm_candidates("/r/logos-basecamp.AppImage");
+        for expected in ["LogosBasecamp", ".LogosBasecamp", ".LogosBasecamp."] {
+            assert!(
+                candidates.iter().any(|c| c == expected),
+                "{expected} missing from {candidates:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_basecamp_app_skips_nix_when_the_pinned_result_already_resolves() {
+        let tmp = tempdir().expect("tempdir");
+        let store = tmp.path().join("store-output");
+        touch_exe(&store, "bin/LogosBasecamp");
+        let out_dir = tmp.path().join("pin");
+        fs::create_dir_all(&out_dir).unwrap();
+        std::os::unix::fs::symlink(&store, out_dir.join("app-result")).unwrap();
+        // No nix involved: the repo path does not even exist.
+        let bin = build_basecamp_app(
+            tmp.path(),
+            &tmp.path().join("missing"),
+            "app",
+            &out_dir,
+            true,
+        )
+        .expect("an existing result for an immutable pin must be reused");
+        assert_eq!(bin, out_dir.join("app-result/bin/LogosBasecamp"));
+    }
+
+    #[test]
+    fn is_commit_sha_accepts_only_full_hex_ids() {
+        assert!(is_commit_sha(DEFAULT_BASECAMP_PIN));
+        assert!(!is_commit_sha("0.3.0"));
+        assert!(!is_commit_sha("master"));
+        assert!(!is_commit_sha(&DEFAULT_BASECAMP_PIN[..12]));
+    }
+
+    #[test]
+    fn count_installed_modules_ignores_lgpm_staging_dirs() {
+        let tmp = tempdir().expect("tempdir");
+        let profile_dir = tmp.path().join("alice");
+        let modules = profile_module_root(&profile_dir, None).join(BASECAMP_BASE_DIR_MODULES);
+        for dir in ["mymod", ".lgpm-staging-1234", ".lgpm-retired-5678"] {
+            fs::create_dir_all(modules.join(dir)).unwrap();
+        }
+        assert_eq!(count_installed_modules(&profile_dir, None), 1);
+    }
+
     /// The dev stack loads `<host>-dev` variants and the portable stack bare
     /// `<host>` ones; installing across that line fails at extraction.
     #[test]
@@ -4393,30 +4951,6 @@ mod tests {
         }
     }
 
-    /// Both data-tree override keys, in the order `launch` writes them. Only
-    /// the macOS portable stack gets both; every other host/stack gets
-    /// `LOGOS_USER_DIR` alone (see the `launch` call site).
-    const MODULE_ROOT_KEYS: &[&str] = &[
-        BASECAMP_MODULE_ROOT_ENV_VAR_USER_DIR,
-        BASECAMP_MODULE_ROOT_ENV_VAR_DATA_DIR,
-    ];
-
-    /// Test-only mirror of `launch`'s macOS-portable branch: apply the per-key
-    /// finalizer to both generations' keys. The keys are deliberately gated
-    /// separately in production, so this helper exists to keep the transform's
-    /// own contract (defaulting, absolutizing, empty-as-unset, no cross-key
-    /// leakage) under test independently of that gating.
-    fn set_absolute_basecamp_data_dirs(
-        env: &mut BTreeMap<String, OsString>,
-        project_root: &Path,
-        profile_dir: &Path,
-        basecamp_repo: Option<&RepoRef>,
-    ) {
-        for key in MODULE_ROOT_KEYS {
-            set_absolute_module_root_var(env, key, project_root, profile_dir, basecamp_repo);
-        }
-    }
-
     #[test]
     fn is_portable_basecamp_picks_known_portable_attrs() {
         assert!(!is_portable_basecamp(None));
@@ -4444,54 +4978,49 @@ mod tests {
     }
 
     #[test]
-    fn set_absolute_basecamp_data_dirs_defaults_both_keys_to_profile_module_root_when_unset() {
+    fn set_module_root_env_defaults_to_profile_module_root_when_unset() {
         let portable = repo_with_attr("bin-macos-app");
         let project_root = Path::new("/abs/project");
         let profile_dir = project_root
             .join(".scaffold/basecamp/profiles")
             .join("alice");
         let mut env: BTreeMap<String, OsString> = BTreeMap::new();
-        set_absolute_basecamp_data_dirs(&mut env, project_root, &profile_dir, Some(&portable));
+        set_module_root_env(&mut env, project_root, &profile_dir, Some(&portable));
         let expected = profile_dir
             .join("xdg-data")
             .join(BASECAMP_XDG_APP_SUBPATH_PORTABLE);
-        // 0.1.x reads LOGOS_DATA_DIR, 0.2.x reads LOGOS_USER_DIR; both must
-        // point at the same profile module root for the launch to be
-        // pin-agnostic.
-        assert_eq!(
-            env.get("LOGOS_DATA_DIR").map(PathBuf::from),
-            Some(expected.clone())
-        );
         assert_eq!(env.get("LOGOS_USER_DIR").map(PathBuf::from), Some(expected));
     }
 
+    /// Basecamp 0.1.x read `LOGOS_DATA_DIR`; scaffold supports only 0.3.0,
+    /// which never reads it, so `launch` must not invent one.
     #[test]
-    fn set_absolute_basecamp_data_dirs_absolutizes_relative_logos_data_dir() {
-        let portable = repo_with_attr("bin-macos-app");
+    fn set_module_root_env_does_not_export_the_retired_data_dir_key() {
         let project_root = Path::new("/abs/project");
         let profile_dir = project_root.join("profiles/alice");
-        let mut env: BTreeMap<String, OsString> = BTreeMap::new();
-        // A relative value (e.g. from [basecamp.profiles.<name>.env]) loads the
-        // backend modules but breaks @rpath resolution of the UI dylibs.
-        env.insert("LOGOS_DATA_DIR".into(), OsString::from("custom/data"));
-        set_absolute_basecamp_data_dirs(&mut env, project_root, &profile_dir, Some(&portable));
-        assert_eq!(
-            env.get("LOGOS_DATA_DIR").map(PathBuf::from),
-            Some(project_root.join("custom/data"))
-        );
+        for attr in ["app", "bin-macos-app", "bin-appimage", "bin-bundle-dir"] {
+            let mut env: BTreeMap<String, OsString> = BTreeMap::new();
+            set_module_root_env(
+                &mut env,
+                project_root,
+                &profile_dir,
+                Some(&repo_with_attr(attr)),
+            );
+            assert!(!env.contains_key("LOGOS_DATA_DIR"), "attr={attr}");
+        }
     }
 
     #[test]
-    fn set_absolute_basecamp_data_dirs_absolutizes_relative_logos_user_dir() {
+    fn set_module_root_env_absolutizes_relative_logos_user_dir() {
         let portable = repo_with_attr("bin-macos-app");
         let project_root = Path::new("/abs/project");
         let profile_dir = project_root.join("profiles/alice");
         let mut env: BTreeMap<String, OsString> = BTreeMap::new();
-        // Basecamp 0.2.x consumes the LOGOS_USER_DIR env var verbatim (only
-        // the --user-dir flag is absolutized app-side), so a relative value
-        // would scatter state under the app's cwd.
+        // Basecamp consumes the LOGOS_USER_DIR env var verbatim (only the
+        // --user-dir flag is absolutized app-side), so a relative value would
+        // scatter state under the app's cwd.
         env.insert("LOGOS_USER_DIR".into(), OsString::from("custom/user"));
-        set_absolute_basecamp_data_dirs(&mut env, project_root, &profile_dir, Some(&portable));
+        set_module_root_env(&mut env, project_root, &profile_dir, Some(&portable));
         assert_eq!(
             env.get("LOGOS_USER_DIR").map(PathBuf::from),
             Some(project_root.join("custom/user"))
@@ -4499,18 +5028,13 @@ mod tests {
     }
 
     #[test]
-    fn set_absolute_basecamp_data_dirs_leaves_absolute_caller_values_untouched() {
+    fn set_module_root_env_leaves_absolute_caller_value_untouched() {
         let portable = repo_with_attr("bin-macos-app");
         let project_root = Path::new("/abs/project");
         let profile_dir = project_root.join("profiles/alice");
         let mut env: BTreeMap<String, OsString> = BTreeMap::new();
-        env.insert("LOGOS_DATA_DIR".into(), OsString::from("/somewhere/else"));
         env.insert("LOGOS_USER_DIR".into(), OsString::from("/another/place"));
-        set_absolute_basecamp_data_dirs(&mut env, project_root, &profile_dir, Some(&portable));
-        assert_eq!(
-            env.get("LOGOS_DATA_DIR").map(PathBuf::from),
-            Some(PathBuf::from("/somewhere/else"))
-        );
+        set_module_root_env(&mut env, project_root, &profile_dir, Some(&portable));
         assert_eq!(
             env.get("LOGOS_USER_DIR").map(PathBuf::from),
             Some(PathBuf::from("/another/place"))
@@ -4518,128 +5042,52 @@ mod tests {
     }
 
     #[test]
-    fn set_absolute_basecamp_data_dirs_treats_empty_caller_values_as_unset() {
+    fn set_module_root_env_treats_empty_caller_value_as_unset() {
         let portable = repo_with_attr("bin-macos-app");
         let project_root = Path::new("/abs/project");
         let profile_dir = project_root.join("profiles/alice");
         let mut env: BTreeMap<String, OsString> = BTreeMap::new();
-        // An empty value (e.g. `LOGOS_DATA_DIR = ""` in [basecamp.env]) would
+        // An empty value (e.g. `LOGOS_USER_DIR = ""` in [basecamp.env]) would
         // absolutize to the project root itself, which is not a module root;
         // it must fall back to the profile default instead.
-        env.insert("LOGOS_DATA_DIR".into(), OsString::new());
-        env.insert("LOGOS_USER_DIR".into(), OsString::new());
-        set_absolute_basecamp_data_dirs(&mut env, project_root, &profile_dir, Some(&portable));
+        env.insert("LOGOS_USER_DIR".into(), OsString::from("  "));
+        set_module_root_env(&mut env, project_root, &profile_dir, Some(&portable));
         let expected = profile_dir
             .join("xdg-data")
             .join(BASECAMP_XDG_APP_SUBPATH_PORTABLE);
-        assert_eq!(
-            env.get("LOGOS_DATA_DIR").map(PathBuf::from),
-            Some(expected.clone())
-        );
         assert_eq!(env.get("LOGOS_USER_DIR").map(PathBuf::from), Some(expected));
     }
 
+    /// `LOGOS_USER_DIR` is what makes per-profile isolation work on a host
+    /// whose `QStandardPaths::AppDataLocation` ignores `XDG_DATA_HOME`
+    /// (macOS). It therefore has to be written for every stack: without it
+    /// `alice` and `bob` both load
+    /// `~/Library/Application Support/Logos/LogosBasecamp[Dev]`.
     #[test]
-    fn set_absolute_basecamp_data_dirs_handles_each_key_independently() {
-        let portable = repo_with_attr("bin-macos-app");
+    fn set_module_root_env_always_exports_user_dir_whatever_the_stack() {
         let project_root = Path::new("/abs/project");
         let profile_dir = project_root.join("profiles/alice");
-        let mut env: BTreeMap<String, OsString> = BTreeMap::new();
-        // Only one key overridden (relative): it must be absolutized while the
-        // other still gets the profile default — no cross-key leakage.
-        env.insert("LOGOS_USER_DIR".into(), OsString::from("custom/user"));
-        set_absolute_basecamp_data_dirs(&mut env, project_root, &profile_dir, Some(&portable));
-        assert_eq!(
-            env.get("LOGOS_USER_DIR").map(PathBuf::from),
-            Some(project_root.join("custom/user"))
-        );
-        assert_eq!(
-            env.get("LOGOS_DATA_DIR").map(PathBuf::from),
-            Some(
-                profile_dir
-                    .join("xdg-data")
-                    .join(BASECAMP_XDG_APP_SUBPATH_PORTABLE)
-            )
-        );
-    }
-
-    /// `LOGOS_USER_DIR` is basecamp 0.2.x's only data-tree override, and it is
-    /// what makes per-profile isolation work on a host whose
-    /// `QStandardPaths::AppDataLocation` ignores `XDG_DATA_HOME`. It therefore
-    /// has to be written for every stack, not just the portable one: 0.2.x
-    /// installs a CLI-invocable launcher for the dev `.#app` build on macOS
-    /// too, and without the key `alice` and `bob` both load
-    /// `~/Library/Application Support/Logos/LogosBasecampDev`.
-    #[test]
-    fn set_module_root_env_always_exports_user_dir_whatever_the_stack_or_host() {
-        let project_root = Path::new("/abs/project");
-        let profile_dir = project_root.join("profiles/alice");
-        for host_is_macos in [true, false] {
-            for attr in ["app", "bin-macos-app", "bin-appimage", ""] {
-                let repo = repo_with_attr(attr);
-                let mut env: BTreeMap<String, OsString> = BTreeMap::new();
-                set_module_root_env(
-                    &mut env,
-                    project_root,
-                    &profile_dir,
-                    Some(&repo),
-                    host_is_macos,
-                );
-                let exported = env
-                    .get(BASECAMP_MODULE_ROOT_ENV_VAR_USER_DIR)
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| {
-                        panic!("LOGOS_USER_DIR must be set (macos={host_is_macos}, attr={attr})")
-                    });
-                assert_eq!(
-                    exported,
-                    profile_module_root(&profile_dir, Some(&repo)),
-                    "LOGOS_USER_DIR must point at this profile's module root \
-                     (macos={host_is_macos}, attr={attr})"
-                );
-            }
-        }
-    }
-
-    /// `LOGOS_DATA_DIR` is the 0.1.x name and stays on the narrow gate it was
-    /// introduced for. Writing it elsewhere is not free: it would also start
-    /// absolutizing relative `LOGOS_DATA_DIR` values from `[basecamp.env]` on
-    /// hosts where the key is inert.
-    #[test]
-    fn set_module_root_env_exports_data_dir_only_on_the_macos_portable_stack() {
-        let project_root = Path::new("/abs/project");
-        let profile_dir = project_root.join("profiles/alice");
-        let cases = [
-            (true, "bin-macos-app", true),
-            (true, "app", false),
-            (false, "bin-appimage", false),
-            (false, "app", false),
-        ];
-        for (host_is_macos, attr, expected) in cases {
+        for attr in ["app", "bin-macos-app", "bin-appimage", ""] {
             let repo = repo_with_attr(attr);
             let mut env: BTreeMap<String, OsString> = BTreeMap::new();
-            set_module_root_env(
-                &mut env,
-                project_root,
-                &profile_dir,
-                Some(&repo),
-                host_is_macos,
-            );
+            set_module_root_env(&mut env, project_root, &profile_dir, Some(&repo));
+            let exported = env
+                .get(BASECAMP_MODULE_ROOT_ENV_VAR_USER_DIR)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| panic!("LOGOS_USER_DIR must be set (attr={attr})"));
             assert_eq!(
-                env.contains_key(BASECAMP_MODULE_ROOT_ENV_VAR_DATA_DIR),
-                expected,
-                "LOGOS_DATA_DIR presence wrong for macos={host_is_macos}, attr={attr}"
+                exported,
+                profile_module_root(&profile_dir, Some(&repo)),
+                "LOGOS_USER_DIR must point at this profile's module root (attr={attr})"
             );
         }
     }
 
-    /// Basecamp 0.2.x consumes `LOGOS_USER_DIR` as the *base* directory and
-    /// appends `modules/` and `plugins/` to it — so the exported value has to
-    /// sit at exactly the depth `basecamp install` writes into, not one level
-    /// above or below it. Every other `set_absolute_basecamp_data_dirs_*` test
-    /// asserts the two keys are *equal*, which would not notice a value at the
-    /// wrong depth: both keys move together, and the profile would load zero
-    /// project modules while the suite stayed green.
+    /// Basecamp consumes `LOGOS_USER_DIR` as the *base* directory and appends
+    /// `modules/` and `plugins/` to it — so the exported value has to sit at
+    /// exactly the depth `basecamp install` writes into, not one level above
+    /// or below it; otherwise the profile loads zero project modules while
+    /// every other test stays green.
     ///
     /// Two independent things are pinned here, and they need different kinds of
     /// assertion because they are different kinds of contract:
@@ -4647,56 +5095,48 @@ mod tests {
     ///   * **Exporter vs. installer** — the exported value must be the parent of
     ///     the dirs `basecamp install` writes into. Both sides route through
     ///     `basecamp_xdg_subpath`, so this catches a depth change in
-    ///     `set_absolute_module_root_var`'s join chain alone (either direction),
-    ///     which is the drift scaffold can introduce on its own.
-    ///   * **The shared value itself** — `Logos/LogosBasecamp` is basecamp
-    ///     0.2.x's `LogosBasecampPaths.h::baseDirectory()`, not something
-    ///     scaffold chooses. Because the exported path is *derived from*
+    ///     `set_module_root_env`'s join chain alone (either direction), which
+    ///     is the drift scaffold can introduce on its own.
+    ///   * **The shared value itself** — `Logos/LogosBasecamp` is basecamp's
+    ///     `LogosBasecampPaths.h::baseDirectory()`, not something scaffold
+    ///     chooses. Because the exported path is *derived from*
     ///     `BASECAMP_XDG_APP_SUBPATH_PORTABLE`, only a literal can pin it —
     ///     asserting against the constant co-moves with the edit it is meant to
     ///     catch and passes for `Logos/LogosBasecamp/WRONG_DEPTH`.
     #[test]
-    fn set_absolute_basecamp_data_dirs_defaults_to_the_dir_install_writes_into() {
+    fn set_module_root_env_defaults_to_the_dir_install_writes_into() {
         let portable = repo_with_attr("bin-macos-app");
         let project_root = Path::new("/abs/project");
         let profiles_root = project_root.join(BASECAMP_PROFILES_REL);
         let profile_dir = profiles_root.join(BASECAMP_PROFILE_ALICE);
         let mut env: BTreeMap<String, OsString> = BTreeMap::new();
-        set_absolute_basecamp_data_dirs(&mut env, project_root, &profile_dir, Some(&portable));
+        set_module_root_env(&mut env, project_root, &profile_dir, Some(&portable));
 
         let (modules_dir, plugins_dir) =
             profile_modules_and_plugins(&profiles_root, BASECAMP_PROFILE_ALICE, Some(&portable));
-        for key in MODULE_ROOT_KEYS {
-            let exported = env
-                .get(*key)
-                .map(PathBuf::from)
-                .unwrap_or_else(|| panic!("{key} must be exported"));
-            assert_eq!(
-                modules_dir.parent(),
-                Some(exported.as_path()),
-                "{key} must be the parent of the modules dir install writes into"
-            );
-            assert_eq!(
-                plugins_dir.parent(),
-                Some(exported.as_path()),
-                "{key} must be the parent of the plugins dir install writes into"
-            );
-            // Literal, not `BASECAMP_XDG_APP_SUBPATH_PORTABLE`. `exported` is
-            // built *from* that constant via `basecamp_xdg_subpath`, so
-            // asserting against the constant moves in lockstep with the value
-            // it is meant to pin: setting it to `Logos/LogosBasecamp/WRONG_DEPTH`
-            // keeps this assertion — and the whole suite — green. The depth is
-            // basecamp 0.2.x's own `LogosBasecampPaths.h::baseDirectory()`, an
-            // upstream contract scaffold does not get to choose, so the
-            // expectation has to be spelled out rather than derived.
-            assert!(
-                exported.ends_with("Logos/LogosBasecamp"),
-                "{key} must end in Logos/LogosBasecamp (basecamp 0.2.x's own \
-                 baseDirectory()); changing this is an upstream-contract change, \
-                 got: {}",
-                exported.display()
-            );
-        }
+        let exported = env
+            .get(BASECAMP_MODULE_ROOT_ENV_VAR_USER_DIR)
+            .map(PathBuf::from)
+            .expect("LOGOS_USER_DIR must be exported");
+        assert_eq!(
+            modules_dir.parent(),
+            Some(exported.as_path()),
+            "LOGOS_USER_DIR must be the parent of the modules dir install writes into"
+        );
+        assert_eq!(
+            plugins_dir.parent(),
+            Some(exported.as_path()),
+            "LOGOS_USER_DIR must be the parent of the plugins dir install writes into"
+        );
+        // Literal, not `BASECAMP_XDG_APP_SUBPATH_PORTABLE`: `exported` is built
+        // *from* that constant, so asserting against it would move in lockstep
+        // with the value it is meant to pin.
+        assert!(
+            exported.ends_with("Logos/LogosBasecamp"),
+            "LOGOS_USER_DIR must end in Logos/LogosBasecamp (basecamp's own \
+             baseDirectory()); changing this is an upstream-contract change, got: {}",
+            exported.display()
+        );
     }
 
     #[test]
@@ -5384,11 +5824,16 @@ mod tests {
     fn basecamp_comm_candidates_truncate_to_15_bytes_like_proc_comm() {
         assert_eq!(
             basecamp_comm_candidates("/nix/store/xyz/bin/basecamp"),
-            vec!["basecamp".to_string(), ".basecamp".to_string()]
+            vec![
+                "basecamp".to_string(),
+                ".basecamp".to_string(),
+                ".basecamp.elf".to_string()
+            ]
         );
-        // Both the name and its dotted twin are truncated independently, so the
+        // The name and each hidden twin are truncated independently, so the
         // dot costs one character of the 15-byte budget exactly like the kernel
-        // would charge it.
+        // would charge it — and two twins that collide after truncation are
+        // one candidate.
         assert_eq!(
             basecamp_comm_candidates("/x/extremely-long-binary-name"),
             vec!["extremely-long-".to_string(), ".extremely-long".to_string()]
@@ -5401,42 +5846,22 @@ mod tests {
         fs::write(&p, "#!/bin/sh\n").expect("write");
     }
 
-    /// Neither generation wraps the Qt app itself, so the launcher script is
-    /// what exports `QT_PLUGIN_PATH` / `QML2_IMPORT_PATH` / `LD_LIBRARY_PATH`.
-    /// The generations disagree on its *name*, and each one's launcher name is
-    /// the other one's raw binary:
-    ///
-    ///   * 0.1.x `#app` ships `bin/logos-basecamp` (launcher) **and**
-    ///     `bin/LogosBasecamp` (the unwrapped binary).
-    ///   * 0.2.x `#app` ships no `bin/logos-basecamp` at all; there
-    ///     `bin/LogosBasecamp` *is* the launcher.
-    ///
-    /// So `bin/logos-basecamp` has to be probed first. It cannot shadow a 0.2.x
-    /// build (it does not exist there), and demoting it silently picks 0.1.x's
-    /// unwrapped binary — an app launched with no Qt environment, which fails
-    /// to find its platform plugin rather than failing here where we could say
-    /// why.
+    /// Basecamp's dev build does not wrap the Qt app itself: `bin/LogosBasecamp`
+    /// is the launcher that exports `QT_PLUGIN_PATH` / `QML2_IMPORT_PATH` /
+    /// `LD_LIBRARY_PATH` and execs the hidden `bin/.LogosBasecamp`. Selecting the
+    /// hidden binary directly starts an app with no Qt environment.
     #[test]
-    fn resolve_basecamp_binary_prefers_each_generations_qt_launcher() {
-        // 0.1.x: both names present, launcher must win.
-        let v01 = tempdir().expect("tempdir");
-        touch_exe(v01.path(), "bin/logos-basecamp");
-        touch_exe(v01.path(), "bin/LogosBasecamp");
+    fn resolve_basecamp_binary_picks_the_entry_point_of_each_stack() {
+        // Dev `#app` and Linux portable `#bin-bundle-dir`: the launcher, never
+        // the hidden binary it execs.
+        let dev = tempdir().expect("tempdir");
+        touch_exe(dev.path(), "bin/LogosBasecamp");
+        touch_exe(dev.path(), "bin/.LogosBasecamp");
+        touch_exe(dev.path(), "bin/.LogosBasecamp.elf");
         assert_eq!(
-            resolve_basecamp_binary(v01.path()).expect("0.1.x resolves"),
-            v01.path().join("bin/logos-basecamp"),
-            "0.1.x must launch through its `logos-basecamp` launcher, not the raw binary"
-        );
-
-        // 0.2.x dev: no `logos-basecamp`; `LogosBasecamp` is itself the wrapper
-        // and the hidden `.LogosBasecamp` must never be selected directly.
-        let v02 = tempdir().expect("tempdir");
-        touch_exe(v02.path(), "bin/LogosBasecamp");
-        touch_exe(v02.path(), "bin/.LogosBasecamp");
-        assert_eq!(
-            resolve_basecamp_binary(v02.path()).expect("0.2.x resolves"),
-            v02.path().join("bin/LogosBasecamp"),
-            "0.2.x must launch the wrapper that execs the hidden binary"
+            resolve_basecamp_binary(dev.path()).expect("dev resolves"),
+            dev.path().join("bin/LogosBasecamp"),
+            "must launch the wrapper that execs the hidden binary"
         );
 
         // macOS portable bundle: only the `.app` payload exists.
@@ -5448,12 +5873,23 @@ mod tests {
                 .join("LogosBasecamp.app/Contents/MacOS/LogosBasecamp"),
         );
 
-        // Nothing recognisable: a named error, not a silent empty path.
+        // `#bin-appimage`: a single AppImage at the output root, no `bin/`.
+        let appimage = tempdir().expect("tempdir");
+        touch_exe(appimage.path(), "logos-basecamp.AppImage");
+        assert_eq!(
+            resolve_basecamp_binary(appimage.path()).expect("appimage resolves"),
+            appimage.path().join("logos-basecamp.AppImage"),
+        );
+
+        // Nothing recognisable: a named error, not a silent empty path. The
+        // 0.1.x launcher name is no longer an entry point scaffold knows.
         let empty = tempdir().expect("tempdir");
-        assert!(resolve_basecamp_binary(empty.path()).is_err());
+        touch_exe(empty.path(), "bin/logos-basecamp");
+        let err = resolve_basecamp_binary(empty.path()).expect_err("0.1.x layout is unsupported");
+        assert!(err.to_string().contains("bin/LogosBasecamp"), "got: {err}");
     }
 
-    /// Basecamp 0.2.x's dev build installs `bin/LogosBasecamp` as a shell
+    /// Basecamp's dev build installs `bin/LogosBasecamp` as a shell
     /// wrapper that `exec`s the hidden `bin/.LogosBasecamp`, so the process
     /// `launch` records reports the dotted name even though we execed the
     /// undotted path. Matching only the resolved basename makes
@@ -5475,29 +5911,20 @@ mod tests {
         );
     }
 
-    /// The 0.1.x launcher renames rather than dot-hides: `bin/logos-basecamp`
-    /// execs `bin/LogosBasecamp`, so the live process reports a name sharing no
-    /// prefix with the path `launch` execed. The dotted-twin rule cannot reach
-    /// it, and without the mapping `pid_comm_matches` never matches — `launch`
-    /// skips the kill and a 0.1.x-pinned project silently accumulates a second
-    /// instance on the same profile.
+    /// The Linux portable bundle's launcher execs `bin/.LogosBasecamp.elf`, which
+    /// the kernel reports as `.LogosBasecamp.` (15 bytes). Missing it made
+    /// `launch` skip the kill on every portable-stack relaunch.
     #[test]
-    fn basecamp_comm_candidates_cover_the_0_1_x_launcher_rename() {
-        let candidates = basecamp_comm_candidates("/nix/store/xyz/bin/logos-basecamp");
+    fn basecamp_comm_candidates_cover_the_portable_bundle_elf() {
+        let candidates = basecamp_comm_candidates("/nix/store/xyz/bin/LogosBasecamp");
         assert!(
-            candidates.iter().any(|c| c == "LogosBasecamp"),
-            "the 0.1.x launcher's exec target must be a candidate, got: {candidates:?}"
+            candidates.iter().any(|c| c == ".LogosBasecamp."),
+            "the bundle's hidden .elf must be a candidate, got: {candidates:?}"
         );
+        let from_elf = basecamp_comm_candidates("/nix/store/xyz/bin/.LogosBasecamp.elf");
         assert!(
-            candidates.iter().any(|c| c == "logos-basecamp"),
-            "the launcher's own name must stay a candidate, got: {candidates:?}"
-        );
-        // The mapping is one-directional and name-specific: an unrelated binary
-        // must not inherit basecamp's exec target.
-        let unrelated = basecamp_comm_candidates("/x/some-other-app");
-        assert!(
-            !unrelated.iter().any(|c| c == "LogosBasecamp"),
-            "mapping must not leak onto unrelated names, got: {unrelated:?}"
+            from_elf.iter().any(|c| c == "LogosBasecamp"),
+            "the launcher name must be a candidate, got: {from_elf:?}"
         );
     }
 
@@ -5831,6 +6258,34 @@ mod tests {
 
     // ---- resolve_sibling_overrides (I1 fix) — exercised via the command paths;
     //      a focused test pins the helper's Path-source short-circuit ----
+
+    /// `basecamp build --module <ui>` builds one module, but that module's
+    /// `path:../<sibling>` inputs still need the sibling's override. With only
+    /// the selected module in the pool nix resolved `path:../minimal` inside
+    /// the store copy (`/nix/store/minimal/flake.nix ... forbidden in pure
+    /// evaluation mode`), so the pool must be every captured project module.
+    #[test]
+    fn sibling_overrides_need_the_unselected_sibling_in_the_pool() {
+        let tmp = tempdir().expect("tempdir");
+        let ui = tmp.path().join("ui");
+        let minimal = tmp.path().join("minimal");
+        fs::create_dir_all(&ui).unwrap();
+        fs::create_dir_all(&minimal).unwrap();
+        fs::write(
+            ui.join("flake.nix"),
+            "{ inputs = { minimal.url = \"path:../minimal\"; }; }\n",
+        )
+        .unwrap();
+        let ui_src = BasecampSource::Flake(format!("path:{}#lgx-portable", ui.display()));
+        let minimal_src = BasecampSource::Flake(format!("path:{}#lgx-portable", minimal.display()));
+        assert!(
+            sibling_overrides_for(&ui_src, std::slice::from_ref(&ui_src)).is_empty(),
+            "the selected module alone cannot supply its sibling"
+        );
+        let overrides = sibling_overrides_for(&ui_src, &[minimal_src, ui_src.clone()]);
+        assert_eq!(overrides.len(), 1, "{overrides:?}");
+        assert_eq!(overrides[0].0, "minimal");
+    }
 
     #[test]
     fn resolve_sibling_overrides_returns_empty_for_isolated_flake() {
@@ -6251,11 +6706,63 @@ mod tests {
         let tmp = tempdir().expect("tempdir");
         seed_module_metadata(tmp.path(), "mymod", &["delivery_module", "storage_module"]);
         let src = BasecampSource::Flake(format!("path:{}#lgx", tmp.path().display()));
-        let deps = read_source_metadata_dependencies(&src);
+        let deps: Vec<String> = read_source_metadata_dependencies(&src)
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
         assert_eq!(
             deps,
             vec!["delivery_module".to_string(), "storage_module".to_string()]
         );
+    }
+
+    /// Basecamp 0.3.0 accepts `{name, version, signer}` objects next to plain
+    /// names, and an `optional_dependencies` list. Reading strings only would
+    /// silently drop the object entries and never capture their flakes.
+    #[test]
+    fn read_source_metadata_dependencies_reads_object_and_optional_entries() {
+        let tmp = tempdir().expect("tempdir");
+        let metadata = serde_json::json!({
+            "name": "mymod",
+            "dependencies": [
+                "delivery_module",
+                {"name": "storage_module", "version": ">=0.3.0"},
+                {"version": "1.0.0"},
+            ],
+            "optional_dependencies": ["liblogos_rln_module", {"name": "delivery_module"}],
+        });
+        fs::write(tmp.path().join("metadata.json"), metadata.to_string()).unwrap();
+        let src = BasecampSource::Flake(format!("path:{}#lgx", tmp.path().display()));
+        let deps = read_source_metadata_dependencies(&src);
+        let dep = |name: &str, optional: bool| DeclaredDependency {
+            name: name.to_string(),
+            optional,
+        };
+        assert_eq!(
+            deps,
+            vec![
+                dep("delivery_module", false),
+                dep("storage_module", false),
+                dep("liblogos_rln_module", true),
+            ],
+            "nameless entries are skipped and a required name is not re-added as optional"
+        );
+    }
+
+    #[test]
+    fn resolve_manifest_dependencies_skips_unresolvable_optional_deps() {
+        let tmp = tempdir().expect("tempdir");
+        let metadata = serde_json::json!({
+            "name": "mymod",
+            "dependencies": ["delivery_module"],
+            "optional_dependencies": ["no_such_module"],
+        });
+        fs::write(tmp.path().join("metadata.json"), metadata.to_string()).unwrap();
+        let src = BasecampSource::Flake(format!("path:{}#lgx", tmp.path().display()));
+        let added = resolve_manifest_dependencies(&[src], &BTreeMap::new())
+            .expect("an unresolvable optional dep must not fail capture");
+        assert!(added.contains_key("delivery_module"));
+        assert!(!added.contains_key("no_such_module"));
     }
 
     #[test]
@@ -6314,17 +6821,19 @@ mod tests {
         );
     }
 
-    /// The bundled set is basecamp's, and it changed with the 0.2.x pin:
-    /// `package_downloader` joined it (`main_ui` declares it as a dependency,
-    /// so every project that pulls the shell UI in transitively meets it), and
-    /// `main_ui` itself is the upstream `metadata.json` name — scaffold's list
-    /// carried `basecamp_main_ui`, which never matched anything. Both names
-    /// have to be skipped or `basecamp modules` goes hunting for a flake ref
-    /// that does not exist and fails the capture.
+    /// The bundled set is basecamp's, and it changes with the release: 0.3.0
+    /// folded `main_ui` into the app and added `modules_state`, the module
+    /// lifecycle registry. Every bundled name has to be skipped or
+    /// `basecamp modules` goes hunting for a flake ref that does not exist and
+    /// fails the capture.
     #[test]
-    fn resolve_manifest_dependencies_skips_the_0_2_x_bundled_module_names() {
+    fn resolve_manifest_dependencies_skips_the_0_3_0_bundled_module_names() {
         let tmp = tempdir().expect("tempdir");
-        seed_module_metadata(tmp.path(), "mymod", &["package_downloader", "main_ui"]);
+        seed_module_metadata(
+            tmp.path(),
+            "mymod",
+            &["package_downloader", "modules_state", "capability_module"],
+        );
         let project = BasecampSource::Flake(format!("path:{}#lgx", tmp.path().display()));
         let new_entries =
             resolve_manifest_dependencies(&[project], &std::collections::BTreeMap::new())
@@ -6338,8 +6847,8 @@ mod tests {
 
     /// The default companion pin is not free to float: the `lgpm` rev in
     /// `DEFAULT_LGPM_PIN` validates Merkle content hashes on install, which
-    /// only packages built by `logos-module-builder` 0.2.x / `nix-bundle-lgx`
-    /// carry. A ref without the `#lgx` fragment would also break the resolver,
+    /// only packages built by `logos-module-builder` 0.2.x or later /
+    /// `nix-bundle-lgx` carry. A ref without the `#lgx` fragment would also break the resolver,
     /// which builds the attr as given.
     #[test]
     fn default_delivery_module_ref_targets_the_lgx_output_at_a_pinned_rev() {
