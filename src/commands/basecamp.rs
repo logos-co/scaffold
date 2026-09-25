@@ -18,7 +18,7 @@ use crate::constants::{
     BASECAMP_PROFILE_ALICE, BASECAMP_PROFILE_BOB, BASECAMP_SOURCE, BASECAMP_XDG_APP_SUBPATH_DEV,
     BASECAMP_XDG_APP_SUBPATH_PORTABLE, DEFAULT_BASECAMP_PIN, DEFAULT_BASECAMP_RELEASE,
     DEFAULT_LGPM_PIN, LGPM_ATTR, LGPM_ATTR_PORTABLE, LGPM_SOURCE, RETIRED_BASECAMP_PIN_SETS,
-    RETIRED_DEPENDENCY_FLAKES,
+    RETIRED_DEPENDENCY_FLAKES, RETIRED_PREINSTALLED_MODULES,
 };
 use crate::model::{
     BasecampConfig, BasecampSource, BasecampState, ModuleEntry, ModuleRole, Project, RepoBuild,
@@ -220,12 +220,13 @@ fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
         .to_string();
     }
 
-    for moved in upgrade_retired_pins(
-        &mut basecamp_repo,
-        &mut lgpm_repo,
-        &mut project.config.modules,
-    ) {
-        println!("{moved}");
+    // Persist the rewrite before anything slow can fail, then report it: the
+    // `old -> new` lines must describe `scaffold.toml` as it is, not as it
+    // would be had the builds below succeeded. If a build then fails, the
+    // project sits on the new pins with the old binaries, which is exactly
+    // what the stale-setup guard in `install` / `launch` / `doctor` reports.
+    for line in persist_retired_pin_upgrade(&mut project, &mut basecamp_repo, &mut lgpm_repo)? {
+        println!("{line}");
     }
 
     let (cache_root, _) = resolve_cache_root(&project)?;
@@ -395,7 +396,7 @@ fn retired_pin_status(basecamp_repo: &RepoRef, lgpm_repo: &RepoRef) -> RetiredPi
 /// together (see [`retired_pin_status`]), and a captured default companion
 /// flake from [`RETIRED_DEPENDENCY_FLAKES`] is rewritten only when basecamp
 /// ends up on the current default — the companion pins are built for it.
-/// Values a user chose are left as they are.
+/// Any value that is not exactly a retired default is left as it is.
 fn upgrade_retired_pins(
     basecamp_repo: &mut RepoRef,
     lgpm_repo: &mut RepoRef,
@@ -451,6 +452,28 @@ fn entry_point_matches_attr(bin: &Path, attr: &str) -> bool {
         "bin-macos-app" => is_macos_bundle,
         _ => !is_appimage && !is_macos_bundle,
     }
+}
+
+/// Run [`upgrade_retired_pins`] and, if anything moved, write `scaffold.toml`
+/// *before* returning the lines that announce it. `setup` builds afterwards,
+/// and a build can fail (the basecamp flake's evaluation alone needs ~5 GB of
+/// RAM): announcing `old -> new` and then dying unsaved would leave the user
+/// believing a rewrite happened that did not.
+fn persist_retired_pin_upgrade(
+    project: &mut Project,
+    basecamp_repo: &mut RepoRef,
+    lgpm_repo: &mut RepoRef,
+) -> DynResult<Vec<String>> {
+    let moved = upgrade_retired_pins(basecamp_repo, lgpm_repo, &mut project.config.modules);
+    if moved.is_empty() {
+        return Ok(moved);
+    }
+    project.config.basecamp_repo = Some(basecamp_repo.clone());
+    project.config.lgpm_repo = Some(lgpm_repo.clone());
+    save_project_config(project)?;
+    let mut lines = vec!["updated scaffold.toml off retired default pins:".to_string()];
+    lines.extend(moved.into_iter().map(|line| format!("  {line}")));
+    Ok(lines)
 }
 
 /// A full 40-hex git commit id. Only such a pin names immutable flake inputs;
@@ -2556,12 +2579,27 @@ fn resolve_manifest_dependencies(
     let mut new_entries: std::collections::BTreeMap<String, ModuleEntry> =
         std::collections::BTreeMap::new();
     let mut unresolved: Vec<(String, String)> = Vec::new();
+    let mut retired: Vec<(String, String, &str)> = Vec::new();
 
     for (name, (via, local_path, optional)) in declared {
         if captured.contains_key(&name) {
             continue;
         }
         if BASECAMP_PREINSTALLED_MODULES.iter().any(|m| *m == name) {
+            continue;
+        }
+        if let Some((_, why)) = RETIRED_PREINSTALLED_MODULES
+            .iter()
+            .find(|(m, _)| *m == name)
+        {
+            if optional {
+                println!(
+                    "note: optional dependency `{name}` (declared by `{via}`) is no longer a \
+                     basecamp package ({why}); skipping it."
+                );
+            } else {
+                retired.push((name, via, *why));
+            }
             continue;
         }
         if let Some(path) = &local_path {
@@ -2596,6 +2634,26 @@ fn resolve_manifest_dependencies(
             continue;
         }
         unresolved.push((name, via));
+    }
+
+    // A name an older basecamp bundled has no flake to capture and no rev to
+    // pin, so the generic fixes below would be dead ends; the fix is in the
+    // declaring module's own metadata.json.
+    if !retired.is_empty() {
+        let mut msg = String::from(
+            "module dependencies on packages basecamp no longer ships (declared in \
+             metadata.json):\n",
+        );
+        for (name, via, why) in &retired {
+            msg.push_str(&format!("  - `{name}` declared by `{via}`: {why}\n"));
+        }
+        msg.push_str(&format!(
+            "Remove them from `dependencies` in that module's metadata.json and rebuild it \
+             with `logos-module-builder` {DEFAULT_BASECAMP_RELEASE}.\n"
+        ));
+        msg.push_str(COMPAT_DOCS_BREADCRUMB);
+        msg.push('\n');
+        bail!("{msg}");
     }
 
     if !unresolved.is_empty() {
@@ -4675,6 +4733,66 @@ mod tests {
         let mut lgpm = default_lgpm_repo(DEFAULT_LGPM_PIN);
         upgrade_retired_pins(&mut basecamp, &mut lgpm, &mut BTreeMap::new());
         assert_eq!(basecamp.pin, DEFAULT_BASECAMP_PIN);
+    }
+
+    #[test]
+    fn persist_retired_pin_upgrade_writes_scaffold_toml_before_announcing() {
+        let tmp = tempdir().expect("tempdir");
+        let mut project = seed_basecamp_project(tmp.path());
+        let (_, retired_basecamp, retired_lgpm) = RETIRED_BASECAMP_PIN_SETS[0];
+        let mut basecamp = default_basecamp_repo(retired_basecamp);
+        let mut lgpm = default_lgpm_repo(retired_lgpm);
+        let lines =
+            persist_retired_pin_upgrade(&mut project, &mut basecamp, &mut lgpm).expect("persist");
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        // The file on disk already carries the new pins — no build ran.
+        let on_disk = load_project_at(tmp.path());
+        assert_eq!(
+            on_disk.config.basecamp_repo.unwrap().pin,
+            DEFAULT_BASECAMP_PIN
+        );
+        assert_eq!(on_disk.config.lgpm_repo.unwrap().pin, DEFAULT_LGPM_PIN);
+
+        // Nothing retired: nothing written, nothing announced.
+        let before = fs::read_to_string(tmp.path().join("scaffold.toml")).unwrap();
+        let lines =
+            persist_retired_pin_upgrade(&mut project, &mut basecamp, &mut lgpm).expect("persist");
+        assert!(lines.is_empty());
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("scaffold.toml")).unwrap(),
+            before
+        );
+    }
+
+    /// `main_ui` (and the 0.1.x examples) have no flake to capture and no rev
+    /// to pin, so the generic unresolved-dependency fixes would be dead ends.
+    #[test]
+    fn resolve_manifest_dependencies_names_the_fix_for_retired_bundled_modules() {
+        let tmp = tempdir().expect("tempdir");
+        seed_module_metadata(tmp.path(), "mymod", &["main_ui"]);
+        let src = BasecampSource::Flake(format!("path:{}#lgx", tmp.path().display()));
+        let err = resolve_manifest_dependencies(&[src], &BTreeMap::new())
+            .expect_err("a required retired module must fail capture")
+            .to_string();
+        assert!(
+            err.contains("`main_ui`") && err.contains("metadata.json"),
+            "{err}"
+        );
+        assert!(
+            !err.contains("basecamp modules --flake"),
+            "no dead-end fixes: {err}"
+        );
+
+        let tmp = tempdir().expect("tempdir");
+        let metadata = serde_json::json!({
+            "name": "mymod",
+            "optional_dependencies": ["counter_qml"],
+        });
+        fs::write(tmp.path().join("metadata.json"), metadata.to_string()).unwrap();
+        let src = BasecampSource::Flake(format!("path:{}#lgx", tmp.path().display()));
+        let added = resolve_manifest_dependencies(&[src], &BTreeMap::new())
+            .expect("an optional retired module is skipped, not fatal");
+        assert!(added.is_empty());
     }
 
     #[test]

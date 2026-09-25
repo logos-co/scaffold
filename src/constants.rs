@@ -281,13 +281,37 @@ pub(crate) const BASECAMP_PREINSTALLED_MODULES: &[&str] = &[
     "package_manager_ui",
 ];
 
+/// Module names earlier basecamp releases bundled that are no longer packages
+/// in the release scaffold supports, with why. A project module that still
+/// declares one as a dependency gets a targeted error from `basecamp modules`
+/// (no flake exists to capture) instead of the generic unresolved-dependency
+/// fixes; as an optional dependency it is skipped with a note.
+pub(crate) const RETIRED_PREINSTALLED_MODULES: &[(&str, &str)] = &[
+    (
+        "main_ui",
+        "basecamp 0.3.0 folded the shell UI into the app; it is not a package any more",
+    ),
+    (
+        "counter",
+        "basecamp 0.2.x stopped bundling this example module",
+    ),
+    (
+        "counter_qml",
+        "basecamp 0.2.x stopped bundling this example module",
+    ),
+    (
+        "webview_app",
+        "basecamp 0.2.x stopped bundling this example app",
+    ),
+];
+
 /// Default `(basecamp, lgpm)` pin pairs earlier scaffold releases wrote into
 /// `scaffold.toml` (`new` / `init` / `basecamp setup` persist the literal
 /// default). Scaffold supports only the release in [`DEFAULT_BASECAMP_PIN`],
 /// so `basecamp setup` moves a project still carrying one of these *exact*
-/// pairs to the current pair, and `basecamp doctor` warns until it has. A pair
-/// that matches neither side of a retired default is a deliberate user choice
-/// and is left alone.
+/// pairs to the current pair, and `basecamp doctor` warns until it has. The
+/// match is on revs, not provenance: a deliberate pin to one of these is moved
+/// too. A pair that matches neither side of a retired default is left alone.
 pub(crate) const RETIRED_BASECAMP_PIN_SETS: &[(&str, &str, &str)] = &[
     // (release label, basecamp pin, lgpm pin)
     (

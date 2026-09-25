@@ -188,8 +188,12 @@ never reaches an existing project. Scaffold therefore keeps a short table of
 the *retired defaults* it wrote (`RETIRED_BASECAMP_PIN_SETS`,
 `RETIRED_DEPENDENCY_FLAKES`): `basecamp setup` rewrites a value that is exactly
 one of them to the current default and prints each rewrite, and `basecamp
-doctor` warns until it has. Values a user chose are never touched — the table
-matches whole revs from scaffold's default source only.
+doctor` warns until it has. The line is drawn at rev equality, not intent:
+scaffold records no provenance, so a user who deliberately pins basecamp 0.2.3
+with its matching `lgpm` is indistinguishable from one an old default left
+behind, and both get moved (per the rejected alternative below, such a user
+stays on the scaffold release that shipped with 0.2.3). Any pin that is *not*
+exactly a retired default from scaffold's default source is left alone.
 
 Rejected alternative: keep the compat branches "because they are cheap". They
 were not: each one came with its own doc paragraph, test and DOGFOODING caveat,
