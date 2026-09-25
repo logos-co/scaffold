@@ -141,6 +141,13 @@ jobs:
       # rzup is risc0's toolchain manager; it registers a `risc0` rustup
       # toolchain that risc0-build then discovers.
       - name: Install Risc Zero toolchain
+        # rzup resolves each component through the GitHub releases API, which
+        # is rate-limited per source IP for unauthenticated callers — shared
+        # runner IPs hit it, and the step then dies with
+        # `api.github.com: API rate limit exceeded`. rzup reads GITHUB_TOKEN
+        # for exactly this reason.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # Download the official rzup installer to disk first rather than
