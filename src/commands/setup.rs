@@ -67,14 +67,14 @@ pub(crate) fn setup_for_project(project: &crate::model::Project, prebuilt: bool)
     };
 
     if !built_from_prebuilt {
-        let mut sequencer_cmd = Command::new("cargo");
+        let mut sequencer_cmd = dependency_cargo();
         sequencer_cmd.current_dir(&lez).args(SEQUENCER_BUILD_ARGS);
         run_checked(&mut sequencer_cmd, "build sequencer_service (standalone)")?;
     }
 
     // wallet is always built from source — prebuilt download only covers sequencer_service
     run_checked(
-        Command::new("cargo")
+        dependency_cargo()
             .current_dir(&lez)
             .arg("build")
             .arg("--release")
@@ -86,7 +86,7 @@ pub(crate) fn setup_for_project(project: &crate::model::Project, prebuilt: bool)
     sync_pinned_repo(&project.config.spel, &spel, "spel")?;
     ensure_dir_exists(&spel, "spel")?;
     run_checked(
-        Command::new("cargo")
+        dependency_cargo()
             .current_dir(&spel)
             .arg("build")
             .arg("--release")
@@ -102,6 +102,20 @@ pub(crate) fn setup_for_project(project: &crate::model::Project, prebuilt: bool)
     println!("setup complete");
 
     Ok(())
+}
+
+/// `cargo` for building a pinned dependency (sequencer, wallet, spel).
+///
+/// `build` and `run` re-run these builds every time, and cargo replays the
+/// cached warnings of workspace members even when nothing is recompiled —
+/// spel alone prints ~150 lines of them ahead of the user's own build output,
+/// none of which the user can act on. `CARGO_BUILD_WARNINGS=allow` hides
+/// warnings without touching the fingerprint (unlike `RUSTFLAGS`), so it never
+/// forces a rebuild; errors still print. Older cargo ignores the variable.
+fn dependency_cargo() -> Command {
+    let mut cmd = Command::new("cargo");
+    cmd.env("CARGO_BUILD_WARNINGS", "allow");
+    cmd
 }
 
 /// Sync the cloned repo to its pinned commit at `path`.
