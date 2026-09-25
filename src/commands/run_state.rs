@@ -427,6 +427,81 @@ mod tests {
         }
     }
 
+    fn spel_project(root: std::path::PathBuf, spel_toml: Option<&str>) -> Project {
+        let mut project = make_test_project(root);
+        project.config.framework.kind = FRAMEWORK_KIND_SPEL.to_string();
+        if let Some(body) = spel_toml {
+            std::fs::create_dir_all(&project.root).unwrap();
+            std::fs::write(project.root.join("spel.toml"), body).unwrap();
+        }
+        project
+    }
+
+    /// Single-program shape: `spel init` writes `[program] idl = "<name>-idl.json"`.
+    #[test]
+    fn spel_idl_path_reads_the_single_program_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = spel_project(
+            tmp.path().to_path_buf(),
+            Some("[program]\nidl = \"demo-idl.json\"\n"),
+        );
+        assert_eq!(
+            spel_idl_path(&project, "demo"),
+            Some(tmp.path().join("demo-idl.json"))
+        );
+    }
+
+    /// Multi-program shape: `[programs.<name>]` wins for its own stem.
+    #[test]
+    fn spel_idl_path_prefers_the_named_program_over_the_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = spel_project(
+            tmp.path().to_path_buf(),
+            Some(
+                "[program]\nidl = \"fallback-idl.json\"\n\n\
+                 [programs.alpha]\nidl = \"alpha-idl.json\"\n",
+            ),
+        );
+        assert_eq!(
+            spel_idl_path(&project, "alpha"),
+            Some(tmp.path().join("alpha-idl.json"))
+        );
+        // A stem with no section of its own falls back to `[program]`.
+        assert_eq!(
+            spel_idl_path(&project, "beta"),
+            Some(tmp.path().join("fallback-idl.json"))
+        );
+    }
+
+    /// Non-spel projects keep the `<idl-dir>/<stem>.json` convention, and a
+    /// spel project with a missing or unparseable `spel.toml` falls back to it
+    /// too — which is what produces the "run `lgs build idl` first" error, so
+    /// the fallback needs to stay deliberate rather than accidental.
+    #[test]
+    fn spel_idl_path_is_none_when_it_cannot_resolve() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Not a spel project at all.
+        assert_eq!(
+            spel_idl_path(&make_test_project(tmp.path().to_path_buf()), "demo"),
+            None
+        );
+        // spel project, no spel.toml.
+        assert_eq!(
+            spel_idl_path(&spel_project(tmp.path().to_path_buf(), None), "demo"),
+            None
+        );
+        // spel project, spel.toml with no idl key.
+        let project = spel_project(
+            tmp.path().to_path_buf(),
+            Some("[program]\nbinary = \"x.bin\"\n"),
+        );
+        assert_eq!(spel_idl_path(&project, "demo"), None);
+        // spel project, unparseable spel.toml.
+        let project = spel_project(tmp.path().to_path_buf(), Some("this is not toml ="));
+        assert_eq!(spel_idl_path(&project, "demo"), None);
+    }
+
     /// Stage a guest source under `methods/guest/src/bin/<stem>.rs` so
     /// `discover_deployable_programs` will pick it up. Optionally stages a
     /// matching `.bin` under a riscv32im release path so

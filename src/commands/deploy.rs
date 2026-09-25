@@ -987,6 +987,49 @@ mod tests {
         assert!(result.ends_with("my_program.bin"));
     }
 
+    /// `cargo risczero build` (spel projects, via `make build`) writes the
+    /// Docker-reproducible guest under `methods/guest/target/<triple>/docker/`.
+    /// That is the binary whose ImageID *is* the ProgramId, so discovery has to
+    /// find it — neither the root nor the `docker` component existed before.
+    #[test]
+    fn finds_binary_in_spel_docker_layout() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp
+            .path()
+            .join("methods/guest/target/riscv32im-risc0-zkvm-elf/docker");
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(bin_dir.join("my_program.bin"), b"fake").unwrap();
+
+        let result = lookup(tmp.path(), "my_program")
+            .expect("the cargo-risczero docker layout must be discoverable");
+        assert!(result.ends_with("my_program.bin"));
+    }
+
+    /// `docker/` is the reproducible build, so it must rank with `release/`
+    /// rather than as a debug fallback: given both, neither may be discarded
+    /// and the one that wins must not be the debug build.
+    #[test]
+    fn spel_docker_binary_outranks_a_debug_build() {
+        let tmp = TempDir::new().unwrap();
+        let docker_dir = tmp
+            .path()
+            .join("methods/guest/target/riscv32im-risc0-zkvm-elf/docker");
+        let debug_dir = tmp
+            .path()
+            .join("methods/target/x/riscv32im-risc0-zkvm-elf/debug");
+        fs::create_dir_all(&docker_dir).unwrap();
+        fs::create_dir_all(&debug_dir).unwrap();
+        fs::write(docker_dir.join("my_program.bin"), b"docker").unwrap();
+        fs::write(debug_dir.join("my_program.bin"), b"debug").unwrap();
+
+        let result = lookup(tmp.path(), "my_program").unwrap();
+        assert_eq!(
+            fs::read(&result).unwrap(),
+            b"docker",
+            "the docker build is release-grade and must win over debug"
+        );
+    }
+
     /// Regression test for issue #59: a project named anything other than
     /// the scaffold template (`example_program_deployment`) places its guest
     /// binaries under `target/riscv-guest/<project>_methods/<project>_programs/...`.
