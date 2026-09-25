@@ -86,7 +86,7 @@ fn build_idl_inner(force: bool) -> DynResult<()> {
         bail!(
             "`build idl` is only supported for `spel` and `lez-framework` projects (current framework.kind = `{}`).\n\
              Use `logos-scaffold build` for the framework-agnostic build, \
-             or set `framework.kind = \"lez-framework\"` in scaffold.toml.",
+             or set `framework.kind = \"spel\"` in scaffold.toml.",
             project.config.framework.kind
         );
     }

@@ -97,7 +97,8 @@ make build          # cargo build + risc0 guest
 # or: lgs build
 
 make idl            # generate IDL → <name>-idl.json (project root)
-# or: lgs build idl   (delegates to `spel generate-idl`)
+# or: lgs build idl   (runs `make idl`; `spel generate-idl` writes to stdout,
+#                      the Makefile recipe is what redirects it to the file)
 
 make ffi            # generate FFI bindings → <name>_ffi/
 # or: lgs build client  (runs `make ffi-gen` with the vendored spel-client-gen)
@@ -111,7 +112,7 @@ make ffi            # generate FFI bindings → <name>_ffi/
 lgs setup           # clone LEZ, build sequencer + wallet + spel CLI
 lgs localnet start  # start the sequencer
 lgs deploy          # deploy the program
-lgs run             # start localnet, deploy, enter REPL
+lgs run             # build, start localnet, top up wallet, deploy
 
 # Interact using the spel CLI (reads spel.toml automatically):
 lgs spel -- --help

@@ -48,12 +48,6 @@ pub(crate) fn cmd_build_shortcut(project_dir: Option<PathBuf>, prebuilt: bool) -
                 build_idl_for_current_project()?;
                 generate_clients_from_current_idl()?;
             }
-            // spel delegates IDL generation to the vendored spel CLI.
-            // FFI/client gen is left to the project's own Makefile (`make ffi`)
-            // or `lgs spel -- ffi-gen`, keeping scaffold's role minimal.
-            FRAMEWORK_KIND_SPEL => {
-                build_idl_for_current_project()?;
-            }
             other => {
                 println!(
                     "Skipping IDL/client generation for framework kind `{}`",
