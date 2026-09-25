@@ -127,44 +127,43 @@ fn cmd_new_spel(
         );
     }
 
+    // The CLI always comes from the scaffold cache, never from inside `target`
+    // — even with `--vendor-deps`. `spel init` refuses to write into a
+    // directory that already exists, so anything created under `target` before
+    // the delegation makes the whole command fail. Vendoring therefore happens
+    // *after* `spel init` has created the project.
     println!(
         "Cloning spel at pin {} from {} (this may take a minute the first time)...",
         DEFAULT_SPEL.sha, SPEL_SOURCE
     );
-    let spel_repo = {
+    let cached_spel = bootstrap_cache.join("repos/spel").join(DEFAULT_SPEL.sha);
+    {
         let _echo_guard = crate::process::EchoGuard::suppress();
-        if cmd.vendor_deps {
-            let root = target.join(".scaffold/repos");
-            fs::create_dir_all(&root)?;
-            let vendored = root.join("spel");
-            sync_repo_to_pin_at_path_with_opts(
-                &vendored,
-                SPEL_SOURCE,
-                DEFAULT_SPEL.sha,
-                "spel",
-                RepoSyncOptions::fail_on_source_mismatch(),
-            )?;
-            vendored
-        } else {
-            let cached = bootstrap_cache.join("repos/spel").join(DEFAULT_SPEL.sha);
-            sync_repo_to_pin_at_path_with_opts(
-                &cached,
-                SPEL_SOURCE,
-                DEFAULT_SPEL.sha,
-                "spel",
-                RepoSyncOptions::auto_reclone_cache_repo(),
-            )?;
-            cached
-        }
-    };
+        sync_repo_to_pin_at_path_with_opts(
+            &cached_spel,
+            SPEL_SOURCE,
+            DEFAULT_SPEL.sha,
+            "spel",
+            RepoSyncOptions::auto_reclone_cache_repo(),
+        )?;
+    }
 
-    let spel_bin = build_spel_cli(&spel_repo)?;
+    let spel_bin = build_spel_cli(&cached_spel)?;
 
     println!(
         "Running `spel init {}` (LEZ tag: {}, spel tag: {})...",
         cmd.name, DEFAULT_LEZ.tag, DEFAULT_SPEL.tag
     );
-    let cwd = env::current_dir()?;
+    // `spel init` resolves the project name against *its own* working
+    // directory, so it must run in `target`'s parent — not the process cwd.
+    // They coincide for the CLI, but not for `api::create_project`, which takes
+    // an explicit parent: running in the cwd there would scatter the spel
+    // project and scaffold's overlay across two different directories.
+    let parent = match target.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => env::current_dir()?,
+    };
+    fs::create_dir_all(&parent)?;
     // Flags MUST precede the project name. `spel init`'s parser walks
     // arguments until the first non-flag, treats it as the name, and silently
     // ignores everything after it — `spel init foo --spel-tag v0.7.0` exits 0
@@ -178,7 +177,7 @@ fn cmd_new_spel(
         .arg("--spel-tag")
         .arg(DEFAULT_SPEL.tag)
         .arg(&cmd.name)
-        .current_dir(&cwd)
+        .current_dir(&parent)
         .status()
         .context("failed to launch spel init")?;
     if !status.success() {
@@ -188,6 +187,21 @@ fn cmd_new_spel(
     // `spel init` created the project directory; layer scaffold state on top.
     fs::create_dir_all(target.join(".scaffold/state"))?;
     fs::create_dir_all(target.join(".scaffold/logs"))?;
+
+    // Now that the project exists, `--vendor-deps` can place a project-local
+    // copy of the repo at the path `scaffold.toml` records.
+    if cmd.vendor_deps {
+        let vendored = target.join(".scaffold/repos/spel");
+        println!("Vendoring spel into {}...", vendored.display());
+        let _echo_guard = crate::process::EchoGuard::suppress();
+        sync_repo_to_pin_at_path_with_opts(
+            &vendored,
+            SPEL_SOURCE,
+            DEFAULT_SPEL.sha,
+            "spel",
+            RepoSyncOptions::fail_on_source_mismatch(),
+        )?;
+    }
 
     let cfg = build_scaffold_config(cmd, FRAMEWORK_KIND_SPEL);
     write_text(&target.join("scaffold.toml"), &serialize_config(&cfg)?)?;
