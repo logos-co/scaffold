@@ -171,17 +171,21 @@ lgs deploy          # auto-discovers methods/guest/src/bin/lez_counter.rs
 
 ## Reference Example: Running `lez_counter`
 
-The runner at `src/bin/run_lez_counter.rs` exposes `init` and `increment` subcommands:
+The runner at `src/bin/run_lez_counter.rs` exposes `init`, `increment`, and `show` subcommands. The counter is not a user account: both instructions derive it as the PDA `[program_id, "counter"]`, so each deployment has exactly one counter and the runner computes its address. `--authority` is the self-owned public account that signs.
 
 ```bash
 export NSSA_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet" LEE_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet"
+export HOST_CC=cc HOST_CXX=c++                # direct cargo in this template; see below
 lgs wallet -- account new public            # capture the base58 account id
 
-cargo run --bin run_lez_counter -- init      --to <account-id>
-cargo run --bin run_lez_counter -- increment --counter <account-id> --authority <account-id> --amount 5
+cargo run --bin run_lez_counter -- init      --authority <account-id>
+cargo run --bin run_lez_counter -- increment --authority <account-id> --amount 5
+cargo run --bin run_lez_counter -- show      # counter <pda> = 5 once the block lands
 ```
 
-> **Caveat (per DOGFOODING scenario L4):** as of writing, the `run_lez_counter` runner contains `TODO` placeholders for actual transaction submission. Don't be surprised if subcommands accept input but only print diagnostic messages without submitting. When transaction submission is implemented, follow the same `verification hint:` pattern as default-template runners (`lgs wallet -- account get --account-id <id>`).
+`init` and `increment` print `submitted transaction: tx_hash=…` and a `verification hint:` naming the counter account; reads follow block production (15s by default), so poll `show` until the value moves. `init` runs once per deployment — a second `init` is rejected by the sequencer because the account already exists. `HOST_CC`/`HOST_CXX` keep the guest embed from compiling host C with the riscv compiler when the risc0 C++ toolchain is installed; `lgs build` sets them for you.
+
+The same instructions are also reachable without Rust through the vendored spel CLI, which reads the IDL: `lgs spel -- --idl idl/lez_counter.json --program <lez_counter.bin> -- increment --amount 5 --authority <account-id>`.
 
 ## Differences vs. `default` Template
 

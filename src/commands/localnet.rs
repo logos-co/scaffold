@@ -715,12 +715,37 @@ fn build_status_report(
 /// rather than carrying the deferred tx forward. Until LEZ stops aborting on
 /// deferral, scaffold widens the limit so the documented first-success path
 /// fits in a single block.
+///
+/// Chain home: the upstream config says `"home": "."`, which the sequencer
+/// resolves against its cwd — the LEZ checkout. For a cache-managed project
+/// that checkout is shared by every project on the same pin, so they all read
+/// and wrote one chain (a new project inherited another's deployed programs
+/// and accounts, and `localnet reset` in one wiped the other's), and the DB
+/// grew inside a content-addressed cache directory. `home` is pointed at the
+/// project's own `.scaffold/localnet/` instead, next to `dest_dir`.
 fn prepare_sequencer_config(lez: &Path, dest_dir: &Path, port: u16) -> DynResult<PathBuf> {
+    let home = localnet_home_for_state_dir(dest_dir);
+    fs::create_dir_all(&home)
+        .with_context(|| format!("failed to create localnet home {}", home.display()))?;
+    let home = home.canonicalize().unwrap_or(home);
     let (dest_path, _) = patch_runtime_sequencer_config(lez, dest_dir, |obj| {
         apply_common_runtime_overrides(obj, port);
+        obj.insert(
+            "home".to_string(),
+            serde_json::Value::String(home.display().to_string()),
+        );
         Ok(())
     })?;
     Ok(dest_path)
+}
+
+/// Project-relative directory holding the localnet chain (`rocksdb/`) and the
+/// sequencer's signing key.
+const LOCALNET_HOME_REL: &str = ".scaffold/localnet";
+
+/// `.scaffold/localnet` for the `.scaffold/state` directory `state_dir`.
+fn localnet_home_for_state_dir(state_dir: &Path) -> PathBuf {
+    state_dir.parent().unwrap_or(state_dir).join("localnet")
 }
 
 fn read_log_tail(log_path: &Path, tail: usize) -> String {
@@ -741,7 +766,6 @@ fn read_log_tail(log_path: &Path, tail: usize) -> String {
 
 fn cmd_localnet_reset_dry_run(
     project: &Project,
-    lez: &Path,
     state_path: &Path,
     log_path: &Path,
     localnet_addr: &str,
@@ -750,7 +774,7 @@ fn cmd_localnet_reset_dry_run(
     verify_timeout_sec: u64,
     sequencer_bin: &Path,
 ) -> DynResult<()> {
-    // `lez` and `sequencer_bin` come out of the cache-root resolver, which can
+    // `sequencer_bin` comes out of the cache-root resolver, which can
     // return either an absolute path (env override, explicit absolute
     // `[repos.lez].path`, or scaffold default cache layer) or a path relative
     // to `project.root` (the portable default for vendored / new projects).
@@ -764,7 +788,7 @@ fn cmd_localnet_reset_dry_run(
             project.root.join(p)
         }
     };
-    let rocksdb_path = abs(&lez.join("rocksdb"));
+    let rocksdb_path = project.root.join(LOCALNET_HOME_REL).join("rocksdb");
     let sequencer_bin_abs = abs(sequencer_bin);
 
     println!("dry-run: localnet reset (no changes made)");
@@ -858,7 +882,6 @@ pub(crate) fn cmd_localnet_reset(
     if dry_run {
         return cmd_localnet_reset_dry_run(
             project,
-            lez,
             state_path,
             log_path,
             localnet_addr,
@@ -907,7 +930,7 @@ pub(crate) fn cmd_localnet_reset(
         }
     })?;
 
-    reset_cleanup(project, lez, state_path, reset_wallet)?;
+    reset_cleanup(project, state_path, reset_wallet)?;
 
     println!("starting sequencer…");
     let (pid, _) = start_localnet(
@@ -928,13 +951,8 @@ pub(crate) fn cmd_localnet_reset(
 /// Deletes on-disk state so the next start begins with a fresh chain.
 /// Extracted from `cmd_localnet_reset` so it can be unit-tested without
 /// invoking setup or starting a real sequencer.
-fn reset_cleanup(
-    project: &Project,
-    lez: &Path,
-    state_path: &Path,
-    reset_wallet: bool,
-) -> DynResult<()> {
-    let rocksdb_path = lez.join("rocksdb");
+fn reset_cleanup(project: &Project, state_path: &Path, reset_wallet: bool) -> DynResult<()> {
+    let rocksdb_path = project.root.join(LOCALNET_HOME_REL).join("rocksdb");
     remove_dir_if_exists(&rocksdb_path, "sequencer DB")?;
 
     if reset_wallet {
@@ -1104,7 +1122,7 @@ mod tests {
 
     use super::{
         prepare_sequencer_config, reset_cleanup, verify_block_production, wait_for_pid_exit,
-        wait_for_port_free,
+        wait_for_port_free, LOCALNET_HOME_REL,
     };
     use crate::commands::wallet_support::wallet_state_path;
     use crate::constants::SEQUENCER_CONFIG_REL_PATH;
@@ -1175,12 +1193,20 @@ mod tests {
         fs::write(&wallet_state, "default_address=Public/demo\n").unwrap();
         let state_path = project.root.join(".scaffold/state/localnet.state");
         fs::write(&state_path, "sequencer_pid=123\n").unwrap();
-        let rocksdb = lez.join("rocksdb");
+        let rocksdb = project.root.join(LOCALNET_HOME_REL).join("rocksdb");
         fs::create_dir_all(&rocksdb).unwrap();
+        // A chain DB left in the shared LEZ checkout belongs to whichever
+        // project last ran there (older scaffold); reset must not touch it.
+        let shared_rocksdb = lez.join("rocksdb");
+        fs::create_dir_all(&shared_rocksdb).unwrap();
 
-        reset_cleanup(&project, &lez, &state_path, false).unwrap();
+        reset_cleanup(&project, &state_path, false).unwrap();
 
         assert!(!rocksdb.exists(), "rocksdb should be deleted");
+        assert!(
+            shared_rocksdb.exists(),
+            "shared LEZ checkout must be left alone"
+        );
         assert!(!state_path.exists(), "localnet state should be deleted");
         assert!(
             marker.exists(),
@@ -1195,7 +1221,7 @@ mod tests {
     #[test]
     fn cleanup_deletes_wallet_when_reset_wallet_true() {
         let temp = tempdir().unwrap();
-        let (project, lez) = make_test_project(&temp);
+        let (project, _lez) = make_test_project(&temp);
 
         let wallet_dir = project.root.join(&project.config.wallet_home_dir);
         fs::write(wallet_dir.join("keys.json"), "{}").unwrap();
@@ -1203,7 +1229,7 @@ mod tests {
         fs::write(&wallet_state, "default_address=Public/demo\n").unwrap();
         let state_path = project.root.join(".scaffold/state/localnet.state");
 
-        reset_cleanup(&project, &lez, &state_path, true).unwrap();
+        reset_cleanup(&project, &state_path, true).unwrap();
 
         assert!(
             !wallet_dir.exists(),
@@ -1218,14 +1244,14 @@ mod tests {
     #[test]
     fn cleanup_is_idempotent_when_nothing_exists() {
         let temp = tempdir().unwrap();
-        let (project, lez) = make_test_project(&temp);
+        let (project, _lez) = make_test_project(&temp);
 
         let wallet_dir = project.root.join(&project.config.wallet_home_dir);
         fs::remove_dir_all(&wallet_dir).unwrap();
         let state_path = project.root.join(".scaffold/state/localnet.state");
 
         // No rocksdb, no wallet, no state file — cleanup should succeed silently.
-        reset_cleanup(&project, &lez, &state_path, true).unwrap();
+        reset_cleanup(&project, &state_path, true).unwrap();
     }
 
     #[test]
@@ -1315,6 +1341,17 @@ mod tests {
             dest_json["max_block_size"],
             serde_json::json!("8 MiB"),
             "patched copy should carry the widened max_block_size override"
+        );
+        let home = state_dir
+            .parent()
+            .unwrap()
+            .join("localnet")
+            .canonicalize()
+            .unwrap();
+        assert_eq!(
+            dest_json["home"],
+            serde_json::json!(home.display().to_string()),
+            "the chain must live in the project, not in the (shared) lez checkout"
         );
 
         let src_after: serde_json::Value =

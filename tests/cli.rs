@@ -2776,6 +2776,34 @@ fn spel_proxy_forwards_args_to_vendored_binary() {
 }
 
 #[test]
+fn spel_proxy_exports_project_wallet_home() {
+    // spel's IDL instruction commands sign and submit through the LEZ wallet,
+    // which reads its home from the environment. Without it they used
+    // `~/.nssa/wallet` and failed with `Failed to read persistent storage`.
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+    let home = temp.path().join(".scaffold/wallet");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .env_remove("NSSA_WALLET_HOME_DIR")
+        .env_remove("LEE_WALLET_HOME_DIR")
+        .arg("spel")
+        .arg("--")
+        .arg("print-wallet-home")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "NSSA_WALLET_HOME_DIR={}",
+            home.display()
+        )))
+        .stdout(predicate::str::contains(format!(
+            "LEE_WALLET_HOME_DIR={}",
+            home.display()
+        )));
+}
+
+#[test]
 fn spel_proxy_works_with_leading_quiet_flag() {
     // Suppressed copilot comment on PR #86: `spel_passthrough_args` was
     // hard-coded to look at args[1], so `lgs -q spel -- ...` skipped the
@@ -3811,6 +3839,12 @@ if [ "$#" -ge 2 ] && [ "$1" = "program-id" ]; then
   done
   full="$(printf '%s' "$hex" | cut -c1-64)"
   printf '   ImageID (hex bytes): %s\n' "$full"
+  exit 0
+fi
+
+if [ "$#" -ge 1 ] && [ "$1" = "print-wallet-home" ]; then
+  echo "NSSA_WALLET_HOME_DIR=${NSSA_WALLET_HOME_DIR:-unset}"
+  echo "LEE_WALLET_HOME_DIR=${LEE_WALLET_HOME_DIR:-unset}"
   exit 0
 fi
 

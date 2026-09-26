@@ -42,7 +42,7 @@ pub(crate) fn sync_repo_to_pin_at_path_with_opts(
     label: &str,
     opts: RepoSyncOptions,
 ) -> DynResult<()> {
-    ensure_repo_present(path, source, label, opts)?;
+    ensure_repo_present(path, source, pin, label, opts)?;
 
     let _ = run_checked(
         Command::new("git")
@@ -108,15 +108,16 @@ pub(crate) fn ensure_pin_exists(
     }
 }
 
-pub(crate) fn ensure_repo_present(
+fn ensure_repo_present(
     path: &Path,
     source: &str,
+    pin: &str,
     label: &str,
     opts: RepoSyncOptions,
 ) -> DynResult<()> {
     if path.exists() {
         if path.join(".git").exists() {
-            reconcile_repo_source(path, source, label, opts)?;
+            reconcile_repo_source(path, source, pin, label, opts)?;
             return Ok(());
         }
         bail!("{} exists but is not a git repo: {}", label, path.display());
@@ -140,6 +141,7 @@ pub(crate) fn ensure_repo_present(
 fn reconcile_repo_source(
     path: &Path,
     source: &str,
+    pin: &str,
     label: &str,
     opts: RepoSyncOptions,
 ) -> DynResult<()> {
@@ -174,6 +176,23 @@ fn reconcile_repo_source(
                      Refusing to discard the existing cache at {} — fix the path/URL and retry.",
                     path.display(),
                 );
+            }
+
+            // A commit SHA names the same tree whichever remote it came
+            // from, so a clean cache checkout that already has the pinned
+            // commit is reusable as-is. Recloning it would only throw away
+            // the build artifacts under it (~20 min of sequencer + wallet
+            // builds for LEZ) and yank the directory out from under any
+            // other project on the same pin mid-build — `new --lez-path
+            // <local checkout>` did exactly that to a GitHub-sourced
+            // project sharing the cache, and the next GitHub-sourced
+            // `setup` then flipped it back again.
+            if is_full_sha(pin) && has_commit(path, pin) {
+                eprintln!(
+                    "note: {label} cache at {} was cloned from `{origin}` and already has pin {pin}; reusing it rather than recloning from `{source}`.",
+                    path.display(),
+                );
+                return Ok(());
             }
 
             fs::remove_dir_all(path)?;
@@ -314,6 +333,24 @@ fn normalize_url(source: &str) -> String {
         .to_ascii_lowercase()
 }
 
+fn is_full_sha(pin: &str) -> bool {
+    pin.len() == 40 && pin.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Whether `rev` resolves to a commit object already present in `repo`,
+/// without fetching.
+fn has_commit(repo: &Path, rev: &str) -> bool {
+    Command::new("git")
+        .current_dir(repo)
+        .args(["cat-file", "-e"])
+        .arg(format!("{rev}^{{commit}}"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 pub(crate) fn git_head_sha(repo: &Path) -> DynResult<String> {
     let out = run_capture(
         Command::new("git")
@@ -369,6 +406,39 @@ mod tests {
 
         let head = git_head_sha(&cache_repo).expect("head");
         assert_eq!(head, pin_b);
+    }
+
+    #[test]
+    fn source_mismatch_reuses_clean_cache_repo_that_has_the_sha_pin() {
+        // `new --lez-path <local checkout>` against a cache already holding
+        // the same pin cloned from GitHub used to `remove_dir_all` the cache
+        // (built target/ included) and reclone it from the local path. The
+        // commit is the same tree either way, so the checkout must be kept.
+        let temp = tempdir().expect("tempdir");
+        let source_a = temp.path().join("source-a");
+        let source_b = temp.path().join("source-b");
+        let cache_repo = temp.path().join("cache/repo");
+
+        let pin = init_repo_with_commit(&source_a, "a.txt", "a");
+        git_clone(&source_a, &source_b);
+        git_clone(&source_a, &cache_repo);
+        let build_artifact = cache_repo.join(".git/scaffold-build-marker");
+        fs::write(&build_artifact, "built").expect("write marker");
+
+        sync_repo_to_pin_at_path_with_opts(
+            &cache_repo,
+            &source_b.display().to_string(),
+            &pin,
+            "lez",
+            RepoSyncOptions::auto_reclone_cache_repo(),
+        )
+        .expect("sync success");
+
+        assert_eq!(git_head_sha(&cache_repo).expect("head"), pin);
+        assert!(
+            build_artifact.exists(),
+            "cache checkout must not be recloned"
+        );
     }
 
     #[test]
