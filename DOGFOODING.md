@@ -1296,10 +1296,10 @@ From the module project root:
 "$SCAFFOLD_BIN" basecamp launch alice    # let it come up, then close it
 "$SCAFFOLD_BIN" basecamp paths alice --json
 ls .scaffold/basecamp/profiles/alice
-mkdir -p .scaffold/basecamp/profiles/alice/.scaffold-xdg-data/scratch
-echo "marker-$(date -u +%s)" > .scaffold/basecamp/profiles/alice/.scaffold-xdg-data/scratch/marker.txt
+mkdir -p .scaffold/basecamp/profiles/alice/xdg-data/scratch
+echo "marker-$(date -u +%s)" > .scaffold/basecamp/profiles/alice/xdg-data/scratch/marker.txt
 "$SCAFFOLD_BIN" basecamp launch alice    # scrub-and-reinstall
-test -e .scaffold/basecamp/profiles/alice/.scaffold-xdg-data/scratch/marker.txt && echo "REGRESSION: marker survived clean launch" || echo "OK: marker scrubbed"
+test -e .scaffold/basecamp/profiles/alice/xdg-data/scratch/marker.txt && echo "REGRESSION: marker survived clean launch" || echo "OK: marker scrubbed"
 "$SCAFFOLD_BIN" basecamp paths ../escape
 ```
 
