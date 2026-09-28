@@ -19,14 +19,21 @@ use super::wallet_support::{
     RpcReachabilityError,
 };
 
-/// Roots searched (in order) for guest `.bin` artefacts. Both layouts exist in
+/// Roots searched (in order) for guest `.bin` artefacts. All layouts exist in
 /// the wild: risc0's default workspace layout emits to `target/riscv-guest/...`
 /// (used by the scaffold template), while sub-crate builds can land in
-/// `methods/target/...`. Discovery walks both so renamed projects work
-/// regardless of which layout cargo/risc0 chose. The `methods/...` half of
-/// this constant is the same project-relative directory that `build.rs`
-/// compiles via `crate::constants::METHODS_DIR`; keep them in sync.
-const GUEST_BIN_SEARCH_ROOTS: &[&str] = &["target/riscv-guest", "methods/target"];
+/// `methods/target/...`. A guest crate that carries its own `[workspace]`
+/// (so it builds independently of the parent) emits to
+/// `methods/guest/target/riscv32im-risc0-zkvm-elf/...` instead. Discovery
+/// walks all of them so renamed and self-workspaced guests work regardless
+/// of which layout cargo/risc0 chose. The `methods/...` roots sit under the
+/// same project-relative directory that `build.rs` compiles via
+/// `crate::constants::METHODS_DIR`; keep them in sync.
+const GUEST_BIN_SEARCH_ROOTS: &[&str] = &[
+    "target/riscv-guest",
+    "methods/target",
+    "methods/guest/target",
+];
 
 /// `spel program-id` line prefix that carries the risc0 image ID — the value
 /// the sequencer uses as the on-chain program ID. Format is whitespace-tolerant:
@@ -1071,6 +1078,27 @@ mod tests {
 
         let result = lookup(tmp.path(), "my_program").unwrap();
         assert!(result.components().any(|c| c.as_os_str() == "debug"));
+    }
+
+    /// A guest crate with its own `[workspace]` emits to
+    /// `methods/guest/target/riscv32im-risc0-zkvm-elf/...`, which none of the
+    /// two original roots covered, so `deploy` reported `missing program
+    /// binary` for a successfully built guest (issue #231). The `docker`
+    /// profile dir has no `release` component and is picked up through the
+    /// debug fallback bucket.
+    #[test]
+    fn discovers_guest_owned_workspace_layout() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp
+            .path()
+            .join("methods/guest/target/riscv32im-risc0-zkvm-elf/docker");
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(bin_dir.join("my_program.bin"), b"guest").unwrap();
+
+        let result = lookup(tmp.path(), "my_program").unwrap();
+        assert!(
+            result.ends_with("methods/guest/target/riscv32im-risc0-zkvm-elf/docker/my_program.bin")
+        );
     }
 
     #[test]
