@@ -34,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        template: [default, lez-framework]
+        template: [default, spel]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -58,6 +58,11 @@ jobs:
             ~/.cache/logos-scaffold
             ~/.logos-blockchain-circuits
           key: scaffold-bootstrap-${{ runner.os }}-${{ hashFiles('src/constants.rs') }}
+
+      # The LEZ wallet links against libpcsclite (keycard support), so `setup`
+      # cannot build it on a bare runner: `Could not find a PCSC library`.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkgconf libpcsclite-dev
 
       - name: Build scaffold CLI
         run: cargo build --release --bin logos-scaffold
@@ -136,6 +141,13 @@ jobs:
       # rzup is risc0's toolchain manager; it registers a `risc0` rustup
       # toolchain that risc0-build then discovers.
       - name: Install Risc Zero toolchain
+        # rzup resolves each component through the GitHub releases API, which
+        # is rate-limited per source IP for unauthenticated callers — shared
+        # runner IPs hit it, and the step then dies with
+        # `api.github.com: API rate limit exceeded`. rzup reads GITHUB_TOKEN
+        # for exactly this reason.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # Download the official rzup installer to disk first rather than
@@ -148,12 +160,18 @@ jobs:
           bash "$RUNNER_TEMP/rzup-install.sh"
           echo "$HOME/.risc0/bin" >> "$GITHUB_PATH"
           "$HOME/.risc0/bin/rzup" install rust
-          # Guest deps that compile C sources (e.g. `ring` in the lez-framework
+          # Guest deps that compile C sources (e.g. `ring` in the spel
           # guest) additionally need risc0's C++ cross-toolchain. When it is
           # missing, risc0-build points CC at a sentinel path
           # (/no_risc0_cpp_toolchain_installed_run_rzup_install_cpp) and the
           # guest build dies in cc-rs compiler detection.
           "$HOME/.risc0/bin/rzup" install cpp
+          # spel projects build the guest with `cargo risczero build` (via
+          # `make build`), which is a separate rzup component from the
+          # toolchains above — without it the build dies with
+          # `error: no such command: risczero`. Pin it to the risc0-build
+          # version both templates depend on.
+          "$HOME/.risc0/bin/rzup" install cargo-risczero 3.0.5
 
       - name: Build rendered project workspace
         # HOST_CC/HOST_CXX are intentionally NOT set here: scaffold pins them

@@ -6,14 +6,16 @@ use anyhow::bail;
 use super::wallet_support::{set_wallet_home_env, wallet_password};
 use crate::commands::wallet_support::WALLET_CONFIG_PRIMARY;
 use crate::constants::{
-    DEFAULT_LEZ, DEFAULT_SPEL, SEQUENCER_BIN_REL_PATH, SPEL_BIN_REL_PATH, WALLET_BIN_REL_PATH,
+    DEFAULT_LEZ, DEFAULT_SPEL, FRAMEWORK_KIND_SPEL, SEQUENCER_BIN_REL_PATH, SPEL_BIN_REL_PATH,
+    WALLET_BIN_REL_PATH,
 };
 use crate::doctor_checks::{
-    check_binary, check_container_runtime, check_logos_blockchain_circuits, check_path,
-    check_port_warn, check_repo, check_standalone_support, one_line, print_rows,
+    check_binary, check_cargo_risczero, check_container_runtime, check_logos_blockchain_circuits,
+    check_path, check_pcsc_library, check_port_warn, check_repo, check_standalone_support,
+    one_line, print_rows,
 };
 use crate::model::{CheckRow, CheckStatus, DoctorReport, DoctorSummary, Project};
-use crate::process::{pid_running, run_capture, run_with_stdin, set_command_echo};
+use crate::process::{pid_running, port_open, run_capture, run_with_stdin, set_command_echo};
 use crate::project::{load_project, resolve_cache_root, resolve_repo_path};
 use crate::state::read_localnet_state;
 use crate::DynResult;
@@ -88,6 +90,7 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
     rows.push(check_binary("ps", true));
     rows.push(check_binary("kill", true));
     rows.push(check_container_runtime());
+    rows.push(check_pcsc_library());
     rows.push(check_binary("nix", false));
     rows.push(check_logos_blockchain_circuits(
         &project.root,
@@ -152,6 +155,16 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
     ));
 
     rows.push(check_spel_lez_alignment(&spel));
+
+    // spel projects build their guest with `cargo risczero build` (`make
+    // build`). That subcommand is a separate rzup component from the risc0
+    // toolchains, and when it is missing the build dies as
+    // `error: no such command: risczero`, which names neither risc0 nor rzup.
+    // Only meaningful for spel projects — `default` guests build through
+    // risc0-build instead — so don't warn other projects about it.
+    if project.config.framework.kind == FRAMEWORK_KIND_SPEL {
+        rows.push(check_cargo_risczero());
+    }
 
     let (resolved_cache_root, cache_root_source) = resolve_cache_root(&project)?;
     rows.push(CheckRow {
@@ -309,13 +322,15 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
                         detail: "wallet check-health succeeded".to_string(),
                         remediation: None,
                     });
-                } else if is_localnet_connectivity_failure(&out.stdout, &out.stderr, localnet_port)
+                } else if !port_open(&format!("127.0.0.1:{localnet_port}"))
+                    || is_localnet_connectivity_failure(&out.stdout, &out.stderr, localnet_port)
                 {
                     rows.push(CheckRow {
                         status: CheckStatus::Warn,
                         name: "wallet usability".to_string(),
                         detail: format!(
-                            "wallet cannot reach local sequencer at http://127.0.0.1:{localnet_port}"
+                            "wallet cannot reach local sequencer at http://127.0.0.1:{localnet_port} ({})",
+                            one_line(&out.stderr)
                         ),
                         remediation: Some(
                             "Run `logos-scaffold localnet start` (required before running example binaries), then `logos-scaffold doctor`"
@@ -479,6 +494,14 @@ fn check_spel_lez_alignment(spel_path: &std::path::Path) -> CheckRow {
 // error contexts (RPC rejection, signature mismatch, malformed payload).
 // We require *both* an explicit transport-error token *and* the address,
 // so an unrelated failure that happens to print the URL is left as Fail.
+/// Text-based fallback for a wallet failure that is really "no sequencer".
+///
+/// Only consulted when the sequencer port *is* open — if nothing is listening,
+/// the caller already knows the cause and does not need to recognise the
+/// wording. That matters because the wording is not stable: LEZ v0.2.4's
+/// `wallet check-health` reports a missing node as bare `Error: Failed to find
+/// leader`, naming neither the address nor a transport error, so no amount of
+/// token matching here would have caught it.
 fn is_localnet_connectivity_failure(stdout: &str, stderr: &str, localnet_port: u16) -> bool {
     let text = format!("{stdout}\n{stderr}").to_lowercase();
 

@@ -21,7 +21,7 @@ If your task is to *use* scaffold rather than change it, read the skills in
 |---|---|
 | `skills/lgs-cli` | Entry point. Driving the CLI, diagnosing errors, adopting scaffold in an existing project. |
 | `skills/lez-template` | Working inside a default-template project. |
-| `skills/lez-framework-template` | Working inside a `--template lez-framework` project. |
+| `skills/spel-template` | Working inside a `--template spel` (SPEL framework) project. |
 | `skills/basecamp` | Any `lgs basecamp` subcommand, or a project that builds `.lgx` modules. |
 
 `skills/lgs-cli` routes into the other three once it knows the project type.
@@ -33,7 +33,7 @@ If your task is to *use* scaffold rather than change it, read the skills in
 | `src/commands/` | One module per CLI command. Start here for behaviour changes. |
 | `src/api/` | Public Rust API. Keep in sync with command behaviour. |
 | `src/cli.rs` | clap definitions. The source of truth for flags. |
-| `templates/` | Project templates: `default` and `lez-framework`. |
+| `templates/` | The `default` (bare LEZ) project template. The `spel` template lives in the spel repo; `lgs new --template spel` shells out to `spel init`. |
 | `skills/` | Agent skills, shipped into scaffolded projects. |
 | `tests/` | Integration tests driven through `assert_cmd`. |
 | `docs/` | User documentation. |

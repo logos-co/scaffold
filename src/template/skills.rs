@@ -205,9 +205,9 @@ mod tests {
             names,
             vec![
                 "basecamp".to_string(),
-                "lez-framework-template".to_string(),
                 "lez-template".to_string(),
                 "lgs-cli".to_string(),
+                "spel-template".to_string(),
             ],
             "shipped skills set drifted; update the test if intentional"
         );

@@ -618,7 +618,8 @@ pub struct InitProjectOptions {
 pub struct CreateProjectOptions {
     /// Project (directory) name.
     pub name: String,
-    /// Template name (`default` or `lez-framework`).
+    /// Template name (`default` or `spel`; `lez-framework` is a deprecated
+    /// alias for `spel`).
     pub template: String,
     /// Vendor pinned repos into the project instead of the shared cache.
     pub vendor_deps: bool,

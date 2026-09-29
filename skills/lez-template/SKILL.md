@@ -1,6 +1,6 @@
 ---
 name: lez-template
-description: Use when working inside a project scaffolded with the bare LEZ template (`lgs new` default — raw Rust + risc0 guest programs, no framework macros). Identify by scaffold.toml without `framework = "lez-framework"`, presence of `methods/guest/src/bin/*.rs`, and absence of `idl/` + `crates/lez-client-gen/`.
+description: Use when working inside a project scaffolded with the bare LEZ template (`lgs new` default — raw Rust + risc0 guest programs, no framework macros). Identify by scaffold.toml with `framework.kind = "default"`, presence of `methods/guest/src/bin/*.rs`, and absence of `spel.toml`.
 ---
 
 # Bare LEZ Template (`lgs new` Default)
@@ -11,12 +11,12 @@ This skill activates when the agent is working *inside* a project scaffolded wit
 
 Identify a default-template project by **all** of:
 
-- `scaffold.toml` exists at the project root and **does not** contain `framework = "lez-framework"`.
+- `scaffold.toml` exists at the project root and its `framework.kind` is **not** `spel`.
 - `methods/guest/src/bin/*.rs` exists — one file per risc0 guest program.
-- The project does **not** have `crates/lez-client-gen/` or `idl/` directories (those are lez-framework-specific).
+- The project does **not** have a `spel.toml` or a `*-idl.json` at its root (those mark a SPEL project).
 - `src/lib.rs` defines a `runner_support` module with `parse_account_id` / `load_program` helpers (see `templates/default/src/lib.rs`).
 
-If the project has `crates/lez-client-gen/` and `idl/`, switch to `lez-framework-template` instead.
+If the project has `spel.toml` and a `*-idl.json`, switch to `spel-template` instead.
 
 ## What This Template Produces
 
@@ -178,7 +178,7 @@ Verbatim from `templates/default/.scaffold/commands.md` (shipped into every defa
 
 ## When to Switch Templates
 
-If you find yourself writing repetitive instruction-dispatch + account-derivation boilerplate by hand, consider the LEZ Framework template (`lgs new <name> --template lez-framework`), which adds Anchor-style `#[lez_program]` / `#[instruction]` / `#[account(…)]` macros and auto-generates IDL JSON. See the `lez-framework-template` skill.
+If you find yourself writing repetitive instruction-dispatch + account-derivation boilerplate by hand, consider the SPEL template (`lgs new <name> --template spel`), which adds Anchor-style `#[lez_program]` / `#[instruction]` / `#[account(…)]` macros and auto-generates IDL JSON. See the `spel-template` skill.
 
 Drop down to this `default` template when you need primitives the framework hasn't surfaced or when guest-binary size is critical.
 

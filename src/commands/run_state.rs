@@ -24,7 +24,7 @@ use crate::commands::idl::sanitize_file_stem;
 use crate::commands::wallet_support::{
     default_sequencer_http_url_for_project, load_wallet_runtime,
 };
-use crate::constants::FRAMEWORK_KIND_LEZ_FRAMEWORK;
+use crate::constants::{FRAMEWORK_KIND_LEZ_FRAMEWORK, FRAMEWORK_KIND_SPEL};
 use crate::model::Project;
 use crate::state::read_localnet_state;
 use crate::DynResult;
@@ -85,7 +85,11 @@ pub(crate) fn compute_program_hashes(project: &Project) -> DynResult<BTreeMap<St
     }
     let idl_dir = project.root.join(&project.config.framework.idl.path);
     let cfg_digest = config_digest(project);
-    let is_lez_framework = project.config.framework.kind == FRAMEWORK_KIND_LEZ_FRAMEWORK;
+    // Both lez-framework and spel projects require an IDL file at deploy time.
+    let requires_idl = matches!(
+        project.config.framework.kind.as_str(),
+        FRAMEWORK_KIND_LEZ_FRAMEWORK | FRAMEWORK_KIND_SPEL
+    );
 
     for (stem, bin_path) in binaries {
         let mut hasher = Sha256::new();
@@ -106,14 +110,19 @@ pub(crate) fn compute_program_hashes(project: &Project) -> DynResult<BTreeMap<St
         // that's the path the IDL was actually written to: a raw stem
         // like `my-program` would miss the on-disk `my_program.json`
         // and bail with a misleading "run `lgs build idl`" error.
-        let idl_path = idl_dir.join(format!("{}.json", sanitize_file_stem(&stem)));
+        // spel projects don't use the `<idl-dir>/<stem>.json` convention: the
+        // IDL is a single file at the project root, named by `spel.toml`
+        // (`<project>-idl.json`). Resolving it the scaffold way would bail on
+        // a file that is never written.
+        let idl_path = spel_idl_path(project, &stem)
+            .unwrap_or_else(|| idl_dir.join(format!("{}.json", sanitize_file_stem(&stem))));
         if idl_path.exists() {
             let idl_bytes = std::fs::read(&idl_path)
                 .with_context(|| format!("read {} for hashing", idl_path.display()))?;
             hasher.update(b"\x00idl\x00");
             hasher.update(&idl_bytes);
-        } else if is_lez_framework {
-            // For lez-framework projects, the IDL file is a documented
+        } else if requires_idl {
+            // For spel and lez-framework projects, the IDL file is a documented
             // build artifact (`<stem>.json` produced by `build idl`).
             // Missing it would mean we cache a partial digest and silently
             // skip deploys after later ABI-only edits. Bail loudly.
@@ -127,6 +136,25 @@ pub(crate) fn compute_program_hashes(project: &Project) -> DynResult<BTreeMap<St
         out.insert(stem, hex_encode(&hasher.finalize()));
     }
     Ok(out)
+}
+
+/// The IDL path declared by a spel project's `spel.toml`, if this is a spel
+/// project and the file names one. Supports both the single-program
+/// (`[program]`) and multi-program (`[programs.<name>]`) shapes.
+fn spel_idl_path(project: &Project, stem: &str) -> Option<std::path::PathBuf> {
+    if project.config.framework.kind != FRAMEWORK_KIND_SPEL {
+        return None;
+    }
+    let text = std::fs::read_to_string(project.root.join("spel.toml")).ok()?;
+    let doc = text.parse::<toml_edit::DocumentMut>().ok()?;
+    let named = doc
+        .get("programs")
+        .and_then(|p| p.get(stem))
+        .and_then(|p| p.get("idl"));
+    let idl = named
+        .or_else(|| doc.get("program").and_then(|p| p.get("idl")))?
+        .as_str()?;
+    Some(project.root.join(idl))
 }
 
 /// Canonical, stable digest of the deploy-affecting bits of scaffold.toml
@@ -397,6 +425,81 @@ mod tests {
                 basecamp: None,
             },
         }
+    }
+
+    fn spel_project(root: std::path::PathBuf, spel_toml: Option<&str>) -> Project {
+        let mut project = make_test_project(root);
+        project.config.framework.kind = FRAMEWORK_KIND_SPEL.to_string();
+        if let Some(body) = spel_toml {
+            std::fs::create_dir_all(&project.root).unwrap();
+            std::fs::write(project.root.join("spel.toml"), body).unwrap();
+        }
+        project
+    }
+
+    /// Single-program shape: `spel init` writes `[program] idl = "<name>-idl.json"`.
+    #[test]
+    fn spel_idl_path_reads_the_single_program_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = spel_project(
+            tmp.path().to_path_buf(),
+            Some("[program]\nidl = \"demo-idl.json\"\n"),
+        );
+        assert_eq!(
+            spel_idl_path(&project, "demo"),
+            Some(tmp.path().join("demo-idl.json"))
+        );
+    }
+
+    /// Multi-program shape: `[programs.<name>]` wins for its own stem.
+    #[test]
+    fn spel_idl_path_prefers_the_named_program_over_the_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = spel_project(
+            tmp.path().to_path_buf(),
+            Some(
+                "[program]\nidl = \"fallback-idl.json\"\n\n\
+                 [programs.alpha]\nidl = \"alpha-idl.json\"\n",
+            ),
+        );
+        assert_eq!(
+            spel_idl_path(&project, "alpha"),
+            Some(tmp.path().join("alpha-idl.json"))
+        );
+        // A stem with no section of its own falls back to `[program]`.
+        assert_eq!(
+            spel_idl_path(&project, "beta"),
+            Some(tmp.path().join("fallback-idl.json"))
+        );
+    }
+
+    /// Non-spel projects keep the `<idl-dir>/<stem>.json` convention, and a
+    /// spel project with a missing or unparseable `spel.toml` falls back to it
+    /// too — which is what produces the "run `lgs build idl` first" error, so
+    /// the fallback needs to stay deliberate rather than accidental.
+    #[test]
+    fn spel_idl_path_is_none_when_it_cannot_resolve() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Not a spel project at all.
+        assert_eq!(
+            spel_idl_path(&make_test_project(tmp.path().to_path_buf()), "demo"),
+            None
+        );
+        // spel project, no spel.toml.
+        assert_eq!(
+            spel_idl_path(&spel_project(tmp.path().to_path_buf(), None), "demo"),
+            None
+        );
+        // spel project, spel.toml with no idl key.
+        let project = spel_project(
+            tmp.path().to_path_buf(),
+            Some("[program]\nbinary = \"x.bin\"\n"),
+        );
+        assert_eq!(spel_idl_path(&project, "demo"), None);
+        // spel project, unparseable spel.toml.
+        let project = spel_project(tmp.path().to_path_buf(), Some("this is not toml ="));
+        assert_eq!(spel_idl_path(&project, "demo"), None);
     }
 
     /// Stage a guest source under `methods/guest/src/bin/<stem>.rs` so

@@ -186,6 +186,19 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
         ensure_localnet(project, params.localnet_timeout_sec)?;
     }
 
+    // Localnet is up for the first time in this pipeline, so this is the
+    // earliest point wallet commands can work at all: since LEZ v0.2.4,
+    // `WalletCore::from_env` elects a sequencer leader on *every* wallet
+    // invocation and aborts with `Failed to find leader` when none answers.
+    // `setup` therefore cannot seed the default wallet — it runs before any
+    // node exists — and without a default address step 4 has no destination.
+    // Seeding here is a no-op once a default address is recorded.
+    {
+        let wallet_home = project.root.join(&project.config.wallet_home_dir);
+        let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
+        ensure_default_wallet_seeded(&project.root, &wallet_home, &lez.join(WALLET_BIN_REL_PATH))?;
+    }
+
     // Step 4: Wallet topup. Skipped entirely when the run profile sets
     // `topup = false` (project funds its own accounts). The branch below and
     // the value hooks read from `SCAFFOLD_TOPUP_SKIPPED` come from the same

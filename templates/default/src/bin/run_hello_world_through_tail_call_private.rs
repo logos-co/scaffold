@@ -3,10 +3,10 @@ use std::collections::HashMap;
 use anyhow::Context;
 use clap::Parser;
 use example_program_deployment_methods::{HELLO_WORLD_ELF, SIMPLE_TAIL_CALL_ELF};
-use nssa::{
+use lee::{
     ProgramId, privacy_preserving_transaction::circuit::ProgramWithDependencies, program::Program,
 };
-use wallet::{PrivacyPreservingAccount, WalletCore};
+use wallet::{AccountIdentity, WalletCore};
 
 #[path = "../lib.rs"]
 mod scaffold_lib;
@@ -24,7 +24,9 @@ struct Cli {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let wallet_core = WalletCore::from_env().context("failed to initialize wallet from environment")?;
+    let wallet_core = WalletCore::from_env()
+        .await
+        .context("failed to initialize wallet from environment")?;
 
     let simple_tail_call = load_program(
         cli.simple_tail_call_path.as_deref(),
@@ -41,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
         [(hello_world.id(), hello_world)].into_iter().collect();
     let program_with_dependencies = ProgramWithDependencies::new(simple_tail_call, dependencies);
     let account_id = parse_account_id(&cli.account_id)?;
-    let accounts = vec![PrivacyPreservingAccount::PrivateOwned(account_id)];
+    let accounts = vec![AccountIdentity::PrivateOwned(account_id)];
 
     let (response, _) = wallet_core
         .send_privacy_preserving_tx(

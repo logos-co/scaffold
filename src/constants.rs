@@ -25,12 +25,12 @@ pub(crate) struct GitRef {
 // `commands/doctor.rs` enforces this at runtime — re-run `doctor` after
 // bumping either pin.
 pub(crate) const DEFAULT_LEZ: GitRef = GitRef {
-    sha: "cf3639d8252040d13b3d4e933feb19b42c76e14a",
-    tag: "v0.1.2",
+    sha: "47eba256479f6f785acbd138834340703cd03401",
+    tag: "v0.2.4",
 };
 pub(crate) const DEFAULT_SPEL: GitRef = GitRef {
-    sha: "73fc462eb8f0a4d00f1a846437c627ec2e523f83",
-    tag: "v0.5.0",
+    sha: "4107dcb14ec0eb64e9e80a9691a3df0b9acd3c2b",
+    tag: "v0.7.0",
 };
 
 /// `logos-blockchain-circuits` GitHub release version that contains the
@@ -49,7 +49,7 @@ pub(crate) const DEFAULT_SPEL: GitRef = GitRef {
 /// `circuits::ensure_circuits_for_project`. Override by setting
 /// `LOGOS_BLOCKCHAIN_CIRCUITS` to a populated checkout; the env var
 /// short-circuits the download.
-pub(crate) const DEFAULT_CIRCUITS_VERSION: &str = "0.4.1";
+pub(crate) const DEFAULT_CIRCUITS_VERSION: &str = "0.4.2";
 pub(crate) const LOGOS_BLOCKCHAIN_CIRCUITS_ENV: &str = "LOGOS_BLOCKCHAIN_CIRCUITS";
 pub(crate) const CIRCUITS_RELEASE_BASE_URL: &str =
     "https://github.com/logos-blockchain/logos-blockchain-circuits/releases/download";
@@ -79,7 +79,10 @@ pub(crate) const WALLET_CONFIG_REL_PATHS: &[&str] =
     &[WALLET_CONFIG_NESTED_REL_PATH, WALLET_CONFIG_REL_PATH];
 pub(crate) const WALLET_BIN_REL_PATH: &str = "target/release/wallet";
 pub(crate) const FRAMEWORK_KIND_DEFAULT: &str = "default";
+/// Deprecated alias kept for backward compatibility with existing scaffold.toml files.
+/// New projects use `FRAMEWORK_KIND_SPEL` ("spel").
 pub(crate) const FRAMEWORK_KIND_LEZ_FRAMEWORK: &str = "lez-framework";
+pub(crate) const FRAMEWORK_KIND_SPEL: &str = "spel";
 pub(crate) const DEFAULT_FRAMEWORK_VERSION: &str = "0.1.0";
 pub(crate) const DEFAULT_FRAMEWORK_IDL_SPEC: &str = "lssa-idl/0.1.0";
 pub(crate) const DEFAULT_FRAMEWORK_IDL_PATH: &str = "idl";
@@ -97,6 +100,9 @@ pub(crate) const SEQUENCER_CONFIG_NESTED_REL_PATH: &str =
 pub(crate) const SEQUENCER_CONFIG_REL_PATHS: &[&str] =
     &[SEQUENCER_CONFIG_NESTED_REL_PATH, SEQUENCER_CONFIG_REL_PATH];
 pub(crate) const SPEL_BIN_REL_PATH: &str = "target/release/spel";
+/// FFI/client code generator. A separate binary from `spel` — there is no
+/// `spel ffi-gen` subcommand; the scaffolded Makefile shells out to this.
+pub(crate) const SPEL_CLIENT_GEN_BIN_REL_PATH: &str = "target/release/spel-client-gen";
 /// Default seconds to wait for the sequencer to become ready when `lgs run`
 /// has to start localnet itself. Cold first runs (fresh repo clone, cold
 /// nix/cargo caches) routinely overshoot the previous 20s ceiling. Override

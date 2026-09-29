@@ -14,11 +14,14 @@ against a local execution zone.
 
 ```bash
 cargo install logos-scaffold
-lgs new my-app --template lez-framework
+lgs new my-app --template spel
 cd my-app
 lgs run
 lgs wallet -- check-health   # confirm wallet + localnet after the first pipeline
 ```
+
+For a bare LEZ project with no framework macros, drop the flag:
+`lgs new my-app`.
 
 `lgs run` builds your project, starts a local sequencer, funds a wallet, and
 deploys your programs. That is the whole inner loop in one command.
@@ -68,12 +71,20 @@ Every command needs these:
 
 - `git`, `rustc`, `cargo` (Rust 1.81 or newer)
 - Unix process helpers: `lsof`, `ps`, `kill`
+- `pkg-config` and the PCSC development headers, which the LEZ wallet links
+  against for keycard support. On Debian/Ubuntu:
+  `sudo apt install pkgconf libpcsclite-dev` (Fedora: `pkgconf pcsc-lite-devel`,
+  Arch: `pkgconf pcsclite`). Without them `setup` fails building the wallet with
+  `Could not find a PCSC library`.
 
 Some workflows need more:
 
 - `curl`, used by the first `setup` to fetch the pinned
   `logos-blockchain-circuits` release
 - A container runtime, Docker or Podman, for guest builds
+- For `--template spel` projects, risc0's `cargo-risczero`, which `make build`
+  uses to produce the reproducible guest binary:
+  `curl -L https://risc0.com/install | bash && rzup install cargo-risczero 3.0.5`
 - `nix` with flakes enabled, for `basecamp` subcommands
 
 Circuits are not a manual step. Scaffold downloads the release pinned in
@@ -157,7 +168,7 @@ lgs setup
 
 `init` only writes `scaffold.toml` and creates `.scaffold/` directories. It
 does not touch your `Cargo.toml` or `src/`. Edit `scaffold.toml` if you need
-non-default framework settings, for example `lez-framework`.
+non-default framework settings, for example `kind = "spel"`.
 
 ### Migrate an older scaffolded project
 
@@ -197,17 +208,33 @@ node.stop()?;
 See the [`api` module rustdoc](https://docs.rs/logos-scaffold) for the full
 surface, typed result models, and categorized errors.
 
-## LEZ Framework
+## SPEL
 
 For a developer experience closer to Anchor on Solana, use the
-[LEZ Framework](https://github.com/jimmy-claw/lez-framework) template:
+[SPEL](https://github.com/logos-co/spel) template:
 
 ```bash
-lgs new my-app --template lez-framework
+lgs new my-app --template spel
 ```
 
-See the [LEZ Framework template README](./templates/lez-framework/README.md)
-for details.
+Scaffold clones and builds the pinned `spel` CLI itself, the same way it
+bootstraps LEZ — you do not install it separately, and a `spel` that happens
+to be on your `PATH` is ignored in favour of the pin.
+
+SPEL turns a Rust module into a LEZ program with `#[lez_program]`,
+`#[instruction]` and `#[account(...)]` macros, generates an IDL from it, and
+gives you a typed CLI that derives PDAs and signs transactions for you.
+`lgs new --template spel` runs `spel init` and layers scaffold's `scaffold.toml`
+and AI skills on top, so `lgs run`, `lgs build client` and `lgs doctor` work
+against the result.
+
+See the [SPEL docs](https://github.com/logos-co/spel/tree/main/docs) for the
+framework itself, and `skills/spel-template/` here for the scaffold-side
+workflow.
+
+> `--template lez-framework` still works as a deprecated alias: `lez-framework`
+> was renamed to SPEL, it is not a separate framework. It now scaffolds a SPEL
+> project and prints a warning.
 
 ## Troubleshooting
 
