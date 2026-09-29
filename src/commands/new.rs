@@ -109,11 +109,15 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
 /// layering scaffold.toml and AI skills on top.
 ///
 /// The CLI is bootstrapped from `DEFAULT_SPEL`, exactly the way the `default`
-/// template bootstraps LEZ: clone the pinned commit into the scaffold cache
-/// (or into the project with `--vendor-deps`) and build it there. Scaffold
-/// deliberately ignores any `spel` that happens to be on PATH — the pin
-/// recorded in scaffold.toml is the only version that matters, and `setup`
-/// reuses this same checkout, so nothing is built twice.
+/// template bootstraps LEZ: clone the pinned commit into the scaffold cache and
+/// build it there. Scaffold deliberately ignores any `spel` that happens to be
+/// on PATH — the pin recorded in scaffold.toml is the only version that matters.
+///
+/// Without `--vendor-deps`, `setup` resolves to this same cache checkout, so it
+/// reuses the build rather than repeating it. With `--vendor-deps`, scaffold.toml
+/// points `setup` at the project-local copy instead, which is a fresh clone with
+/// no build in it, so `setup` builds the CLI there once more. That is deliberate:
+/// the cache's `target/` is ~1.7 GB, too much to copy into every vendored project.
 fn cmd_new_spel(
     cmd: &NewCommand,
     target: &Path,
@@ -149,40 +153,18 @@ fn cmd_new_spel(
     }
 
     let spel_bin = build_spel_cli(&cached_spel)?;
+    finish_spel_project(cmd, target, &spel_bin)
+}
 
-    println!(
-        "Running `spel init {}` (LEZ tag: {}, spel tag: {})...",
-        cmd.name, DEFAULT_LEZ.tag, DEFAULT_SPEL.tag
-    );
-    // `spel init` resolves the project name against *its own* working
-    // directory, so it must run in `target`'s parent — not the process cwd.
-    // They coincide for the CLI, but not for `api::create_project`, which takes
-    // an explicit parent: running in the cwd there would scatter the spel
-    // project and scaffold's overlay across two different directories.
-    let parent = match target.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-        _ => env::current_dir()?,
-    };
-    fs::create_dir_all(&parent)?;
-    // Flags MUST precede the project name. `spel init`'s parser walks
-    // arguments until the first non-flag, treats it as the name, and silently
-    // ignores everything after it — `spel init foo --spel-tag v0.7.0` exits 0
-    // having pinned nothing.
-    let status = std::process::Command::new(&spel_bin)
-        .arg("init")
-        .arg("--lez-tag")
-        .arg(DEFAULT_LEZ.tag)
-        // `spel init` defaults the framework to branch `main`; pin it to the
-        // same tag scaffold pins so the generated project is reproducible.
-        .arg("--spel-tag")
-        .arg(DEFAULT_SPEL.tag)
-        .arg(&cmd.name)
-        .current_dir(&parent)
-        .status()
-        .context("failed to launch spel init")?;
-    if !status.success() {
-        anyhow::bail!("spel init failed");
-    }
+/// Everything after the spel CLI is resolved: delegate to `spel init`, then
+/// layer scaffold's state, config and skills on top of what it generated.
+///
+/// Split out from `cmd_new_spel` so it can be driven by a stub `spel` in tests
+/// without a network clone or a CLI build. The ordering it encodes has been
+/// wrong twice, both times silently: **nothing** may exist at `target` when
+/// `spel init` runs, because it refuses to write into an existing directory.
+fn finish_spel_project(cmd: &NewCommand, target: &Path, spel_bin: &Path) -> DynResult<()> {
+    run_spel_init(spel_bin, target)?;
 
     // `spel init` created the project directory; layer scaffold state on top.
     fs::create_dir_all(target.join(".scaffold/state"))?;
@@ -221,9 +203,58 @@ fn cmd_new_spel(
     Ok(())
 }
 
+/// Run `spel init` so that it creates exactly `target`.
+///
+/// `spel init` resolves the name it is given against its *own* working
+/// directory, so the invocation is derived from `target` alone — its parent as
+/// the working directory, its final component as the name — never from the
+/// name the user typed. Using the process cwd broke `api::create_project`,
+/// which takes an explicit parent; passing the typed name broke names with a
+/// path separator (`nested/sub-app`), where the prefix was applied twice. Both
+/// left scaffold's overlay in one directory and the spel project in another,
+/// while reporting success.
+fn run_spel_init(spel_bin: &Path, target: &Path) -> DynResult<()> {
+    let name = target
+        .file_name()
+        .with_context(|| format!("project path `{}` has no final component", target.display()))?;
+    let parent = match target.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => env::current_dir()?,
+    };
+    fs::create_dir_all(&parent)?;
+
+    println!(
+        "Running `spel init {}` in {} (LEZ tag: {}, spel tag: {})...",
+        name.to_string_lossy(),
+        parent.display(),
+        DEFAULT_LEZ.tag,
+        DEFAULT_SPEL.tag
+    );
+    // Flags MUST precede the project name. `spel init`'s parser walks
+    // arguments until the first non-flag, treats it as the name, and silently
+    // ignores everything after it — `spel init foo --spel-tag v0.7.0` exits 0
+    // having pinned nothing.
+    let status = std::process::Command::new(spel_bin)
+        .arg("init")
+        .arg("--lez-tag")
+        .arg(DEFAULT_LEZ.tag)
+        // `spel init` defaults the framework to branch `main`; pin it to the
+        // same tag scaffold pins so the generated project is reproducible.
+        .arg("--spel-tag")
+        .arg(DEFAULT_SPEL.tag)
+        .arg(name)
+        .current_dir(&parent)
+        .status()
+        .context("failed to launch spel init")?;
+    if !status.success() {
+        anyhow::bail!("spel init failed");
+    }
+    Ok(())
+}
+
 /// Build the `spel` CLI from a checkout already synced to its pin, returning
-/// the binary path. `setup` builds the same target in the same checkout, so a
-/// later `lgs setup` is a no-op rather than a rebuild.
+/// the binary path. For cache-managed projects `setup` builds the same target
+/// in the same checkout, so a later `lgs setup` reuses it rather than rebuilding.
 fn build_spel_cli(spel_repo: &Path) -> DynResult<PathBuf> {
     let spel_bin = spel_repo.join(SPEL_BIN_REL_PATH);
     if spel_bin.is_file() {
@@ -488,6 +519,141 @@ pub(crate) fn to_cargo_crate_name(input: &str) -> String {
 mod tests {
     use super::{build_scaffold_config, to_cargo_crate_name, NewCommand};
     use crate::constants::{DEFAULT_LEZ, DEFAULT_SPEL, FRAMEWORK_KIND_SPEL};
+
+    /// A stand-in for `spel init` with the two properties the real one has and
+    /// scaffold has to respect: it resolves the project name against its *own*
+    /// working directory, and it refuses a directory that already exists. It
+    /// also refuses to run anywhere outside `sandbox`, so a regression that
+    /// sends it to the process cwd fails the test instead of writing a project
+    /// into the repo. Each invocation is appended to `log` as `<cwd>|<args>`.
+    #[cfg(unix)]
+    fn stub_spel(sandbox: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = sandbox.join("stub-spel");
+        let log = sandbox.join("stub-spel.log");
+        let script = format!(
+            r#"#!/bin/sh
+cwd=$(pwd -P)
+case "$cwd" in
+  "{sandbox}"*) ;;
+  *) echo "stub spel ran outside the test sandbox: $cwd" >&2; exit 97 ;;
+esac
+for name; do :; done
+if [ -e "$name" ]; then
+  echo "Directory '$name' already exists" >&2
+  exit 1
+fi
+mkdir "$name"
+: > "$name/spel.toml"
+: > "$name/Cargo.toml"
+printf '%s|%s\n' "$cwd" "$*" >> "{log}"
+"#,
+            sandbox = sandbox.display(),
+            log = log.display(),
+        );
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (bin, log)
+    }
+
+    #[cfg(unix)]
+    fn sandbox() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        // Canonical, so the stub's `pwd -P` comparison holds where the temp dir
+        // sits behind a symlink (macOS `/tmp` → `/private/tmp`).
+        let root = tmp.path().canonicalize().unwrap();
+        (tmp, root)
+    }
+
+    /// `lgs new nested/sub-app --template spel` used to pass the typed name to
+    /// `spel init` *and* run it in the target's parent, applying `nested/`
+    /// twice: scaffold's overlay landed in `nested/sub-app` and the spel
+    /// project in `nested/nested/sub-app`, with exit 0 and a success line.
+    ///
+    /// Because the stub refuses an existing directory, this also holds the
+    /// ordering invariant in place: anything created at `target` before the
+    /// delegation makes this test fail.
+    #[cfg(unix)]
+    #[test]
+    fn spel_project_lands_in_one_directory_for_a_nested_name() {
+        let (_tmp, root) = sandbox();
+        let (spel, log) = stub_spel(&root);
+        let target = root.join("nested/sub-app");
+        let mut cmd = spel_cmd();
+        cmd.name = "nested/sub-app".to_string();
+
+        super::finish_spel_project(&cmd, &target, &spel).expect("scaffold spel project");
+
+        // One directory holds both what `spel init` generated and scaffold's overlay.
+        assert!(
+            target.join("spel.toml").is_file(),
+            "spel project missing from target"
+        );
+        assert!(
+            target.join("scaffold.toml").is_file(),
+            "overlay missing from target"
+        );
+        assert!(
+            !root.join("nested/nested").exists(),
+            "the `nested/` prefix must not be applied twice"
+        );
+
+        let calls = std::fs::read_to_string(&log).unwrap();
+        let calls: Vec<&str> = calls.lines().collect();
+        assert_eq!(calls.len(), 1, "spel init must run exactly once: {calls:?}");
+        let (cwd, args) = calls[0].split_once('|').unwrap();
+        assert_eq!(cwd, root.join("nested").to_str().unwrap());
+        assert!(
+            args.ends_with(" sub-app"),
+            "spel init must be given the final component, got: {args}"
+        );
+    }
+
+    /// `api::create_project` passes an explicit parent that is not the process
+    /// cwd. `spel init` must run there, or the spel project and scaffold's
+    /// overlay end up in two different directories. The stub's sandbox check
+    /// is what catches a regression to the process cwd.
+    #[cfg(unix)]
+    #[test]
+    fn spel_init_runs_in_the_target_parent_not_the_process_cwd() {
+        let (_tmp, root) = sandbox();
+        let (spel, log) = stub_spel(&root);
+        let target = root.join("api-app");
+        let mut cmd = spel_cmd();
+        cmd.name = "api-app".to_string();
+
+        super::finish_spel_project(&cmd, &target, &spel).expect("scaffold spel project");
+
+        assert!(target.join("spel.toml").is_file());
+        assert!(target.join("scaffold.toml").is_file());
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            calls.starts_with(&format!("{}|", root.display())),
+            "spel init ran in the wrong directory: {calls}"
+        );
+    }
+
+    /// The pins must reach `spel init` as flags *before* the name — its parser
+    /// silently ignores anything after the first positional argument.
+    #[cfg(unix)]
+    #[test]
+    fn spel_init_receives_both_pins_before_the_name() {
+        let (_tmp, root) = sandbox();
+        let (spel, log) = stub_spel(&root);
+        let target = root.join("pinned");
+
+        super::run_spel_init(&spel, &target).expect("run spel init");
+
+        let calls = std::fs::read_to_string(&log).unwrap();
+        let (_, args) = calls.trim_end().split_once('|').unwrap();
+        assert_eq!(
+            args,
+            format!(
+                "init --lez-tag {} --spel-tag {} pinned",
+                DEFAULT_LEZ.tag, DEFAULT_SPEL.tag
+            )
+        );
+    }
 
     fn spel_cmd() -> NewCommand {
         NewCommand {
