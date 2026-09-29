@@ -208,16 +208,30 @@ lgpm. Consequences:
 - The pin is the only version that can be used, so "scaffolded with one spel,
   pinned to another" stops being a failure mode rather than being detected.
   `find_spel_on_path` and `check_spel_version` were deleted with it.
-- It is the same checkout and target directory `setup` uses, so a later
-  `lgs setup` reuses the build instead of repeating it.
+- For cache-managed projects it is the same checkout and target directory
+  `setup` uses, so a later `lgs setup` reuses the build instead of repeating
+  it. With `--vendor-deps` it is not: `scaffold.toml` then points `setup` at
+  the project-local clone, which has no build in it, so the CLI is built a
+  second time there. That is a deliberate trade — the cache's `target/` is
+  about 1.7 GB, too much to copy into every vendored project to save one build.
 
 Ordering matters and is easy to get wrong: `spel init` refuses to write into a
 directory that already exists, so **nothing** may be created under the project
 directory before the delegation — including the vendored repo for
-`--vendor-deps`, which is therefore cloned after `spel init` returns. The
-delegation also has to run in the target's *parent*, not the process working
-directory, or `api::create_project` (which takes an explicit parent) scatters
-the spel project and scaffold's overlay across two locations.
+`--vendor-deps`, which is therefore cloned after `spel init` returns.
+
+Placement is the other trap. `spel init` resolves the name it is given against
+its own working directory, so the invocation is derived from the target path
+alone: its parent as the working directory, its final component as the name.
+Deriving either half from anything else splits the project — scaffold's overlay
+in one directory, the spel project in another, with exit 0. It went wrong twice
+this way: running in the process cwd broke `api::create_project`, which takes
+an explicit parent, and passing the typed name broke names with a path
+separator (`nested/sub-app` became `nested/nested/sub-app`).
+
+All three constraints are held by tests that drive `finish_spel_project` with a
+stub `spel` which, like the real one, refuses an existing directory and
+resolves names against its own cwd.
 
 ## Vendoring `spel` Per-Project for Program ID Surfacing
 

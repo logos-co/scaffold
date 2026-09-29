@@ -481,7 +481,6 @@ mod tests {
         assert!(row.detail.contains("podman"));
     }
 
-    #[test]
     /// A client binary with a stopped daemon used to pass, which meant a clean
     /// `doctor` followed by a failing spel guest build.
     #[test]

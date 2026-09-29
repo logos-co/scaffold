@@ -91,9 +91,13 @@ fn build_methods_guests(cwd: &Path) -> DynResult<()> {
     if methods_manifest.is_file() {
         println!("Building guest methods...");
         // `--release` is required: deploy-side discovery (`deploy.rs`,
-        // `GUEST_BIN_SEARCH_ROOTS`) only matches `.bin` files whose path
-        // contains a `release/` component, so a debug build here would
-        // produce artefacts the deploy step cannot find.
+        // `discover_program_binaries`) prefers `.bin` files under a `release/`
+        // component — or `docker/`, which is where spel projects' `make build`
+        // puts them — and falls back to anything else only when no
+        // release-grade binary exists. A debug build here would be picked up
+        // only by that fallback, and lose to any stale release build lying
+        // around. (spel projects never reach this function; see
+        // `build_spel_guest`.)
         let mut cmd = Command::new("cargo");
         cmd.current_dir(cwd)
             .arg("build")

@@ -788,10 +788,14 @@ fn is_valid_program_name(program: &str) -> bool {
 }
 
 /// Walk every `GUEST_BIN_SEARCH_ROOTS` once and return a `program -> binary_path`
-/// map. Only paths whose components include both a `riscv32im*` target triple
-/// and a `release` directory match (debug builds are ignored as a fallback).
-/// When multiple matches exist for the same program, the shallowest path wins
-/// (preferring the canonical risc0 layout over nested workspace duplicates).
+/// map. A path must contain a `riscv32im*` target-triple component to match at
+/// all. Among matches, release-grade builds win: a `release` component (cargo /
+/// risc0-build, the `default` template) or a `docker` component
+/// (`cargo risczero build`, spel projects — the reproducible build whose
+/// ImageID is the ProgramId). Any other match, e.g. `debug`, is used only when
+/// no release-grade binary exists for that program. Within a tier, the
+/// shallowest path wins (preferring the canonical risc0 layout over nested
+/// workspace duplicates).
 pub(crate) fn discover_program_binaries(
     project_root: &Path,
     programs: &[String],
