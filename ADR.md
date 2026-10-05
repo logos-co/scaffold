@@ -478,7 +478,7 @@ so non-Risc0 projects pay nothing. Release mode is chosen so the produced `.bin`
 same `release/` path component the deploy-side discovery requires — the two halves are designed
 together. The shared `methods` directory name lives in `crate::constants::METHODS_DIR`.
 
-## Deterministic Guest Builds are Opt-In, Not the Default
+## Deterministic Guest Builds are the Default
 
 `risc0_build::embed_methods()` — what "Guest Build Discovery" above describes — compiles the
 guest against the host's Rust and clang. The ELF it emits, and therefore the risc0 image ID that
@@ -490,21 +490,20 @@ The reproducible alternative is the one `lssa` uses for the artefacts it ships: 
 build`, which compiles the guest inside a pinned `risczero/risc0-guest-builder:<tag>` container.
 Same source plus same tag gives the same bytes on every machine.
 
-Scaffold offers both and defaults to the host toolchain, selected by `[build].guest` in
-`scaffold.toml` (`"local"` | `"docker"`, overridable per invocation with `lgs build --guest`).
-Docker is not the default because:
+Scaffold offers both, selected by `[build].guest` in `scaffold.toml` (`"docker"` | `"local"`,
+overridable per invocation with `lgs build --guest`), and defaults to `docker`. An earlier
+revision defaulted to the host toolchain and only warned; review rejected that, because a default
+whose failure mode is a silently non-portable `program_id` is a footgun — the damage shows up
+later, on someone else's machine, after the ID has been published. Requiring Docker is a loud,
+immediate, one-line-fixable failure; a wrong `program_id` is neither. So:
 
-- it is a hard dependency scaffold does not otherwise have, and a first `lgs build` that fails
-  on a missing daemon is a worse onboarding failure than a `program_id` that is not yet
-  portable for a program nobody has deployed;
-- `lssa`'s own README rejects mandatory Docker for the same reason, and uses `embed_methods()`
-  in its tests while reserving `cargo risczero build` for real artefacts;
-- the cost of the wrong default is recoverable in one line of config, and only bites at the
-  point where reproducibility starts to matter — publishing a `program_id`.
-
-Non-reproducibility is therefore made *visible* rather than prevented: `lgs build` prints a
-one-time note naming the config change, and `lgs doctor` reports the active strategy as its own
-check (FAIL when `docker` is configured but the toolchain to run it is absent).
+- the default is the safe one, and `local` is an explicit opt-out for machines without Docker or
+  for inner-loop speed on a program whose `program_id` does not matter yet;
+- the missing-toolchain failure is made as cheap as possible: `lgs build` checks `cargo-risczero`,
+  `docker`, and the daemon *before* `setup` can spend minutes compiling, and each error names the
+  `[build].guest = "local"` escape hatch; `lgs doctor` reports the same condition as a FAIL;
+- a project that sets `guest = "local"` has made the choice deliberately, so `lgs build` no longer
+  nags; `lgs doctor` still reports the active strategy and says it is not reproducible.
 
 The two modes write to disjoint trees — `embed_methods()` owns `target/riscv-guest/`, the
 deterministic build gets `target/riscv-guest-docker/` via `CARGO_TARGET_DIR`. Deploy-side
@@ -522,4 +521,4 @@ twice from a clean tree, and fails on any digest difference. This mirrors what `
 does by rebuilding and diffing its committed `artifacts/`. Without it, the pinned tag
 could drift or a future risc0 release could reintroduce nondeterminism and nothing
 would notice — the unit tests only pin the invocation, and Template E2E exercises the
-host-toolchain path.
+host-toolchain path (`--guest local`).

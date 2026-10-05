@@ -64,9 +64,9 @@ fn container_runtime_row(docker: Option<PathBuf>, podman: Option<PathBuf>) -> Ch
 }
 
 /// Report the guest-build strategy, and — in `docker` mode — whether the
-/// toolchain that mode needs is actually present. A project pinned to
-/// deterministic builds that cannot run them is a FAIL, not a WARN: `lgs
-/// build` will refuse, and the fix is a one-line install.
+/// toolchain that mode needs is actually present. `docker` is the default, so
+/// a project that cannot run it is a FAIL, not a WARN: `lgs build` will
+/// refuse, and the fix is a one-line install (or an explicit `local` opt-out).
 pub(crate) fn check_guest_build(build: &BuildConfig) -> CheckRow {
     let missing: Vec<&str> = ["cargo-risczero", "docker"]
         .into_iter()
@@ -82,9 +82,9 @@ fn guest_build_row(build: &BuildConfig, missing: &[&str]) -> CheckRow {
         return CheckRow {
             status: CheckStatus::Pass,
             name: "guest build".to_string(),
-            detail: "local — host risc0 toolchain; program_id is not reproducible across \
-                     machines. Set [build].guest = \"docker\" in scaffold.toml for \
-                     reproducible builds."
+            detail: "local — host risc0 toolchain (opted in via [build].guest); program_id is \
+                     not reproducible across machines. Remove the setting or use \"docker\" \
+                     for reproducible builds."
                 .to_string(),
             remediation: None,
         };
@@ -423,7 +423,13 @@ mod tests {
 
     #[test]
     fn guest_build_row_reports_local_mode_as_pass_and_says_why_it_is_not_reproducible() {
-        let row = guest_build_row(&BuildConfig::default(), &[]);
+        let row = guest_build_row(
+            &BuildConfig {
+                guest: GuestBuildMode::Local,
+                ..BuildConfig::default()
+            },
+            &[],
+        );
         assert_eq!(row.status, CheckStatus::Pass);
         assert!(row.detail.starts_with("local"), "got: {}", row.detail);
         assert!(

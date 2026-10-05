@@ -166,17 +166,17 @@ ways. The choice decides whether the guest ELF — and therefore the
 
 ```toml
 [build]
-guest = "docker"                  # "local" (default) | "docker"
+guest = "docker"                  # "docker" (default) | "local"
 risc0_docker_tag = "r0.1.97.0"    # optional; scaffold's pin is the default
 ```
 
 | `guest` | How | Needs | `program_id` |
 |---|---|---|---|
-| `local` (default) | `cargo build --release --manifest-path methods/Cargo.toml`, i.e. the guest crate's own `risc0_build::embed_methods()` | nothing beyond the host Rust toolchain | **Not reproducible.** Depends on the host's Rust and clang versions, so two developers — or a developer and CI — can produce different bytes from the same source |
-| `docker` | `cargo risczero build` inside `risczero/risc0-guest-builder:<tag>` | Docker daemon running, `cargo-risczero` on `PATH` (see below) | **Reproducible.** Same source plus same tag gives the same bytes, and therefore the same `program_id`, on any machine |
+| `local` | `cargo build --release --manifest-path methods/Cargo.toml`, i.e. the guest crate's own `risc0_build::embed_methods()` | nothing beyond the host Rust toolchain | **Not reproducible.** Depends on the host's Rust and clang versions, so two developers — or a developer and CI — can produce different bytes from the same source |
+| `docker` (default) | `cargo risczero build` inside `risczero/risc0-guest-builder:<tag>` | Docker daemon running, `cargo-risczero` on `PATH` (see below) | **Reproducible.** Same source plus same tag gives the same bytes, and therefore the same `program_id`, on any machine |
 
-`cargo-risczero` is a **separate rzup component** — `rzup install rust`, which is
-what you need for the default build, does not provide it:
+`cargo-risczero` is a **separate rzup component** — `rzup install rust`, which
+is what you need for a `local` build, does not provide it:
 
 ```bash
 rzup install cargo-risczero      # or: cargo install cargo-risczero
@@ -193,12 +193,11 @@ RISC0_DOCKER_CONTAINER_TAG=r0.1.97.0 cargo risczero build --manifest-path method
 `lgs build --guest docker` always sets it for you; this only bites when
 reaching past scaffold to the underlying tool.
 
-Use `local` while you are iterating: it is much faster and needs no container
-runtime. Switch to `docker` before a `program_id` starts to matter — anything
-you publish, deploy somewhere other than your own localnet, or verify in CI.
-`lgs build --guest <local|docker>` overrides the setting for one invocation,
-which is the quickest way to check what a program's reproducible `program_id`
-actually is.
+`docker` is the default so that a `program_id` is never silently
+non-portable. If you do not have Docker, or want faster inner-loop builds while
+a `program_id` does not matter yet, opt out with `guest = "local"`; it is much
+faster and needs no container runtime. `lgs build --guest <local|docker>`
+overrides the setting for one invocation.
 
 `risc0_docker_tag` pins the guest Rust toolchain. **Changing it changes every
 `program_id` the project produces**, so treat a bump the same way you would
@@ -215,7 +214,7 @@ last `lgs build` decides what `lgs deploy` ships — you never have to reason
 about which of two `.bin` files on disk is current.
 
 `lgs doctor` reports the active strategy as a `guest build` check, and fails
-when `guest = "docker"` but Docker or `cargo-risczero` is missing.
+when `guest = "docker"` (the default) but Docker or `cargo-risczero` is missing.
 
 ### Costs of the deterministic path
 

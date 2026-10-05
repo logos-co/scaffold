@@ -534,7 +534,8 @@ pub struct BuildOptions {
 /// [`GuestBuild::Local`] uses the host risc0 toolchain via
 /// `risc0_build::embed_methods()`: fast, no Docker, but the emitted ELF (and
 /// the `program_id` derived from it) can differ across machines.
-/// [`GuestBuild::Docker`] runs `cargo risczero build` inside the pinned
+/// [`GuestBuild::Docker`] — the default when `scaffold.toml` has no
+/// `[build]` section — runs `cargo risczero build` inside the pinned
 /// `risczero/risc0-guest-builder` container, so the same source yields the
 /// same `program_id` everywhere.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -244,11 +244,11 @@ struct BuildArgs {
     /// Falls back to source build if no prebuilt exists for the pinned commit.
     #[arg(long, default_value_t = false)]
     prebuilt: bool,
-    /// Override [build].guest for this invocation. `local` builds guest
-    /// programs with the host risc0 toolchain (fast, no Docker,
-    /// non-reproducible program_id); `docker` builds them inside the pinned
-    /// risc0-guest-builder container (reproducible program_id, needs Docker
-    /// and cargo-risczero).
+    /// Override [build].guest for this invocation. `docker` (the default)
+    /// builds guest programs inside the pinned risc0-guest-builder container
+    /// (reproducible program_id, needs Docker and cargo-risczero); `local`
+    /// uses the host risc0 toolchain (fast, no Docker, non-reproducible
+    /// program_id).
     #[arg(long, value_enum, value_name = "MODE")]
     guest: Option<GuestBuildModeArg>,
     #[command(subcommand)]

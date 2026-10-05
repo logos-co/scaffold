@@ -646,8 +646,8 @@ fn parse_framework(doc: &DocumentMut) -> FrameworkConfig {
 
 /// `[build]` is optional and every key has a default, so a config written
 /// before this section existed parses to `BuildConfig::default()` (the
-/// pre-existing `local` behaviour) rather than failing. That is why adding it
-/// did not need a `[scaffold].version` bump.
+/// default `docker` strategy) rather than failing. That is why adding it did
+/// not need a `[scaffold].version` bump.
 fn parse_build(doc: &DocumentMut) -> DynResult<BuildConfig> {
     let mut cfg = BuildConfig::default();
     let Some(table) = doc.get("build").and_then(Item::as_table) else {
@@ -844,9 +844,8 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
     idl_table["spec"] = value(&cfg.framework.idl.spec);
     idl_table["path"] = value(&cfg.framework.idl.path);
 
-    // [build] — omitted entirely at defaults so existing files and freshly
-    // created projects stay byte-identical to what they were before the
-    // section existed. `lgs build` prints the snippet to add when it matters.
+    // [build] — omitted entirely at defaults, so freshly created projects
+    // stay byte-identical to what they were before the section existed.
     if cfg.build != BuildConfig::default() {
         check_toml_value("build.risc0_docker_tag", &cfg.build.risc0_docker_tag)?;
         let build = doc.entry("build").or_insert(Item::Table(Table::new()));
@@ -1302,13 +1301,13 @@ risc0_dev_mode = true
         assert_eq!(cfg.circuits.url_template, None);
     }
 
-    /// A config written before `[build]` existed must keep working and land
-    /// on the pre-existing behaviour (host toolchain), not fail to parse.
+    /// A config written before `[build]` existed must keep parsing and land
+    /// on the default (deterministic, `docker`) strategy.
     #[test]
-    fn build_section_is_optional_and_defaults_to_local() {
+    fn build_section_is_optional_and_defaults_to_docker() {
         let cfg = parse_config(&minimal_v0_2_0()).expect("parse");
         assert_eq!(cfg.build, BuildConfig::default());
-        assert_eq!(cfg.build.guest, GuestBuildMode::Local);
+        assert_eq!(cfg.build.guest, GuestBuildMode::Docker);
         assert_eq!(
             cfg.build.risc0_docker_tag,
             crate::constants::DEFAULT_RISC0_DOCKER_TAG
@@ -1320,11 +1319,11 @@ risc0_dev_mode = true
         let toml = minimal_v0_2_0()
             + r#"
 [build]
-guest = "docker"
+guest = "local"
 risc0_docker_tag = "r0.1.91.1"
 "#;
         let cfg = parse_config(&toml).expect("parse");
-        assert_eq!(cfg.build.guest, GuestBuildMode::Docker);
+        assert_eq!(cfg.build.guest, GuestBuildMode::Local);
         assert_eq!(cfg.build.risc0_docker_tag, "r0.1.91.1");
     }
 
@@ -1398,7 +1397,7 @@ risc0_docker_tag = "r0.1.91.1 && rm -rf /"
     fn build_round_trips_through_serialize() {
         let mut cfg = base_config();
         cfg.build = BuildConfig {
-            guest: GuestBuildMode::Docker,
+            guest: GuestBuildMode::Local,
             risc0_docker_tag: "r0.1.91.1".to_string(),
         };
         let text = serialize_config(&cfg).expect("serialize");
@@ -1411,8 +1410,9 @@ risc0_docker_tag = "r0.1.91.1 && rm -rf /"
     #[test]
     fn build_mode_round_trips_without_an_explicit_tag() {
         let mut cfg = base_config();
-        cfg.build.guest = GuestBuildMode::Docker;
+        cfg.build.guest = GuestBuildMode::Local;
         let text = serialize_config(&cfg).expect("serialize");
+        assert!(text.contains("guest = \"local\""), "got:\n{text}");
         assert!(!text.contains("risc0_docker_tag"), "got:\n{text}");
         let parsed = parse_config(&text).expect("reparse");
         assert_eq!(parsed.build, cfg.build);

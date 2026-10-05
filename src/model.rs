@@ -89,15 +89,15 @@ pub(crate) enum GuestBuildMode {
     /// guest crate's own `risc0_build::embed_methods()`. Uses the host's Rust
     /// and clang, needs no Docker, and is fast — but the ELF (and its
     /// `program_id`) can differ between machines, OS versions, and toolchain
-    /// versions. The default, because requiring Docker for a first build is a
-    /// bigger tax than non-reproducibility is for a program you have not
-    /// deployed anywhere yet.
+    /// versions. Opt-in: choose it when Docker is unavailable or the
+    /// `program_id` does not need to be portable.
     Local,
     /// `cargo risczero build` inside the pinned
     /// `risczero/risc0-guest-builder:<tag>` container — the strategy `lssa`
     /// uses for the program artefacts it ships. Same source plus same pinned
     /// tag produces the same ELF bytes, so `program_id` is stable across
-    /// machines and CI. Needs Docker and `cargo-risczero` on PATH.
+    /// machines and CI. Needs Docker and `cargo-risczero` on PATH. The
+    /// default, so a `program_id` is never silently non-portable.
     Docker,
 }
 
@@ -135,7 +135,7 @@ pub(crate) struct BuildConfig {
 impl Default for BuildConfig {
     fn default() -> Self {
         Self {
-            guest: GuestBuildMode::Local,
+            guest: GuestBuildMode::Docker,
             risc0_docker_tag: crate::constants::DEFAULT_RISC0_DOCKER_TAG.to_string(),
         }
     }

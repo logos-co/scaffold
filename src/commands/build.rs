@@ -2,7 +2,6 @@ use std::env;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::Once;
 
 use anyhow::{anyhow, bail, Context};
 
@@ -98,7 +97,6 @@ fn build_methods_guests(cwd: &Path, mode: GuestBuildMode, docker_tag: &str) -> D
         GuestBuildMode::Local => {
             clear_docker_guest_artifacts(cwd)?;
             build_methods_guests_local(cwd, &methods_manifest)?;
-            warn_local_guest_build_is_not_reproducible();
         }
         GuestBuildMode::Docker => build_methods_guests_docker(cwd, &methods_manifest, docker_tag)?,
     }
@@ -125,21 +123,6 @@ fn build_methods_guests_local(cwd: &Path, methods_manifest: &Path) -> DynResult<
         &mut cmd,
         "cargo build --release --manifest-path methods/Cargo.toml",
     )
-}
-
-/// Print the non-reproducibility note once per process. `lgs run --watch`
-/// rebuilds in-process on every file change; repeating this on each rebuild
-/// would train people to ignore it.
-fn warn_local_guest_build_is_not_reproducible() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        println!(
-            "Note: guest ELFs were built with the local risc0 toolchain, so their\n\
-             `program_id` can differ on another machine, OS, or Rust/clang version.\n\
-             For reproducible artefacts add this to scaffold.toml (needs Docker):\n\
-             \n    [build]\n    guest = \"docker\"\n"
-        );
-    });
 }
 
 /// Deterministic guest build: `cargo risczero build` compiles the guest inside

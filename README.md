@@ -73,9 +73,10 @@ Some workflows need more:
 
 - `curl`, used by the first `setup` to fetch the pinned
   `logos-blockchain-circuits` release
-- Docker, for reproducible guest builds (`[build].guest = "docker"`). The
-  default guest build uses your host toolchain and needs no container runtime,
-  but the `program_id` it produces is not portable across machines — see
+- Docker and `cargo-risczero`, for the default reproducible guest build
+  (`[build].guest = "docker"`). Set `[build].guest = "local"` to use your host
+  toolchain instead — no container runtime, but the `program_id` it produces
+  is not portable across machines — see
   [docs/configuration.md](docs/configuration.md#build--guest-program-build-strategy)
 - `nix` with flakes enabled, for `basecamp` subcommands
 
@@ -125,7 +126,7 @@ semantics of each one.
 | `lgs new <name>` | Create a project from a template (`create` is an alias) |
 | `lgs init` | Add scaffold to an existing project, or migrate an older one |
 | `lgs setup` | Sync pinned dependencies and build project-local binaries |
-| `lgs build` | Build the workspace and guest programs (`--guest docker` for a reproducible `program_id`) |
+| `lgs build` | Build the workspace and guest programs (`--guest local` for a faster, Docker-free, non-reproducible guest build) |
 | `lgs deploy` | Deploy guest programs to the running localnet |
 | `lgs localnet` | Start, stop, inspect, or reset the local sequencer |
 | `lgs run` | Chain the whole loop: build, IDL, localnet, topup, deploy |

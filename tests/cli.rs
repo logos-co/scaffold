@@ -4833,14 +4833,17 @@ fn doctor_reports_configured_circuits_missing() {
         );
 }
 
-/// scaffold#259: the default guest build is not reproducible, and doctor is
-/// where a developer looks to find that out before deploying a `program_id`
-/// they expect to be stable.
+/// scaffold#259: a project that opts into the host-toolchain guest build gets
+/// told, in doctor, that its `program_id` is not reproducible.
 #[test]
 fn doctor_reports_the_guest_build_strategy() {
     let temp = tempdir().expect("tempdir");
     let project = temp.path();
-    fs::write(project.join("scaffold.toml"), MINIMAL_SCAFFOLD_TOML).expect("write scaffold.toml");
+    fs::write(
+        project.join("scaffold.toml"),
+        format!("{MINIMAL_SCAFFOLD_TOML}\n[build]\nguest = \"local\"\n"),
+    )
+    .expect("write scaffold.toml");
 
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(project)
@@ -4853,7 +4856,7 @@ fn doctor_reports_the_guest_build_strategy() {
         );
 }
 
-/// scaffold#259: a project pinned to deterministic guest builds must say so
+/// scaffold#259: deterministic (the default) guest builds must say so
 /// in doctor, tag included — that tag is part of what makes `program_id`
 /// reproducible. Asserted independently of whether this machine happens to
 /// have `cargo-risczero`/`docker` installed, which only changes PASS vs FAIL.
@@ -4879,7 +4882,7 @@ fn doctor_reports_the_pinned_risc0_docker_tag_in_deterministic_mode() {
 }
 
 /// `--guest` is a closed set; a typo must fail at parse time rather than
-/// silently falling back to the non-reproducible default.
+/// silently falling back to the default.
 #[test]
 fn build_guest_flag_rejects_unknown_modes() {
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
