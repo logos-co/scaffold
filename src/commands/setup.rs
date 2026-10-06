@@ -11,9 +11,9 @@ use crate::state::prepare_wallet_home;
 use crate::DynResult;
 
 use super::wallet_support::{
-    first_public_address_in_listing, first_public_wallet_address, read_default_wallet_address,
-    set_wallet_home_env, summarize_command_failure, wallet_password, wallet_state_path,
-    write_default_wallet_address,
+    default_sequencer_http_url_for_project, first_public_address_in_listing,
+    first_public_wallet_address, read_default_wallet_address, set_wallet_home_env,
+    summarize_command_failure, wallet_password, wallet_state_path, write_default_wallet_address,
 };
 
 /// Cargo args for the standalone sequencer build. `--features standalone`
@@ -96,7 +96,11 @@ pub(crate) fn setup_for_project(project: &crate::model::Project, prebuilt: bool)
     )?;
 
     let wallet_home = project.root.join(&project.config.wallet_home_dir);
-    prepare_wallet_home(&lez, &wallet_home)?;
+    prepare_wallet_home(
+        &lez,
+        &wallet_home,
+        &default_sequencer_http_url_for_project(project),
+    )?;
     ensure_default_wallet_seeded(&project.root, &wallet_home, &lez.join(WALLET_BIN_REL_PATH))?;
 
     println!("setup complete");

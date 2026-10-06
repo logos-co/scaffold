@@ -1107,12 +1107,13 @@ fn localnet_start_patches_config_and_uses_configured_port() {
     fs::create_dir_all(config_path.parent().expect("parent")).expect("create config dir");
     fs::write(&config_path, r#"{"port": 3040}"#).expect("write sequencer config");
 
-    // Fake sequencer: reads port from sequencer_config.json (like the real one),
-    // logs args and env for assertions.
+    // Fake sequencer: binds the `--port` CLI flag, like the real pinned
+    // sequencer_service does (it ignores sequencer_config.json's `port` key
+    // entirely for RPC binding — see #263). Logs args and env for assertions.
     fs::write(
         &sequencer_bin,
         format!(
-            "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s' \"${{RISC0_DEV_MODE:-}}\" > '{}'\nport=$(python3 -c \"import json,sys; print(json.load(open(sys.argv[1]))['port'])\" \"$1\")\nexec python3 -m http.server \"$port\" --bind 127.0.0.1\n",
+            "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s' \"${{RISC0_DEV_MODE:-}}\" > '{}'\nport=\"$3\"\nexec python3 -m http.server \"$port\" --bind 127.0.0.1\n",
             args_log.display(),
             env_log.display(),
         ),
@@ -1193,10 +1194,16 @@ fn localnet_start_patches_config_and_uses_configured_port() {
         patched_path.display()
     );
 
-    // Verify --port was NOT passed as a CLI arg
+    // Regression for #263: the pinned sequencer binds `--port`, not the
+    // config file's `port` key, so `localnet start` must pass it explicitly
+    // — matching the value patched into the config, so both stay consistent.
     assert!(
-        !args.contains("--port"),
-        "expected --port NOT to appear in sequencer args, got: {args}"
+        args.lines().any(|line| line == "--port"),
+        "expected --port to appear in sequencer args, got: {args}"
+    );
+    assert!(
+        args.lines().any(|line| line == localnet_port.to_string()),
+        "expected --port {localnet_port} to appear in sequencer args, got: {args}"
     );
 
     let env = fs::read_to_string(&env_log).expect("read env log");
