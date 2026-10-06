@@ -2,6 +2,7 @@ use std::process::Command;
 
 use anyhow::bail;
 
+use crate::commands::wallet_support::set_wallet_home_env;
 use crate::constants::SPEL_BIN_REL_PATH;
 use crate::project::{load_project, resolve_repo_path};
 use crate::DynResult;
@@ -35,5 +36,21 @@ pub(crate) fn spel_passthrough_for_project(
             spel_bin.display()
         );
     }
-    Ok(Command::new(&spel_bin).args(args).status()?)
+    Ok(spel_command(project, &spel_bin, args).status()?)
+}
+
+/// spel's IDL-driven instruction commands submit transactions through the
+/// LEZ wallet, which reads its home from the environment. Without the
+/// project's wallet home, `lgs spel -- --idl … <instruction>` signed against
+/// `~/.nssa/wallet` (or `~/.lee/wallet`) and failed with `Failed to read
+/// persistent storage`, even though `lgs wallet …` worked in the same project.
+fn spel_command(
+    project: &crate::model::Project,
+    spel_bin: &std::path::Path,
+    args: &[String],
+) -> Command {
+    let mut cmd = Command::new(spel_bin);
+    cmd.args(args);
+    set_wallet_home_env(&mut cmd, project.root.join(&project.config.wallet_home_dir));
+    cmd
 }

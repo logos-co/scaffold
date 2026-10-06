@@ -123,9 +123,7 @@ fn build_idl_inner(force: bool) -> DynResult<()> {
 
     blocks.sort_by(|a, b| a.0.cmp(&b.0));
     let mut outputs = Vec::new();
-    for (name, json_text) in blocks {
-        let canonical = canonical_json(&json_text)?;
-        let file_name = format!("{}.json", sanitize_file_stem(&name));
+    for (file_name, canonical) in idl_outputs(blocks)? {
         let path = idl_dir.join(&file_name);
         write_text(&path, &canonical)?;
         println!("Wrote IDL {}", path.display());
@@ -389,6 +387,28 @@ fn parse_idl_blocks(output: &str) -> DynResult<Vec<(String, String)>> {
     Ok(blocks)
 }
 
+/// Map parsed IDL blocks to `(file name, canonical JSON)` outputs, one per
+/// file. The same block routinely appears more than once: the lez-framework
+/// template's runner binary includes `lib.rs`, so `cargo test --workspace`
+/// runs `__lssa_idl_print` in both the lib and the bin test targets. Identical
+/// repeats collapse; two different IDLs mapping to one file are an error
+/// rather than a silent last-writer-wins.
+fn idl_outputs(blocks: Vec<(String, String)>) -> DynResult<Vec<(String, String)>> {
+    let mut outputs: Vec<(String, String)> = Vec::new();
+    for (name, json_text) in blocks {
+        let canonical = canonical_json(&json_text)?;
+        let file_name = format!("{}.json", sanitize_file_stem(&name));
+        match outputs.iter().find(|(existing, _)| *existing == file_name) {
+            Some((_, existing)) if *existing == canonical => {}
+            Some(_) => bail!(
+                "conflicting IDL output for `{file_name}`: `__lssa_idl_print` printed two different IDLs that map to the same file"
+            ),
+            None => outputs.push((file_name, canonical)),
+        }
+    }
+    Ok(outputs)
+}
+
 fn parse_marker<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
     let tail = line.strip_prefix(prefix)?;
     tail.strip_suffix(IDL_MARKER_SUFFIX)
@@ -398,6 +418,25 @@ fn parse_marker<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn idl_outputs_collapse_identical_repeats_and_reject_conflicts() {
+        let block = |name: &str, json: &str| (name.to_string(), json.to_string());
+        let outputs = idl_outputs(vec![
+            block("lez_counter", r#"{"a":1}"#),
+            block("lez_counter", r#"{ "a": 1 }"#),
+        ])
+        .expect("identical repeats collapse");
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].0, "lez_counter.json");
+
+        let err = idl_outputs(vec![
+            block("lez_counter", r#"{"a":1}"#),
+            block("lez_counter", r#"{"a":2}"#),
+        ])
+        .expect_err("conflicting IDLs for one file must fail");
+        assert!(format!("{err:#}").contains("conflicting IDL output"));
+    }
 
     #[test]
     fn parses_idl_blocks() {
