@@ -353,7 +353,7 @@ Both deploy paths honor `--json`, with a different shape each. `--program-path -
 - `deploy <name> --json` and bare `deploy --json` print a parseable `{"deploys":[…]}` object whose entries carry the same fields.
 - `deploy --program-path ...` without `--json` prints a human-readable `OK` line with the binary path.
 - `deploy nonexistent_program` fails with an error listing the available discovered programs.
-- The echoed `wallet deploy-program <path>` names which artefact was shipped. With only a `local` build on disk that is the `target/riscv-guest/.../release/` one; a `target/riscv-guest-docker/.../docker/` artefact, when present, outranks it. With the guest artefacts removed (and localnet up — the missing-binary report comes after the sequencer preflight), `deploy` names the searched roots, which must list all three in ranking order: `target/riscv-guest-docker`, `target/riscv-guest`, `methods/target`. A missing root is why a built program looks undeployable. See `D8` for the ranking itself.
+- The echoed `wallet deploy-program <path>` names which artefact was shipped. With only a `local` build on disk that is the `target/riscv-guest/.../release/` one; a `target/riscv-guest-docker/.../docker/` artefact, when present, outranks it. With the guest artefacts removed (and localnet up — the missing-binary report comes after the sequencer preflight), `deploy` names the searched roots, which must list all four in ranking order: `target/riscv-guest-docker`, `target/riscv-guest`, `methods/target`, `methods/guest/target`. A missing root is why a built program looks undeployable. See `D8` for the ranking itself.
 
 ### Failure Signals / Common Pitfalls
 
@@ -732,6 +732,7 @@ hand: copy the `release/` `.bin` into `$DOCKER_BINS/` and confirm the next
 
 - The same `program_id` from steps 1 and 5 usually means `deploy` picked the same artefact twice — check which path `deploy` reported as the binary, not just the ID.
 - `deploy` reporting a `release/` binary while the effective mode is `docker` (the default) is a discovery-ranking regression.
+- The `docker` rank applies only under `target/riscv-guest-docker`, the one root `lgs build` writes and clears. `methods/guest/target` (an independently-workspaced guest crate, typically a hand-run `cargo risczero build`) is searched, but a `docker/` artefact there is ranked like any other path: `release/` if present, else the debug fallback. It never outranks a fresh `release/` build. `deploy` shipping a stale hand-built ELF right after `lgs build --guest local` is a regression.
 - A deterministic build that succeeds but produces no `.bin` (only extension-less ELFs) means risc0's output layout moved; capture `ls -R target/riscv-guest-docker`.
 - Very slow builds are expected on the first run (~1.7 GB image pull, no cargo cache reuse inside the container). Slowness is worth recording as a DX finding, but it is not a correctness failure.
 - Any large directory in the project root inflates the Docker build context (risc0 excludes only `.git`, `target`, `node_modules`, `tmp`). If the context transfer dominates the build, capture its reported size.

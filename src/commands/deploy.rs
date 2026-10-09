@@ -19,20 +19,23 @@ use super::wallet_support::{
     RpcReachabilityError,
 };
 
-/// Roots searched for guest `.bin` artefacts. Three layouts exist: risc0's
+/// Roots searched for guest `.bin` artefacts. Four layouts exist: risc0's
 /// default workspace layout emits to `target/riscv-guest/...` (what
 /// `embed_methods()` produces for the scaffold template), sub-crate builds can
-/// land in `methods/target/...`, and the deterministic Docker build
+/// land in `methods/target/...`, the deterministic Docker build
 /// (`[build].guest = "docker"`) emits to
-/// `target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/`. Discovery
-/// walks all three so renamed projects work regardless of which layout
-/// cargo/risc0 chose. The `methods/...` entry is the same project-relative
-/// directory that `build.rs` compiles via `crate::constants::METHODS_DIR`;
-/// keep them in sync.
+/// `target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/`, and a guest
+/// crate that carries its own `[workspace]` (so it builds independently of the
+/// parent) emits to `methods/guest/target/...`. Discovery walks all four so
+/// renamed projects and independently-workspaced guest crates work regardless
+/// of which layout cargo/risc0 chose. The `methods/...` entries are the same
+/// project-relative directory that `build.rs` compiles via
+/// `crate::constants::METHODS_DIR`; keep them in sync.
 const GUEST_BIN_SEARCH_ROOTS: &[&str] = &[
     crate::constants::GUEST_DOCKER_TARGET_DIR,
     "target/riscv-guest",
     "methods/target",
+    "methods/guest/target",
 ];
 
 /// `spel program-id` line prefix that carries the risc0 image ID — the value
@@ -793,9 +796,12 @@ fn is_valid_program_name(program: &str) -> bool {
 ///
 /// Ranking, highest first:
 ///
-/// 1. a `docker` component *directly under* the `riscv32im*` one — the
-///    deterministic `cargo risczero build` output, whose layout is always
-///    `<target-dir>/riscv32im-risc0-zkvm-elf/docker/`;
+/// 1. a `docker` component *directly under* the `riscv32im*` one, inside
+///    `GUEST_DOCKER_TARGET_DIR` only — the deterministic `cargo risczero build`
+///    output, whose layout is always
+///    `<target-dir>/riscv32im-risc0-zkvm-elf/docker/`. Other roots are trees
+///    scaffold neither writes nor clears, so a `docker/` there (e.g. a
+///    hand-run `cargo risczero build`) must not outrank a fresh `release/`;
 /// 2. a `release` component — the host-toolchain `embed_methods()` output;
 /// 3. anything else (a `debug` build) as a last-resort fallback.
 ///
@@ -829,6 +835,7 @@ pub(crate) fn discover_program_binaries(
         if !search_dir.exists() {
             continue;
         }
+        let root_owns_docker_rank = *root == crate::constants::GUEST_DOCKER_TARGET_DIR;
         for entry in WalkDir::new(&search_dir)
             .follow_links(false)
             .into_iter()
@@ -856,7 +863,7 @@ pub(crate) fn discover_program_binaries(
                     has_release |= name == "release";
                     // Only the segment immediately below the target triple —
                     // see the ranking notes on this function.
-                    has_docker |= name == "docker" && prev_was_riscv32im;
+                    has_docker |= root_owns_docker_rank && name == "docker" && prev_was_riscv32im;
                     prev_was_riscv32im = is_riscv32im;
                 }
             }
@@ -1025,6 +1032,42 @@ mod tests {
         assert!(result
             .components()
             .any(|c| c.as_os_str() == "my_app_methods"));
+    }
+
+    /// Regression test for issue #231: a guest crate that carries its own
+    /// `[workspace]` (so it builds independently of the parent workspace)
+    /// emits to `methods/guest/target/...` rather than `methods/target/...`
+    /// or `target/riscv-guest/...`, and that root was not searched.
+    #[test]
+    fn finds_binary_in_independent_guest_workspace_layout() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp
+            .path()
+            .join("methods/guest/target/riscv32im-risc0-zkvm-elf/docker");
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(bin_dir.join("my_program.bin"), b"fake").unwrap();
+
+        let result = lookup(tmp.path(), "my_program").unwrap();
+        assert!(result.ends_with("my_program.bin"));
+        assert!(result.to_string_lossy().contains("methods/guest/target"));
+    }
+
+    #[test]
+    fn docker_dir_outside_scaffold_root_does_not_outrank_release() {
+        let tmp = TempDir::new().unwrap();
+        let stale = tmp
+            .path()
+            .join("methods/guest/target/riscv32im-risc0-zkvm-elf/docker");
+        let fresh = tmp
+            .path()
+            .join("target/riscv-guest/m/g/riscv32im-risc0-zkvm-elf/release");
+        for dir in [&stale, &fresh] {
+            fs::create_dir_all(dir).unwrap();
+            fs::write(dir.join("my_program.bin"), b"fake").unwrap();
+        }
+
+        let result = lookup(tmp.path(), "my_program").unwrap();
+        assert!(result.starts_with(tmp.path().join("target/riscv-guest")));
     }
 
     #[test]
