@@ -1,7 +1,6 @@
 use std::path::Path;
 use std::process::Command;
 
-use crate::circuits::ensure_circuits_for_project;
 use crate::constants::WALLET_BIN_REL_PATH;
 use crate::model::RepoRef;
 use crate::process::{run_checked, run_with_stdin};
@@ -11,20 +10,19 @@ use crate::state::prepare_wallet_home;
 use crate::DynResult;
 
 use super::wallet_support::{
-    first_public_address_in_listing, first_public_wallet_address, read_default_wallet_address,
+    ensure_dev_funder_imported, first_public_address_in_listing, read_default_wallet_address,
     set_wallet_home_env, summarize_command_failure, wallet_password, wallet_state_path,
     write_default_wallet_address,
 };
 
 /// Cargo args for the standalone sequencer build. `--features standalone`
-/// is load-bearing (#101): it swaps `SequencerCore`'s real
-/// `IndexerClient` / `BlockSettlementClient` for the no-op mocks. Without it,
-/// `sequencer_core::start_from_config` does `IndexerClient::new(ws://…8779)`
-/// and `BlockSettlementClient::new(http://…8080)` and `.expect()`s on the
-/// connection — so `localnet start` aborts with "Failed to create Indexer
-/// Client" on any host that isn't already running a Bedrock + Indexer stack
-/// (i.e. every standalone dev box). Pinned as a const so the unit test below
-/// fails loudly if the feature is ever dropped from the build invocation.
+/// is load-bearing (#101): in LEZ 0.3 it swaps the sequencer's Bedrock actor
+/// for its mock (`sequencer_bedrock_actor/mock`). Without it the sequencer
+/// tries to post every block to a Bedrock node at `bedrock_config.node_url`,
+/// so `localnet start` cannot work on any host that isn't already running a
+/// Logos blockchain node (i.e. every standalone dev box). Pinned as a const
+/// so the unit test below fails loudly if the feature is ever dropped from
+/// the build invocation.
 pub(crate) const SEQUENCER_BUILD_ARGS: &[&str] = &[
     "build",
     "--release",
@@ -37,25 +35,16 @@ pub(crate) const SEQUENCER_BUILD_ARGS: &[&str] = &[
 pub(crate) fn cmd_setup(prebuilt: bool) -> DynResult<()> {
     // Load project first so an outdated scaffold.toml gets the canonical
     // "run `lgs init`" hint before we surface unrelated environment
-    // gripes (circuits artifact, etc.). Tests assert the migration hint
-    // wins on pre-v0.2.0 configs.
+    // gripes. Tests assert the migration hint wins on old configs.
     let project = load_project()?;
     setup_for_project(&project, prebuilt)
 }
 
-/// Sync pinned repos and build project-local binaries (sequencer, wallet,
-/// spel) for `project`. Streams build progress to stdout; failures surface as
+/// Sync the pinned LEZ checkout and build project-local binaries (sequencer,
+/// wallet) for `project`. Streams build progress to stdout; failures surface as
 /// typed `CommandFailed` errors where an external command is at fault.
 pub(crate) fn setup_for_project(project: &crate::model::Project, prebuilt: bool) -> DynResult<()> {
     let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
-    let spel = resolve_repo_path(project, &project.config.spel, "spel")?;
-
-    // Both the LEZ standalone-sequencer build below and (downstream) the
-    // user-project workspace build pull in `logos-blockchain-{pol,poc,poq,zksign}`
-    // build scripts, which panic when their circuits release isn't visible.
-    // Materialise it once before any cargo invocation; the export propagates
-    // to every subprocess for the rest of the process.
-    ensure_circuits_for_project(project)?;
 
     sync_pinned_repo(&project.config.lez, &lez, "lez")?;
     ensure_dir_exists(&lez, "lez")?;
@@ -83,21 +72,15 @@ pub(crate) fn setup_for_project(project: &crate::model::Project, prebuilt: bool)
         "build wallet",
     )?;
 
-    sync_pinned_repo(&project.config.spel, &spel, "spel")?;
-    ensure_dir_exists(&spel, "spel")?;
-    run_checked(
-        Command::new("cargo")
-            .current_dir(&spel)
-            .arg("build")
-            .arg("--release")
-            .arg("-p")
-            .arg("spel"),
-        "build spel",
-    )?;
-
     let wallet_home = project.root.join(&project.config.wallet_home_dir);
-    prepare_wallet_home(&lez, &wallet_home)?;
-    ensure_default_wallet_seeded(&project.root, &wallet_home, &lez.join(WALLET_BIN_REL_PATH))?;
+    let wallet_binary = lez.join(WALLET_BIN_REL_PATH);
+    prepare_wallet_home(&lez, &wallet_home, project.config.localnet.port)?;
+    ensure_default_wallet_seeded(&project.root, &wallet_home, &wallet_binary)?;
+    ensure_dev_funder_imported(&wallet_binary, &wallet_home)?;
+    println!(
+        "dev funder {} available in the project wallet (source of `wallet topup`)",
+        super::wallet_support::dev_funder_address()
+    );
 
     println!("setup complete");
 
@@ -142,33 +125,17 @@ pub(crate) fn ensure_default_wallet_seeded(
         return Ok(());
     }
 
-    match first_public_wallet_address(wallet_home) {
-        Ok(Some(address)) => {
-            let normalized = write_default_wallet_address(project_root, &address)?;
+    match seed_default_wallet_by_initializing(project_root, wallet_home, wallet_binary) {
+        Ok(Some(normalized)) => {
             let state_path = wallet_state_path(project_root);
-            println!("default wallet seeded from preconfigured account");
+            println!("default wallet seeded from the wallet's first derived account");
             println!("  Address: {normalized}");
             println!("  State file: {}", state_path.display());
         }
         Ok(None) => {
-            match seed_default_wallet_by_initializing(project_root, wallet_home, wallet_binary) {
-                Ok(Some(normalized)) => {
-                    let state_path = wallet_state_path(project_root);
-                    println!(
-                    "default wallet seeded by initializing wallet storage (config ships no preconfigured account)"
-                );
-                    println!("  Address: {normalized}");
-                    println!("  State file: {}", state_path.display());
-                }
-                Ok(None) => {
-                    println!(
-                    "warning: could not seed default wallet automatically (no preconfigured public account found)"
-                );
-                }
-                Err(err) => {
-                    println!("warning: could not seed default wallet automatically: {err}");
-                }
-            }
+            println!(
+                "warning: could not seed default wallet automatically (no derived public account found)"
+            );
         }
         Err(err) => {
             println!("warning: could not seed default wallet automatically: {err}");
@@ -178,13 +145,13 @@ pub(crate) fn ensure_default_wallet_seeded(
     Ok(())
 }
 
-/// Seed the default wallet when the debug config ships no `initial_accounts`
-/// (LEZ v0.2.0+): run `wallet account list` against the project wallet home —
-/// the wallet CLI initializes its persistent storage on first use, creating a
-/// default Public/Private account pair — then register the first Public
-/// account through the same state write `wallet default set` performs. Without
-/// this, `.scaffold/state/wallet.state` never gains a `default_address=` line
-/// and `lgs run`'s mandatory topup step fails (scaffold#240).
+/// Seed the default wallet: run `wallet account list` against the project
+/// wallet home — the LEZ 0.3 wallet initializes its persistent storage on
+/// first use (from [`wallet_password`]), deriving a default Public/Private
+/// account pair — then register the first derived Public account through the
+/// same state write `wallet default set` performs. Without this,
+/// `.scaffold/state/wallet.state` never gains a `default_address=` line and
+/// `lgs run`'s topup step fails (scaffold#240).
 ///
 /// Returns `Ok(None)` when seeding is not possible (no wallet binary yet, or
 /// no Public account in the listing); the caller downgrades that to a warning.

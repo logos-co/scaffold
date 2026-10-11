@@ -551,7 +551,7 @@ fn segment_match(pat: &[u8], seg: &[u8]) -> bool {
 fn reseed_after_wipe(project: &Project) -> DynResult<()> {
     let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
     let wallet_home = project.root.join(&project.config.wallet_home_dir);
-    prepare_wallet_home(&lez, &wallet_home)?;
+    prepare_wallet_home(&lez, &wallet_home, project.config.localnet.port)?;
     ensure_default_wallet_seeded(&project.root, &wallet_home, &lez.join(WALLET_BIN_REL_PATH))
 }
 
