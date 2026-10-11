@@ -11,13 +11,13 @@ Earlier one-off dogfood notes are historical context only; future runs should st
 If you are an automated agent running this runbook, treat the following as binding. They exist because a previous run stopped at "this environment can't run a real sequencer" when, in fact, it could — the toolchain just had to be installed by hand.
 
 1. **Do the real thing.** End-to-end dogfooding means a real, running LEZ sequencer executing real transactions — not a stub, a mock, or a "validated by composition" shortcut. A stub (e.g. a scripted JSON-RPC server) is acceptable only as an *addition* to a real run, never a substitute. If you catch yourself writing "this environment can't…", stop and apply directive 3 before you believe it.
-2. **Install every dependency yourself.** The real path needs the risc0 toolchain (`r0vm`), the `logos-blockchain-circuits` release, and the LEZ-built `sequencer_service` (plus `wallet` for transactions). None ship in a fresh container. Provision them per "Provisioning the Real LEZ Sequencer Toolchain" below. The container has `curl`, network access to GitHub, and (usually) a `GH_TOKEN` env var — that is enough.
+2. **Install every dependency yourself.** The real path needs the risc0 toolchain (`r0vm`, plus the risc0 Rust guest toolchain for `build --guest local`), the LEZ build's system libraries, and the LEZ-built `sequencer_service` and `wallet`. None ship in a fresh container. Provision them per "Provisioning the Real LEZ Sequencer Toolchain" below. The container has `curl`, network access to GitHub, and (usually) a `GH_TOKEN` env var — that is enough.
 3. **Push through difficulties; a failed first attempt is a routing problem, not a verdict.** Expect the obvious installers to fail and route around them:
    - `rzup` downloads over rustls and fails with `InvalidCertificate(UnknownIssuer)` behind a TLS-intercepting proxy. Fall back to `curl`, which trusts the system CA, to fetch the release tarball directly.
    - Unauthenticated GitHub API calls hit rate limits; add `-H "Authorization: Bearer $GH_TOKEN"`.
    - `git push` and PR creation via the default proxy/MCP may `403`; push and open PRs with `https://x-access-token:$GH_TOKEN@github.com/<owner>/<repo>.git` and the GitHub REST API.
    Do not report "impossible" until you have exhausted the curl + token fallbacks.
-4. **Builds are long; background them so they survive turns.** The sequencer build is ~6 min, `setup` (wallet + spel) ~3 min. Launch them with a mechanism that outlives a single shell — the harness's background-run, or a Monitor with an `until` loop — because `nohup … &` from a one-shot shell gets killed when the shell tears down. Wait on a sentinel (the built binary path, or an `EXIT=` marker you append), not a fixed sleep.
+4. **Builds are long; background them so they survive turns.** On a 4-core box the LEZ 0.3 `sequencer_service` + `wallet` release build takes ~30 min (it also downloads the `logos-blockchain-circuits` release on first build), and a template project's first `cargo build --workspace` another ~15–20. Launch them with a mechanism that outlives a single shell — the harness's background-run, or a Monitor with an `until` loop — because `nohup … &` from a one-shot shell gets killed when the shell tears down. Wait on a sentinel (the built binary path, or an `EXIT=` marker you append), not a fixed sleep. On memory-constrained hosts cap parallelism (`CARGO_BUILD_JOBS=2`).
 5. **Leave the box provisioned.** Once installed, the toolchain persists in the container cache and the `~/.risc0` extensions dir, so later runs are fast. Reuse it rather than reinstalling.
 
 ## Purpose and Audience
@@ -73,9 +73,10 @@ Scaffold is also consumable as a Rust library (`logos_scaffold::api`): the same 
 ## Shared Preconditions
 
 - Unix-like environment with `git`, `rustc`, `cargo`, `lsof`, `ps`, and `kill`.
-- Docker or Podman available for guest builds.
-- `logos-blockchain-circuits` release on disk when validating older projects without `[circuits]`: set `LOGOS_BLOCKCHAIN_CIRCUITS=<path>` (scaffold no longer consults `~/.logos-blockchain-circuits/`). New projects should carry a `[circuits]` table in `scaffold.toml`; `setup`, `build`, `build idl`, `localnet`, and test-node startup resolve and materialize the configured release instead of relying on ambient shell state.
-- No conflicting listener on the scaffold localnet port before `localnet start`.
+- The LEZ build's system libraries: `clang`/`libclang-dev`, `libssl-dev`, `pkg-config`, and `libpcsclite-dev` (the LEZ 0.3 wallet links PC/SC for keycard support; without it the wallet build fails in `pcsc-sys`).
+- Docker or Podman available for the default (deterministic) guest builds; otherwise use `--guest local` / `[build].guest = "local"` and the risc0 Rust toolchain (see D8 for what that changes).
+- No `logos-blockchain-circuits` provisioning: LEZ 0.3's build downloads its release (`v0.5.7`) into `~/.cache/logos/blockchain` itself. `LOGOS_BLOCKCHAIN_CIRCUITS` and `[circuits]` no longer exist.
+- No conflicting listener on the scaffold localnet port before `localnet start`. On a shared host, set a non-default `[localnet].port` (it is honoured end to end in LEZ 0.3: the sequencer gets `--port`, and `setup` writes the port into the wallet config).
 - Network access available for setup/build flows that fetch dependencies.
 - No preinstalled `wallet` binary is required. If one exists on `PATH`, do not treat it as the runtime under test for scaffold wallet scenarios.
 - Optional but supported: `LOGOS_SCAFFOLD_WALLET_PASSWORD` when validating password override behavior.
@@ -85,16 +86,18 @@ The `lgs` binary is a short alias for `logos-scaffold` produced by the same crat
 
 ## Provisioning the Real LEZ Sequencer Toolchain
 
-The `T`-series (and any real `localnet` / `deploy` / `run` validation) needs a real LEZ sequencer. A fresh container has none of the pieces; provision them once — they then live in the scaffold cache and `~/.risc0`, and persist for later runs. This whole section was reverse-engineered from a real run; follow it rather than re-deriving it.
+The `T`-series (and any real `localnet` / `deploy` / `run` validation) needs a real LEZ 0.3 sequencer. A fresh container has none of the pieces; provision them once — they then live in the scaffold cache and `~/.risc0`, and persist for later runs. This whole section was reverse-engineered from a real run; follow it rather than re-deriving it.
 
-Assume `"$P"` is a generated project root (e.g. `$SCRATCH_ROOT/dogfood-default`) and `GH_TOKEN` is set.
+Assume `"$P"` is a generated project root (e.g. `$SCRATCH_ROOT/dogfood-default`) and `GH_TOKEN` is set. On a host shared with other runs, export a private cache root first (`export LOGOS_SCAFFOLD_CACHE_ROOT=$SCRATCH_ROOT/cache`) so nobody else's cleanup deletes your LEZ build mid-run.
 
 **1. Discover the risc0 version the pinned LEZ needs.** scaffold's r0vm auto-detect requires an *exact* version match, read from the LEZ `Cargo.lock`:
 
 ```bash
 LEZ=$("$SCAFFOLD_BIN" test-node pins --project "$P" --json | jq -r .lez_checkout)
-grep -A1 'name = "risc0-zkvm"' "$LEZ/Cargo.lock"   # e.g. version = "3.0.5"
+grep -A1 'name = "risc0-zkvm"' "$LEZ/Cargo.lock"   # LEZ v0.3.1: version = "3.0.5"
 ```
+
+(The checkout exists after `new`; if it does not yet, `test-node prepare` in step 3 creates it.)
 
 **2. Install r0vm at that version.** Try `rzup install r0vm <ver>` first (`curl -sSL https://risczero.com/install | bash` installs rzup). In a TLS-intercepting environment rzup fails with `InvalidCertificate(UnknownIssuer)`; fall back to `curl` for the release tarball (which bundles `r0vm` and `cargo-risczero`):
 
@@ -108,75 +111,62 @@ mkdir -p "$EXT" && cp /tmp/cr/r0vm "$EXT/r0vm" && chmod +x "$EXT/r0vm"
 "$EXT/r0vm" --version                              # → risc0-r0vm 3.0.5
 ```
 
-`find_r0vm_path_for_lez` looks at `~/.risc0/extensions/v<risc0-zkvm-version>-cargo-risczero-<arch>-<os>/r0vm`; placing r0vm there is what wires it into a spawned sequencer (scaffold sets `RISC0_SERVER_PATH` from it). The sequencer runs with `RISC0_DEV_MODE=1` (the test-node default), so r0vm executes guests without real proving — which is why no GPU/prover is needed.
+`find_r0vm_path_for_lez` looks at `~/.risc0/extensions/v<risc0-zkvm-version>-cargo-risczero-<arch>-<os>/r0vm`; placing r0vm there is what wires it into a spawned sequencer (scaffold sets `RISC0_SERVER_PATH` from it). The sequencer runs with `RISC0_DEV_MODE=1` (`[localnet].risc0_dev_mode`, the default), so r0vm executes guests without real proving — which is why no GPU/prover is needed.
 
-**2b. (Only for guest compilation — `build`, D-series/L-series.) Install the risc0 Rust toolchain.** `risc0-build` resolves the guest toolchain through rzup's directory layout; without one installed, `build` fails with `Risc Zero Rust toolchain not found. Try running rzup install rust`. When rzup itself is unusable (same TLS issue as above), install it from the `risc0/rust` release assets — the directory name must follow the `v<version>-rust-<triple>` pattern for discovery, and no `settings.toml` is needed (the highest installed version wins). Pick the newest available tag: guest dependency floats (e.g. `ruint`) carry MSRVs that outrun older toolchains — 1.88.0 already fails with `rustc 1.88.0-dev is not supported by the following packages` on a fresh default-template project.
+**2b. (Only for guest compilation with `--guest local` — D-series.) Install the risc0 Rust toolchain.** `risc0-build` resolves the guest toolchain through rzup's directory layout; without one installed, `build` fails with `Risc Zero Rust toolchain not found. Try running rzup install rust`. When rzup itself is unusable (same TLS issue as above), install it from the `risc0/rust` release assets — the directory name must follow the `v<version>-rust-<triple>` pattern for discovery, and no `settings.toml` is needed (the highest installed version wins). Pick the newest available tag: guest dependency floats carry MSRVs that outrun older toolchains.
 
 ```bash
-TCVER=1.91.1   # tag r0.1.91.1 — newest published as of 2026-07
+TCVER=1.97.0   # tag r0.1.97.0 — the same compiler the pinned docker builder ships
 curl -sSL -H "Authorization: Bearer $GH_TOKEN" -o /tmp/rust-tc.tar.gz \
   "https://github.com/risc0/rust/releases/download/r0.$TCVER/rust-toolchain-$TRIPLE.tar.gz"
 DEST="$HOME/.risc0/toolchains/v$TCVER-rust-$TRIPLE"
 mkdir -p "$DEST" && tar xzf /tmp/rust-tc.tar.gz -C "$DEST"
-"$DEST/bin/rustc" --version                        # → rustc 1.91.1-dev
+"$DEST/bin/rustc" --version                        # → rustc 1.97.0-dev
+rustup toolchain link risc0 "$DEST"                # rzup normally does this
 ```
 
-The `lez-framework` template's guest additionally compiles C (the default template's guests do not), so the L-series `build` also needs the risc0 **C++** toolchain; without it the guest build dies in cc-rs with `failed to find tool "/no_risc0_cpp_toolchain_installed_run_rzup_install_cpp"`. Same rzup layout, date-based version (dir uses the semver form of the tag, e.g. tag `2024.01.05` → dir `v2024.1.5`). The release asset (and the directory inside the tarball) is platform-specific and does **not** follow `$TRIPLE`: pick `riscv32im-linux-x86_64` on Linux x86_64 and `riscv32im-osx-arm64` on macOS arm64:
-
-```bash
-CPPASSET=riscv32im-linux-x86_64                    # riscv32im-osx-arm64 on macOS arm64
-curl -sSL -H "Authorization: Bearer $GH_TOKEN" -o /tmp/cpp-tc.tar.xz \
-  "https://github.com/risc0/toolchain/releases/download/2024.01.05/$CPPASSET.tar.xz"
-CPPDEST="$HOME/.risc0/toolchains/v2024.1.5-cpp-$TRIPLE"
-mkdir -p /tmp/cpp-tc && tar xJf /tmp/cpp-tc.tar.xz -C /tmp/cpp-tc
-mkdir -p "$CPPDEST" && mv /tmp/cpp-tc/"$CPPASSET"/* "$CPPDEST/"
-ln -sfn "$CPPDEST" "$HOME/.risc0/cpp"
-"$CPPDEST/bin/riscv32-unknown-elf-gcc" --version   # → gcc 13.2.0
-```
-
-**3. Build the real sequencer.** `test-node prepare` downloads the circuits release (via `curl`, automatically) and builds `sequencer_service`. It is long (~6 min); run it, then confirm doctor is green:
+**3. Build the real sequencer.** `test-node prepare` syncs the LEZ checkout and builds `sequencer_service --features standalone` (a mock Bedrock, so no Logos blockchain node is needed). The first build downloads the circuits release automatically. Run it, then confirm doctor is green:
 
 ```bash
 "$SCAFFOLD_BIN" test-node prepare --project "$P"            # → "test-node prerequisites ready"
 "$SCAFFOLD_BIN" test-node doctor  --project "$P" --json | jq .ok   # → true (all checks pass)
 ```
 
-**4. (Only for real transactions — T4) build the wallet via `setup`.** One gotcha distinguishes `setup` from `test-node prepare`: it uses cwd discovery, so it must run **inside** the project (no `--project` flag). Circuits need no manual provisioning here — projects with a `[circuits]` table (every freshly generated one) materialize the pinned release into `.scaffold/circuits` during `setup` automatically; set `LOGOS_BLOCKCHAIN_CIRCUITS` only to override with a local checkout (the env var wins when set):
+**4. (For anything that transacts — D1, D3–D7, T4) build the wallet via `setup`.** It uses cwd discovery, so it must run **inside** the project (no `--project` flag):
 
 ```bash
-( cd "$P" && "$SCAFFOLD_BIN" setup )   # builds wallet + spel, seeds the default wallet (~3 min) → "setup complete"
+( cd "$P" && "$SCAFFOLD_BIN" setup )   # builds sequencer (cached) + wallet, seeds the default wallet, imports the dev funder → "setup complete"
 ```
 
-Sanity-check the provisioned toolchain before running the T-series:
+Sanity-check the provisioned toolchain before running the scenarios:
 
 ```bash
 "$EXT/r0vm" --version
 ls "$LEZ/target/release/sequencer_service"          # real sequencer (T1–T3)
-ls "$LEZ/target/release/wallet"                     # real wallet (T4)
-ls "$P"/.scaffold/circuits/pol/verification_key.json   # project-local [circuits] install
+ls "$LEZ/target/release/wallet"                     # real wallet (T4, D-series)
+ls ~/.cache/logos/blockchain                        # logos-blockchain-circuits-v0.5.7-<os>-<arch>
+grep default_address "$P/.scaffold/state/wallet.state"
 ```
 
 If any of these is missing, do not "skip the real run" — go back and fix the step that produced it.
+
+What does **not** run on a small container: real proving (`RISC0_DEV_MODE=0`, or the `_private` runners without dev mode) needs several GB of RAM for `r0vm`; and the default docker guest build needs a Docker daemon that can run `docker build`. Report those as partial coverage with the reason, and run the `--guest local` path instead.
 
 ## Scenario Index
 
 | ID | Template | Level | Goal | Command surface |
 | --- | --- | --- | --- | --- |
-| D1 | `default` | Core | Fresh project creation and first-success bootstrap | `new`, `create`, `setup`, `localnet start`, `build`, `deploy`, `wallet topup`, `wallet -- check-health` |
+| D1 | `default` | Core | Fresh project creation and first-success bootstrap | `new`, `create`, `setup`, `localnet start`, `build`, `wallet topup`, `deploy`, `wallet -- check-health` |
 | D2 | `default` | Core | Localnet lifecycle visibility and doctor checks | `localnet status`, `localnet logs`, `localnet stop`, `doctor`, JSON variants |
-| D3 | `default` | Advanced | Deploy path variations and machine-readable single-program submission | `deploy [program-name]`, `deploy --program-path`, `deploy --program-path --json` |
+| D3 | `default` | Advanced | Deploy path variations (program-loader) and machine-readable output | `deploy [program-name]`, `deploy --program-path`, `deploy --program-path --json`, `deployments.json` |
 | D4 | `default` | Core | Wallet management, default-address behavior, and passthrough UX | `wallet list`, `wallet default set`, `wallet topup --dry-run`, `wallet topup`, `wallet -- ...` |
 | D5 | `default` | Advanced | Diagnostics bundle and support artifact hygiene | `report`, `report --out`, `report --tail` |
 | D6 | `default` | Core | Example runner interaction and account state verification | `cargo run --bin run_hello_world`, `cargo run --bin run_hello_world_with_move_function`, `wallet -- account get` |
 | D7 | `default` | Core | One-step `run` pipeline and post-deploy hooks | `run`, `run --post-deploy`, `run --no-post-deploy`, `[run]` config |
-| D8 | `default` | Advanced | Reproducible guest builds and the `program_id` they produce | `build`, `build --guest docker`, `[build]` config, `doctor`, `deploy --json` |
-| L1 | `lez-framework` | Core | Fresh LEZ project bootstrap to ready state | `new --template lez-framework`, `setup`, `localnet start`, `doctor`, `build` |
-| L2 | `lez-framework` | Core | LEZ IDL regeneration | `build idl` |
-| L3 | `lez-framework` | Advanced | LEZ client generation from current IDL | `build client` |
-| L4 | `lez-framework` | Core | LEZ deploy and counter interaction | `deploy`, `cargo run --bin run_lez_counter` |
+| D8 | `default` | Advanced | Reproducible guest builds and the binaries `deploy` ships | `build`, `build --guest docker`, `[build]` config, `doctor`, `deploy --json` (`elf_sha256`) |
 | E1 | N/A | Core | CLI discoverability and error quality | `--help`, `help`, `--version`, unknown commands, out-of-project errors |
-| E2 | N/A | Advanced | Project creation with advanced flags and invalid inputs | `new --template`, `new --vendor-deps`, `new --cache-root` |
-| E3 | N/A | Core | AI skills materialized into generated and adopted projects | `new`, `new --template lez-framework`, `init`, `init` re-run |
+| E2 | N/A | Advanced | Project creation with advanced flags, invalid inputs, and LEZ 0.1/0.2-era migration | `new --template`, `new --vendor-deps`, `new --cache-root`, `init` on a schema-0.2.0 project |
+| E3 | N/A | Core | AI skills materialized into generated and adopted projects | `new`, `init`, `init` re-run |
 | B1 | external module project | Core | Basecamp + lgpm setup and idempotent re-run | `init`, `basecamp setup`, `basecamp doctor`, `basecamp docs` |
 | B2 | external module project | Core | Module capture, install, paths, and single-instance launch | `basecamp modules`, `basecamp modules --show`, `basecamp install`, `basecamp paths`, `basecamp launch <profile>` |
 | B3 | external module project | Core | Two-instance p2p dogfooding | `basecamp launch <profile>` (parallel) |
@@ -188,7 +178,9 @@ If any of these is missing, do not "skip the real run" — go back and fix the s
 | T1 | `default` | Advanced | Isolated test-node lifecycle and caller-project pins | `test-node pins`, `test-node prepare`, `test-node doctor`, `test-node start`, `test-node status`, `test-node stop`, `test-node run` |
 | T2 | `default` | Advanced | Typed RPC reads against a running test node | `test-node tx submit-and-wait`, `test-node blocks head/range/wait`, `test-node clock read/wait-stable`, `test-node account get/batch-get`, `test-node proof get`, `test-node snapshot accounts` |
 | T3 | `default` | Advanced | Caller-provided state seeding | `test-node state schema`, `test-node state export`, `test-node state seed`, `test-node start --state` |
-| T4 | `default` | Advanced | Real committed user transaction (test-node + wallet) | `test-node start --port`, `wallet topup`, `test-node blocks wait`, `test-node tx wait` |
+| T4 | `default` | Advanced | Real committed user transaction (test-node + wallet) | `test-node start --port`, `wallet topup` (dev funder), `test-node blocks wait`, `test-node tx wait` |
+
+There is no `L`-series any more: the `lez-framework` (spel) template was removed with the move to LEZ 0.3, because spel has no LEZ 0.3 release. E2 checks that it is refused.
 
 ## Standing Validation Notes
 
@@ -853,6 +845,50 @@ find "$SCRATCH_ROOT/custom-cache/repos/lez" -maxdepth 2 -mindepth 1 -type d | so
 grep -n "^\[wallet\]\|^home_dir\|^binary" dogfood-cache/scaffold.toml
 ```
 
+Then migrate a LEZ 0.1/0.2-era project (the `scaffold.toml` an earlier scaffold wrote):
+
+```bash
+mkdir -p dogfood-migrate && cd dogfood-migrate
+cat > scaffold.toml <<'EOF'
+# kept comment
+[scaffold]
+version = "0.2.0"
+
+[repos.lez]
+source = "https://github.com/logos-blockchain/logos-execution-zone.git"
+pin = "cf3639d8252040d13b3d4e933feb19b42c76e14a"
+
+[repos.spel]
+source = "https://github.com/logos-co/spel.git"
+pin = "73fc462eb8f0a4d00f1a846437c627ec2e523f83"
+
+[wallet]
+home_dir = ".scaffold/wallet"
+
+[framework]
+kind = "default"
+version = "0.1.0"
+
+[framework.idl]
+spec = "lssa-idl/0.1.0"
+path = "idl"
+
+[localnet]
+port = 3055
+risc0_dev_mode = true
+
+[circuits]
+version = "0.4.1"
+EOF
+"$SCAFFOLD_BIN" doctor; echo "exit=$?"
+"$SCAFFOLD_BIN" init --dry-run
+"$SCAFFOLD_BIN" init
+cat scaffold.toml
+sed -i 's/kind = "default"/kind = "lez-framework"/' scaffold.toml.bak && cp scaffold.toml.bak scaffold.toml
+"$SCAFFOLD_BIN" init; echo "exit=$?"
+cd ..
+```
+
 ### Expected Success Signals
 
 - Invalid `--template` name fails with a clear error naming the available template (`default`).
@@ -860,6 +896,8 @@ grep -n "^\[wallet\]\|^home_dir\|^binary" dogfood-cache/scaffold.toml
 - `--vendor-deps` is accepted without error and creates a project that vendors the pinned LEZ repo under `.scaffold/repos/lez`.
 - `--cache-root` is honored and scaffold uses the specified directory for cache operations, with non-vendored LEZ clones isolated by pin under `<cache-root>/repos/lez/<pin>/`.
 - Generated `scaffold.toml` includes `[wallet].home_dir` and does not include a deprecated `wallet.binary` field.
+- On the schema-0.2.0 file, `doctor` fails fast with `scaffold.toml uses an old schema. Run \`logos-scaffold init\` to migrate to v0.3.0`. `init --dry-run` lists the planned changes without writing; `init` writes `scaffold.toml.bak`, bumps the version to `0.3.0`, removes `[repos.spel]`, `[circuits]` and `[framework.idl]`, re-pins `[repos.lez]` to `1a003bfb…` (`v0.3.1`) with a `run \`logos-scaffold setup\` to rebuild` note, and keeps `# kept comment` and `port = 3055`.
+- With `kind = "lez-framework"`, `init` refuses (non-zero exit, a message naming spel and LEZ 0.3) and leaves `scaffold.toml` untouched.
 
 ### Failure Signals / Common Pitfalls
 
@@ -1742,7 +1780,7 @@ HEAD0=$("$SCAFFOLD_BIN" test-node blocks head --url "$URL" --json | jq -r .block
 - Changes to the `test-node` RPC client (transaction outcomes, block/clock parsing, account/proof reads, or their JSON shapes): rerun `T2`.
 - Changes to `test-node` state seeding (snapshot formats, validation classes, genesis-config injection, or database seeding): rerun `T3`.
 - Changes to the transaction-bearing block path (`sendTransaction`/`getBlock` handling, the committed-block scan, user-vs-system classification, or the r0vm/sequencer spawn env): rerun `T4` (the only check that proves the path against a real executed transaction).
-- Changes to `scaffold.toml` schema handling or `init` migration (`migrate_to_current`): rerun `E2` and the "Migrate a LEZ 0.1/0.2-era project" check in `E1`.
+- Changes to `scaffold.toml` schema handling or `init` migration (`migrate_to_current`): rerun `E2` (its LEZ 0.1/0.2-era migration check).
 - Changes to r0vm provisioning, the LEZ pin, the localnet/test-node sequencer arguments or config overrides (`apply_common_runtime_overrides`, `LOCALNET_BLOCK_CREATE_TIMEOUT`), or the sequencer/wallet build invocation (`SEQUENCER_BUILD_ARGS`, `setup`): re-verify "Provisioning the Real LEZ Sequencer Toolchain", then rerun `D1`, `T1` and `T4`.
 
 The `T`-series must be run against a real sequencer (see the Agent Execution Directives and the provisioning section). When in doubt, rerun more scenarios rather than fewer — and never substitute a stub for the real node in a `T` scenario.
