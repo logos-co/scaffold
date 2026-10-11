@@ -160,6 +160,12 @@ fn collect_report_artifacts(
         reason: "excluded by policy: wallet key material is never included".to_string(),
     });
     skipped.push(SkippedItem {
+        path: ".scaffold/localnet/**".to_string(),
+        reason: "excluded by policy: localnet chain database and sequencer signing keys are \
+                 never included"
+            .to_string(),
+    });
+    skipped.push(SkippedItem {
         path: ".scaffold/state/wallet.state".to_string(),
         reason: "excluded by policy: project default wallet state is never included raw"
             .to_string(),

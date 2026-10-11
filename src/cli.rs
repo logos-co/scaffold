@@ -986,6 +986,10 @@ struct WalletTopupArgs {
     address: Option<String>,
     #[arg(long = "address", value_name = "ADDRESS")]
     address_flag: Option<String>,
+    /// Native units to transfer from the localnet dev funder (default
+    /// 1000000000, enough for a few dozen deployments and calls).
+    #[arg(long, value_name = "UNITS")]
+    amount: Option<u64>,
     #[arg(long)]
     dry_run: bool,
     /// Emit the topup outcome as a JSON object instead of human-readable text.
@@ -1448,6 +1452,7 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                         args.address_flag,
                         "wallet topup",
                     )?,
+                    amount: args.amount,
                     dry_run: args.dry_run,
                     json: args.json,
                 },

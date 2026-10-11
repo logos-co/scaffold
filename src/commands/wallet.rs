@@ -111,6 +111,7 @@ pub(crate) enum WalletAction {
     },
     Topup {
         address: Option<String>,
+        amount: Option<u64>,
         dry_run: bool,
         json: bool,
     },
@@ -127,9 +128,10 @@ pub(crate) fn cmd_wallet(action: WalletAction) -> DynResult<()> {
         WalletAction::Proxy { args } => cmd_wallet_proxy(&project, &args),
         WalletAction::Topup {
             address,
+            amount,
             dry_run,
             json,
-        } => cmd_wallet_topup(&project, address, dry_run, json),
+        } => cmd_wallet_topup(&project, address, amount, dry_run, json),
         WalletAction::DefaultSet { address } => cmd_wallet_default_set(&project, &address),
     }
 }
@@ -188,10 +190,11 @@ pub(crate) fn cmd_wallet_proxy(project: &crate::model::Project, args: &[String])
 fn cmd_wallet_topup(
     project: &crate::model::Project,
     address: Option<String>,
+    amount: Option<u64>,
     dry_run: bool,
     json: bool,
 ) -> DynResult<()> {
-    match cmd_wallet_topup_inner(project, address, dry_run, json)? {
+    match cmd_wallet_topup_inner(project, address, amount, dry_run, json)? {
         TopupOutcome::Success => Ok(()),
         TopupOutcome::ConfirmationTimeout { message } => bail!("{message}"),
     }
@@ -225,9 +228,14 @@ const TOPUP_METHOD: &str = "dev funder transfer";
 pub(crate) fn cmd_wallet_topup_inner(
     project: &crate::model::Project,
     address: Option<String>,
+    amount: Option<u64>,
     dry_run: bool,
     json: bool,
 ) -> DynResult<TopupOutcome> {
+    let amount = amount.unwrap_or(DEFAULT_TOPUP_AMOUNT);
+    if amount == 0 {
+        bail!("wallet topup --amount must be greater than zero");
+    }
     // In JSON mode, keep stdout clean: suppress the `$ <cmd>` echoes so the
     // only thing on stdout is the structured object we emit at the end.
     let _echo_guard = json.then(EchoGuard::suppress);
@@ -259,7 +267,7 @@ pub(crate) fn cmd_wallet_topup_inner(
         .arg("--to")
         .arg(&resolved_to)
         .arg("--amount")
-        .arg(DEFAULT_TOPUP_AMOUNT.to_string());
+        .arg(amount.to_string());
 
     if dry_run {
         if json {
@@ -267,7 +275,7 @@ pub(crate) fn cmd_wallet_topup_inner(
                 "status": "dry_run",
                 "address": resolved_to,
                 "method": TOPUP_METHOD,
-                "amount": DEFAULT_TOPUP_AMOUNT,
+                "amount": amount,
                 "network": sequencer_addr,
                 // Stable shape: no tx exists for a dry run, but keep the key.
                 "tx": serde_json::Value::Null,
@@ -281,7 +289,7 @@ pub(crate) fn cmd_wallet_topup_inner(
         println!("planned preflight: import the dev funder key into the wallet if it is missing");
         println!("$ {}", render_command(&send_command));
         println!("planned wallet: {resolved_to}");
-        println!("planned method: {TOPUP_METHOD} ({DEFAULT_TOPUP_AMOUNT} from {funder})");
+        println!("planned method: {TOPUP_METHOD} ({amount} from {funder})");
         println!("planned network: local sequencer ({sequencer_addr})");
         return Ok(TopupOutcome::Success);
     }
@@ -368,7 +376,7 @@ pub(crate) fn cmd_wallet_topup_inner(
             "status": "success",
             "address": resolved_to,
             "method": TOPUP_METHOD,
-            "amount": DEFAULT_TOPUP_AMOUNT,
+            "amount": amount,
             "network": sequencer_addr,
             "tx": tx,
         });
@@ -378,7 +386,7 @@ pub(crate) fn cmd_wallet_topup_inner(
 
     println!("wallet topup complete");
     println!("  Address: {resolved_to}");
-    println!("  Method: {TOPUP_METHOD} ({DEFAULT_TOPUP_AMOUNT})");
+    println!("  Method: {TOPUP_METHOD} ({amount})");
     println!("  Network: local sequencer ({sequencer_addr})");
     if let Some(tx) = tx {
         println!("  Tx: {tx}");

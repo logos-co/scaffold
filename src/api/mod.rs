@@ -311,8 +311,14 @@ impl Project {
     /// means the submission reached the sequencer but confirmation timed out —
     /// funding is uncertain, not failed.
     pub fn wallet_topup(&self, options: &TopupOptions) -> Result<TopupOutcome> {
-        cmd_wallet_topup_inner(&self.inner, options.address.clone(), false, false)
-            .map_err(error::classify)
+        cmd_wallet_topup_inner(
+            &self.inner,
+            options.address.clone(),
+            options.amount,
+            false,
+            false,
+        )
+        .map_err(error::classify)
     }
 
     /// Set the project's default wallet address; returns the normalized form
@@ -579,6 +585,9 @@ impl Default for LocalnetResetOptions {
 pub struct TopupOptions {
     /// Destination address; `None` uses the project default wallet.
     pub address: Option<String>,
+    /// Native units to transfer from the dev funder; `None` uses the
+    /// default (1,000,000,000).
+    pub amount: Option<u64>,
 }
 
 /// Options for [`Project::report`].

@@ -1010,6 +1010,16 @@ fn doctor_reports_dev_funder_in_wallet() {
     let temp = tempdir().expect("tempdir");
     setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
 
+    // Before the wallet storage exists doctor must not create it (listing
+    // accounts would initialize key material as a side effect).
+    let storage = temp.path().join(".scaffold/wallet/storage.json");
+    let _ = fs::remove_file(&storage);
+    let report = doctor_json(temp.path());
+    let funder = doctor_check(&report, "dev funder in wallet").expect("dev funder row");
+    assert_eq!(funder["status"], "warn", "{funder}");
+    assert!(!storage.exists(), "doctor must not initialize the wallet");
+
+    fs::write(&storage, "{}").expect("write storage stub");
     let report = doctor_json(temp.path());
     let funder = doctor_check(&report, "dev funder in wallet").expect("dev funder row");
     assert_eq!(funder["status"], "pass", "{funder}");
@@ -1690,6 +1700,37 @@ fn wallet_list_json_emits_structured_envelope() {
     assert!(accounts
         .iter()
         .any(|a| a.as_str() == Some(&format!("/ {VALID_PUBLIC_ADDRESS}"))));
+}
+
+#[test]
+fn wallet_topup_amount_flag_sets_the_transfer_amount() {
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args([
+            "wallet",
+            "topup",
+            "--address",
+            VALID_PUBLIC_ADDRESS,
+            "--amount",
+            "7",
+            "--dry-run",
+            "--json",
+        ])
+        .assert()
+        .success();
+    let value: serde_json::Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("valid json");
+    assert_eq!(value["amount"].as_u64(), Some(7), "{value}");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["wallet", "topup", "--amount", "0", "--dry-run"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("greater than zero"));
 }
 
 #[test]

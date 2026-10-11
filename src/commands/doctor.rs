@@ -325,6 +325,16 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
 /// not need a running sequencer.
 fn check_dev_funder(wallet_binary: &std::path::Path, wallet_home: &std::path::Path) -> CheckRow {
     let name = "dev funder in wallet".to_string();
+    // `account list` creates the wallet storage when it does not exist yet;
+    // doctor must not initialize key material as a side effect.
+    if !wallet_home.join("storage.json").is_file() {
+        return CheckRow {
+            status: CheckStatus::Warn,
+            name,
+            detail: "wallet storage not initialized yet".to_string(),
+            remediation: Some(format!("Run `{STEP_SETUP}`")),
+        };
+    }
     let mut list_cmd = Command::new(wallet_binary);
     set_wallet_home_env(&mut list_cmd, wallet_home);
     list_cmd.arg("account").arg("list");

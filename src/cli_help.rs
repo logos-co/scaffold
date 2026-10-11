@@ -117,6 +117,7 @@ pub(crate) const EXAMPLES_WALLET_TOPUP: &str = r"Examples:
   logos-scaffold wallet topup
   logos-scaffold wallet topup Public/6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV
   logos-scaffold wallet topup --address Public/6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV
+  logos-scaffold wallet topup --amount 5000000000
   logos-scaffold wallet topup --dry-run
   logos-scaffold wallet topup --json
 
