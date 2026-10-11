@@ -10,7 +10,7 @@
 //! retryable error instead of silently inconsistent data.
 //!
 //! The pinned sequencer serves only the *latest* state (`getAccount` /
-//! `getProofForCommitment` have no historical parameter). `ReadAt::Block`
+//! `getProofsAndRoot` have no historical parameter). `ReadAt::Block`
 //! therefore validates that the node's head **is** the requested block and
 //! fails with a targeted error otherwise — which still gives tests an exact
 //! block-scoped read right after `blocks wait` / `tx submit-and-wait`
@@ -40,24 +40,32 @@ pub enum ReadAt {
 pub enum AccountValue {
     /// The account exists (has been written at least once).
     Present {
-        /// Canonical borsh encoding of the account
-        /// (`program_owner [u32;8]`, `balance u128`, `data Vec<u8>`,
-        /// `nonce u128`), base64 — lossless for byte-level comparisons.
+        /// Canonical borsh encoding of the LEZ 0.3 account (`nonce u128`,
+        /// then `AccountData { shards: BTreeMap<AccountId, ShardData> }`),
+        /// base64 — lossless for byte-level comparisons.
         encoded: String,
-        /// Program owner as hex of the 32 little-endian bytes.
-        program_owner: String,
+        /// Native token balance (`getAccountBalance`).
         balance: u128,
         nonce: u128,
-        /// Account data bytes, base64 (lossless).
-        data: String,
-        data_len: usize,
+        /// Per-program shards, ordered by program account id.
+        shards: Vec<AccountShard>,
     },
     /// The account has never been written: the node returned the default
-    /// account (zero balance, zero nonce, empty data, default owner).
+    /// account (zero nonce, no shards) and a zero balance.
     Missing,
     /// The node returned a payload this client could not decode. The raw
     /// JSON is preserved for inspection.
     DecodeError { message: String, raw: Value },
+}
+
+/// One program's shard of an account.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct AccountShard {
+    /// Program account id (base58) that owns this shard.
+    pub program: String,
+    /// Shard bytes, base64 (lossless).
+    pub data: String,
+    pub data_len: usize,
 }
 
 /// One account read, with the block boundary it was scoped to.
@@ -151,13 +159,23 @@ impl TestNodeClient {
         let param: Vec<u64> = bytes.iter().map(|byte| u64::from(*byte)).collect();
 
         let (block_id, proof) = self.read_at_boundary(at, |client| {
-            let result = client.call("getProofForCommitment", json!([param]))?;
-            match result {
+            // `getProofsAndRoot([commitments]) -> ([Option<proof>], root)`.
+            let result = client.call("getProofsAndRoot", json!([[param]]))?;
+            let first = result
+                .as_array()
+                .and_then(|pair| pair.first())
+                .and_then(Value::as_array)
+                .and_then(|proofs| proofs.first())
+                .ok_or_else(|| RpcError::Other {
+                    operation: "getProofsAndRoot".to_string(),
+                    message: format!("unexpected payload shape: {result}"),
+                })?;
+            match first {
                 Value::Null => Ok(None),
-                other => parse_proof(&other)
+                other => parse_proof(other)
                     .map(Some)
                     .map_err(|message| RpcError::Other {
-                        operation: "getProofForCommitment".to_string(),
+                        operation: "getProofsAndRoot".to_string(),
                         message,
                     }),
             }
@@ -172,7 +190,8 @@ impl TestNodeClient {
 
     fn fetch_account_value(&self, account_id: &str) -> Result<AccountValue, RpcError> {
         let result = self.call("getAccount", json!([account_id]))?;
-        Ok(parse_account_value(&result))
+        let balance = self.call("getAccountBalance", json!([account_id]))?;
+        Ok(parse_account_value(&result, &balance))
     }
 
     /// Run `reads` scoped to a block boundary: the head must be identical
@@ -219,96 +238,76 @@ impl TestNodeClient {
     }
 }
 
-fn parse_account_value(value: &Value) -> AccountValue {
+fn parse_account_value(value: &Value, balance: &Value) -> AccountValue {
     let Some(object) = value.as_object() else {
         return AccountValue::DecodeError {
             message: "account payload is not a JSON object".to_string(),
             raw: value.clone(),
         };
     };
+    let decode_error = |message: &str| AccountValue::DecodeError {
+        message: message.to_string(),
+        raw: json!({ "account": value, "balance": balance }),
+    };
 
-    let balance = match read_u128_field(object.get("balance")) {
-        Some(balance) => balance,
-        None => {
-            return AccountValue::DecodeError {
-                message: "missing or non-numeric `balance`".to_string(),
-                raw: value.clone(),
-            }
-        }
+    let Some(balance) = read_u128_field(Some(balance)) else {
+        return decode_error("`getAccountBalance` returned a non-numeric balance");
     };
-    let nonce = match read_u128_field(object.get("nonce")) {
-        Some(nonce) => nonce,
-        None => {
-            return AccountValue::DecodeError {
-                message: "missing or non-numeric `nonce`".to_string(),
-                raw: value.clone(),
-            }
-        }
+    let Some(nonce) = read_u128_field(object.get("nonce")) else {
+        return decode_error("missing or non-numeric `nonce`");
     };
-    let program_owner: Option<Vec<u32>> = object
-        .get("program_owner")
-        .and_then(Value::as_array)
-        .map(|words| {
-            words
-                .iter()
-                .map(|word| word.as_u64().and_then(|w| u32::try_from(w).ok()))
-                .collect::<Option<Vec<u32>>>()
-        })
-        .unwrap_or_default();
-    let Some(program_owner) = program_owner.filter(|words| words.len() == 8) else {
-        return AccountValue::DecodeError {
-            message: "missing or malformed `program_owner` (expected 8 u32 words)".to_string(),
-            raw: value.clone(),
-        };
-    };
-    let data: Option<Vec<u8>> = object
+    let Some(shard_map) = object
         .get("data")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .map(|item| item.as_u64().and_then(|byte| u8::try_from(byte).ok()))
-                .collect::<Option<Vec<u8>>>()
-        })
-        .unwrap_or(Some(Vec::new()));
-    let Some(data) = data else {
-        return AccountValue::DecodeError {
-            message: "`data` is not a byte array".to_string(),
-            raw: value.clone(),
-        };
+        .and_then(|data| data.get("shards"))
+        .and_then(Value::as_object)
+    else {
+        return decode_error("missing `data.shards` object");
     };
 
-    let is_default = balance == 0
-        && nonce == 0
-        && data.is_empty()
-        && program_owner.iter().all(|word| *word == 0);
-    if is_default {
+    // Borsh orders a BTreeMap by key; AccountId orders by its raw bytes.
+    let mut shards: Vec<([u8; 32], String, Vec<u8>)> = Vec::with_capacity(shard_map.len());
+    for (program, bytes) in shard_map {
+        let raw = match bs58::decode(program).into_vec() {
+            Ok(raw) if raw.len() == 32 => {
+                let mut id = [0_u8; 32];
+                id.copy_from_slice(&raw);
+                id
+            }
+            _ => return decode_error("shard key is not a base58 account id"),
+        };
+        let Some(bytes) = super::blocks::shard_bytes(bytes) else {
+            return decode_error("shard data is not a byte array");
+        };
+        shards.push((raw, program.clone(), bytes));
+    }
+    shards.sort_by(|a, b| a.0.cmp(&b.0));
+
+    if balance == 0 && nonce == 0 && shards.is_empty() {
         return AccountValue::Missing;
     }
 
-    // Canonical borsh of the account: program_owner words LE, balance u128
-    // LE, Vec<u8> data (u32 len + bytes), nonce u128 LE.
-    let mut encoded = Vec::with_capacity(32 + 16 + 4 + data.len() + 16);
-    for word in &program_owner {
-        encoded.extend_from_slice(&word.to_le_bytes());
-    }
-    encoded.extend_from_slice(&balance.to_le_bytes());
-    encoded.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    encoded.extend_from_slice(&data);
+    let mut encoded = Vec::new();
     encoded.extend_from_slice(&nonce.to_le_bytes());
+    encoded.extend_from_slice(&(shards.len() as u32).to_le_bytes());
+    for (raw, _, bytes) in &shards {
+        encoded.extend_from_slice(raw);
+        encoded.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        encoded.extend_from_slice(bytes);
+    }
 
-    let owner_bytes: Vec<u8> = program_owner
-        .iter()
-        .flat_map(|word| word.to_le_bytes())
-        .collect();
-
+    let engine = base64::engine::general_purpose::STANDARD;
     AccountValue::Present {
-        encoded: base64::engine::general_purpose::STANDARD.encode(&encoded),
-        program_owner: hex_string(&owner_bytes),
+        encoded: engine.encode(&encoded),
         balance,
         nonce,
-        data: base64::engine::general_purpose::STANDARD.encode(&data),
-        data_len: data.len(),
+        shards: shards
+            .into_iter()
+            .map(|(_, program, bytes)| AccountShard {
+                program,
+                data: engine.encode(&bytes),
+                data_len: bytes.len(),
+            })
+            .collect(),
     }
 }
 
@@ -399,22 +398,14 @@ mod tests {
     use super::*;
     use crate::testnode::test_support::FakeNode;
 
+    const PROGRAM: &str = "2RHZhw9h534Zr3eq2RGhQete2Hh667foECzXPmSkGni2";
+
     fn present_account() -> Value {
-        json!({
-            "program_owner": [1, 0, 0, 0, 0, 0, 0, 0],
-            "balance": 10_000,
-            "data": [1, 2, 3],
-            "nonce": 7,
-        })
+        json!({ "nonce": 7, "data": { "shards": { PROGRAM: [1, 2, 3] } } })
     }
 
     fn default_account() -> Value {
-        json!({
-            "program_owner": [0, 0, 0, 0, 0, 0, 0, 0],
-            "balance": 0,
-            "data": [],
-            "nonce": 0,
-        })
+        json!({ "nonce": 0, "data": { "shards": {} } })
     }
 
     #[test]
@@ -422,6 +413,7 @@ mod tests {
         let node = FakeNode::start(|method, _| match method {
             "getLastBlockId" => json!(42),
             "getAccount" => present_account(),
+            "getAccountBalance" => json!(10_000),
             other => panic!("unexpected method {other}"),
         });
 
@@ -432,30 +424,32 @@ mod tests {
             AccountValue::Present {
                 balance,
                 nonce,
-                data,
-                data_len,
+                shards,
                 encoded,
-                program_owner,
             } => {
                 assert_eq!(balance, 10_000);
                 assert_eq!(nonce, 7);
-                assert_eq!(data_len, 3);
+                assert_eq!(shards.len(), 1);
+                assert_eq!(shards[0].program, PROGRAM);
+                assert_eq!(shards[0].data_len, 3);
                 assert_eq!(
                     base64::engine::general_purpose::STANDARD
-                        .decode(data)
+                        .decode(&shards[0].data)
                         .unwrap(),
                     vec![1, 2, 3]
                 );
-                assert!(program_owner.starts_with("01000000"));
-                // Lossless canonical borsh: owner(32) + balance(16) +
-                // len(4) + data(3) + nonce(16).
+                // Lossless canonical borsh: nonce(16) + map len(4) +
+                // key(32) + data len(4) + data(3).
                 let encoded_bytes = base64::engine::general_purpose::STANDARD
                     .decode(encoded)
                     .unwrap();
-                assert_eq!(encoded_bytes.len(), 32 + 16 + 4 + 3 + 16);
-                assert_eq!(encoded_bytes[0], 1); // first owner word LE
-                assert_eq!(encoded_bytes[32], 0x10); // balance 10000 = 0x2710 LE
-                assert_eq!(encoded_bytes[33], 0x27);
+                assert_eq!(encoded_bytes.len(), 16 + 4 + 32 + 4 + 3);
+                assert_eq!(encoded_bytes[0], 7); // nonce LE
+                assert_eq!(encoded_bytes[16], 1); // one shard
+                assert_eq!(
+                    &encoded_bytes[20..52],
+                    bs58::decode(PROGRAM).into_vec().unwrap().as_slice()
+                );
             }
             other => panic!("expected Present, got {other:?}"),
         }
@@ -466,6 +460,7 @@ mod tests {
         let node = FakeNode::start(|method, _| match method {
             "getLastBlockId" => json!(9),
             "getAccount" => default_account(),
+            "getAccountBalance" => json!(0),
             other => panic!("unexpected method {other}"),
         });
 
@@ -478,7 +473,8 @@ mod tests {
     fn malformed_account_reports_decode_error_with_raw_payload() {
         let node = FakeNode::start(|method, _| match method {
             "getLastBlockId" => json!(9),
-            "getAccount" => json!({ "balance": "not-a-number" }),
+            "getAccount" => json!({ "nonce": "not-a-number" }),
+            "getAccountBalance" => json!(0),
             other => panic!("unexpected method {other}"),
         });
 
@@ -486,8 +482,8 @@ mod tests {
         let read = client.account("someid", ReadAt::Latest).unwrap();
         match read.value {
             AccountValue::DecodeError { message, raw } => {
-                assert!(message.contains("balance"), "{message}");
-                assert_eq!(raw["balance"], json!("not-a-number"));
+                assert!(message.contains("nonce"), "{message}");
+                assert_eq!(raw["account"]["nonce"], json!("not-a-number"));
             }
             other => panic!("expected DecodeError, got {other:?}"),
         }
@@ -504,6 +500,7 @@ mod tests {
                     default_account()
                 }
             }
+            "getAccountBalance" => json!(0),
             other => panic!("unexpected method {other}"),
         });
 
@@ -525,6 +522,7 @@ mod tests {
         let node = FakeNode::start(|method, _| match method {
             "getLastBlockId" => json!(10),
             "getAccount" => default_account(),
+            "getAccountBalance" => json!(0),
             other => panic!("unexpected method {other}"),
         });
 
@@ -546,12 +544,8 @@ mod tests {
 
         let node = FakeNode::start(move |method, _| match method {
             "getLastBlockId" => json!(counter_for_node.fetch_add(1, Ordering::Relaxed)),
-            "getAccount" => json!({
-                "program_owner": [0,0,0,0,0,0,0,0],
-                "balance": 0,
-                "data": [],
-                "nonce": 0,
-            }),
+            "getAccount" => json!({ "nonce": 0, "data": { "shards": {} } }),
+            "getAccountBalance" => json!(0),
             other => panic!("unexpected method {other}"),
         });
 
@@ -565,15 +559,16 @@ mod tests {
         let commitment_hex = "ab".repeat(32);
         let node = FakeNode::start(|method, params| match method {
             "getLastBlockId" => json!(20),
-            "getProofForCommitment" => {
-                // Commitment arrives as an array of 32 numbers.
-                let bytes = params[0].as_array().unwrap();
+            "getProofsAndRoot" => {
+                // One commitment, as an array of 32 numbers, in a list.
+                let bytes = params[0][0].as_array().unwrap();
                 assert_eq!(bytes.len(), 32);
-                if bytes[0].as_u64() == Some(0xAB) {
+                let proof = if bytes[0].as_u64() == Some(0xAB) {
                     json!([3, [vec![1_u8; 32], vec![2_u8; 32]]])
                 } else {
                     Value::Null
-                }
+                };
+                json!([[proof], vec![9_u8; 32]])
             }
             other => panic!("unexpected method {other}"),
         });
