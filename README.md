@@ -14,7 +14,7 @@ against a local execution zone.
 
 ```bash
 cargo install logos-scaffold
-lgs new my-app --template lez-framework
+lgs new my-app
 cd my-app
 lgs run
 lgs wallet -- check-health   # confirm wallet + localnet after the first pipeline
@@ -25,17 +25,18 @@ deploys your programs. That is the whole inner loop in one command.
 
 ```console
 $ lgs run
-[1/5] Building...
-[2/5] Building IDL...
-[3/5] Ensuring localnet...
+[1/4] Building...
+[2/4] Ensuring localnet...
 localnet ready (sequencer pid=<pid>)
-[4/5] Topping up wallet...
-[5/5] Deploying programs...
-  program_id: <hex>
+[3/4] Topping up wallet...
+[4/4] Deploying programs...
+OK  hello_world deployed
+  program_id: <base58 header account id>
 
 Deployed programs:
-  lez_counter
-    Binary: <project>/target/riscv-guest/.../lez_counter.bin
+  hello_world
+    program_id: <base58 header account id>
+    Binary: <project>/target/riscv-guest-docker/.../hello_world.bin
 
 Sequencer: http://127.0.0.1:3040
 ```
@@ -43,13 +44,14 @@ Sequencer: http://127.0.0.1:3040
 Step labels above are exactly what the CLI prints; the values in angle
 brackets are yours.
 
-The first run compiles the LEZ toolchain from source, so expect it to take a
-while. Every run after that reuses a running localnet and skips deploy when
+Scaffold targets **LEZ 0.3** (pinned to `v0.3.1`) and nothing older. The
+first run compiles the LEZ sequencer and wallet from source, so expect it to
+take a while. Every run after that reuses a running localnet and skips deploy when
 nothing changed. If a step fails, `lgs doctor` reports what is missing.
 
 ## What you get
 
-- `lgs run` chains build, IDL, localnet, wallet topup, and deploy into one command. Add `--watch` to re-run it on every file change.
+- `lgs run` chains build, localnet, wallet topup, and deploy into one command. Add `--watch` to re-run it on every file change.
 - `lgs localnet` gives each project one long-lived sequencer. It is daemonized, so closing the terminal does not kill it, and its status tells a managed process apart from a stale one or a foreign listener.
 - `lgs test-node` spins up throwaway sequencers for integration tests. Each gets its own port, database, and state, so tests run in parallel without colliding.
 - `lgs basecamp` builds your project's Logos modules and launches them in clean-slate desktop profiles.
@@ -71,19 +73,14 @@ Every command needs these:
 
 Some workflows need more:
 
-- `curl`, used by the first `setup` to fetch the pinned
-  `logos-blockchain-circuits` release
+- Network access to GitHub for the first `setup`: the LEZ build downloads
+  its own `logos-blockchain-circuits` release (into `~/.cache/logos`)
 - Docker and `cargo-risczero`, for the default reproducible guest build
   (`[build].guest = "docker"`). Set `[build].guest = "local"` to use your host
-  toolchain instead — no container runtime, but the `program_id` it produces
-  is not portable across machines — see
+  toolchain instead — no container runtime, but the guest binary it produces
+  is not byte-identical across machines — see
   [docs/configuration.md](docs/configuration.md#build--guest-program-build-strategy)
 - `nix` with flakes enabled, for `basecamp` subcommands
-
-Circuits are not a manual step. Scaffold downloads the release pinned in
-`[circuits]` into `.scaffold/circuits` the first time a command needs it. Set
-`LOGOS_BLOCKCHAIN_CIRCUITS=<path>` only to point at a checkout you already
-have.
 
 Run `lgs doctor` to check all of this at once. Add `--json` for CI.
 
@@ -129,9 +126,9 @@ semantics of each one.
 | `lgs build` | Build the workspace and guest programs (`--guest local` for a faster, Docker-free, non-reproducible guest build) |
 | `lgs deploy` | Deploy guest programs to the running localnet |
 | `lgs localnet` | Start, stop, inspect, or reset the local sequencer |
-| `lgs run` | Chain the whole loop: build, IDL, localnet, topup, deploy |
+| `lgs run` | Chain the whole loop: build, localnet, topup, deploy |
 | `lgs test-node` | Manage isolated sequencers for integration tests |
-| `lgs wallet` | List accounts, top up, set the project default |
+| `lgs wallet` | List accounts, top up from the localnet's dev funder, set the project default |
 | `lgs basecamp` | Build and launch Logos desktop profiles |
 | `lgs doctor` | Report what is missing or misconfigured |
 | `lgs report` | Build a redacted diagnostics bundle for a GitHub issue |
@@ -144,8 +141,8 @@ Use these when debugging a single phase or learning what `run` orchestrates:
 lgs setup
 lgs localnet start
 lgs build
+lgs wallet topup   # the default account pays deployment fees
 lgs deploy
-lgs wallet topup
 ```
 
 ### Adopt scaffold in an existing project
@@ -160,21 +157,25 @@ lgs setup
 ```
 
 `init` only writes `scaffold.toml` and creates `.scaffold/` directories. It
-does not touch your `Cargo.toml` or `src/`. Edit `scaffold.toml` if you need
-non-default framework settings, for example `lez-framework`.
+does not touch your `Cargo.toml` or `src/`.
 
 ### Migrate an older scaffolded project
 
-If `scaffold.toml` predates a section scaffold now requires (for example
-`[repos.spel]`), commands fail with an error pointing at `init`. Migrate with:
+Projects created for LEZ 0.1/0.2 (`scaffold.toml` schema `0.2.0`, with
+`[repos.spel]` and `[circuits]`) are rejected with an error pointing at
+`init`. Migrate with:
 
 ```bash
 cd my-existing-project
-lgs init    # appends the missing section to scaffold.toml in place
-lgs setup   # picks up the new section
+lgs init    # schema 0.3.0: drops [repos.spel]/[circuits]/[framework.idl], re-pins LEZ to v0.3.1
+lgs setup   # rebuilds the LEZ 0.3 sequencer and wallet
 ```
 
-Existing fields are preserved verbatim.
+Other settings and comments are preserved. `init` cannot port your program
+code: LEZ 0.3 changed the guest program model (`lee_core::program::{Plan,
+run_program}`, per-program account shards) and the client crates (`nssa` →
+`lee`), so compare with a freshly generated project. `lez-framework` (spel)
+projects are refused: spel has no LEZ 0.3 release yet.
 
 ## Configuration
 
@@ -200,18 +201,6 @@ node.stop()?;
 
 See the [`api` module rustdoc](https://docs.rs/logos-scaffold) for the full
 surface, typed result models, and categorized errors.
-
-## LEZ Framework
-
-For a developer experience closer to Anchor on Solana, use the
-[LEZ Framework](https://github.com/jimmy-claw/lez-framework) template:
-
-```bash
-lgs new my-app --template lez-framework
-```
-
-See the [LEZ Framework template README](./templates/lez-framework/README.md)
-for details.
 
 ## Troubleshooting
 
@@ -245,30 +234,20 @@ The CLI is Unix-only. Localnet and process/port detection rely on `lsof`, `ps`,
 and `kill`.
 
 Scaffold has a single external dependency,
-[LEZ](https://github.com/logos-blockchain/logos-execution-zone/). It supports
-the standalone sequencer flow only, and does not depend on `logos-blockchain`.
+[LEZ](https://github.com/logos-blockchain/logos-execution-zone/), and supports
+the LEZ 0.3 release line only. It runs the sequencer in standalone mode (a mock
+Bedrock), so it does not need a `logos-blockchain` node.
 
 ## Example runs
 
-A project created from the default template ships example client binaries.
-From that project's root, run them directly, without passing `.bin` paths:
+A project created from the default template ships LEZ's example runners. Each
+deploys a fresh copy of its program and calls it; they take the guest binary,
+plain base58 account ids, and a funded payer. The generated project's README
+walks through them, for example:
 
 ```bash
-cargo run --bin run_hello_world -- <public_account_id>
-cargo run --bin run_hello_world_private -- <private_account_id>
-cargo run --bin run_hello_world_with_authorization -- <public_account_id>
-cargo run --bin run_hello_world_with_move_function -- write-public <public_account_id> <text>
-cargo run --bin run_hello_world_through_tail_call -- <public_account_id>
-cargo run --bin run_hello_world_through_tail_call_private -- <private_account_id>
-cargo run --bin run_hello_world_with_authorization_through_tail_call_with_pda
-```
-
-To point at custom binaries:
-
-```bash
-export EXAMPLE_PROGRAMS_BUILD_DIR=$(pwd)/target/riscv-guest/example_program_deployment_methods/example_program_deployment_programs/riscv32im-risc0-zkvm-elf/release
-cargo run --bin run_hello_world -- --program-path "$EXAMPLE_PROGRAMS_BUILD_DIR/hello_world.bin" <public_account_id>
-cargo run --bin run_hello_world_through_tail_call_private -- --simple-tail-call-path "$EXAMPLE_PROGRAMS_BUILD_DIR/simple_tail_call.bin" --hello-world-path "$EXAMPLE_PROGRAMS_BUILD_DIR/hello_world.bin" <private_account_id>
+export LEE_WALLET_HOME_DIR=$(pwd)/.scaffold/wallet
+cargo run --bin run_hello_world -- "$BIN_DIR/hello_world.bin" <account_id> <payer_account_id>
 ```
 
 ## Contributing

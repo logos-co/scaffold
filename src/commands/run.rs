@@ -681,12 +681,17 @@ fn print_deploy_summary(project: &Project) -> DynResult<()> {
         return Ok(());
     }
     let binaries = discover_program_binaries(&project.root, &programs);
+    let recorded = read_deployments(&project.root);
 
     println!();
     println!("Deployed programs:");
     for stem in &programs {
         if let Some(binary_path) = binaries.get(stem) {
             println!("  {stem}");
+            match recorded.get(stem) {
+                Some(record) => println!("    program_id: {}", record.program_id),
+                None => println!("    program_id: (no recorded deployment)"),
+            }
             println!("    Binary: {}", binary_path.display());
         }
     }
