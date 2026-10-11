@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
-use anyhow::{anyhow, bail};
+use anyhow::anyhow;
 use clap::{CommandFactory, Parser, Subcommand};
 
 use crate::cli_help::{
@@ -1565,10 +1565,6 @@ pub(crate) fn print_help(bin_name: &str) -> DynResult<()> {
     cmd.print_help()?;
     println!();
     Ok(())
-}
-
-fn is_help_token(token: &str) -> bool {
-    matches!(token, "--help" | "-h" | "help" | "-?")
 }
 
 fn apply_quiet_from_env() {

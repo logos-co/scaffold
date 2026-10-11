@@ -753,7 +753,6 @@ fn read_log_tail(log_path: &Path, tail: usize) -> String {
 
 fn cmd_localnet_reset_dry_run(
     project: &Project,
-    lez: &Path,
     state_path: &Path,
     log_path: &Path,
     localnet_addr: &str,
@@ -762,7 +761,7 @@ fn cmd_localnet_reset_dry_run(
     verify_timeout_sec: u64,
     sequencer_bin: &Path,
 ) -> DynResult<()> {
-    // `lez` and `sequencer_bin` come out of the cache-root resolver, which can
+    // `sequencer_bin` comes out of the cache-root resolver, which can
     // return either an absolute path (env override, explicit absolute
     // `[repos.lez].path`, or scaffold default cache layer) or a path relative
     // to `project.root` (the portable default for vendored / new projects).
@@ -785,7 +784,7 @@ fn cmd_localnet_reset_dry_run(
         state_path.display()
     );
     println!(
-        "planned: delete sequencer DB at {} (exists: {})",
+        "planned: delete localnet chain home (sequencer DB + keys) at {} (exists: {})",
         rocksdb_path.display(),
         rocksdb_path.exists()
     );
@@ -870,7 +869,6 @@ pub(crate) fn cmd_localnet_reset(
     if dry_run {
         return cmd_localnet_reset_dry_run(
             project,
-            lez,
             state_path,
             log_path,
             localnet_addr,

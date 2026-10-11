@@ -29,10 +29,6 @@ pub(crate) const DEFAULT_LEZ: GitRef = GitRef {
     sha: "1a003bfbfb89fcf987f62975cd08a401169e1b8c",
     tag: "v0.3.1",
 };
-/// Release line `DEFAULT_LEZ` belongs to. `doctor` warns when a project's
-/// pinned LEZ checkout reports a different line, since every wallet
-/// subcommand, config key, and RPC shape scaffold relies on is 0.3-specific.
-pub(crate) const SUPPORTED_LEZ_LINE: &str = "0.3.";
 
 /// Funding account for scaffold-managed sequencers (localnet and test-node).
 ///

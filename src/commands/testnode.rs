@@ -168,16 +168,18 @@ fn print_account_value(account_id: &str, value: &AccountValue) {
         AccountValue::Present {
             balance,
             nonce,
-            program_owner,
-            data,
-            data_len,
+            shards,
             ..
         } => {
             println!("  state: present");
             println!("  balance: {balance}");
             println!("  nonce: {nonce}");
-            println!("  program_owner: {program_owner}");
-            println!("  data ({data_len} bytes, base64): {data}");
+            for shard in shards {
+                println!(
+                    "  shard {} ({} bytes, base64): {}",
+                    shard.program, shard.data_len, shard.data
+                );
+            }
         }
         AccountValue::Missing => println!("  state: missing (never written)"),
         AccountValue::DecodeError { message, .. } => {
@@ -199,7 +201,13 @@ fn print_block_info(info: &BlockInfo) {
             "  tx {} ({:?}{})",
             tx.hash,
             tx.kind,
-            if tx.is_clock { ", clock" } else { "" }
+            if tx.is_clock {
+                ", clock"
+            } else if tx.is_system {
+                ", system"
+            } else {
+                ""
+            }
         );
     }
     if !info.fully_parsed {
@@ -213,7 +221,6 @@ fn print_clock_snapshot(snapshot: &ClockSnapshot) {
     println!("read_block_id: {}", snapshot.read_block_id);
     for account in &snapshot.accounts {
         println!("clock account {}", account.account_id);
-        println!("  balance: {}", account.balance);
         println!("  nonce: {}", account.nonce);
         match (account.block_id, account.timestamp) {
             (Some(block_id), Some(timestamp)) => {
