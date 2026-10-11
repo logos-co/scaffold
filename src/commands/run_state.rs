@@ -1,8 +1,8 @@
 //! Persisted run state used by `cmd_run` for deploy idempotence.
 //!
 //! The state file at `.scaffold/state/run_deploy.json` records the SHA-256
-//! of every guest `.bin` (folded together with its IDL JSON and a small
-//! deploy-config digest) that was last deployed, plus the sequencer PID
+//! of every guest `.bin` (folded together with a small deploy-config
+//! digest) that was last deployed, plus the sequencer PID
 //! that received the deploy. Before re-deploying, `cmd_run` compares the
 //! current hashes against the stored ones and skips the deploy step when
 //! they match AND the sequencer is the same instance. A `lgs localnet
@@ -20,11 +20,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::commands::deploy::{discover_deployable_programs, discover_program_binaries};
-use crate::commands::idl::sanitize_file_stem;
 use crate::commands::wallet_support::{
     default_sequencer_http_url_for_project, load_wallet_runtime,
 };
-use crate::constants::FRAMEWORK_KIND_LEZ_FRAMEWORK;
 use crate::model::Project;
 use crate::state::read_localnet_state;
 use crate::DynResult;
@@ -83,9 +81,7 @@ pub(crate) fn compute_program_hashes(project: &Project) -> DynResult<BTreeMap<St
             missing.join(", ")
         );
     }
-    let idl_dir = project.root.join(&project.config.framework.idl.path);
     let cfg_digest = config_digest(project);
-    let is_lez_framework = project.config.framework.kind == FRAMEWORK_KIND_LEZ_FRAMEWORK;
 
     for (stem, bin_path) in binaries {
         let mut hasher = Sha256::new();
@@ -93,37 +89,12 @@ pub(crate) fn compute_program_hashes(project: &Project) -> DynResult<BTreeMap<St
             .with_context(|| format!("read {} for hashing", bin_path.display()))?;
         hasher.update(&bin_bytes);
         // Fold a small canonical digest of deploy-affecting config so the
-        // cache invalidates when the user switches sequencer port, wallet
-        // home, or IDL path without doing a `--reset`. Without this, a
+        // cache invalidates when the user switches sequencer port or wallet
+        // home without doing a `--reset`. Without this, a
         // run pointed at a different localnet would silently skip deploy
         // and leave the new target empty.
         hasher.update(b"\x00cfg\x00");
         hasher.update(cfg_digest.as_bytes());
-        // Fold the corresponding IDL JSON (if any) into the program's
-        // hash so that an ABI-only edit invalidates the cached deploy
-        // even when the compiled binary is byte-identical. Use the
-        // same name-sanitizer as `build_idl_for_current_project`, since
-        // that's the path the IDL was actually written to: a raw stem
-        // like `my-program` would miss the on-disk `my_program.json`
-        // and bail with a misleading "run `lgs build idl`" error.
-        let idl_path = idl_dir.join(format!("{}.json", sanitize_file_stem(&stem)));
-        if idl_path.exists() {
-            let idl_bytes = std::fs::read(&idl_path)
-                .with_context(|| format!("read {} for hashing", idl_path.display()))?;
-            hasher.update(b"\x00idl\x00");
-            hasher.update(&idl_bytes);
-        } else if is_lez_framework {
-            // For lez-framework projects, the IDL file is a documented
-            // build artifact (`<stem>.json` produced by `build idl`).
-            // Missing it would mean we cache a partial digest and silently
-            // skip deploys after later ABI-only edits. Bail loudly.
-            anyhow::bail!(
-                "expected IDL file {} for program `{stem}` is missing; \
-                 run `lgs build idl` first or delete {} to bypass the deploy cache",
-                idl_path.display(),
-                project.root.join(RUN_DEPLOY_STATE_REL).display()
-            );
-        }
         out.insert(stem, hex_encode(&hasher.finalize()));
     }
     Ok(out)
@@ -140,8 +111,8 @@ fn config_digest(project: &Project) -> String {
     let cfg = &project.config;
     let sequencer = resolved_sequencer_addr(project);
     format!(
-        "port={}|wallet={}|idl={}|sequencer={}",
-        cfg.localnet.port, cfg.wallet_home_dir, cfg.framework.idl.path, sequencer
+        "port={}|wallet={}|sequencer={}",
+        cfg.localnet.port, cfg.wallet_home_dir, sequencer
     )
 }
 

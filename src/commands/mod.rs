@@ -2,6 +2,7 @@ pub(crate) mod basecamp;
 pub(crate) mod build;
 pub(crate) mod completions;
 pub(crate) mod deploy;
+pub(crate) mod deployments;
 pub(crate) mod doctor;
 pub(crate) mod init;
 pub(crate) mod localnet;

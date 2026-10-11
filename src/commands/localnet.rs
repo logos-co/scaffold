@@ -941,6 +941,8 @@ pub(crate) fn cmd_localnet_reset(
 fn reset_cleanup(project: &Project, state_path: &Path, reset_wallet: bool) -> DynResult<()> {
     let chain_home = localnet_home_for(state_path);
     remove_dir_if_exists(&chain_home, "sequencer DB")?;
+    // Program ids point into the chain that was just wiped.
+    super::deployments::clear_deployments(&project.root)?;
 
     if reset_wallet {
         let wallet_path = project.root.join(&project.config.wallet_home_dir);
