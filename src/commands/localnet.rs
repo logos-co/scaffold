@@ -1049,7 +1049,9 @@ fn verify_block_production(localnet_addr: &str, timeout_sec: u64) -> DynResult<(
 /// Resolve the r0vm binary path from the rzup installation that matches the LEZ risc0 version.
 ///
 /// Reads the risc0-zkvm version from the LEZ Cargo.lock, then looks for an exact-version
-/// rzup-managed extension dir: ~/.risc0/extensions/v<version>-cargo-risczero-<arch>-<os>/r0vm.
+/// rzup-managed extension dir, `<risc0 home>/extensions/v<version>-cargo-risczero-<arch>-<os>/r0vm`,
+/// where the risc0 home is `$RISC0_HOME` when set (rzup honours it, e.g. system-wide
+/// installs under `/usr/local/risc0`) and `~/.risc0` otherwise.
 /// Returns None (without guessing) if the version cannot be determined or the exact path
 /// does not exist. The caller should error with a clear diagnostic if None is returned.
 pub(crate) fn find_r0vm_path_for_lez(lez: &std::path::Path) -> Option<std::path::PathBuf> {
@@ -1071,18 +1073,22 @@ pub(crate) fn find_r0vm_path_for_lez(lez: &std::path::Path) -> Option<std::path:
     };
     let ext_name = format!("v{risc0_version}-cargo-risczero-{arch}-{os}");
 
-    let home = std::env::var("HOME").ok()?;
-    let r0vm = std::path::Path::new(&home)
-        .join(".risc0")
-        .join("extensions")
-        .join(&ext_name)
-        .join("r0vm");
+    risc0_homes()
+        .into_iter()
+        .map(|home| home.join("extensions").join(&ext_name).join("r0vm"))
+        .find(|r0vm| r0vm.exists())
+}
 
-    if r0vm.exists() {
-        Some(r0vm)
-    } else {
-        None
+/// Candidate rzup homes in lookup order: `$RISC0_HOME`, then `~/.risc0`.
+fn risc0_homes() -> Vec<std::path::PathBuf> {
+    let mut homes = Vec::new();
+    if let Some(home) = std::env::var_os("RISC0_HOME").filter(|v| !v.is_empty()) {
+        homes.push(std::path::PathBuf::from(home));
     }
+    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+        homes.push(std::path::PathBuf::from(home).join(".risc0"));
+    }
+    homes
 }
 
 /// Extract risc0-zkvm version from Cargo.lock content.
