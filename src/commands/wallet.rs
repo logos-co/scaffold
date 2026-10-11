@@ -7,9 +7,11 @@ use crate::process::{render_command, run_forwarded, run_with_stdin, EchoGuard};
 use crate::project::load_project;
 use crate::DynResult;
 
+use crate::constants::{DEFAULT_TOPUP_AMOUNT, WALLET_HOME_ENV_VAR};
+
 use super::wallet_support::{
-    default_sequencer_http_url_for_project, extract_tx_identifier, is_already_initialized_failure,
-    is_confirmation_timeout_failure, is_uninitialized_account_output, load_wallet_runtime,
+    default_sequencer_http_url_for_project, dev_funder_address, ensure_dev_funder_imported,
+    extract_tx_identifier, is_confirmation_timeout_failure, load_wallet_runtime,
     read_default_wallet_address, resolve_wallet_address, sequencer_connectivity_failure,
     sequencer_unreachable_hint, set_wallet_home_env, summarize_command_failure, wallet_password,
     wallet_state_path, write_default_wallet_address,
@@ -205,7 +207,7 @@ fn emit_topup_error_json(reason: &str, message: &str, address: &str, network: &s
         "status": "error",
         "reason": reason,
         "address": address,
-        "method": "pinata faucet claim",
+        "method": TOPUP_METHOD,
         "network": network,
         // Always present (null here) so the object shape is stable across
         // every `status` and consumers don't need per-status conditional keys.
@@ -216,6 +218,9 @@ fn emit_topup_error_json(reason: &str, message: &str, address: &str, network: &s
         println!("{text}");
     }
 }
+
+/// How `wallet topup` funds an account, as reported in its output.
+const TOPUP_METHOD: &str = "dev funder transfer";
 
 pub(crate) fn cmd_wallet_topup_inner(
     project: &crate::model::Project,
@@ -236,36 +241,33 @@ pub(crate) fn cmd_wallet_topup_inner(
     let wallet_home = wallet.wallet_home.as_os_str().to_string_lossy().to_string();
     let password_input = format!("{}\n", wallet_password());
 
-    let mut preflight_command = Command::new(&wallet.wallet_binary);
-    set_wallet_home_env(&mut preflight_command, &wallet.wallet_home);
-    preflight_command
-        .arg("account")
-        .arg("get")
-        .arg("--account-id")
-        .arg(&resolved_to);
+    let funder = dev_funder_address();
+    if resolved_to == funder {
+        bail!(
+            "wallet topup destination {resolved_to} is the dev funder itself; pick another account \
+             (`logos-scaffold wallet list`) or set one with `logos-scaffold wallet default set <address>`."
+        );
+    }
 
-    let mut init_command = Command::new(&wallet.wallet_binary);
-    set_wallet_home_env(&mut init_command, &wallet.wallet_home);
-    init_command
+    let mut send_command = Command::new(&wallet.wallet_binary);
+    set_wallet_home_env(&mut send_command, &wallet.wallet_home);
+    send_command
         .arg("auth-transfer")
-        .arg("init")
-        .arg("--account-id")
-        .arg(&resolved_to);
-
-    let mut pinata_command = Command::new(&wallet.wallet_binary);
-    set_wallet_home_env(&mut pinata_command, &wallet.wallet_home);
-    pinata_command
-        .arg("pinata")
-        .arg("claim")
+        .arg("send")
+        .arg("--from")
+        .arg(&funder)
         .arg("--to")
-        .arg(&resolved_to);
+        .arg(&resolved_to)
+        .arg("--amount")
+        .arg(DEFAULT_TOPUP_AMOUNT.to_string());
 
     if dry_run {
         if json {
             let report = json!({
                 "status": "dry_run",
                 "address": resolved_to,
-                "method": "pinata faucet claim",
+                "method": TOPUP_METHOD,
+                "amount": DEFAULT_TOPUP_AMOUNT,
                 "network": sequencer_addr,
                 // Stable shape: no tx exists for a dry run, but keep the key.
                 "tx": serde_json::Value::Null,
@@ -275,110 +277,40 @@ pub(crate) fn cmd_wallet_topup_inner(
             return Ok(TopupOutcome::Success);
         }
         println!("dry-run: wallet topup command will not be executed");
-        for name in crate::constants::WALLET_HOME_ENV_VARS {
-            println!("{name}={wallet_home}");
-        }
-        println!("$ {}", render_command(&preflight_command));
-        println!("planned preflight: check destination wallet initialization");
+        println!("{WALLET_HOME_ENV_VAR}={wallet_home}");
         println!(
-            "planned conditional step: run only if uninitialized -> {}",
-            render_command(&init_command)
+            "planned preflight: import the dev funder key into the wallet if it is missing"
         );
-        println!("$ {}", render_command(&pinata_command));
+        println!("$ {}", render_command(&send_command));
         println!("planned wallet: {resolved_to}");
-        println!("planned method: pinata faucet claim");
+        println!("planned method: {TOPUP_METHOD} ({DEFAULT_TOPUP_AMOUNT} from {funder})");
         println!("planned network: local sequencer ({sequencer_addr})");
         return Ok(TopupOutcome::Success);
     }
 
-    let preflight_output = run_with_stdin(preflight_command, password_input.clone())
-        .context("failed to execute wallet topup preflight command")?;
-    if !preflight_output.status.success() {
-        let summary = summarize_command_failure(&preflight_output.stdout, &preflight_output.stderr);
-        let combined = format!("{}\n{}", preflight_output.stdout, preflight_output.stderr);
-        if sequencer_connectivity_failure(&combined, &sequencer_addr) {
-            if json {
-                emit_topup_error_json(
-                    "connectivity",
-                    &format!("wallet topup failed during account preflight: {summary}"),
-                    &resolved_to,
-                    &sequencer_addr,
-                );
-            }
-            bail!(
-                "wallet topup failed during account preflight: {summary}\n{}",
-                sequencer_unreachable_hint(&sequencer_addr)
-            );
-        }
-
+    // Projects set up before the funder existed (or whose wallet home was
+    // recreated by hand) self-heal here instead of failing the transfer.
+    if let Err(err) = ensure_dev_funder_imported(&wallet.wallet_binary, &wallet.wallet_home) {
+        let summary = err.to_string();
         if json {
-            emit_topup_error_json(
-                "preflight",
-                &format!("wallet topup failed while checking account initialization: {summary}"),
-                &resolved_to,
-                &sequencer_addr,
-            );
-        }
-        bail!(
-            "wallet topup failed while checking account initialization: {summary}\nHint: verify the destination with `logos-scaffold wallet -- account get --account-id {resolved_to}`."
-        );
-    }
-
-    let preflight_combined = format!("{}\n{}", preflight_output.stdout, preflight_output.stderr);
-    if is_uninitialized_account_output(&preflight_combined) {
-        if !json {
-            println!(
-                "wallet topup preflight: destination is uninitialized; running auth-transfer init"
-            );
-        }
-        let init_output = run_with_stdin(init_command, password_input.clone())
-            .context("failed to execute wallet topup init command")?;
-
-        if !init_output.status.success() {
-            let summary = summarize_command_failure(&init_output.stdout, &init_output.stderr);
-            let combined = format!("{}\n{}", init_output.stdout, init_output.stderr);
-            if sequencer_connectivity_failure(&combined, &sequencer_addr) {
-                if json {
-                    emit_topup_error_json(
-                        "connectivity",
-                        &format!("wallet topup failed during account initialization: {summary}"),
-                        &resolved_to,
-                        &sequencer_addr,
-                    );
-                }
-                bail!(
-                    "wallet topup failed during account initialization: {summary}\n{}",
-                    sequencer_unreachable_hint(&sequencer_addr)
-                );
-            }
-            if is_already_initialized_failure(&combined) {
-                if !json {
-                    println!("wallet topup preflight: destination already initialized; continuing");
-                }
+            let reason = if sequencer_connectivity_failure(&summary, &sequencer_addr) {
+                "connectivity"
             } else {
-                if json {
-                    emit_topup_error_json(
-                        "init",
-                        &format!(
-                            "wallet topup failed while initializing destination wallet: {summary}"
-                        ),
-                        &resolved_to,
-                        &sequencer_addr,
-                    );
-                }
-                bail!("wallet topup failed while initializing destination wallet: {summary}");
-            }
+                "funder"
+            };
+            emit_topup_error_json(reason, &summary, &resolved_to, &sequencer_addr);
         }
+        bail!("wallet topup could not prepare the dev funder: {summary}");
     }
 
-    let output = run_with_stdin(pinata_command, password_input)
+    let output = run_with_stdin(send_command, password_input)
         .context("failed to execute wallet topup command")?;
 
     if !output.status.success() {
         let summary = summarize_command_failure(&output.stdout, &output.stderr);
         let combined = format!("{}\n{}", output.stdout, output.stderr);
         // Confirmation timeout is checked BEFORE connectivity: once `combined`
-        // is stdout+stderr, a sequencer dying mid-claim can carry both the
+        // is stdout+stderr, a sequencer dying mid-transfer can carry both the
         // "transaction not found in preconfigured amount of blocks" line and a
         // transport token. This tx reached the sequencer but did not settle, so
         // it must be reported as pending (with its tx id) rather than as an
@@ -396,7 +328,7 @@ pub(crate) fn cmd_wallet_topup_inner(
                 let report = json!({
                     "status": "pending",
                     "address": resolved_to,
-                    "method": "pinata faucet claim",
+                    "method": TOPUP_METHOD,
                     "network": sequencer_addr,
                     "tx": extract_tx_identifier(&output.stdout, &output.stderr),
                     "message": message,
@@ -437,7 +369,8 @@ pub(crate) fn cmd_wallet_topup_inner(
         let report = json!({
             "status": "success",
             "address": resolved_to,
-            "method": "pinata faucet claim",
+            "method": TOPUP_METHOD,
+            "amount": DEFAULT_TOPUP_AMOUNT,
             "network": sequencer_addr,
             "tx": tx,
         });
@@ -447,7 +380,7 @@ pub(crate) fn cmd_wallet_topup_inner(
 
     println!("wallet topup complete");
     println!("  Address: {resolved_to}");
-    println!("  Method: pinata faucet claim");
+    println!("  Method: {TOPUP_METHOD} ({DEFAULT_TOPUP_AMOUNT})");
     println!("  Network: local sequencer ({sequencer_addr})");
     if let Some(tx) = tx {
         println!("  Tx: {tx}");
@@ -472,7 +405,7 @@ fn confirmation_timeout_message(
     format!(
         "wallet topup submitted, but confirmation timed out (status: pending — topup may still land)\n  \
          Address: {resolved_to}\n  \
-         Method: pinata faucet claim\n  \
+         Method: {TOPUP_METHOD}\n  \
          Network: local sequencer ({sequencer_addr}){tx_line}\n  \
          Hint: verify balance with `logos-scaffold wallet -- account list`, or retry with `logos-scaffold wallet topup`."
     )

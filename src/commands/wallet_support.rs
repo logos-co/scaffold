@@ -489,23 +489,6 @@ fn contains_on_port_boundary(haystack: &str, needle: &str) -> bool {
     false
 }
 
-pub(crate) fn is_uninitialized_account_output(text: &str) -> bool {
-    text.to_lowercase().contains("account is uninitialized")
-}
-
-pub(crate) fn is_already_initialized_failure(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    [
-        "already initialized",
-        "account must be uninitialized",
-        "account is already initialized",
-        "cannot claim an initialized account",
-        "only uninitialized accounts can be initialized",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
-}
-
 pub(crate) fn is_confirmation_timeout_failure(text: &str) -> bool {
     text.to_lowercase()
         .contains("transaction not found in preconfigured amount of blocks")
@@ -742,7 +725,7 @@ mod tests {
 
     use super::{
         extract_tx_identifier, first_public_address_in_listing, first_public_wallet_address,
-        is_already_initialized_failure, is_uninitialized_account_output, normalize_address_ref,
+        normalize_address_ref,
         read_default_wallet_address, resolve_wallet_address, set_wallet_home_env,
         wallet_state_path, write_default_wallet_address, WALLET_CONFIG_PRIMARY,
     };
@@ -1404,17 +1387,5 @@ details: [1, 2, 3]
              generic missing-result branch; got: {err_msg}"
         );
         handle.join().expect("server thread");
-    }
-
-    #[test]
-    fn detects_uninitialized_account_output() {
-        let combined = "some output\nAccount is Uninitialized\nmore output";
-        assert!(is_uninitialized_account_output(combined));
-    }
-
-    #[test]
-    fn detects_already_initialized_failure_output() {
-        let combined = "Error: Account must be uninitialized";
-        assert!(is_already_initialized_failure(combined));
     }
 }
