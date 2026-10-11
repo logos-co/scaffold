@@ -259,7 +259,7 @@ pub(crate) fn ensure_dir_exists(path: &Path, label: &str) -> DynResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RepoRef};
+    use crate::model::{Config, FrameworkConfig, LocalnetConfig, RepoRef};
     use std::sync::Mutex;
 
     // Tests in this module mutate process-wide env vars; run them under one lock.
@@ -272,18 +272,12 @@ mod tests {
                 version: "0.2.0".into(),
                 cache_root: cache_root.to_string(),
                 lez: RepoRef::default(),
-                spel: RepoRef::default(),
                 basecamp_repo: None,
                 lgpm_repo: None,
                 wallet_home_dir: ".scaffold/wallet".into(),
-                circuits: crate::model::CircuitsConfig::default(),
                 framework: FrameworkConfig {
                     kind: String::new(),
                     version: String::new(),
-                    idl: FrameworkIdlConfig {
-                        spec: String::new(),
-                        path: String::new(),
-                    },
                 },
                 build: crate::model::BuildConfig::default(),
                 localnet: LocalnetConfig::default(),

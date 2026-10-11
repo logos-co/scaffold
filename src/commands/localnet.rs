@@ -1110,7 +1110,7 @@ mod tests {
     use crate::constants::SEQUENCER_CONFIG_REL_PATH;
     use crate::error::ResetError;
     use crate::model::{
-        Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, Project, RepoRef, RunConfig,
+        Config, FrameworkConfig, LocalnetConfig, Project, RepoRef, RunConfig,
     };
     use crate::repo::git_clean;
     use std::process::Command;
@@ -1134,18 +1134,12 @@ mod tests {
                 attr_platform: std::collections::BTreeMap::new(),
                 path: lez_dir.display().to_string(),
             },
-            spel: RepoRef::default(),
             basecamp_repo: None,
             lgpm_repo: None,
             wallet_home_dir: ".scaffold/wallet".to_string(),
-            circuits: crate::model::CircuitsConfig::default(),
             framework: FrameworkConfig {
                 kind: String::new(),
                 version: String::new(),
-                idl: FrameworkIdlConfig {
-                    spec: String::new(),
-                    path: String::new(),
-                },
             },
             build: crate::model::BuildConfig::default(),
             localnet: LocalnetConfig {

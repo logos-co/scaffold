@@ -874,7 +874,7 @@ fn run_post_deploy_hook(
 mod tests {
     use super::*;
     use crate::model::{
-        Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, Project, RepoRef, RunConfig,
+        Config, FrameworkConfig, LocalnetConfig, Project, RepoRef, RunConfig,
     };
     use std::path::PathBuf;
 
@@ -1007,23 +1007,12 @@ mod tests {
                     pin: "abc123".to_string(),
                     ..Default::default()
                 },
-                spel: RepoRef {
-                    source: "spel".to_string(),
-                    path: "spel".to_string(),
-                    pin: "def456".to_string(),
-                    ..Default::default()
-                },
                 basecamp_repo: None,
                 lgpm_repo: None,
                 wallet_home_dir: ".scaffold/wallet".to_string(),
-                circuits: crate::model::CircuitsConfig::default(),
                 framework: FrameworkConfig {
                     kind: "default".to_string(),
                     version: "0.1.0".to_string(),
-                    idl: FrameworkIdlConfig {
-                        spec: "lssa-idl/0.1.0".to_string(),
-                        path: "idl".to_string(),
-                    },
                 },
                 build: crate::model::BuildConfig::default(),
                 localnet: LocalnetConfig {

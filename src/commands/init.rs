@@ -14,7 +14,7 @@ use crate::constants::{
     SCAFFOLD_TOML_SCHEMA_VERSION,
 };
 use crate::migrate::migrate_to_current;
-use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RunConfig};
+use crate::model::{Config, FrameworkConfig, LocalnetConfig, RunConfig};
 use crate::state::write_text_atomic;
 use crate::template::project::ensure_scaffold_in_gitignore;
 use crate::template::skills::apply_skills;
@@ -216,18 +216,12 @@ fn fresh_default_config() -> Config {
         version: SCAFFOLD_TOML_SCHEMA_VERSION.to_string(),
         cache_root: String::new(),
         lez: default_lez_repo(DEFAULT_LEZ.sha),
-        spel: default_spel_repo(DEFAULT_SPEL.sha),
         basecamp_repo: Some(default_basecamp_repo(DEFAULT_BASECAMP_PIN)),
         lgpm_repo: Some(default_lgpm_repo(DEFAULT_LGPM_PIN)),
         wallet_home_dir: ".scaffold/wallet".to_string(),
-        circuits: crate::model::CircuitsConfig::default(),
         framework: FrameworkConfig {
             kind: FRAMEWORK_KIND_DEFAULT.to_string(),
             version: DEFAULT_FRAMEWORK_VERSION.to_string(),
-            idl: FrameworkIdlConfig {
-                spec: DEFAULT_FRAMEWORK_IDL_SPEC.to_string(),
-                path: DEFAULT_FRAMEWORK_IDL_PATH.to_string(),
-            },
         },
         build: crate::model::BuildConfig::default(),
         localnet: LocalnetConfig::default(),

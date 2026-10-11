@@ -6,18 +6,19 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context};
 
 use crate::config::{
-    default_basecamp_repo, default_lez_repo, default_lgpm_repo, default_spel_repo, serialize_config,
+    default_basecamp_repo, default_lez_repo, default_lgpm_repo, lez_framework_unsupported_message,
+    serialize_config,
 };
 use crate::constants::{
-    DEFAULT_BASECAMP_PIN, DEFAULT_FRAMEWORK_IDL_PATH, DEFAULT_FRAMEWORK_IDL_SPEC,
-    DEFAULT_FRAMEWORK_VERSION, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL, FRAMEWORK_KIND_DEFAULT,
-    FRAMEWORK_KIND_LEZ_FRAMEWORK, LEZ_SOURCE, SCAFFOLD_TOML_SCHEMA_VERSION,
+    DEFAULT_BASECAMP_PIN, DEFAULT_FRAMEWORK_VERSION, DEFAULT_LEZ, DEFAULT_LGPM_PIN,
+    FRAMEWORK_KIND_DEFAULT, FRAMEWORK_KIND_LEZ_FRAMEWORK, LEZ_SOURCE,
+    SCAFFOLD_TOML_SCHEMA_VERSION,
 };
-use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RunConfig};
+use crate::model::{Config, FrameworkConfig, LocalnetConfig, RunConfig};
 use crate::project::bootstrap_cache_root;
 use crate::repo::{sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
 use crate::state::write_text;
-use crate::template::copy::{copy_dir_contents, patch_simple_tail_call_program_id};
+use crate::template::copy::copy_dir_contents;
 use crate::template::project::{apply_overlay, OverlayRenderContext};
 use crate::template::skills::apply_skills;
 use crate::DynResult;
@@ -42,9 +43,10 @@ pub(crate) fn cmd_new(cmd: NewCommand) -> DynResult<()> {
 /// explicit parent directory).
 pub(crate) fn create_project_in(base_dir: &Path, cmd: NewCommand) -> DynResult<PathBuf> {
     let template_variant = match cmd.template.as_str() {
-        FRAMEWORK_KIND_DEFAULT | FRAMEWORK_KIND_LEZ_FRAMEWORK => cmd.template.clone(),
+        FRAMEWORK_KIND_DEFAULT => cmd.template.clone(),
+        FRAMEWORK_KIND_LEZ_FRAMEWORK => bail!("{}", lez_framework_unsupported_message()),
         other => {
-            bail!("unsupported template `{other}`. Expected `default` or `lez-framework`.")
+            bail!("unsupported template `{other}`. Expected `default`.")
         }
     };
 
@@ -138,25 +140,19 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
         }
     };
 
-    // spel is recorded in scaffold.toml here but actually cloned + built by
-    // `setup`. Persist `path` only for vendored projects (relative,
-    // project-local). Cache-managed projects leave it empty so scaffold.toml
-    // stays portable; `resolve_repo_path` derives the on-disk location from
-    // cache_root + pin at runtime.
-    let (lez_persisted_path, spel_persisted_path) = if cmd.vendor_deps {
-        (
-            ".scaffold/repos/lez".to_string(),
-            ".scaffold/repos/spel".to_string(),
-        )
+    // Persist `path` only for vendored projects (relative, project-local).
+    // Cache-managed projects leave it empty so scaffold.toml stays portable;
+    // `resolve_repo_path` derives the on-disk location from cache_root + pin
+    // at runtime.
+    let lez_persisted_path = if cmd.vendor_deps {
+        ".scaffold/repos/lez".to_string()
     } else {
-        (String::new(), String::new())
+        String::new()
     };
 
     let mut lez = default_lez_repo(DEFAULT_LEZ.sha);
     lez.source = lez_source;
     lez.path = lez_persisted_path;
-    let mut spel = default_spel_repo(DEFAULT_SPEL.sha);
-    spel.path = spel_persisted_path;
 
     let persisted_cache_root = match &cmd.cache_root {
         Some(p) => p.display().to_string(),
@@ -167,22 +163,12 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
         version: SCAFFOLD_TOML_SCHEMA_VERSION.to_string(),
         cache_root: persisted_cache_root,
         lez,
-        spel,
-        // Default scaffolded projects don't pin basecamp/lgpm — only
-        // projects building Logos modules need them. `lgs basecamp setup`
-        // is the entry point that backfills those sections, mirroring how
-        // `lgs init` backfills `[repos.spel]` for pre-spel projects.
         basecamp_repo: Some(default_basecamp_repo(DEFAULT_BASECAMP_PIN)),
         lgpm_repo: Some(default_lgpm_repo(DEFAULT_LGPM_PIN)),
         wallet_home_dir: ".scaffold/wallet".to_string(),
-        circuits: crate::model::CircuitsConfig::default(),
         framework: FrameworkConfig {
             kind: template_variant.to_string(),
             version: DEFAULT_FRAMEWORK_VERSION.to_string(),
-            idl: FrameworkIdlConfig {
-                spec: DEFAULT_FRAMEWORK_IDL_SPEC.to_string(),
-                path: DEFAULT_FRAMEWORK_IDL_PATH.to_string(),
-            },
         },
         build: crate::model::BuildConfig::default(),
         localnet: LocalnetConfig::default(),
@@ -197,19 +183,12 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
     }
 
     copy_dir_contents(&template_root, target).context("failed to copy scaffold template")?;
-    if template_variant == FRAMEWORK_KIND_DEFAULT {
-        patch_simple_tail_call_program_id(target)?;
-    }
+    seed_lockfile(&lez_repo_path, target)?;
     let overlay_ctx = OverlayRenderContext {
         crate_name: &crate_name,
         lez_pin: &cfg.lez.pin,
-        lez_tag: DEFAULT_LEZ.tag,
-        spel_pin: &cfg.spel.pin,
     };
     apply_overlay(target, template_variant, &overlay_ctx)?;
-    if template_variant == FRAMEWORK_KIND_LEZ_FRAMEWORK {
-        cleanup_lez_hello_artifacts(target)?;
-    }
     write_text(&target.join("scaffold.toml"), &serialize_config(&cfg)?)?;
     apply_skills(&target)?;
 
@@ -230,31 +209,18 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
     Ok(())
 }
 
-fn cleanup_lez_hello_artifacts(project_root: &Path) -> DynResult<()> {
-    const RUNNER_FILES: &[&str] = &[
-        "src/bin/run_hello_world.rs",
-        "src/bin/run_hello_world_private.rs",
-        "src/bin/run_hello_world_with_authorization.rs",
-        "src/bin/run_hello_world_with_move_function.rs",
-        "src/bin/run_hello_world_through_tail_call.rs",
-        "src/bin/run_hello_world_through_tail_call_private.rs",
-        "src/bin/run_hello_world_with_authorization_through_tail_call_with_pda.rs",
-    ];
-    const GUEST_METHOD_FILES: &[&str] = &[
-        "methods/guest/src/bin/hello_world.rs",
-        "methods/guest/src/bin/hello_world_with_authorization.rs",
-        "methods/guest/src/bin/hello_world_with_move_function.rs",
-        "methods/guest/src/bin/simple_tail_call.rs",
-        "methods/guest/src/bin/tail_call_with_pda.rs",
-    ];
-
-    for rel_path in RUNNER_FILES.iter().chain(GUEST_METHOD_FILES) {
-        let path = project_root.join(rel_path);
-        if path.exists() {
-            fs::remove_file(path)?;
-        }
+/// Start the project from the dependency versions the pinned LEZ release
+/// was tested with. The example crates are path dependencies inside LEZ and
+/// git dependencies here, so cargo re-resolves those entries, but every
+/// crates.io package keeps its locked version instead of floating to the
+/// newest semver-compatible one (a fresh resolve has pulled in crates whose
+/// MSRV the risc0 guest toolchain does not meet).
+fn seed_lockfile(lez_repo_path: &Path, target: &Path) -> DynResult<()> {
+    let lock = lez_repo_path.join("Cargo.lock");
+    if lock.is_file() {
+        fs::copy(&lock, target.join("Cargo.lock"))
+            .with_context(|| format!("failed to copy {}", lock.display()))?;
     }
-
     Ok(())
 }
 

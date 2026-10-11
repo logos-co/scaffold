@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 license = { workspace = true }
 
+# The runners under src/bin come verbatim from LEZ's
+# examples/program_deployment and import this library by its upstream name.
+[lib]
+name = "program_deployment"
+path = "src/lib.rs"
+
 [workspace.package]
 license = "MIT or Apache-2.0"
 
@@ -19,30 +25,32 @@ members = [
 unsafe_code = "warn"
 
 [workspace.dependencies]
-nssa = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "{{lez_pin}}" }
-nssa_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "{{lez_pin}}" }
+lee = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "{{lez_pin}}" }
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "{{lez_pin}}" }
+program_loader_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "{{lez_pin}}" }
 wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "{{lez_pin}}" }
 common = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "{{lez_pin}}" }
-sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "{{lez_pin}}", default-features = false, features = ["client"] }
+sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "{{lez_pin}}" }
 
 anyhow = "1.0.98"
-risc0-zkvm = { version = "3.0.5", features = ["std"] }
+borsh = "1.5.7"
+risc0-zkvm = { version = "3.0.5", default-features = false, features = ["std"] }
 risc0-build = "3.0.5"
-
-hex = "0.4.3"
-bytemuck = "1.24.0"
-tokio = { version = "1.28.2", features = ["macros", "net", "rt-multi-thread", "sync", "fs"] }
+tokio = { version = "1.50", features = ["macros", "net", "rt-multi-thread", "sync", "fs"] }
 clap = { version = "4.5.42", features = ["derive", "env"] }
 
 [dependencies]
-nssa.workspace = true
-nssa_core.workspace = true
-wallet.workspace = true
-common.workspace = true
-sequencer_service_rpc.workspace = true
-example_program_deployment_methods = { path = "methods" }
-
 anyhow.workspace = true
-clap.workspace = true
-hex.workspace = true
+common.workspace = true
+lee.workspace = true
+lee_core.workspace = true
+program_loader_core.workspace = true
+sequencer_service_rpc = { workspace = true, features = ["client"] }
+wallet.workspace = true
+
 tokio = { workspace = true, features = ["macros"] }
+clap.workspace = true
+
+# Same patch LEZ's own workspace applies; a git dependency does not inherit it.
+[patch.crates-io]
+keccak = { git = "https://github.com/logos-blockchain/sponges", rev = "3a56e99771beedf04946eab21a4a62adc2951377" }

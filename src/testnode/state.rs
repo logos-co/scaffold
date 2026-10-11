@@ -560,7 +560,7 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RepoRef, RunConfig,
+        Config, FrameworkConfig, LocalnetConfig, RepoRef, RunConfig,
     };
 
     const ACCOUNT_ID: &str = "6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV";
@@ -572,18 +572,12 @@ mod tests {
                 version: "0.2.0".into(),
                 cache_root: ".scaffold/cache".into(),
                 lez: RepoRef::default(),
-                spel: RepoRef::default(),
                 basecamp_repo: None,
                 lgpm_repo: None,
                 wallet_home_dir: ".scaffold/wallet".into(),
-                circuits: crate::model::CircuitsConfig::default(),
                 framework: FrameworkConfig {
                     kind: "default".into(),
                     version: "0.1.0".into(),
-                    idl: FrameworkIdlConfig {
-                        spec: String::new(),
-                        path: String::new(),
-                    },
                 },
                 build: crate::model::BuildConfig::default(),
                 localnet: LocalnetConfig::default(),

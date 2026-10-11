@@ -367,7 +367,7 @@ mod tests {
 
     fn make_test_project(root: std::path::PathBuf) -> Project {
         use crate::model::{
-            Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RepoRef, RunConfig,
+            Config, FrameworkConfig, LocalnetConfig, RepoRef, RunConfig,
         };
         Project {
             root,
@@ -375,18 +375,12 @@ mod tests {
                 version: "0.2.0".to_string(),
                 cache_root: ".scaffold/cache".to_string(),
                 lez: RepoRef::default(),
-                spel: RepoRef::default(),
                 basecamp_repo: None,
                 lgpm_repo: None,
                 wallet_home_dir: ".scaffold/wallet".to_string(),
-                circuits: crate::model::CircuitsConfig::default(),
                 framework: FrameworkConfig {
                     kind: "default".to_string(),
                     version: "0.1.0".to_string(),
-                    idl: FrameworkIdlConfig {
-                        spec: "lssa-idl/0.1.0".to_string(),
-                        path: "idl".to_string(),
-                    },
                 },
                 build: crate::model::BuildConfig::default(),
                 localnet: LocalnetConfig {
