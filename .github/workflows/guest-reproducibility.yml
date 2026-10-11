@@ -22,7 +22,7 @@ on:
       # that changes what gets resolved has to be gated in — not just the
       # build strategy. `templates/**` and `src/template/**` change the
       # manifests; `src/constants.rs` carries the pinned builder tag and the
-      # LEZ/spel pins the guest depends on.
+      # LEZ pin the guest depends on.
       - "src/commands/build.rs"
       - "src/constants.rs"
       - "templates/**"
@@ -54,15 +54,15 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      # Same bootstrap cache shape as template-e2e: the cloned lez/spel repos
-      # with their target/ dirs, plus the extracted circuits release. Keyed on
-      # constants.rs so a pin bump rebuilds from scratch.
-      - name: Cache scaffold bootstrap (repos + circuits)
+      # Same bootstrap cache shape as template-e2e: the cloned LEZ repo with
+      # its target/ dir, plus the circuits release its build downloads. Keyed
+      # on constants.rs so a pin bump rebuilds from scratch.
+      - name: Cache scaffold bootstrap (LEZ checkout + circuits)
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/logos-scaffold
-            ~/.logos-blockchain-circuits
+            ~/.cache/logos
           key: scaffold-bootstrap-${{ runner.os }}-${{ hashFiles('src/constants.rs') }}
 
       # The guest-builder image is ~1.7 GB and the LEZ build is several more.
@@ -78,24 +78,14 @@ jobs:
                       /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-/nonexistent}" || true
           echo "after:  $(df -h / | awk 'NR==2 {print $4}') free"
 
+      # LEZ 0.3's wallet links the PC/SC library (keycard support), and the
+      # sequencer build needs clang for bindgen; both are what LEZ's own CI
+      # image installs.
+      - name: Install LEZ build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpcsclite-dev clang libclang-dev libssl-dev pkg-config
+
       - name: Build scaffold CLI
         run: cargo build --release --bin logos-scaffold
-
-      - name: Fetch logos-blockchain-circuits release
-        run: |
-          set -euo pipefail
-          ver="$(sed -n 's/.*DEFAULT_CIRCUITS_VERSION: &str = "\([^"]*\)".*/\1/p' src/constants.rs)"
-          if [ -z "$ver" ]; then echo "could not parse DEFAULT_CIRCUITS_VERSION"; exit 1; fi
-          dest="$HOME/.logos-blockchain-circuits"
-          if [ -f "$dest/pol/verification_key.json" ]; then
-            echo "circuits already cached at $dest"
-          else
-            url="https://github.com/logos-blockchain/logos-blockchain-circuits/releases/download/v${ver}/logos-blockchain-circuits-v${ver}-linux-x86_64.tar.gz"
-            mkdir -p "$dest"
-            curl -fL --retry 3 -o /tmp/circuits.tar.gz "$url"
-            tar -xzf /tmp/circuits.tar.gz -C "$dest" --strip-components=1
-          fi
-          echo "LOGOS_BLOCKCHAIN_CIRCUITS=$dest" >> "$GITHUB_ENV"
 
       # Three separate rzup components, all required:
       #   rust/cpp — `lgs build` compiles the project workspace before the

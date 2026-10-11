@@ -68,8 +68,14 @@ Full surface: [docs/commands.md](docs/commands.md).
 
 Every command needs these:
 
-- `git`, `rustc`, `cargo` (Rust 1.81 or newer)
+- `git`, `rustc`, `cargo` (Rust 1.81 or newer for scaffold itself; the LEZ
+  build installs its own pinned toolchain, 1.98.1, through rustup)
 - Unix process helpers: `lsof`, `ps`, `kill`
+- The LEZ build's system libraries: `clang`/`libclang`, OpenSSL headers,
+  `pkg-config`, and the PC/SC library the LEZ 0.3 wallet links for keycard
+  support (`apt install clang libclang-dev libssl-dev pkg-config
+  libpcsclite-dev` on Debian/Ubuntu; `brew install pkg-config openssl` on
+  macOS)
 
 Some workflows need more:
 
