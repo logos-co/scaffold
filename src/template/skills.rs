@@ -199,13 +199,12 @@ mod tests {
     }
 
     #[test]
-    fn ships_the_expected_four_skills() {
+    fn ships_the_expected_three_skills() {
         let names = shipped_skill_names();
         assert_eq!(
             names,
             vec![
                 "basecamp".to_string(),
-                "lez-framework-template".to_string(),
                 "lez-template".to_string(),
                 "lgs-cli".to_string(),
             ],

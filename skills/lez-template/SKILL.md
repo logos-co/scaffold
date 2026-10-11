@@ -1,210 +1,130 @@
 ---
 name: lez-template
-description: Use when working inside a project scaffolded with the bare LEZ template (`lgs new` default — raw Rust + risc0 guest programs, no framework macros). Identify by scaffold.toml without `framework = "lez-framework"`, presence of `methods/guest/src/bin/*.rs`, and absence of `idl/` + `crates/lez-client-gen/`.
+description: Use when working inside a project scaffolded with `lgs new` (the default LEZ 0.3 template — LEZ's examples/program_deployment: raw Rust risc0 guest programs plus host runners). Identify by scaffold.toml with `[framework] kind = "default"`, `methods/guest/src/bin/*.rs`, and runners under `src/bin/run_*.rs` that call `program_deployment::deploy_program`.
 ---
 
-# Bare LEZ Template (`lgs new` Default)
+# Default LEZ 0.3 Template (`lgs new`)
 
-This skill activates when the agent is working *inside* a project scaffolded with `lgs new <name>` (or `lgs new <name> --template default`). It is the bare LEZ standalone template: a raw Rust workspace plus a risc0 guest crate, no macros. For driving the `lgs` CLI itself, use the `lgs-cli` skill.
+This skill activates when the agent is working *inside* a project scaffolded with `lgs new <name>`. The project is LEZ v0.3's own `examples/program_deployment`, copied from the pinned release, with a scaffold workspace `Cargo.toml` on top. For driving the `lgs` CLI itself, use the `lgs-cli` skill.
+
+Scaffold supports the **LEZ 0.3** release line only. Anything you remember about LEZ 0.1/0.2 (`nssa`/`nssa_core` crates, `wallet deploy-program`, the Piñata faucet, `program_owner` accounts, image-ID program ids) is wrong here.
 
 ## When to Use
 
 Identify a default-template project by **all** of:
 
-- `scaffold.toml` exists at the project root and **does not** contain `framework = "lez-framework"`.
-- `methods/guest/src/bin/*.rs` exists — one file per risc0 guest program.
-- The project does **not** have `crates/lez-client-gen/` or `idl/` directories (those are lez-framework-specific).
-- `src/lib.rs` defines a `runner_support` module with `parse_account_id` / `load_program` helpers (see `templates/default/src/lib.rs`).
-
-If the project has `crates/lez-client-gen/` and `idl/`, switch to `lez-framework-template` instead.
+- `scaffold.toml` at the project root with `[scaffold] version = "0.3.0"` and `[framework] kind = "default"`.
+- `methods/guest/src/bin/*.rs` — one file per risc0 guest program.
+- `src/lib.rs` exporting `deploy_program` (crate name `program_deployment`), used by every `src/bin/run_*.rs`.
 
 ## What This Template Produces
 
-File-tree highlights from `templates/default/` (paths relative to the project root):
-
 ```
 <project>/
-├── Cargo.toml                 # workspace; usually excludes methods/ from members
-├── rust-toolchain.toml
-├── .env.local                 # local env defaults
-├── scaffold.toml              # written by `lgs new` / `lgs init`
-├── .scaffold/                 # state, logs, wallet/, repos/, reports/
-│   └── commands.md            # canned reference (verbatim below)
+├── Cargo.toml          # workspace (., methods, methods/guest); lee/lee_core/wallet/common/
+│                       # sequencer_service_rpc/program_loader_core git deps at the LEZ pin;
+│                       # [lib] name = "program_deployment"; keccak [patch] copied from LEZ
+├── Cargo.lock          # seeded from the pinned LEZ release's lockfile — commit it
+├── rust-toolchain.toml # 1.98.1 (LEZ 0.3's toolchain)
+├── .env.local          # RUST_LOG=info, RISC0_DEV_MODE=1
+├── scaffold.toml
+├── .scaffold/          # state/, logs/, wallet/, localnet/ (chain), commands.md
 ├── src/
-│   ├── lib.rs                 # `runner_support` helpers
-│   └── bin/                   # example runners (host-side clients)
-│       ├── run_hello_world.rs
-│       ├── run_hello_world_private.rs
-│       ├── run_hello_world_with_authorization.rs
-│       ├── run_hello_world_with_move_function.rs
-│       ├── run_hello_world_through_tail_call.rs
-│       ├── run_hello_world_through_tail_call_private.rs
-│       └── run_hello_world_with_authorization_through_tail_call_with_pda.rs
-└── methods/                   # risc0 guest crate (excluded from main workspace)
-    └── guest/
-        └── src/bin/<program>.rs
+│   ├── lib.rs          # deploy_program(): program-loader deployment helper
+│   └── bin/run_*.rs    # LEZ's example runners (deploy + call)
+└── methods/
+    ├── build.rs        # risc0_build::embed_methods()
+    └── guest/src/bin/  # hello_world, hello_world_with_authorization,
+                        # hello_world_with_move_function, simple_tail_call, tail_call_with_pda
 ```
 
-The parent `Cargo.toml` typically excludes `methods/` from workspace members so the guest crate can build with its own toolchain. `lgs build` knows about this and auto-compiles `methods/Cargo.toml` when present.
+## The LEZ 0.3 Program Model
 
-## Risc0 Guest Discovery Convention
+Guest programs use `lee_core::program`:
 
-`lgs deploy` (and the deploy auto-discovery code path) walks `methods/guest/src/bin/*.rs` to enumerate programs. The basename of each `.rs` file is the program name. For each, the corresponding compiled binary lives at:
+```rust
+use lee_core::{account::ShardData, program::{Plan, PlanInput, run_program}};
 
+fn main() { run_program(plan, apply) }
+
+fn plan(input: &PlanInput, instruction: Vec<u8>) -> Plan {
+    let mut plan = Plan::new(input);
+    let [account] = input.accounts.as_slice() else { panic!("one account") };
+    plan.effect(account, &instruction);   // propose an effect on this program's shard
+    plan
+}
+
+fn apply(greeting: Vec<u8>, pre_data: &ShardData) -> Option<Vec<u8>> {
+    let mut bytes = pre_data.clone().into_inner();
+    bytes.extend(greeting);
+    Some(bytes)                            // None keeps the shard unchanged
+}
 ```
-target/riscv-guest/example_program_deployment_methods/example_program_deployment_programs/riscv32im-risc0-zkvm-elf/release/<program>.bin
-```
 
-The `EXAMPLE_PROGRAMS_BUILD_DIR` env var conventionally captures this absolute path so example runners can pass `--program-path "$EXAMPLE_PROGRAMS_BUILD_DIR/<program>.bin"` for non-default builds.
+- Accounts have a nonce and **shards**: one byte blob per program, keyed by the program's account id. A program writes only its own shard; the native balance is the shard of the native token program (`111…1`).
+- Programs are addressed by **program account id** (the `program_loader` header account), not by risc0 image id. Tail calls name the callee's account id at run time (`ChainedCall::new(callee_account_id, selectors, &data)`), so `simple_tail_call` takes its callee as instruction data.
+- Public transactions pay **fees**: the payer must hold the fee reserve (about 16,003,000 at the default gas limit) plus anything it sends. `lgs wallet topup` funds the default account with 1,000,000,000.
 
-**One file = one program.** Adding a new program is `methods/guest/src/bin/<name>.rs` + a host-side runner in `src/bin/run_<name>.rs`.
-
-## Build Pipeline
+## Build
 
 ```bash
-lgs build              # runs `setup` first, then cargo build --workspace
-                       # auto-compiles methods/Cargo.toml if present
-lgs build my-project   # explicit project path
-lgs build --guest local    # host-toolchain guest ELFs (no Docker, not reproducible)
+lgs build                  # runs setup, cargo build --workspace, then the guest build
+lgs build --guest local    # host risc0 toolchain (rzup install rust); no Docker
 ```
 
-Key behavior (FURPS Functionality #5): `build` auto-compiles `methods/Cargo.toml` even when the parent workspace excludes the guest crate. No manual `cargo build --manifest-path methods/Cargo.toml` needed.
+Guest binaries:
 
-Success criteria (`--guest local`; the default docker mode writes `target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/<program>.bin` instead): `target/riscv-guest/<methods-crate>/<guest-crate>/riscv32im-risc0-zkvm-elf/release/<program>.bin` artefacts exist for every guest in `methods/guest/src/bin/`. `methods/target/...` remains supported for sub-crate workspace layouts, but it is not the default template output.
+- default (docker): `target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/<program>.bin`
+- `--guest local`: `target/riscv-guest/example_program_deployment_methods/example_program_deployment_programs/riscv32im-risc0-zkvm-elf/release/<program>.bin`
 
-### Reproducible `program_id` (FURPS Functionality #10)
+Each `lgs build` clears the other mode's tree, so the last build is what `lgs deploy` ships. The docker build is reproducible (same bytes, same image id on every machine); `deploy --json` reports `elf_sha256`.
 
-The default guest build runs in the pinned risc0 container, so the ELF — and the `program_id` derived from it — is the same on every machine. It needs Docker and `rzup install cargo-risczero`; `lgs doctor` and `lgs build` say so up front when either is missing.
-
-To use the host risc0 toolchain instead (no Docker, but the `program_id` can differ across machines, OS versions, and Rust/clang versions), opt out:
-
-```toml
-# scaffold.toml
-[build]
-guest = "local"                   # default is "docker"
-risc0_docker_tag = "r0.1.97.0"    # optional; docker mode only; scaffold's pin is the default
-```
-
-Deterministic output lands in `target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/<program>.bin` and `lgs deploy` prefers it over `release/` artefacts. Each `lgs build` clears the other mode's tree, so the last build is always what deploy ships. `lgs doctor`'s `guest build` row reports the active strategy. Changing `risc0_docker_tag` changes every `program_id`.
-
-## Deploy Pipeline
+## Deploy
 
 ```bash
-lgs deploy                              # auto-discover all guest programs
-lgs deploy hello_world                  # deploy a single program by name
-lgs deploy --program-path "<path>"      # explicit path; works without methods/
-lgs deploy --program-path "<path>" --json
+lgs wallet topup                         # the default account pays deployment fees
+lgs deploy                               # every program in methods/guest/src/bin
+lgs deploy hello_world --json
+lgs deploy --program-path <path.bin> --json
 ```
 
-`lgs deploy` prints `program_id: <hex>` (the risc0 image ID, computed locally from the submitted ELF) on every successful submission.
+For each program scaffold creates a fresh header account plus one segment account per 96 KiB of the user ELF and runs `wallet program-loader deploy --elf … --header … --segments … --payer <default>`. The wallet waits for every transaction, so `"status": "deployed"` is confirmed. The header id is the `program_id`; it is recorded in `.scaffold/state/deployments.json`. Every deploy creates a new header — re-deploying changes the id.
 
-JSON output shapes (FURPS Functionality #9):
-
-- `--program-path … --json` — bare object: `{"status":"submitted","program":...,"tx"?:...,"program_id"?:...}`. Absent values are omitted, not `null`.
-- Auto-discovery `--json` (`lgs deploy` / `lgs deploy <name>`) — `{"deploys":[<entry>,...]}`, one entry per attempted program, each entry the same shape as above with `error` in place of `program_id` when that program failed. Exit code is non-zero if any entry failed; the object is still emitted.
-
-Failure modes:
-
-- Unknown program name → lists discovered programs.
-- Missing binary → points back at `lgs build`.
-- Localnet unreachable → sequencer-unavailable hint, not a vague wallet error.
+JSON: `--program-path … --json` prints one object (`status`, `program`, `program_id`, `tx`, `elf_sha256`); discovery prints `{"deploys":[…]}` with `error` instead of `program_id` for failures. Absent values are omitted. `Incorrect fee` means the payer is unfunded — run `lgs wallet topup`.
 
 ## Example Runners
 
-The template ships seven host-side runners under `src/bin/`. Each uses `runner_support::parse_account_id` and `runner_support::load_program` from `src/lib.rs`. They expect the wallet home to be exported when invoked directly via `cargo run` (scaffold `wallet --` passthrough sets it automatically; direct `cargo run` does not). Export both names: LEZ reads `NSSA_WALLET_HOME_DIR` up to v0.1.2 and `LEE_WALLET_HOME_DIR` from v0.2.0. Exporting only one is not symmetric — a v0.2.0 wallet that sees only `NSSA_WALLET_HOME_DIR` ignores it and silently falls back to `~/.lee/wallet`, while a pre-v0.2.0 wallet that sees only `LEE_WALLET_HOME_DIR` has no wallet home set at all and fails at `WalletCore::from_env()`.
+The runners are LEZ's own and **deploy their own copy** of the program before calling it. Arguments are the guest `.bin` path(s), plain base58 account ids (no `Public/`), and a funded payer:
 
 ```bash
-export NSSA_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet" LEE_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet"
+export LEE_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet"     # the only variable the 0.3 wallet reads
+export BIN_DIR="$(pwd)/target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker"
+export PAYER=$(sed -n 's/^default_address=Public\///p' .scaffold/state/wallet.state)
+lgs wallet -- account new public                         # → Public/<id>; use <id>
 
-cargo run --bin run_hello_world -- <public_account_id>
-cargo run --bin run_hello_world_private -- <private_account_id>
-lgs wallet -- account sync-private    # after private-account writes
-
-cargo run --bin run_hello_world_with_authorization -- <public_account_id>
-
-cargo run --bin run_hello_world_with_move_function -- write-public  <public_account_id> "<text>"
-cargo run --bin run_hello_world_with_move_function -- write-private <private_account_id> "<text>"
-cargo run --bin run_hello_world_with_move_function -- move-data-public-to-private <public> <private>
-
-cargo run --bin run_hello_world_through_tail_call -- <public_account_id>
-cargo run --bin run_hello_world_through_tail_call_private -- <private_account_id>
-
-cargo run --bin run_hello_world_with_authorization_through_tail_call_with_pda
+cargo run --bin run_hello_world -- "$BIN_DIR/hello_world.bin" <id> "$PAYER"
+cargo run --bin run_hello_world_with_authorization -- "$BIN_DIR/hello_world_with_authorization.bin" <id> "$PAYER"
+cargo run --bin run_hello_world_through_tail_call -- "$BIN_DIR/simple_tail_call.bin" "$BIN_DIR/hello_world.bin" <id> "$PAYER"
+cargo run --bin run_hello_world_with_move_function -- "$BIN_DIR/hello_world_with_move_function.bin" "$PAYER" write-public <id> Hola
+cargo run --bin run_hello_world_with_authorization_through_tail_call_with_pda -- "$BIN_DIR/tail_call_with_pda.bin" "$BIN_DIR/hello_world_with_authorization.bin" "$PAYER"
+lgs wallet -- account get --account-id Public/<id>      # shows the program's shard
 ```
 
-Each runner prints, on success:
-
-```
-submitted transaction: status=<...> tx_hash=<...>
-verification hint: lgs wallet -- account get --account-id <id>
-```
-
-Optional path overrides for custom builds:
-
-```bash
-export EXAMPLE_PROGRAMS_BUILD_DIR="$(pwd)/target/riscv-guest/example_program_deployment_methods/example_program_deployment_programs/riscv32im-risc0-zkvm-elf/release"
-
-cargo run --bin run_hello_world -- \
-  --program-path "$EXAMPLE_PROGRAMS_BUILD_DIR/hello_world.bin" \
-  <public_account_id>
-
-cargo run --bin run_hello_world_through_tail_call_private -- \
-  --simple-tail-call-path "$EXAMPLE_PROGRAMS_BUILD_DIR/simple_tail_call.bin" \
-  --hello-world-path     "$EXAMPLE_PROGRAMS_BUILD_DIR/hello_world.bin" \
-  <private_account_id>
-```
+The `_private` runners prove locally; keep `RISC0_DEV_MODE=1` unless you have a machine that can run the real prover.
 
 ## Iteration Loop
 
-1. Edit guest at `methods/guest/src/bin/<program>.rs`.
-2. `lgs build` (auto-compiles guest crate).
-3. `lgs deploy [program]` to push the new ELF; capture the printed `program_id`.
-4. Edit (or add) the host runner at `src/bin/run_<program>.rs`.
-5. `cargo run --bin run_<program> -- <args>` to invoke against the running localnet.
-6. `lgs wallet -- account get --account-id <id>` to verify state mutation.
-
-If you hit the wallet `from_env()` panic on direct `cargo run`, the name your LEZ pin reads is unset — you forgot `export NSSA_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet" LEE_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet"`, or you exported only `LEE_WALLET_HOME_DIR` on a pre-v0.2.0 pin. The quiet variant of the same mistake is the other direction: on a v0.2.0 pin, exporting only `NSSA_WALLET_HOME_DIR` produces no error at all — the wallet falls back to `~/.lee/wallet` and the runner starts against an unexpectedly empty wallet.
-
-## Account Creation
-
-```bash
-lgs wallet -- account new public      # → "Public/<base58>"
-lgs wallet -- account new private     # → "Private/<base58>"
-lgs wallet -- account list
-lgs wallet -- account get --account-id <id>
-lgs wallet -- account sync-private    # after private-account writes
-```
-
-Runners take the **base58 portion** of the account ID as the positional arg, not the `Public/` or `Private/` prefix. `runner_support::parse_account_id` strips the prefix automatically, so passing the full `Public/<base58>` form also works.
-
-## `.scaffold/commands.md` Quick Reference
-
-Verbatim from `templates/default/.scaffold/commands.md` (shipped into every default-template project):
-
-```markdown
-# Command References
-
-- standalone sequencer: `RUST_LOG=info target/release/sequencer_service sequencer/service/configs/debug/sequencer_config.json`
-- lez standalone docs: `https://github.com/logos-blockchain/logos-execution-zone/tree/main?tab=readme-ov-file#standalone-mode`
-- wallet commands: `logos-scaffold wallet -- <args>`
-- localnet json status: `logos-scaffold localnet status --json`
-- doctor json status: `logos-scaffold doctor --json`
-- diagnostics bundle for issue reports: `logos-scaffold report --tail 500`
-```
-
-## When to Switch Templates
-
-If you find yourself writing repetitive instruction-dispatch + account-derivation boilerplate by hand, consider the LEZ Framework template (`lgs new <name> --template lez-framework`), which adds Anchor-style `#[lez_program]` / `#[instruction]` / `#[account(…)]` macros and auto-generates IDL JSON. See the `lez-framework-template` skill.
-
-Drop down to this `default` template when you need primitives the framework hasn't surfaced or when guest-binary size is critical.
+1. Edit `methods/guest/src/bin/<program>.rs`.
+2. `lgs build`.
+3. `lgs deploy <program>` and take `program_id` from the output or `deployments.json` — or let a runner deploy its own copy.
+4. Send transactions (runner, or your own client using `lee::public_transaction::Message::try_new(program_account_id, selectors, nonces, instruction)` with a fee declaration via the wallet).
+5. `lgs wallet -- account get --account-id Public/<id>` to verify.
 
 ## Key Rules
 
 - **One guest program per `methods/guest/src/bin/<name>.rs`.** The basename is the program name `lgs deploy` recognises.
-- **One host runner per program, named `src/bin/run_<name>.rs`.** Reuse `runner_support::parse_account_id` and `runner_support::load_program`.
-- **The wallet home must be exported for direct `cargo run`.** Use `export NSSA_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet" LEE_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet"` once per shell — both names, since v0.2.0 renamed the variable. Setting only `NSSA_WALLET_HOME_DIR` leaves a v0.2.0 wallet silently pointed at `~/.lee/wallet`; setting only `LEE_WALLET_HOME_DIR` leaves a pre-v0.2.0 wallet with no wallet home at all, which fails at `WalletCore::from_env()`.
-- **Account IDs are passed as CLI args**, never hardcoded. Use `lgs wallet -- account new {public,private}` to create fresh ones.
-- **Don't add Qt / UI / QML deps.** This template is for zk programs; UI work belongs in a separate Logos module project (different repo, different toolchain).
-- **Parent `Cargo.toml` should keep `methods/` excluded** from workspace members; `lgs build` handles its compilation separately.
-- **Don't hand-edit `target/` or `.scaffold/`**. Treat them as generated output.
-- **Read the `--json` shape off the deploy path you took.** `--program-path` gives a bare object; discovery gives `{"deploys":[…]}`. Both are structured — do not deploy one program at a time just to get JSON.
+- **Export `LEE_WALLET_HOME_DIR`** before `cargo run` of a runner; without it the wallet silently uses `~/.lee/wallet`.
+- **Fund before you deploy or call.** Fees are mandatory for public transactions.
+- **Program ids are header accounts.** Never derive one from the ELF; read it from deploy output or `.scaffold/state/deployments.json`.
+- **Keep `max_block_size` at or below 1,835,008 bytes** if you edit sequencer configs; LEZ 0.3 refuses to start above Bedrock's inscription limit.
+- **Don't hand-edit `target/` or `.scaffold/`.** `lgs localnet reset --yes` wipes the chain (`.scaffold/localnet`) and the recorded program ids.
