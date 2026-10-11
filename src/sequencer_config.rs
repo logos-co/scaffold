@@ -12,23 +12,19 @@ use crate::lez_layout::lez_file;
 use crate::DynResult;
 
 pub(crate) const RUNTIME_SEQUENCER_CONFIG_FILE: &str = "sequencer_config.json";
-pub(crate) const WIDENED_MAX_BLOCK_SIZE: &str = "8 MiB";
 
-/// Overrides every scaffold-started sequencer (localnet and test-node)
-/// applies to LEZ's debug config:
+/// Override every scaffold-started sequencer (localnet and test-node)
+/// applies to LEZ's debug config: the dev funder ([`DEV_FUNDER_ACCOUNT_ID`])
+/// is guaranteed a genesis `supply_account`. LEZ's debug config already funds
+/// it today; enforcing it here keeps `wallet topup` working if upstream
+/// reshuffles its debug accounts.
 ///
-/// - `max_block_size` widened so a whole `deploy` batch fits in one block.
-///   The upstream debug value (1 MiB) is smaller than the default template's
-///   five guest programs together.
-/// - The dev funder ([`DEV_FUNDER_ACCOUNT_ID`]) is guaranteed a genesis
-///   `supply_account`. LEZ's debug config already funds it today; enforcing it
-///   here keeps `wallet topup` working if upstream reshuffles its debug
-///   accounts.
+/// `max_block_size` is deliberately left at the upstream value: LEZ 0.3
+/// refuses to start above Bedrock's inscription limit (1,835,008 bytes), and
+/// `program_loader` deployments upload one 96 KiB segment per transaction, so
+/// the old "fit every guest ELF in one block" widening is neither possible
+/// nor needed.
 pub(crate) fn apply_common_runtime_overrides(obj: &mut Map<String, Value>) {
-    obj.insert(
-        "max_block_size".to_string(),
-        Value::String(WIDENED_MAX_BLOCK_SIZE.to_string()),
-    );
     ensure_genesis_supply(obj, DEV_FUNDER_ACCOUNT_ID, DEV_FUNDER_GENESIS_BALANCE);
 }
 
@@ -210,7 +206,7 @@ mod tests {
     }
 
     #[test]
-    fn common_overrides_widen_blocks_and_fund_the_dev_funder_once() {
+    fn common_overrides_fund_the_dev_funder_once_and_keep_block_size() {
         let mut obj: Map<String, Value> = serde_json::from_str(
             r#"{"max_block_size": "1 MiB", "genesis": [
                 {"supply_account": {"account_id": "other", "balance": 5}}
@@ -219,7 +215,7 @@ mod tests {
         .expect("json");
         apply_common_runtime_overrides(&mut obj);
         apply_common_runtime_overrides(&mut obj);
-        assert_eq!(obj["max_block_size"], WIDENED_MAX_BLOCK_SIZE);
+        assert_eq!(obj["max_block_size"], "1 MiB");
         let genesis = obj["genesis"].as_array().expect("genesis");
         assert_eq!(genesis.len(), 2, "{genesis:?}");
         assert_eq!(

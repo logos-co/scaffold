@@ -926,7 +926,10 @@ mod tests {
         let doc: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
         assert_eq!(doc["home"], serde_json::json!(work.display().to_string()));
-        assert_eq!(doc["max_block_size"], serde_json::json!("8 MiB"));
+        assert!(
+            doc.get("max_block_size").is_none(),
+            "block size is left upstream"
+        );
         assert_eq!(doc["block_create_timeout"], serde_json::json!("2s"));
         assert_eq!(doc["retry_pending_blocks_timeout"], serde_json::json!("3s"));
 
@@ -1132,7 +1135,10 @@ mod tests {
             serde_json::json!({
                 "format": "lgs-state-snapshot/1",
                 "public_accounts": [],
-                "private_accounts": [{ "npk": vec![1_u8; 32], "account": {} }],
+                "private_accounts": [{
+                    "npk": vec![1_u8; 32],
+                    "account": { "program_owner": [], "balance": 1, "data": [], "nonce": 0 }
+                }],
             })
             .to_string(),
         )

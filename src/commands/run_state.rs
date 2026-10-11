@@ -438,12 +438,12 @@ mod tests {
         }
         std::fs::write(
             temp_a.path().join(".scaffold/wallet/wallet_config.json"),
-            br#"{"sequencer_addr":"http://127.0.0.1:3040"}"#,
+            br#"{"sequencer":{"sequencer_addr":"http://127.0.0.1:3040"}}"#,
         )
         .unwrap();
         std::fs::write(
             temp_b.path().join(".scaffold/wallet/wallet_config.json"),
-            br#"{"sequencer_addr":"http://10.0.0.1:9999"}"#,
+            br#"{"sequencer":{"sequencer_addr":"http://10.0.0.1:9999"}}"#,
         )
         .unwrap();
 

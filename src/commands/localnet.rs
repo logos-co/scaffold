@@ -24,6 +24,12 @@ use crate::sequencer_config::{apply_common_runtime_overrides, patch_runtime_sequ
 /// state lives in the project and never in the shared LEZ checkout.
 const LOCALNET_HOME_DIR: &str = "localnet";
 
+/// Block interval of the localnet sequencer. LEZ's debug config uses 15s,
+/// and every wallet transaction waits for its block, so a `deploy` (several
+/// segment transactions per program, each confirmed before the next) would
+/// spend minutes idle. A short interval keeps the dev loop interactive.
+pub(crate) const LOCALNET_BLOCK_CREATE_TIMEOUT: &str = "2s";
+
 /// Chain home for the localnet whose state file is `state_path`
 /// (`<project>/.scaffold/state/localnet.state` → `<project>/.scaffold/localnet`).
 fn localnet_home_for(state_path: &Path) -> PathBuf {
@@ -730,6 +736,10 @@ fn build_status_report(
 fn prepare_sequencer_config(lez: &Path, dest_dir: &Path) -> DynResult<PathBuf> {
     let (dest_path, _) = patch_runtime_sequencer_config(lez, dest_dir, |obj| {
         apply_common_runtime_overrides(obj);
+        obj.insert(
+            "block_create_timeout".to_string(),
+            serde_json::Value::String(LOCALNET_BLOCK_CREATE_TIMEOUT.to_string()),
+        );
         Ok(())
     })?;
     Ok(dest_path)
@@ -1113,7 +1123,7 @@ mod tests {
 
     use super::{
         localnet_home_for, prepare_sequencer_config, reset_cleanup, verify_block_production,
-        wait_for_pid_exit, wait_for_port_free,
+        wait_for_pid_exit, wait_for_port_free, LOCALNET_BLOCK_CREATE_TIMEOUT,
     };
     use crate::commands::wallet_support::wallet_state_path;
     use crate::constants::SEQUENCER_CONFIG_REL_PATH;
@@ -1325,9 +1335,9 @@ mod tests {
         let dest_json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
         assert_eq!(
-            dest_json["max_block_size"],
-            serde_json::json!("8 MiB"),
-            "patched copy should carry the widened max_block_size override"
+            dest_json["block_create_timeout"],
+            serde_json::json!(LOCALNET_BLOCK_CREATE_TIMEOUT),
+            "patched copy should carry the localnet block interval"
         );
 
         let src_after: serde_json::Value =

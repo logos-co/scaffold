@@ -1578,7 +1578,7 @@ mod tests {
         let post_reset = tempfile::tempdir().expect("post_reset tempdir");
 
         for root in [baseline.path(), post_reset.path()] {
-            let lez_cfg_dir = root.join("lez/wallet/configs/debug");
+            let lez_cfg_dir = root.join("lez/lez/wallet/configs/debug");
             std::fs::create_dir_all(&lez_cfg_dir).expect("create lez cfg dir");
             std::fs::write(
                 lez_cfg_dir.join("wallet_config.json"),

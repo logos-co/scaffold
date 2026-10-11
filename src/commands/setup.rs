@@ -226,34 +226,6 @@ mod tests {
     }
 
     #[test]
-    fn ensure_default_wallet_seeded_writes_first_public_account() {
-        let temp = tempdir().expect("tempdir");
-        let wallet_home = temp.path().join(".scaffold/wallet");
-        fs::create_dir_all(&wallet_home).expect("mkdir wallet home");
-        fs::write(
-            wallet_home.join(WALLET_CONFIG_PRIMARY),
-            format!(
-                r#"{{
-  "initial_accounts": [
-    {{ "Private": {{ "account_id": "{PRIVATE_ACCOUNT_ID}" }} }},
-    {{ "Public": {{ "account_id": "{PUBLIC_ACCOUNT_ID}" }} }}
-  ]
-}}"#
-            ),
-        )
-        .expect("write wallet config");
-
-        ensure_default_wallet_seeded(temp.path(), &wallet_home, &missing_wallet_binary(&temp))
-            .expect("seed default wallet");
-
-        let state = fs::read_to_string(wallet_state_path(temp.path())).expect("read wallet.state");
-        assert_eq!(
-            state,
-            format!("default_address=Public/{PUBLIC_ACCOUNT_ID}\n")
-        );
-    }
-
-    #[test]
     fn ensure_default_wallet_seeded_does_not_overwrite_existing_default() {
         let temp = tempdir().expect("tempdir");
         let state_path = wallet_state_path(temp.path());
@@ -268,13 +240,7 @@ mod tests {
         fs::create_dir_all(&wallet_home).expect("mkdir wallet home");
         fs::write(
             wallet_home.join(WALLET_CONFIG_PRIMARY),
-            format!(
-                r#"{{
-  "initial_accounts": [
-    {{ "Public": {{ "account_id": "{PUBLIC_ACCOUNT_ID}" }} }}
-  ]
-}}"#
-            ),
+            r#"{ "sequencer": { "sequencer_addr": "http://127.0.0.1:3040" } }"#,
         )
         .expect("write wallet config");
 
@@ -288,15 +254,15 @@ mod tests {
         );
     }
 
-    /// LEZ v0.2.0 debug wallet configs ship no `initial_accounts`: seeding
-    /// must fall back to initializing the wallet storage via the wallet
-    /// binary and registering the first Public account it reports. The fake
-    /// wallet script mirrors the v0.2.0 `account list` first-use output and
-    /// records its environment so the test also locks in that the seeding
-    /// subprocess receives both wallet-home env var names.
+    /// Seeding initializes the wallet storage via the wallet binary and
+    /// registers the first derived Public account it reports. The fake
+    /// wallet script mirrors the LEZ 0.3 `account list` first-use output
+    /// (recovery phrase, then path-prefixed accounts) and records its
+    /// environment so the test also locks in that the seeding subprocess
+    /// receives `LEE_WALLET_HOME_DIR`.
     #[cfg(unix)]
     #[test]
-    fn ensure_default_wallet_seeded_initializes_storage_without_preconfigured_accounts() {
+    fn ensure_default_wallet_seeded_initializes_storage_and_adopts_first_derived_account() {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempdir().expect("tempdir");
@@ -304,7 +270,7 @@ mod tests {
         fs::create_dir_all(&wallet_home).expect("mkdir wallet home");
         fs::write(
             wallet_home.join(WALLET_CONFIG_PRIMARY),
-            r#"{ "sequencer_addr": "http://127.0.0.1:3040" }"#,
+            r#"{ "sequencer": { "sequencer_addr": "http://127.0.0.1:3040" } }"#,
         )
         .expect("write wallet config");
 
@@ -314,9 +280,10 @@ mod tests {
             &wallet_binary,
             format!(
                 "#!/bin/sh\n\
-                 printf '%s\\n' \"$NSSA_WALLET_HOME_DIR\" \"$LEE_WALLET_HOME_DIR\" > '{}'\n\
-                 echo 'Persistent storage not found, need to execute setup'\n\
-                 echo 'Input password: '\n\
+                 printf '%s\\n' \"$LEE_WALLET_HOME_DIR\" > '{}'\n\
+                 echo 'Recovery phrase:'\n\
+                 echo '  wrist record endless surprise'\n\
+                 echo 'Stored persistent accounts at /tmp/storage.json'\n\
                  echo '/ Public/{PUBLIC_ACCOUNT_ID}'\n\
                  echo '/ Private/{PRIVATE_ACCOUNT_ID}'\n",
                 env_file.display()
@@ -336,10 +303,10 @@ mod tests {
         );
 
         let env_lines = fs::read_to_string(&env_file).expect("read wallet env capture");
-        let expected = format!("{}\n{}\n", wallet_home.display(), wallet_home.display());
+        let expected = format!("{}\n", wallet_home.display());
         assert_eq!(
             env_lines, expected,
-            "wallet subprocess must see both NSSA_WALLET_HOME_DIR and LEE_WALLET_HOME_DIR"
+            "wallet subprocess must see LEE_WALLET_HOME_DIR"
         );
     }
 

@@ -131,8 +131,16 @@ pub(crate) fn read_basecamp_state(path: &Path) -> DynResult<BasecampState> {
 /// localnet. The config is seeded from the pinned LEZ debug wallet config on
 /// first use; on every call `sequencer.sequencer_addr` is rewritten to
 /// `http://127.0.0.1:<port>` so a changed `[localnet].port` reaches the
-/// wallet the next time `setup` (or `localnet reset`) runs. Other keys the
-/// user or the wallet added are preserved.
+/// wallet the next time `setup` (or `localnet reset`) runs, and the
+/// confirmation polling is tuned for a local chain: the wallet sleeps
+/// `seq_poll_timeout` between inclusion checks (30s in LEZ's debug config,
+/// i.e. ~30s per transaction), so scaffold polls every second for up to two
+/// minutes instead. Other keys the user or the wallet added are preserved.
+/// Wallet confirmation polling for scaffold-managed wallets (see
+/// [`prepare_wallet_home`]).
+const WALLET_POLL_INTERVAL: &str = "1s";
+const WALLET_POLL_ATTEMPTS: u64 = 120;
+
 pub(crate) fn prepare_wallet_home(lez_repo: &Path, wallet_home: &Path, port: u16) -> DynResult<()> {
     fs::create_dir_all(wallet_home)?;
     let cfg_dst = wallet_home.join(WALLET_CONFIG_PRIMARY);
@@ -165,6 +173,14 @@ pub(crate) fn prepare_wallet_home(lez_repo: &Path, wallet_home: &Path, port: u16
     sequencer.insert(
         "sequencer_addr".to_string(),
         serde_json::Value::String(format!("http://127.0.0.1:{port}")),
+    );
+    root.insert(
+        "seq_poll_timeout".to_string(),
+        serde_json::Value::String(WALLET_POLL_INTERVAL.to_string()),
+    );
+    root.insert(
+        "seq_tx_poll_max_blocks".to_string(),
+        serde_json::Value::from(WALLET_POLL_ATTEMPTS),
     );
     write_text(&cfg_dst, &(serde_json::to_string_pretty(&config)? + "\n"))?;
     Ok(())
@@ -253,7 +269,8 @@ mod tests {
             copied["sequencer"]["sequencer_addr"],
             "http://127.0.0.1:3055"
         );
-        assert_eq!(copied["seq_poll_timeout"], "30s");
+        assert_eq!(copied["seq_poll_timeout"], "1s");
+        assert_eq!(copied["seq_tx_poll_max_blocks"], 120);
 
         // A later port change is applied to the existing config.
         prepare_wallet_home(&lez, &wallet_home, 3077).expect("prepare again");
