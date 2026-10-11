@@ -9,8 +9,8 @@ use anyhow::{bail, Context};
 use serde_json::Value;
 
 use crate::constants::{
-    DEFAULT_WALLET_PASSWORD, DEV_FUNDER_ACCOUNT_ID, DEV_FUNDER_PRIVATE_KEY_HEX, WALLET_BIN_REL_PATH,
-    WALLET_HOME_ENV_VAR,
+    DEFAULT_WALLET_PASSWORD, DEV_FUNDER_ACCOUNT_ID, DEV_FUNDER_PRIVATE_KEY_HEX,
+    WALLET_BIN_REL_PATH, WALLET_HOME_ENV_VAR,
 };
 use crate::model::Project;
 use crate::project::resolve_repo_path;
@@ -724,13 +724,12 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        extract_tx_identifier, first_public_address_in_listing, first_public_wallet_address,
-        normalize_address_ref,
+        extract_tx_identifier, first_public_address_in_listing, normalize_address_ref,
         read_default_wallet_address, resolve_wallet_address, set_wallet_home_env,
-        wallet_state_path, write_default_wallet_address, WALLET_CONFIG_PRIMARY,
+        wallet_state_path, write_default_wallet_address,
     };
     use crate::commands::test_support::drain_http_request;
-    use crate::constants::WALLET_HOME_ENV_VARS;
+    use crate::constants::WALLET_HOME_ENV_VAR;
 
     use super::{sequencer_connectivity_failure, sequencer_connectivity_failure_with_probe};
 
@@ -1062,47 +1061,7 @@ mod tests {
     }
 
     #[test]
-    fn first_public_wallet_address_parses_wallet_config() {
-        let temp = tempdir().expect("tempdir");
-        let wallet_home = temp.path().join(".scaffold/wallet");
-        fs::create_dir_all(&wallet_home).expect("mkdir wallet home");
-        fs::write(
-            wallet_home.join(WALLET_CONFIG_PRIMARY),
-            r#"{
-  "initial_accounts": [
-    { "Private": { "account_id": "2ECgkFTaXzwjJBXR7ZKmXYQtpHbvTTHK9Auma4NL9AUo" } },
-    { "Public": { "account_id": "6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV" } }
-  ]
-}"#,
-        )
-        .expect("write wallet config");
-
-        let value = first_public_wallet_address(&wallet_home).expect("first public");
-        let expected = format!("Public/{ACCOUNT_ID}");
-        assert_eq!(value.as_deref(), Some(expected.as_str()));
-    }
-
-    #[test]
-    fn first_public_wallet_address_returns_none_without_public_accounts() {
-        let temp = tempdir().expect("tempdir");
-        let wallet_home = temp.path().join(".scaffold/wallet");
-        fs::create_dir_all(&wallet_home).expect("mkdir wallet home");
-        fs::write(
-            wallet_home.join(WALLET_CONFIG_PRIMARY),
-            r#"{
-  "initial_accounts": [
-    { "Private": { "account_id": "2ECgkFTaXzwjJBXR7ZKmXYQtpHbvTTHK9Auma4NL9AUo" } }
-  ]
-}"#,
-        )
-        .expect("write wallet config");
-
-        let value = first_public_wallet_address(&wallet_home).expect("first public");
-        assert!(value.is_none());
-    }
-
-    #[test]
-    fn set_wallet_home_env_sets_every_wallet_home_var() {
+    fn set_wallet_home_env_sets_the_lez_0_3_wallet_home_var() {
         let mut command = std::process::Command::new("true");
         set_wallet_home_env(&mut command, "/project/.scaffold/wallet");
 
@@ -1110,18 +1069,17 @@ mod tests {
             .get_envs()
             .map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string())))
             .collect();
-        for name in WALLET_HOME_ENV_VARS {
-            assert_eq!(
-                envs.get(std::ffi::OsStr::new(name)),
-                Some(&Some("/project/.scaffold/wallet".into())),
-                "missing wallet home env var {name}"
-            );
-        }
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new(WALLET_HOME_ENV_VAR)),
+            Some(&Some("/project/.scaffold/wallet".into())),
+            "missing wallet home env var {WALLET_HOME_ENV_VAR}"
+        );
+        assert_eq!(envs.len(), 1, "only the LEZ 0.3 variable is set: {envs:?}");
     }
 
     #[test]
     fn first_public_address_in_listing_parses_wallet_list_output() {
-        // Shape of v0.2.0 `wallet account list` output right after the CLI
+        // Shape of `wallet account list` output right after the CLI
         // initializes its storage on first use.
         let output = format!(
             "Persistent storage not found, need to execute setup\n\
@@ -1195,52 +1153,29 @@ mod tests {
         );
     }
 
-    /// Pins which account wins on the shape the repo's own fake wallet in
-    /// `tests/cli.rs` prints: an unmarked `Preconfigured Public/<id>` line
-    /// followed by a marked `/ Public/<id>` entry. The marked entry is the
-    /// listing entry, so it is the one adopted.
+    /// LEZ 0.3 listing after `setup`: the imported dev funder prints bare
+    /// (no key-tree path) and may come first; the wallet-derived account
+    /// carries its path. The derived account must win — the funder is the
+    /// *source* of every top-up, never its destination.
     #[test]
-    fn first_public_address_in_listing_prefers_marked_entry_over_earlier_unmarked_line() {
+    fn first_public_address_in_listing_prefers_derived_account_over_imported_funder() {
         const MARKED_ID: &str = "8zxWNm1qh6FLsJpVBuDxdxcTm55qHPgFEdqJpPVu1fuy";
 
         let output = format!(
-            "Preconfigured Public/{ACCOUNT_ID}\n\
-             / Public/{MARKED_ID}\n"
+            "Public/{funder}\n\
+             /0 Public/{MARKED_ID} [main]\n\
+             / Private/{ACCOUNT_ID}\n",
+            funder = crate::constants::DEV_FUNDER_ACCOUNT_ID
         );
         assert_eq!(
             first_public_address_in_listing(&output).as_deref(),
             Some(format!("Public/{MARKED_ID}").as_str()),
-            "a `/ `-marked entry wins over an earlier unmarked Public/ mention"
+            "a path-marked entry wins over an earlier bare Public/ mention"
         );
-    }
 
-    /// The listing shape a **real** wallet prints on the path this function
-    /// exists for: a debug config with `initial_accounts` removed. The wallet
-    /// still emits its own built-in `Preconfigured …` entries above the
-    /// stored accounts, so "the config ships no preconfigured account" does
-    /// not imply "the listing contains none". Captured from a live run
-    /// against the pinned LEZ during review of scaffold#246.
-    ///
-    /// This is what makes the `/ ` tier load-bearing rather than defensive
-    /// garnish: a first-`Public/`-token scan adopts `6iArKUXx…`, four lines
-    /// above the account the wallet actually created in its own storage.
-    #[test]
-    fn first_public_address_in_listing_skips_preconfigured_entries_on_real_output() {
-        const STORED_ID: &str = "EkA2CTdiiPw6b2syzMxBZcZ33n4W5RCbWH3DDsonWy6w";
-
-        let output = "\
-            Preconfigured Public/6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV\n\
-            Preconfigured Public/7wHg9sbJwc6h3NP1S9bekfAzB8CHifEcxKswCKUt3YQo\n\
-            Preconfigured Private/5ya25h4Xc9GAmrGB2WrTEnEWtQKJwRwQx3Xfo2tucNcE\n\
-            Preconfigured Private/E8HwiTyQe4H9HK7icTvn95HQMnzx49mP9A2ddtMLpNaN\n\
-            / Public/EkA2CTdiiPw6b2syzMxBZcZ33n4W5RCbWH3DDsonWy6w\n\
-            / Private/4vgGxgZ5vkP99trgfVDLaF7o5NdHjnJUh26BGRUqCmRD\n";
-
-        assert_eq!(
-            first_public_address_in_listing(output).as_deref(),
-            Some(format!("Public/{STORED_ID}").as_str()),
-            "the stored account must win over the wallet's Preconfigured entries"
-        );
+        // Even with no derived account, the funder is never adopted.
+        let only_funder = format!("Public/{}\n", crate::constants::DEV_FUNDER_ACCOUNT_ID);
+        assert_eq!(first_public_address_in_listing(&only_funder), None);
     }
 
     #[test]

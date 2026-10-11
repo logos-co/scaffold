@@ -115,7 +115,10 @@ pub(crate) fn deploy_for_project(
         );
         record_successes(project, std::slice::from_ref(&result))?;
         if json {
-            println!("{}", serde_json::to_string(&render_deploy_result_json(&result))?);
+            println!(
+                "{}",
+                serde_json::to_string(&render_deploy_result_json(&result))?
+            );
         } else {
             print_result_block(&result, Some(&custom_path));
         }
@@ -167,7 +170,10 @@ pub(crate) fn deploy_for_project(
                 println!("  Error: missing binary `{program}.bin` (searched: {searched})");
                 println!("  Hint: run `logos-scaffold build` first.");
             }
-            results.push(DeployResult::failed(program, "missing program binary".to_string()));
+            results.push(DeployResult::failed(
+                program,
+                "missing program binary".to_string(),
+            ));
             continue;
         };
 
@@ -335,7 +341,10 @@ fn deploy_one(
         Err(err) => {
             let mut result = DeployResult::failed(
                 program.to_string(),
-                format!("{} is not a risc0 program binary: {err}", binary_path.display()),
+                format!(
+                    "{} is not a risc0 program binary: {err}",
+                    binary_path.display()
+                ),
             );
             result.elf_sha256 = elf_sha256;
             return result;
@@ -759,7 +768,6 @@ pub(crate) fn discover_program_binaries(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::test_support::drain_http_request;
     use std::fs;
     use tempfile::TempDir;
 
@@ -767,93 +775,70 @@ mod tests {
         discover_program_binaries(root, &[program.to_string()]).remove(program)
     }
 
-    /// Serve one scripted `getLastBlockId` response per incoming connection,
-    /// then stop accepting. `Some(id)` answers with a valid JSON-RPC result;
-    /// `None` answers with a 500 and no body (a transient RPC failure).
-    /// Uses the same complete-request drain as the wallet-support stub, but
-    /// extends it to a response sequence so pacing can observe heads that
-    /// advance — or reads that fail and then recover — between polls.
-    fn spawn_scripted_block_id_server(
-        responses: Vec<Option<u64>>,
-    ) -> (String, std::thread::JoinHandle<()>) {
-        use std::io::Write;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub server");
-        let url = format!("http://{}", listener.local_addr().expect("local addr"));
-        let handle = std::thread::spawn(move || {
-            for response in responses {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    return;
-                };
-                drain_http_request(&mut stream);
-                let payload = match response {
-                    Some(block_id) => {
-                        let body = format!(r#"{{"jsonrpc":"2.0","result":{block_id},"id":1}}"#);
-                        format!(
-                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
-                            body.len(),
-                            body
-                        )
-                    }
-                    None => "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n"
-                        .to_string(),
-                };
-                let _ = stream.write_all(payload.as_bytes());
-                let _ = stream.flush();
-            }
-        });
-        (url, handle)
+    /// A minimal risc0 `ProgramBinary`: magic, version, a header, the user
+    /// ELF of `user_len` bytes, then a kernel blob.
+    fn fake_program_binary(user_len: usize) -> Vec<u8> {
+        let mut bytes = b"R0BF".to_vec();
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        let header = [9_u8; 5];
+        bytes.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&header);
+        bytes.extend_from_slice(&(user_len as u32).to_le_bytes());
+        bytes.extend(std::iter::repeat_n(0x7f_u8, user_len));
+        bytes.extend_from_slice(b"kernel");
+        bytes
     }
 
     #[test]
-    fn wait_for_block_past_returns_true_once_head_advances() {
-        let (url, handle) = spawn_scripted_block_id_server(vec![Some(5), Some(5), Some(6)]);
-        let advanced =
-            wait_for_block_past(&url, 5, Duration::from_secs(10), Duration::from_millis(10));
-        assert!(advanced, "head reached 6 > 5, pacing wait must succeed");
-        handle.join().expect("server thread");
-    }
-
-    #[test]
-    fn wait_for_block_past_times_out_when_head_stalls() {
-        let (url, handle) = spawn_scripted_block_id_server(vec![Some(5); 64]);
-        let advanced = wait_for_block_past(
-            &url,
-            5,
-            Duration::from_millis(200),
-            Duration::from_millis(10),
-        );
-        assert!(
-            !advanced,
-            "stalled head must report timeout, not spin forever"
-        );
-        drop(handle); // server thread parks in accept(); do not join.
-    }
-
-    #[test]
-    fn read_head_with_retry_recovers_after_transient_failure() {
-        // Reviewer scenario (PR #241): the post-submission baseline read
-        // fails once and then recovers — pacing must keep its baseline
-        // instead of failing open (pre-fix) or aborting prematurely.
-        let (url, handle) = spawn_scripted_block_id_server(vec![None, Some(7)]);
-        let head = read_head_with_retry(&url, Duration::from_secs(10), Duration::from_millis(10));
+    fn segment_count_follows_the_user_elf_in_96_kib_chunks() {
+        assert_eq!(program_segment_count(&fake_program_binary(1)).unwrap(), 1);
         assert_eq!(
-            head,
-            Some(7),
-            "one transient 500 must not lose the baseline"
+            program_segment_count(&fake_program_binary(MAX_SEGMENT_DATA_LEN)).unwrap(),
+            1
         );
-        handle.join().expect("server thread");
+        assert_eq!(
+            program_segment_count(&fake_program_binary(MAX_SEGMENT_DATA_LEN + 1)).unwrap(),
+            2
+        );
+        assert_eq!(
+            program_segment_count(&fake_program_binary(3 * MAX_SEGMENT_DATA_LEN)).unwrap(),
+            3
+        );
     }
 
     #[test]
-    fn read_head_with_retry_gives_up_after_deadline_of_failures() {
-        let (url, handle) = spawn_scripted_block_id_server(vec![None; 64]);
-        let head =
-            read_head_with_retry(&url, Duration::from_millis(200), Duration::from_millis(10));
+    fn segment_count_rejects_non_program_binaries() {
+        assert!(program_segment_count(b"\x7fELF plain elf").is_err());
+        let mut truncated = fake_program_binary(100);
+        truncated.truncate(30);
+        assert!(program_segment_count(&truncated).is_err());
+        let mut wrong_version = fake_program_binary(10);
+        wrong_version[4] = 2;
+        assert!(program_segment_count(&wrong_version).is_err());
+    }
+
+    #[test]
+    fn parses_wallet_account_and_deploy_output() {
+        let generated = "Generated new account with account_id \
+                         Public/BzdBoL4JRa5M873cuWb9rbYgASr1pXyaAZ1YW9ertWH9 at path /3\n\
+                         With pk abcd\n";
         assert_eq!(
-            head, None,
-            "persistent RPC failure must surface as no-baseline so the deploy aborts fail-closed"
+            parse_generated_public_account(generated).as_deref(),
+            Some("Public/BzdBoL4JRa5M873cuWb9rbYgASr1pXyaAZ1YW9ertWH9")
         );
-        drop(handle); // server thread parks in accept(); do not join.
+        assert_eq!(parse_generated_public_account("nothing here"), None);
+
+        let deployed = "Transaction hash is aa11\nTransaction is included in block 4\n\
+                        Transaction hash is bb22\nTransaction is included in block 5\n\
+                        Program deployed. Header account id: 6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV\n";
+        assert_eq!(
+            parse_deployed_header(deployed).as_deref(),
+            Some("6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV")
+        );
+        assert_eq!(
+            extract_last_tx_identifier(deployed, "").as_deref(),
+            Some("bb22")
+        );
     }
 
     #[test]
@@ -1080,6 +1065,8 @@ mod tests {
             detail: nasty.clone(),
             tx: None,
             program_id: None,
+            elf_sha256: None,
+            payer: None,
         };
         let value = render_deploy_result_json(&result);
         let serialized = serde_json::to_string(&value).expect("serialize");

@@ -278,9 +278,7 @@ pub(crate) fn cmd_wallet_topup_inner(
         }
         println!("dry-run: wallet topup command will not be executed");
         println!("{WALLET_HOME_ENV_VAR}={wallet_home}");
-        println!(
-            "planned preflight: import the dev funder key into the wallet if it is missing"
-        );
+        println!("planned preflight: import the dev funder key into the wallet if it is missing");
         println!("$ {}", render_command(&send_command));
         println!("planned wallet: {resolved_to}");
         println!("planned method: {TOPUP_METHOD} ({DEFAULT_TOPUP_AMOUNT} from {funder})");

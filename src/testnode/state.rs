@@ -573,9 +573,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::model::{
-        Config, FrameworkConfig, LocalnetConfig, RepoRef, RunConfig,
-    };
+    use crate::model::{Config, FrameworkConfig, LocalnetConfig, RepoRef, RunConfig};
 
     const ACCOUNT_ID: &str = "6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV";
 
@@ -583,7 +581,7 @@ mod tests {
         Project {
             root: root.to_path_buf(),
             config: Config {
-                version: "0.2.0".into(),
+                version: crate::constants::SCAFFOLD_TOML_SCHEMA_VERSION.into(),
                 cache_root: ".scaffold/cache".into(),
                 lez: RepoRef::default(),
                 basecamp_repo: None,
@@ -607,11 +605,13 @@ mod tests {
         let temp = tempdir().unwrap();
         let project = fixture_project(temp.path());
         let schema = StateSchema::for_project(&project).unwrap();
-        assert_eq!(schema.state_format_version, "nssa-v03");
-        assert!(schema
-            .config_keys
-            .contains(&"initial_public_accounts".to_string()));
-        assert_eq!(schema.public_account_fields, ["account_id", "balance"]);
+        assert_eq!(schema.state_format_version, "lee-v03");
+        assert_eq!(schema.config_keys, ["genesis[].supply_account"]);
+        assert_eq!(
+            schema.public_account_fields,
+            ["account_id", "balance (u64)"]
+        );
+        assert!(schema.private_account_fields.is_empty());
     }
 
     #[test]
@@ -621,6 +621,29 @@ mod tests {
                 account_id: ACCOUNT_ID.to_string(),
                 balance: 12_345,
             }],
+            vec![],
+        );
+        snapshot.validate().unwrap();
+
+        let value = serde_json::to_value(&snapshot).unwrap();
+        let parsed = StateSnapshot::from_json(&value).unwrap();
+        assert_eq!(parsed.public_accounts.len(), 1);
+
+        let genesis = parsed.to_genesis_actions();
+        assert_eq!(
+            genesis[0]["supply_account"]["account_id"],
+            serde_json::json!(ACCOUNT_ID)
+        );
+        assert_eq!(
+            genesis[0]["supply_account"]["balance"],
+            serde_json::json!(12_345)
+        );
+    }
+
+    #[test]
+    fn private_accounts_and_oversized_balances_are_schema_mismatches() {
+        let private = StateSnapshot::new(
+            vec![],
             vec![PrivateSeedAccount {
                 npk: vec![7; 32],
                 account: SeedAccountState {
@@ -631,21 +654,22 @@ mod tests {
                 },
             }],
         );
-        snapshot.validate().unwrap();
+        assert!(matches!(
+            private.validate().unwrap_err(),
+            SeedError::StorageSchemaMismatch(_)
+        ));
 
-        let value = serde_json::to_value(&snapshot).unwrap();
-        let parsed = StateSnapshot::from_json(&value).unwrap();
-        assert_eq!(parsed.public_accounts.len(), 1);
-        assert_eq!(parsed.private_accounts.len(), 1);
-
-        let (public, private) = parsed.to_config_values();
-        assert_eq!(public[0]["account_id"], serde_json::json!(ACCOUNT_ID));
-        assert_eq!(public[0]["balance"], serde_json::json!(12_345));
-        // Empty owner normalizes to the default 8-word owner.
-        assert_eq!(
-            private[0]["account"]["program_owner"],
-            serde_json::json!([0, 0, 0, 0, 0, 0, 0, 0])
+        let oversized = StateSnapshot::new(
+            vec![PublicSeedAccount {
+                account_id: ACCOUNT_ID.to_string(),
+                balance: u128::from(u64::MAX) + 1,
+            }],
+            vec![],
         );
+        assert!(matches!(
+            oversized.validate().unwrap_err(),
+            SeedError::StorageSchemaMismatch(_)
+        ));
     }
 
     #[test]
@@ -669,30 +693,13 @@ mod tests {
     }
 
     #[test]
-    fn bad_npk_is_decode_error() {
-        let snapshot = StateSnapshot::new(
-            vec![],
-            vec![PrivateSeedAccount {
-                npk: vec![1; 16],
-                account: SeedAccountState {
-                    program_owner: vec![],
-                    balance: 0,
-                    data: vec![],
-                    nonce: 0,
-                },
-            }],
-        );
-        let err = snapshot.validate().unwrap_err();
-        assert!(err.to_string().contains("npk has 16 bytes"), "{err}");
-    }
-
-    #[test]
     fn account_snapshot_converts_balances_and_rejects_data() {
         let ok = serde_json::json!({
             "format": ACCOUNT_SNAPSHOT_FORMAT,
             "block_id": 9,
             "accounts": [
-                { "account_id": ACCOUNT_ID, "state": "present", "balance": 500, "nonce": 0, "data_len": 0 },
+                { "account_id": ACCOUNT_ID, "state": "present", "balance": 500, "nonce": 0,
+                  "shards": [{ "program": "11111111111111111111111111111111", "data": "", "data_len": 16 }] },
                 { "account_id": "missing-one", "state": "missing" },
             ],
         });
@@ -703,7 +710,8 @@ mod tests {
         let with_data = serde_json::json!({
             "format": ACCOUNT_SNAPSHOT_FORMAT,
             "accounts": [
-                { "account_id": ACCOUNT_ID, "state": "present", "balance": 500, "nonce": 0, "data_len": 64 },
+                { "account_id": ACCOUNT_ID, "state": "present", "balance": 500, "nonce": 0,
+                  "shards": [{ "program": "2RHZhw9h534Zr3eq2RGhQete2Hh667foECzXPmSkGni2", "data": "", "data_len": 64 }] },
             ],
         });
         let err = StateSnapshot::from_json(&with_data).unwrap_err();
@@ -729,7 +737,7 @@ mod tests {
         let seeded = seed_state(&project, &input, Some(&out)).unwrap();
         assert_eq!(seeded.seed_kind, "config");
         assert_eq!(seeded.public_account_count, 1);
-        assert_eq!(seeded.state_format_version, "nssa-v03");
+        assert_eq!(seeded.state_format_version, "lee-v03");
         assert!(out.join(SEED_FILE).exists());
 
         let loaded = load_seed_from_state_dir(&out).unwrap().unwrap();

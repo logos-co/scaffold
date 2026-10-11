@@ -338,8 +338,9 @@ fn check_dev_funder(wallet_binary: &std::path::Path, wallet_home: &std::path::Pa
         Ok(out) if out.status.success() => CheckRow {
             status: CheckStatus::Warn,
             name,
-            detail: "the project wallet does not hold the dev funder key; `wallet topup` will import it"
-                .to_string(),
+            detail:
+                "the project wallet does not hold the dev funder key; `wallet topup` will import it"
+                    .to_string(),
             remediation: Some(format!("Run `{STEP_SETUP}`")),
         },
         Ok(out) => CheckRow {
@@ -410,7 +411,6 @@ pub(crate) fn print_report(report: &DoctorReport) {
         }
     }
 }
-
 
 // Decide whether a wallet-check failure should be downgraded from Fail to
 // Warn because the local sequencer is simply unreachable. Conservative on
@@ -504,7 +504,6 @@ fn derive_next_steps(rows: &[CheckRow]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
 
     fn warn_row(name: &str, remediation: Option<&str>) -> CheckRow {
         CheckRow {

@@ -270,9 +270,7 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
-    use super::{
-        check_standalone_support, container_runtime_row, guest_build_row,
-    };
+    use super::{check_standalone_support, container_runtime_row, guest_build_row};
     use crate::model::{BuildConfig, GuestBuildMode};
 
     #[test]

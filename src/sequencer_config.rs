@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context};
 use serde_json::{Map, Value};
 
-use crate::constants::{DEV_FUNDER_ACCOUNT_ID, DEV_FUNDER_GENESIS_BALANCE, SEQUENCER_CONFIG_REL_PATH};
+use crate::constants::{
+    DEV_FUNDER_ACCOUNT_ID, DEV_FUNDER_GENESIS_BALANCE, SEQUENCER_CONFIG_REL_PATH,
+};
 use crate::lez_layout::lez_file;
 use crate::DynResult;
 
@@ -103,7 +105,6 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
-
     use super::*;
     use tempfile::tempdir;
 
@@ -111,7 +112,8 @@ mod tests {
         let lez = root.join("lez");
         let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
         fs::create_dir_all(config_path.parent().expect("parent")).expect("create config dir");
-        fs::write(&config_path, r#"{"home": ".", "max_num_tx_in_block": 1}"#).expect("write source config");
+        fs::write(&config_path, r#"{"home": ".", "max_num_tx_in_block": 1}"#)
+            .expect("write source config");
         lez
     }
 
@@ -122,11 +124,14 @@ mod tests {
         let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
         let dest_dir = temp.path().join("runtime");
         fs::create_dir_all(config_path.parent().expect("parent")).expect("create config dir");
-        fs::write(&config_path, r#"{"home": ".", "max_num_tx_in_block": 7}"#).expect("write source config");
+        fs::write(&config_path, r#"{"home": ".", "max_num_tx_in_block": 7}"#)
+            .expect("write source config");
 
         let (dest_path, genesis_id) = patch_runtime_sequencer_config(&lez, &dest_dir, |obj| {
             obj.insert("port".to_string(), Value::Number(30_400.into()));
-            Ok(obj["max_num_tx_in_block"].as_u64().expect("max_num_tx_in_block"))
+            Ok(obj["max_num_tx_in_block"]
+                .as_u64()
+                .expect("max_num_tx_in_block"))
         })
         .expect("patch config");
 

@@ -266,11 +266,11 @@ mod tests {
             include_str!("../../templates/default/.scaffold/commands.md")
         );
 
-        let runner_text = fs::read_to_string(target.join("src/bin/run_hello_world.rs"))
-            .expect("failed to read generated run_hello_world.rs");
+        let toolchain_text = fs::read_to_string(target.join("rust-toolchain.toml"))
+            .expect("failed to read generated rust-toolchain.toml");
         assert_eq!(
-            runner_text,
-            include_str!("../../templates/default/src/bin/run_hello_world.rs")
+            toolchain_text,
+            include_str!("../../templates/default/rust-toolchain.toml")
         );
 
         fs::remove_dir_all(&target).expect("failed to cleanup temporary test directory");

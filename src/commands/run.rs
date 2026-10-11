@@ -10,6 +10,7 @@ use crate::commands::build::cmd_build_shortcut;
 use crate::commands::deploy::{
     cmd_deploy, discover_deployable_programs, discover_program_binaries,
 };
+use crate::commands::deployments::read_deployments;
 use crate::commands::localnet::{
     build_localnet_status_for_project, cmd_localnet, cmd_localnet_reset, LocalnetAction,
 };
@@ -19,7 +20,6 @@ use crate::commands::run_state::{
 };
 use crate::commands::setup::ensure_default_wallet_seeded;
 use crate::commands::wallet::{cmd_wallet_topup_inner, TopupOutcome};
-use crate::commands::deployments::read_deployments;
 use crate::commands::wallet_support::{ensure_dev_funder_imported, set_wallet_home_env};
 use crate::constants::{DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, WALLET_BIN_REL_PATH};
 use crate::model::{LocalnetOwnership, Project, RunProfile};
@@ -806,9 +806,7 @@ fn run_post_deploy_hook(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{
-        Config, FrameworkConfig, LocalnetConfig, Project, RepoRef, RunConfig,
-    };
+    use crate::model::{Config, FrameworkConfig, LocalnetConfig, Project, RepoRef, RunConfig};
     use std::path::PathBuf;
 
     #[test]
@@ -892,7 +890,6 @@ mod tests {
     #[test]
     fn is_ignored_path_keeps_builtin_ignores_with_filters() {
         let ctx = WatchIgnore {
-            idl_rel: PathBuf::from("idl"),
             include: vec!["src/**".to_string()],
             exclude: vec![],
         };
@@ -900,39 +897,17 @@ mod tests {
         // Built-in ignores apply even though they'd match neither filter.
         assert!(is_ignored_path(root, &ctx, &root.join("target/debug/x")));
         assert!(is_ignored_path(root, &ctx, &root.join(".scaffold/state/x")));
-        assert!(is_ignored_path(root, &ctx, &root.join("idl/counter.json")));
         // An included source path is watched (not ignored)...
         assert!(!is_ignored_path(root, &ctx, &root.join("src/main.rs")));
         // ...while a path outside the include set is ignored.
         assert!(is_ignored_path(root, &ctx, &root.join("docs/readme.md")));
     }
 
-    #[test]
-    fn normalize_idl_rel_handles_relative_and_absolute_paths() {
-        let root = Path::new("/proj");
-        // Relative config value is used as-is.
-        assert_eq!(normalize_idl_rel("idl", root), PathBuf::from("idl"));
-        // Absolute value inside the project is rewritten relative to root, so
-        // the ignore check matches the project-relative event path.
-        let ctx = WatchIgnore {
-            idl_rel: normalize_idl_rel("/proj/idl", root),
-            include: vec![],
-            exclude: vec![],
-        };
-        assert_eq!(ctx.idl_rel, PathBuf::from("idl"));
-        assert!(is_ignored_path(root, &ctx, &root.join("idl/counter.json")));
-        // Absolute value outside the project passes through unchanged.
-        assert_eq!(
-            normalize_idl_rel("/elsewhere/idl", root),
-            PathBuf::from("/elsewhere/idl")
-        );
-    }
-
     fn make_test_project(root: PathBuf) -> Project {
         Project {
             root,
             config: Config {
-                version: "0.2.0".to_string(),
+                version: crate::constants::SCAFFOLD_TOML_SCHEMA_VERSION.to_string(),
                 cache_root: ".scaffold/cache".to_string(),
                 lez: RepoRef {
                     source: "lez".to_string(),
@@ -979,10 +954,9 @@ mod tests {
         let env_file = temp.path().join("env_out.txt");
         let project = make_test_project(temp.path().to_path_buf());
 
-        // Both wallet home names must reach the hook: older wallet binaries
-        // read NSSA_WALLET_HOME_DIR, LEZ v0.2.0 reads LEE_WALLET_HOME_DIR.
+        // The LEZ 0.3 wallet reads its home from LEE_WALLET_HOME_DIR only.
         let hook = format!(
-            "printf '%s\\n' \"$NSSA_WALLET_HOME_DIR\" \"$LEE_WALLET_HOME_DIR\" > '{}'",
+            "printf '%s\\n' \"$LEE_WALLET_HOME_DIR\" > '{}'",
             env_file.display()
         );
         run_post_deploy_hook(&project, &hook, &DeployedPrograms::default(), false)
@@ -990,14 +964,11 @@ mod tests {
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         let lines: Vec<&str> = content.lines().collect();
-        assert_eq!(lines.len(), 2, "expected both wallet home vars: {content}");
-        for line in &lines {
-            assert!(
-                line.ends_with(".scaffold/wallet"),
-                "expected wallet home to end with .scaffold/wallet, got: {content}"
-            );
-        }
-        assert_eq!(lines[0], lines[1], "both vars must agree: {content}");
+        assert_eq!(lines.len(), 1, "expected the wallet home var: {content}");
+        assert!(
+            lines[0].ends_with(".scaffold/wallet"),
+            "expected wallet home to end with .scaffold/wallet, got: {content}"
+        );
     }
 
     #[test]
@@ -1016,23 +987,6 @@ mod tests {
             .canonicalize()
             .unwrap_or_else(|_| temp.path().to_path_buf());
         assert_eq!(content.trim(), canonical.display().to_string());
-    }
-
-    #[test]
-    fn hook_receives_idl_dir_env() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let env_file = temp.path().join("env_out.txt");
-        let project = make_test_project(temp.path().to_path_buf());
-
-        let hook = format!("echo \"$SCAFFOLD_IDL_DIR\" > '{}'", env_file.display());
-        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default(), false)
-            .expect("hook should succeed");
-
-        let content = std::fs::read_to_string(&env_file).expect("read env output");
-        assert!(
-            content.trim().ends_with("/idl"),
-            "expected IDL dir to end with /idl, got: {content}"
-        );
     }
 
     #[test]
@@ -1142,10 +1096,8 @@ mod tests {
         let hook = format!(
             "{{ \
                 echo \"SEQUENCER_URL=$SEQUENCER_URL\"; \
-                echo \"NSSA_WALLET_HOME_DIR=$NSSA_WALLET_HOME_DIR\"; \
                 echo \"LEE_WALLET_HOME_DIR=$LEE_WALLET_HOME_DIR\"; \
                 echo \"SCAFFOLD_PROJECT_ROOT=$SCAFFOLD_PROJECT_ROOT\"; \
-                echo \"SCAFFOLD_IDL_DIR=$SCAFFOLD_IDL_DIR\"; \
                 echo \"SCAFFOLD_TOPUP_SKIPPED=$SCAFFOLD_TOPUP_SKIPPED\"; \
                 echo \"SCAFFOLD_DEPLOY_SKIPPED=$SCAFFOLD_DEPLOY_SKIPPED\"; \
             }} > '{}'",
@@ -1163,34 +1115,24 @@ mod tests {
 
         assert_eq!(lines[0], "SEQUENCER_URL=http://127.0.0.1:3040");
         assert!(
-            lines[1].starts_with("NSSA_WALLET_HOME_DIR=") && lines[1].ends_with(".scaffold/wallet"),
+            lines[1].starts_with("LEE_WALLET_HOME_DIR=") && lines[1].ends_with(".scaffold/wallet"),
             "wallet home line was: {}",
             lines[1]
         );
-        assert!(
-            lines[2].starts_with("LEE_WALLET_HOME_DIR=") && lines[2].ends_with(".scaffold/wallet"),
-            "v0.2.0 wallet home line was: {}",
-            lines[2]
-        );
         assert_eq!(
-            lines[3],
+            lines[2],
             format!("SCAFFOLD_PROJECT_ROOT={}", canonical.display())
-        );
-        assert!(
-            lines[4].starts_with("SCAFFOLD_IDL_DIR=") && lines[4].ends_with("/idl"),
-            "idl dir line was: {}",
-            lines[4]
         );
         // `=0`, not merely "present": an empty value is what an unset variable
         // expands to in the hook shell, so asserting the concrete not-skipped
         // value is what distinguishes "scaffold reported the step ran" from
         // "scaffold reported nothing".
         assert_eq!(
-            lines[5], "SCAFFOLD_TOPUP_SKIPPED=0",
+            lines[3], "SCAFFOLD_TOPUP_SKIPPED=0",
             "topup-skip flag must be set, and 0 for this not-skipped run"
         );
         assert_eq!(
-            lines[6], "SCAFFOLD_DEPLOY_SKIPPED=0",
+            lines[4], "SCAFFOLD_DEPLOY_SKIPPED=0",
             "deploy-skip flag must be set, and 0 for this not-skipped run"
         );
     }
@@ -1516,22 +1458,38 @@ mod tests {
     }
 
     #[test]
-    fn collect_deployed_programs_propagates_spel_resolution_error() {
-        // Misconfigured `[repos.spel]` (both path and pin empty) must
-        // bubble up as a hard error rather than silently producing
-        // an empty `SCAFFOLD_PROGRAMS` for hooks.
+    fn collect_deployed_programs_reads_program_ids_from_recorded_deployments() {
         let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir_all(temp.path().join("methods/guest/src/bin")).expect("create bin dir");
-        let mut project = make_test_project(temp.path().to_path_buf());
-        project.config.spel.path = String::new();
-        project.config.spel.pin = String::new();
+        let root = temp.path().to_path_buf();
+        std::fs::create_dir_all(root.join("methods/guest/src/bin")).expect("create bin dir");
+        std::fs::write(root.join("methods/guest/src/bin/hello.rs"), "fn main() {}").unwrap();
+        std::fs::write(root.join("methods/guest/src/bin/other.rs"), "fn main() {}").unwrap();
+        for name in ["hello", "other"] {
+            let bin = root.join(format!(
+                "target/riscv-guest/m/p/riscv32im-risc0-zkvm-elf/release/{name}.bin"
+            ));
+            std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+            std::fs::write(&bin, b"bin").unwrap();
+        }
+        crate::commands::deployments::record_deployments(
+            &root,
+            &[crate::commands::deployments::DeploymentRecord {
+                program: "hello".to_string(),
+                program_id: "HeaderId1".to_string(),
+                elf_sha256: None,
+                payer: None,
+            }],
+        )
+        .unwrap();
+        let project = make_test_project(root);
 
-        let err = collect_deployed_programs(&project, false).expect_err("should be Err");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("spel"),
-            "expected error to mention spel, got: {msg}"
-        );
+        let got = collect_deployed_programs(&project, true).expect("should be Ok");
+        assert!(got.skipped);
+        assert_eq!(got.programs.len(), 2);
+        assert_eq!(got.programs[0].name, "hello");
+        assert_eq!(got.programs[0].program_id.as_deref(), Some("HeaderId1"));
+        assert_eq!(got.programs[1].name, "other");
+        assert_eq!(got.programs[1].program_id, None);
     }
 
     #[test]
@@ -1607,8 +1565,11 @@ mod tests {
     #[test]
     fn reseed_after_wipe_matches_setup_baseline() {
         use crate::commands::setup::ensure_default_wallet_seeded;
-        use crate::commands::wallet_support::{wallet_state_path, WALLET_CONFIG_PRIMARY};
+        use crate::commands::wallet_support::{
+            ensure_dev_funder_imported, wallet_state_path, WALLET_CONFIG_PRIMARY,
+        };
         use crate::state::prepare_wallet_home;
+        use std::os::unix::fs::PermissionsExt as _;
 
         // Two parallel project trees with identical fake LEZ wallet configs.
         // Both start from the same state a freshly-wiped project would: LEZ
@@ -1621,26 +1582,38 @@ mod tests {
             std::fs::create_dir_all(&lez_cfg_dir).expect("create lez cfg dir");
             std::fs::write(
                 lez_cfg_dir.join("wallet_config.json"),
-                r#"{
-  "initial_accounts": [
-    { "Public": { "account_id": "6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV" } }
-  ]
-}"#,
+                r#"{ "sequencer": { "sequencer_addr": "http://127.0.0.1:3040" } }"#,
             )
             .expect("write lez wallet config");
+            // Fake LEZ 0.3 wallet: a derived default account, plus the dev
+            // funder once it has been imported.
+            let wallet_bin = root.join("lez").join(crate::constants::WALLET_BIN_REL_PATH);
+            std::fs::create_dir_all(wallet_bin.parent().unwrap()).unwrap();
+            std::fs::write(
+                &wallet_bin,
+                format!(
+                    "#!/bin/sh\ncat >/dev/null\ncase \"$1 $2\" in\n\
+                     'account list') echo '/ Public/6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV'; \
+                     [ -f \"$LEE_WALLET_HOME_DIR/imported\" ] && echo 'Public/{id}';;\n\
+                     'account import') touch \"$LEE_WALLET_HOME_DIR/imported\"; \
+                     echo 'Imported public account Public/{id}';;\n\
+                     esac\nexit 0\n",
+                    id = crate::constants::DEV_FUNDER_ACCOUNT_ID
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&wallet_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
         // Baseline: drive `cmd_setup`'s seed primitives directly.
         {
             let lez = baseline.path().join("lez");
             let wallet_home = baseline.path().join(".scaffold/wallet");
-            prepare_wallet_home(&lez, &wallet_home).expect("baseline prepare");
-            ensure_default_wallet_seeded(
-                baseline.path(),
-                &wallet_home,
-                &lez.join(crate::constants::WALLET_BIN_REL_PATH),
-            )
-            .expect("baseline seed");
+            let wallet_bin = lez.join(crate::constants::WALLET_BIN_REL_PATH);
+            prepare_wallet_home(&lez, &wallet_home, 3040).expect("baseline prepare");
+            ensure_default_wallet_seeded(baseline.path(), &wallet_home, &wallet_bin)
+                .expect("baseline seed");
+            ensure_dev_funder_imported(&wallet_bin, &wallet_home).expect("baseline funder");
         }
 
         // Post-reset: drive `reseed_after_wipe` directly.
@@ -1658,6 +1631,10 @@ mod tests {
         assert_eq!(
             baseline_state, post_reset_state,
             "post-reset wallet.state must be byte-equivalent to clean-setup baseline"
+        );
+        assert!(
+            post_reset.path().join(".scaffold/wallet/imported").exists(),
+            "post-reset reseed must re-import the dev funder"
         );
 
         let baseline_cfg = std::fs::read(

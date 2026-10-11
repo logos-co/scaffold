@@ -239,16 +239,16 @@ fn cmd_localnet_in_project(project: &Project, action: LocalnetAction) -> DynResu
             reset_wallet,
             verify_timeout_sec,
         } => cmd_localnet_reset(
-                project,
-                &ctx.lez,
-                &ctx.state_path,
-                &ctx.log_path,
-                &ctx.localnet_addr,
-                dry_run,
-                yes,
-                reset_wallet,
-                verify_timeout_sec,
-            ),
+            project,
+            &ctx.lez,
+            &ctx.state_path,
+            &ctx.log_path,
+            &ctx.localnet_addr,
+            dry_run,
+            yes,
+            reset_wallet,
+            verify_timeout_sec,
+        ),
     }
 }
 
@@ -1109,16 +1109,16 @@ mod tests {
     use std::net::TcpListener;
     use std::time::Duration;
 
+    use std::path::Path;
+
     use super::{
-        prepare_sequencer_config, reset_cleanup, verify_block_production, wait_for_pid_exit,
-        wait_for_port_free,
+        localnet_home_for, prepare_sequencer_config, reset_cleanup, verify_block_production,
+        wait_for_pid_exit, wait_for_port_free,
     };
     use crate::commands::wallet_support::wallet_state_path;
     use crate::constants::SEQUENCER_CONFIG_REL_PATH;
     use crate::error::ResetError;
-    use crate::model::{
-        Config, FrameworkConfig, LocalnetConfig, Project, RepoRef, RunConfig,
-    };
+    use crate::model::{Config, FrameworkConfig, LocalnetConfig, Project, RepoRef, RunConfig};
     use crate::repo::git_clean;
     use std::process::Command;
 
@@ -1177,12 +1177,24 @@ mod tests {
         fs::write(&wallet_state, "default_address=Public/demo\n").unwrap();
         let state_path = project.root.join(".scaffold/state/localnet.state");
         fs::write(&state_path, "sequencer_pid=123\n").unwrap();
-        let rocksdb = lez.join("rocksdb");
-        fs::create_dir_all(&rocksdb).unwrap();
+        let chain_home = project.root.join(".scaffold/localnet");
+        fs::create_dir_all(chain_home.join("rocksdb-0101")).unwrap();
+        let deployments = crate::commands::deployments::deployments_path(&project.root);
+        fs::write(&deployments, "{}").unwrap();
+        // The shared LEZ checkout is never touched by a reset.
+        fs::create_dir_all(lez.join("keep")).unwrap();
 
-        reset_cleanup(&project, &lez, &state_path, false).unwrap();
+        reset_cleanup(&project, &state_path, false).unwrap();
 
-        assert!(!rocksdb.exists(), "rocksdb should be deleted");
+        assert!(
+            !chain_home.exists(),
+            "localnet chain home should be deleted"
+        );
+        assert!(
+            !deployments.exists(),
+            "recorded program ids should be cleared"
+        );
+        assert!(lez.join("keep").exists(), "LEZ checkout must be left alone");
         assert!(!state_path.exists(), "localnet state should be deleted");
         assert!(
             marker.exists(),
@@ -1197,7 +1209,7 @@ mod tests {
     #[test]
     fn cleanup_deletes_wallet_when_reset_wallet_true() {
         let temp = tempdir().unwrap();
-        let (project, lez) = make_test_project(&temp);
+        let (project, _lez) = make_test_project(&temp);
 
         let wallet_dir = project.root.join(&project.config.wallet_home_dir);
         fs::write(wallet_dir.join("keys.json"), "{}").unwrap();
@@ -1205,7 +1217,7 @@ mod tests {
         fs::write(&wallet_state, "default_address=Public/demo\n").unwrap();
         let state_path = project.root.join(".scaffold/state/localnet.state");
 
-        reset_cleanup(&project, &lez, &state_path, true).unwrap();
+        reset_cleanup(&project, &state_path, true).unwrap();
 
         assert!(
             !wallet_dir.exists(),
@@ -1220,14 +1232,14 @@ mod tests {
     #[test]
     fn cleanup_is_idempotent_when_nothing_exists() {
         let temp = tempdir().unwrap();
-        let (project, lez) = make_test_project(&temp);
+        let (project, _lez) = make_test_project(&temp);
 
         let wallet_dir = project.root.join(&project.config.wallet_home_dir);
         fs::remove_dir_all(&wallet_dir).unwrap();
         let state_path = project.root.join(".scaffold/state/localnet.state");
 
         // No rocksdb, no wallet, no state file — cleanup should succeed silently.
-        reset_cleanup(&project, &lez, &state_path, true).unwrap();
+        reset_cleanup(&project, &state_path, true).unwrap();
     }
 
     #[test]
@@ -1261,7 +1273,7 @@ mod tests {
         // empty and we can see any write-back to that file as a dirty diff.
         let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
         fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        fs::write(&config_path, "{\n  \"port\": 3040\n}\n").unwrap();
+        fs::write(&config_path, "{\n  \"max_block_size\": \"1 MiB\"\n}\n").unwrap();
 
         let git_init = Command::new("git")
             .args(["init", "--quiet", "--initial-branch=main"])
@@ -1302,7 +1314,7 @@ mod tests {
             "test precondition: seeded lez tree should be clean"
         );
 
-        let dest = prepare_sequencer_config(&lez, &state_dir, 4040).unwrap();
+        let dest = prepare_sequencer_config(&lez, &state_dir).unwrap();
 
         assert_eq!(
             dest,
@@ -1312,7 +1324,6 @@ mod tests {
 
         let dest_json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
-        assert_eq!(dest_json["port"], serde_json::json!(4040));
         assert_eq!(
             dest_json["max_block_size"],
             serde_json::json!("8 MiB"),
@@ -1322,13 +1333,13 @@ mod tests {
         let src_after: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
         assert_eq!(
-            src_after["port"],
-            serde_json::json!(3040),
+            src_after["max_block_size"],
+            serde_json::json!("1 MiB"),
             "vendored sequencer_config.json must be left untouched"
         );
         assert!(
-            src_after.get("max_block_size").is_none(),
-            "vendored sequencer_config.json must be left untouched (no max_block_size injected)"
+            src_after.get("genesis").is_none(),
+            "vendored sequencer_config.json must be left untouched (no genesis injected)"
         );
 
         assert!(
@@ -1338,24 +1349,11 @@ mod tests {
     }
 
     #[test]
-    fn prepare_sequencer_config_accepts_nested_lez_layout() {
-        let temp = tempdir().unwrap();
-        let lez = temp.path().join("lez");
-        let state_dir = temp.path().join(".scaffold/state");
-
-        // Newer LEZ pins moved the repository payload under a `lez/` prefix.
-        // `localnet start` must find that config instead of only probing the
-        // pre-reorg flat path.
-        let config_path = lez.join("lez/sequencer/service/configs/debug/sequencer_config.json");
-        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        fs::write(&config_path, "{\n  \"port\": 3040\n}\n").unwrap();
-
-        let dest = prepare_sequencer_config(&lez, &state_dir, 4050).unwrap();
-        let doc: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
-
-        assert_eq!(doc["port"], serde_json::json!(4050));
-        assert_eq!(doc["max_block_size"], serde_json::json!("8 MiB"));
+    fn localnet_home_sits_next_to_the_state_dir() {
+        assert_eq!(
+            localnet_home_for(Path::new("/p/.scaffold/state/localnet.state")),
+            PathBuf::from("/p/.scaffold/localnet")
+        );
     }
 
     #[test]

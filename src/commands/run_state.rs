@@ -337,9 +337,7 @@ mod tests {
     }
 
     fn make_test_project(root: std::path::PathBuf) -> Project {
-        use crate::model::{
-            Config, FrameworkConfig, LocalnetConfig, RepoRef, RunConfig,
-        };
+        use crate::model::{Config, FrameworkConfig, LocalnetConfig, RepoRef, RunConfig};
         Project {
             root,
             config: Config {
@@ -418,29 +416,6 @@ mod tests {
         assert_eq!(hashes.len(), 2);
         assert!(hashes.contains_key("alpha"));
         assert!(hashes.contains_key("beta"));
-    }
-
-    #[test]
-    fn compute_hashes_finds_sanitized_idl_for_dashed_program_name() {
-        // `build_idl_for_current_project` writes the IDL at
-        // `<sanitize_file_stem(stem)>.json` (e.g. `my-program.rs` →
-        // `my_program.json`). The hash lookup must use the same
-        // sanitizer; otherwise lez-framework projects with a `-` in the
-        // program filename bail with a misleading "run `lgs build idl`"
-        // message even though `build idl` ran successfully.
-        let temp = tempfile::tempdir().expect("tempdir");
-        stage_guest_program(temp.path(), "my-program", true);
-        let idl_dir = temp.path().join("idl");
-        std::fs::create_dir_all(&idl_dir).expect("create idl dir");
-        std::fs::write(idl_dir.join("my_program.json"), br#"{"abi": []}"#)
-            .expect("stage sanitized IDL");
-
-        let mut project = make_test_project(temp.path().to_path_buf());
-        project.config.framework.kind = FRAMEWORK_KIND_LEZ_FRAMEWORK.to_string();
-
-        let hashes =
-            compute_program_hashes(&project).expect("must succeed with the sanitized IDL on disk");
-        assert!(hashes.contains_key("my-program"));
     }
 
     #[test]

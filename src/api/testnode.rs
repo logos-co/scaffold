@@ -267,7 +267,7 @@ mod tests {
         fs::write(
             root.join("scaffold.toml"),
             r#"[scaffold]
-version = "0.2.0"
+version = "0.3.0"
 cache_root = "cache"
 
 [repos.lez]
@@ -275,10 +275,6 @@ source = "https://example/lez.git"
 path = "lez"
 pin = "deadbeef"
 
-[repos.spel]
-source = "https://example/spel.git"
-path = "spel"
-pin = "deadbeef"
 
 [wallet]
 home_dir = ".scaffold/wallet"
@@ -287,9 +283,6 @@ home_dir = ".scaffold/wallet"
 kind = "default"
 version = "0.1.0"
 
-[framework.idl]
-spec = "lssa-idl/0.1.0"
-path = "idl"
 
 [localnet]
 port = 3040

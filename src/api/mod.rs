@@ -120,7 +120,9 @@ use crate::commands::wallet::{
     cmd_wallet_proxy, cmd_wallet_topup_inner, wallet_default_set_for_project,
     wallet_list_for_project,
 };
-use crate::constants::{DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, SEQUENCER_BIN_REL_PATH, WALLET_BIN_REL_PATH};
+use crate::constants::{
+    DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, SEQUENCER_BIN_REL_PATH, WALLET_BIN_REL_PATH,
+};
 use crate::project::{find_project_root, load_project_at, resolve_cache_root, resolve_repo_path};
 
 /// A scaffold-managed project, addressed by an explicit root directory.
@@ -724,21 +726,16 @@ mod tests {
     use super::*;
 
     /// Minimal valid scaffold.toml for fixture projects, mirroring what
-    /// `lgs new` writes (schema 0.2.0).
+    /// `lgs new` writes (schema 0.3.0).
     fn write_fixture_config(root: &Path) {
         fs::write(
             root.join("scaffold.toml"),
             r#"[scaffold]
-version = "0.2.0"
+version = "0.3.0"
 
 [repos.lez]
 source = "https://github.com/logos-blockchain/logos-execution-zone.git"
-pin = "cf3639d8252040d13b3d4e933feb19b42c76e14a"
-build = "cargo"
-
-[repos.spel]
-source = "https://github.com/logos-co/spel.git"
-pin = "73fc462eb8f0a4d00f1a846437c627ec2e523f83"
+pin = "1a003bfbfb89fcf987f62975cd08a401169e1b8c"
 build = "cargo"
 
 [wallet]
@@ -811,7 +808,11 @@ port = 3040
             .sequencer_binary
             .ends_with("target/release/sequencer_service"));
         assert!(paths.wallet_binary.ends_with("target/release/wallet"));
-        assert!(paths.spel_binary.ends_with("target/release/spel"));
+        assert_eq!(paths.localnet_home, temp.path().join(".scaffold/localnet"));
+        assert_eq!(
+            paths.deployments,
+            temp.path().join(".scaffold/state/deployments.json")
+        );
     }
 
     #[test]

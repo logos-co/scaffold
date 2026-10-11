@@ -504,15 +504,13 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::model::{
-        Config, FrameworkConfig, LocalnetConfig, RepoRef, RunConfig,
-    };
+    use crate::model::{Config, FrameworkConfig, LocalnetConfig, RepoRef, RunConfig};
 
     fn fixture_project(root: &Path, lez: RepoRef) -> Project {
         Project {
             root: root.to_path_buf(),
             config: Config {
-                version: "0.2.0".into(),
+                version: crate::constants::SCAFFOLD_TOML_SCHEMA_VERSION.into(),
                 cache_root: ".scaffold/cache".into(),
                 lez,
                 basecamp_repo: None,
@@ -585,7 +583,6 @@ mod tests {
         assert_eq!(pins.lez_source_origin, PinOrigin::ProjectConfig);
         assert_eq!(pins.lez_ref, "abc123");
         assert_eq!(pins.lez_ref_origin, PinOrigin::ProjectConfig);
-        assert_eq!(pins.circuits_version_origin, PinOrigin::ScaffoldDefault);
         assert_eq!(pins.checkout_ownership, CheckoutOwnership::ManagedCache);
         assert!(pins
             .lez_checkout
@@ -602,20 +599,6 @@ mod tests {
         .unwrap();
         assert_eq!(pins.lez_ref, "v9.9.9");
         assert_eq!(pins.lez_ref_origin, PinOrigin::CliOverride);
-    }
-
-    #[test]
-    fn circuits_version_uses_project_config_as_source_of_truth() {
-        let temp = tempdir().unwrap();
-        let mut project = fixture_project(temp.path(), RepoRef::default());
-        // Circuits version is project config (there is no CLI override): a
-        // non-default `[circuits].version` is the single pin that `pins`,
-        // `prepare`, and `start` all resolve and provision.
-        project.config.circuits.version = "0.9.9".into();
-
-        let pins = resolve_test_node_pins(&project, &PinOverrides::default()).unwrap();
-        assert_eq!(pins.circuits_version, "0.9.9");
-        assert_eq!(pins.circuits_version_origin, PinOrigin::ProjectConfig);
     }
 
     #[test]
@@ -741,7 +724,6 @@ mod tests {
             .collect();
         assert!(categories.contains(&TestNodeCheckCategory::CheckoutMissing));
         assert!(categories.contains(&TestNodeCheckCategory::MissingBinary));
-        assert!(categories.contains(&TestNodeCheckCategory::MissingCircuits));
     }
 
     #[test]

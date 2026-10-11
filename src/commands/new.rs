@@ -11,8 +11,7 @@ use crate::config::{
 };
 use crate::constants::{
     DEFAULT_BASECAMP_PIN, DEFAULT_FRAMEWORK_VERSION, DEFAULT_LEZ, DEFAULT_LGPM_PIN,
-    FRAMEWORK_KIND_DEFAULT, FRAMEWORK_KIND_LEZ_FRAMEWORK, LEZ_SOURCE,
-    SCAFFOLD_TOML_SCHEMA_VERSION,
+    FRAMEWORK_KIND_DEFAULT, FRAMEWORK_KIND_LEZ_FRAMEWORK, LEZ_SOURCE, SCAFFOLD_TOML_SCHEMA_VERSION,
 };
 use crate::model::{Config, FrameworkConfig, LocalnetConfig, RunConfig};
 use crate::project::bootstrap_cache_root;

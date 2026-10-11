@@ -26,16 +26,16 @@ use toml_edit::{value, DocumentMut, Item, Table};
 
 use crate::constants::{
     BASECAMP_ATTR, BASECAMP_SOURCE, DEFAULT_FRAMEWORK_VERSION, FRAMEWORK_KIND_DEFAULT,
-    FRAMEWORK_KIND_LEZ_FRAMEWORK, LEZ_SOURCE, LGPM_ATTR, LGPM_SOURCE,
-    SCAFFOLD_TOML_SCHEMA_VERSION,
+    FRAMEWORK_KIND_LEZ_FRAMEWORK, LEZ_SOURCE, LGPM_ATTR, LGPM_SOURCE, SCAFFOLD_TOML_SCHEMA_VERSION,
 };
 use crate::model::{
-    BasecampConfig, BasecampProfile, BuildConfig, Config, FrameworkConfig, GuestBuildMode, LocalnetConfig, ModuleEntry, ModuleRole, RepoBuild,
-    RepoRef, RunConfig, RunProfile, WatchConfig,
+    BasecampConfig, BasecampProfile, BuildConfig, Config, FrameworkConfig, GuestBuildMode,
+    LocalnetConfig, ModuleEntry, ModuleRole, RepoBuild, RepoRef, RunConfig, RunProfile,
+    WatchConfig,
 };
 use crate::DynResult;
 
-/// Parse a `scaffold.toml` text into a `Config`. Pre-0.2.0 schemas are
+/// Parse a `scaffold.toml` text into a `Config`. Older schemas (0.2.0 and pre-0.2.0) are
 /// rejected with a targeted error pointing at `init`.
 pub(crate) fn parse_config(text: &str) -> DynResult<Config> {
     let doc: DocumentMut = text
@@ -273,7 +273,7 @@ impl OldSchemaMarkers {
     }
 }
 
-/// Pragmatic detection of pre-0.2.0 schemas. Returns a flag-per-shape so the
+/// Pragmatic detection of older schemas. Returns a flag-per-shape so the
 /// caller can decide what (if anything) to surface. `init`'s migrator handles
 /// every variant we detect here, so the user-facing error in
 /// `detect_old_schema` does not enumerate them.
@@ -315,7 +315,7 @@ pub(crate) fn detect_old_schema_markers(doc: &DocumentMut, version: &str) -> Old
     m
 }
 
-/// Reject pre-0.2.0 schemas with a one-line, action-only error pointing at
+/// Reject older schemas with a one-line, action-only error pointing at
 /// `init`. The migrator handles every variant we detect, so the user only
 /// needs to know that a migration is required — not which specific shape
 /// tripped the check.
@@ -1145,12 +1145,10 @@ pub(crate) fn default_lgpm_repo(pin: &str) -> RepoRef {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{
-        DEFAULT_BASECAMP_PIN, DEFAULT_CIRCUITS_VERSION, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL,
-    };
+    use crate::constants::{DEFAULT_BASECAMP_PIN, DEFAULT_LEZ, DEFAULT_LGPM_PIN};
 
     fn base_config() -> Config {
-        parse_config(&minimal_current()).expect("parse minimal v0.2.0")
+        parse_config(&minimal_current()).expect("parse minimal current config")
     }
 
     fn minimal_current() -> String {
@@ -1308,28 +1306,6 @@ risc0_docker_tag = "r0.1.91.1 && rm -rf /"
         assert!(!text.contains("risc0_docker_tag"), "got:\n{text}");
         let parsed = parse_config(&text).expect("reparse");
         assert_eq!(parsed.build, cfg.build);
-    }
-
-    #[test]
-    fn circuits_round_trips_through_serialize() {
-        let toml = minimal_current()
-            + r#"
-[circuits]
-version = "9.9.9"
-url_template = "https://example.invalid/circuits-v{version}-{triple}.tar.gz"
-install_dir = "vendor/circuits"
-"#;
-        let cfg1 = parse_config(&toml).expect("parse");
-        let serialized = serialize_config(&cfg1).expect("serialize");
-        assert!(serialized.contains("[circuits]"), "{serialized}");
-        assert!(serialized.contains("version = \"9.9.9\""), "{serialized}");
-        assert!(
-            serialized.contains("install_dir = \"vendor/circuits\""),
-            "{serialized}"
-        );
-        let cfg2 = parse_config(&serialized).expect("re-parse");
-        assert_eq!(cfg2.circuits.version, "9.9.9");
-        assert_eq!(cfg2.circuits.install_dir, "vendor/circuits");
     }
 
     #[test]
@@ -1712,7 +1688,7 @@ source = "https://example/basecamp"
         let err = parse_config(&toml).unwrap_err();
         assert!(err.to_string().contains("logos-scaffold init"), "{err}");
         let doc: DocumentMut = toml.parse().expect("re-parse for markers");
-        let markers = detect_old_schema_markers(&doc, "0.2.0");
+        let markers = detect_old_schema_markers(&doc, "0.3.0");
         assert!(markers.has_old_basecamp_keys, "{markers:?}");
     }
 
@@ -1727,7 +1703,7 @@ role = "project"
         let err = parse_config(&toml).unwrap_err();
         assert!(err.to_string().contains("logos-scaffold init"), "{err}");
         let doc: DocumentMut = toml.parse().expect("re-parse for markers");
-        let markers = detect_old_schema_markers(&doc, "0.2.0");
+        let markers = detect_old_schema_markers(&doc, "0.3.0");
         assert!(markers.has_old_basecamp_modules, "{markers:?}");
     }
 
@@ -1745,9 +1721,29 @@ role = "project"
 
     #[test]
     fn rejects_pre_v0_2_0_version() {
-        let toml = minimal_current().replace("version = \"0.2.0\"", "version = \"0.1.1\"");
+        let toml = minimal_current().replace("version = \"0.3.0\"", "version = \"0.1.1\"");
         let err = parse_config(&toml).unwrap_err();
         assert!(err.to_string().contains("logos-scaffold init"), "{err}");
+    }
+
+    /// The LEZ 0.1/0.2-era schema (with `[repos.spel]` / `[circuits]`) is an
+    /// old schema too: `init` must migrate it.
+    #[test]
+    fn rejects_lez_0_2_era_schema_with_init_hint() {
+        let toml = minimal_current().replace("version = \"0.3.0\"", "version = \"0.2.0\"")
+            + "\n[repos.spel]\nsource = \"https://github.com/logos-co/spel.git\"\npin = \"abc\"\n";
+        let err = parse_config(&toml).unwrap_err();
+        assert!(err.to_string().contains("logos-scaffold init"), "{err}");
+        let doc: DocumentMut = toml.parse().expect("re-parse for markers");
+        assert!(detect_old_schema_markers(&doc, "0.2.0").version_stale);
+    }
+
+    #[test]
+    fn rejects_lez_framework_projects_with_a_spel_explanation() {
+        let toml = minimal_current().replace("kind = \"default\"", "kind = \"lez-framework\"");
+        let err = parse_config(&toml).unwrap_err();
+        assert!(err.to_string().contains("spel"), "{err}");
+        assert!(err.to_string().contains("LEZ 0.3"), "{err}");
     }
 
     #[test]
@@ -1758,7 +1754,8 @@ role = "project"
         assert_eq!(cfg2.version, cfg1.version);
         assert_eq!(cfg2.lez.source, cfg1.lez.source);
         assert_eq!(cfg2.lez.pin, cfg1.lez.pin);
-        assert_eq!(cfg2.spel.pin, cfg1.spel.pin);
+        assert!(!serialized.contains("spel"), "{serialized}");
+        assert!(!serialized.contains("[circuits]"), "{serialized}");
     }
 
     #[test]
@@ -1789,7 +1786,7 @@ role = "project"
         let serialized = serialize_config(&cfg).expect("serialize");
         assert!(
             !serialized.contains("url ="),
-            "url field should not be emitted in 0.2.0 schema:\n{serialized}"
+            "url field should not be emitted in the current schema:\n{serialized}"
         );
     }
 
@@ -1804,7 +1801,7 @@ role = "project"
         let err = parse_config(&toml).expect_err("lssa section should be rejected");
         assert!(err.to_string().contains("init"), "{err}");
         let doc: DocumentMut = toml.parse().expect("re-parse for markers");
-        let markers = detect_old_schema_markers(&doc, "0.2.0");
+        let markers = detect_old_schema_markers(&doc, "0.3.0");
         assert!(markers.has_lssa, "{markers:?}");
     }
 

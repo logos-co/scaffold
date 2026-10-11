@@ -639,12 +639,8 @@ mod tests {
     #[test]
     fn privacy_preserving_tx_marks_block_partially_parsed() {
         let pp_tx = vec![1_u8, 0xDE, 0xAD]; // tag 1 + opaque bytes
-        let info = parse_block_info(&fake_block(
-            9,
-            1_700_000_002_000,
-            &[fake_fee_tx(), pp_tx],
-        ))
-        .unwrap();
+        let info =
+            parse_block_info(&fake_block(9, 1_700_000_002_000, &[fake_fee_tx(), pp_tx])).unwrap();
         assert!(!info.fully_parsed);
         assert_eq!(info.transaction_count, 2);
         assert_eq!(info.transactions.len(), 1);

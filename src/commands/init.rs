@@ -162,7 +162,7 @@ pub(crate) fn cmd_init_at(
         return Ok(());
     }
 
-    // Fresh init — schema 0.2.0 by construction. Create the .scaffold/
+    // Fresh init — the current schema by construction. Create the .scaffold/
     // directories first so that a failure here leaves no scaffold.toml
     // behind and a re-run starts cleanly.
     let cfg = fresh_default_config();
@@ -232,12 +232,15 @@ fn fresh_default_config() -> Config {
 mod tests {
     use super::*;
     use crate::config::parse_config;
-    use crate::constants::{BASECAMP_ATTR, LEZ_SOURCE, LGPM_ATTR, SPEL_SOURCE};
+    use crate::constants::{BASECAMP_ATTR, LEZ_SOURCE, LGPM_ATTR};
+
+    const OLD_SPEL_SOURCE: &str = "https://github.com/logos-co/spel.git";
+    const OLD_SPEL_PIN: &str = "73fc462eb8f0a4d00f1a846437c627ec2e523f83";
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
-    fn init_writes_parseable_v0_2_0_scaffold_toml() {
+    fn init_writes_parseable_current_scaffold_toml() {
         let temp = tempdir().expect("tempdir");
         let target = temp.path();
         cmd_init_at(target, "lgs", false, false).expect("init");
@@ -247,7 +250,6 @@ mod tests {
 
         assert_eq!(cfg.version, SCAFFOLD_TOML_SCHEMA_VERSION);
         assert_eq!(cfg.lez.pin, DEFAULT_LEZ.sha);
-        assert_eq!(cfg.spel.pin, DEFAULT_SPEL.sha);
         assert_eq!(cfg.framework.kind, FRAMEWORK_KIND_DEFAULT);
         assert_eq!(cfg.wallet_home_dir, ".scaffold/wallet");
         assert_eq!(cfg.localnet.port, 3040);
@@ -267,7 +269,7 @@ mod tests {
         let text = fs::read_to_string(target.join("scaffold.toml")).expect("read");
         assert!(
             !text.contains("url ="),
-            "v0.2.0 scaffold.toml must not contain url field; got:\n{text}"
+            "the current scaffold.toml must not contain url field; got:\n{text}"
         );
     }
 
@@ -364,12 +366,12 @@ home_dir = ".scaffold/wallet"
             "comments preserved; got:\n{after}"
         );
         assert!(
-            after.contains("version = \"0.2.0\""),
+            after.contains("version = \"0.3.0\""),
             "version bumped; got:\n{after}"
         );
         assert!(
-            after.contains("[repos.spel]"),
-            "spel appended; got:\n{after}"
+            !after.contains("[repos.spel]"),
+            "no spel section in the LEZ 0.3 schema; got:\n{after}"
         );
         assert!(!after.contains("url ="), "url stripped; got:\n{after}");
         // Re-parse must succeed.
@@ -493,7 +495,7 @@ pin = "{}"
 [wallet]
 home_dir = ".scaffold/wallet"
 "#,
-            LEZ_SOURCE, DEFAULT_LEZ.sha, SPEL_SOURCE, DEFAULT_SPEL.sha,
+            LEZ_SOURCE, DEFAULT_LEZ.sha, OLD_SPEL_SOURCE, OLD_SPEL_PIN,
         );
         fs::write(target.join("scaffold.toml"), seed).expect("seed");
         cmd_init_at(target, "lgs", false, false).expect("migrate");
@@ -502,6 +504,7 @@ home_dir = ".scaffold/wallet"
         assert!(after.contains("# preserved comment"), "{after}");
         assert!(after.contains("[repos.lez]"), "{after}");
         assert!(!after.contains("[repos.lssa]"), "{after}");
+        assert!(!after.contains("[repos.spel]"), "{after}");
         let cfg = parse_config(&after).expect("re-parse");
         assert_eq!(cfg.lez.source, LEZ_SOURCE);
         assert_eq!(cfg.lez.pin, DEFAULT_LEZ.sha);
@@ -530,7 +533,7 @@ pin = "{}"
 [wallet]
 home_dir = ".scaffold/wallet"
 "#,
-            LEZ_SOURCE, DEFAULT_LEZ.sha, SPEL_SOURCE, DEFAULT_SPEL.sha,
+            LEZ_SOURCE, DEFAULT_LEZ.sha, OLD_SPEL_SOURCE, OLD_SPEL_PIN,
         );
         fs::write(target.join("scaffold.toml"), seed).expect("seed");
         cmd_init_at(target, "lgs", false, false).expect("migrate");
@@ -563,7 +566,7 @@ pin = "{}"
 [wallet]
 home_dir = ".scaffold/wallet"
 "#,
-            LEZ_SOURCE, LEZ_SOURCE, DEFAULT_LEZ.sha, SPEL_SOURCE, DEFAULT_SPEL.sha,
+            LEZ_SOURCE, LEZ_SOURCE, DEFAULT_LEZ.sha, OLD_SPEL_SOURCE, OLD_SPEL_PIN,
         );
         fs::write(target.join("scaffold.toml"), seed).expect("seed");
         cmd_init_at(target, "lgs", false, false).expect("migrate");
@@ -665,7 +668,7 @@ home_dir = ".scaffold/wallet"
 
         let after = fs::read_to_string(target.join("scaffold.toml")).expect("read");
         assert!(
-            after.contains("0.2.0"),
+            after.contains("0.3.0"),
             "scaffold.toml migrated; got:\n{after}"
         );
     }
@@ -738,7 +741,7 @@ home_dir = ".scaffold/wallet"
         cmd_init_at(target, "lgs", false, true).expect("migrate with --no-backup");
         let after = fs::read_to_string(target.join("scaffold.toml")).expect("read");
         assert!(
-            after.contains("0.2.0"),
+            after.contains("0.3.0"),
             "no-backup form must still migrate; got:\n{after}"
         );
     }
@@ -780,7 +783,7 @@ home_dir = ".scaffold/wallet"
         let target = temp.path();
         // First, a normal init.
         cmd_init_at(target, "lgs", false, false).expect("init");
-        // Simulate a wedge: scaffold.toml landed at v0.2.0 but `.scaffold/` is gone.
+        // Simulate a wedge: scaffold.toml landed at the current schema but `.scaffold/` is gone.
         fs::remove_dir_all(target.join(".scaffold")).expect("nuke .scaffold");
         assert!(target.join("scaffold.toml").exists());
         assert!(!target.join(".scaffold/state").exists());

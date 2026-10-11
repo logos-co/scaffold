@@ -11,8 +11,7 @@ use toml_edit::{value, DocumentMut, Item, Table};
 
 use crate::constants::{
     BASECAMP_ATTR, BASECAMP_SOURCE, DEFAULT_BASECAMP_PIN, DEFAULT_LEZ, DEFAULT_LGPM_PIN,
-    FRAMEWORK_KIND_LEZ_FRAMEWORK, LEZ_SOURCE, LGPM_ATTR, LGPM_SOURCE,
-    SCAFFOLD_TOML_SCHEMA_VERSION,
+    FRAMEWORK_KIND_LEZ_FRAMEWORK, LEZ_SOURCE, LGPM_ATTR, LGPM_SOURCE, SCAFFOLD_TOML_SCHEMA_VERSION,
 };
 use crate::model::{RepoBuild, RepoRef};
 use crate::DynResult;
@@ -292,7 +291,11 @@ fn migrate_lez_pin(doc: &mut DocumentMut, report: &mut MigrationReport) {
     else {
         return;
     };
-    let old_pin = lez.get("pin").and_then(Item::as_str).unwrap_or("").to_string();
+    let old_pin = lez
+        .get("pin")
+        .and_then(Item::as_str)
+        .unwrap_or("")
+        .to_string();
     if old_pin == DEFAULT_LEZ.sha {
         return;
     }
@@ -312,7 +315,11 @@ fn migrate_lez_pin(doc: &mut DocumentMut, report: &mut MigrationReport) {
     lez["pin"] = value(DEFAULT_LEZ.sha);
     report.changes.push(format!(
         "re-pinned [repos.lez] {} -> {} ({}); run `logos-scaffold setup` to rebuild",
-        if old_pin.is_empty() { "<unset>" } else { old_pin.as_str() },
+        if old_pin.is_empty() {
+            "<unset>"
+        } else {
+            old_pin.as_str()
+        },
         DEFAULT_LEZ.sha,
         DEFAULT_LEZ.tag,
     ));
@@ -383,10 +390,11 @@ mod tests {
 
     #[test]
     fn migrator_short_circuits_on_current_version_and_preserves_stray_lssa() {
-        // A user keeps a hand-rolled [repos.lssa] in a v0.2.0 file (e.g. a fork
-        // that re-uses the old name). The migrator must not silently drop it.
+        // A user keeps a hand-rolled [repos.lssa] in a current-schema file
+        // (e.g. a fork that re-uses the old name). The migrator must not
+        // silently drop it.
         let seed = r#"[scaffold]
-version = "0.2.0"
+version = "0.3.0"
 
 [repos.lssa]
 source = "https://example.com/lssa.git"
@@ -395,17 +403,13 @@ pin = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 [repos.lez]
 source = "https://example.com/lez.git"
 pin = "abc123abc123abc123abc123abc123abc123abc1"
-
-[repos.spel]
-source = "https://example.com/spel.git"
-pin = "feedfacefeedfacefeedfacefeedfacefeedface"
 "#;
         let mut doc: DocumentMut = seed.parse().expect("parse seed");
-        let report = migrate_to_v0_2_0(&mut doc).expect("migrate");
+        let report = migrate_to_current(&mut doc).expect("migrate");
 
         assert!(
             report.changes.is_empty(),
-            "no changes expected when already at v0.2.0, got: {:?}",
+            "no changes expected when already current, got: {:?}",
             report.changes,
         );
         let after = doc.to_string();
@@ -472,7 +476,7 @@ flake = "path:./new-foo"
 role = "project"
 "#;
         let mut doc: DocumentMut = input.parse().expect("parse seed");
-        let err = match migrate_to_v0_2_0(&mut doc) {
+        let err = match migrate_to_current(&mut doc) {
             Ok(_) => panic!("expected collision error, migration succeeded"),
             Err(e) => e,
         };
@@ -524,7 +528,7 @@ flake = "path:./legacy-foo"
 role = "project"
 "#;
         let mut doc: DocumentMut = input.parse().expect("parse seed");
-        let report = migrate_to_v0_2_0(&mut doc).expect("migration succeeds");
+        let report = migrate_to_current(&mut doc).expect("migration succeeds");
         assert!(
             report
                 .changes
@@ -542,5 +546,104 @@ role = "project"
             .and_then(Item::as_str)
             .expect("modules.foo.flake present after move");
         assert_eq!(moved, "path:./legacy-foo");
+    }
+
+    const LEZ_0_2_ERA: &str = r#"# my project
+[scaffold]
+version = "0.2.0"
+
+[repos.lez]
+source = "https://github.com/logos-blockchain/logos-execution-zone.git"
+pin = "cf3639d8252040d13b3d4e933feb19b42c76e14a"
+
+[repos.spel]
+source = "https://github.com/logos-co/spel.git"
+pin = "73fc462eb8f0a4d00f1a846437c627ec2e523f83"
+
+[wallet]
+home_dir = ".scaffold/wallet"
+
+[framework]
+kind = "default"
+version = "0.1.0"
+
+[framework.idl]
+spec = "lssa-idl/0.1.0"
+path = "idl"
+
+[localnet]
+port = 3055
+risc0_dev_mode = true
+
+[circuits]
+version = "0.4.1"
+"#;
+
+    #[test]
+    fn migrates_lez_0_2_era_config_to_lez_0_3() {
+        let mut doc: DocumentMut = LEZ_0_2_ERA.parse().expect("parse seed");
+        let report = migrate_to_current(&mut doc).expect("migrate");
+        let after = doc.to_string();
+
+        assert!(
+            after.starts_with("# my project"),
+            "comments survive:\n{after}"
+        );
+        assert!(after.contains("version = \"0.3.0\""), "{after}");
+        assert!(!after.contains("[repos.spel]"), "{after}");
+        assert!(!after.contains("[circuits]"), "{after}");
+        assert!(!after.contains("[framework.idl]"), "{after}");
+        assert!(
+            after.contains(&format!("pin = \"{}\"", DEFAULT_LEZ.sha)),
+            "LEZ re-pinned:\n{after}"
+        );
+        assert!(
+            after.contains("port = 3055"),
+            "unrelated settings kept:\n{after}"
+        );
+        assert!(
+            report
+                .changes
+                .iter()
+                .any(|c| c.contains("re-pinned [repos.lez]")),
+            "{:?}",
+            report.changes
+        );
+        // The result is a valid current config.
+        crate::config::parse_config(&after).expect("migrated config parses");
+    }
+
+    #[test]
+    fn migration_keeps_a_fork_pin_and_asks_for_a_hand_edit() {
+        let seed = LEZ_0_2_ERA.replace(
+            "https://github.com/logos-blockchain/logos-execution-zone.git",
+            "https://example.com/my-lez-fork.git",
+        );
+        let mut doc: DocumentMut = seed.parse().expect("parse seed");
+        let report = migrate_to_current(&mut doc).expect("migrate");
+        let after = doc.to_string();
+        assert!(
+            after.contains("cf3639d8252040d13b3d4e933feb19b42c76e14a"),
+            "{after}"
+        );
+        assert!(
+            report
+                .hand_edit_hint
+                .as_deref()
+                .is_some_and(|hint| hint.contains("fork")),
+            "{:?}",
+            report.hand_edit_hint
+        );
+    }
+
+    #[test]
+    fn migration_refuses_lez_framework_projects_without_touching_them() {
+        let seed = LEZ_0_2_ERA.replace("kind = \"default\"", "kind = \"lez-framework\"");
+        let mut doc: DocumentMut = seed.parse().expect("parse seed");
+        let Err(err) = migrate_to_current(&mut doc) else {
+            panic!("a lez-framework project must be refused");
+        };
+        assert!(err.to_string().contains("spel"), "{err}");
+        assert_eq!(doc.to_string(), seed, "nothing rewritten on refusal");
     }
 }

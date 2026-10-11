@@ -142,10 +142,16 @@ pub(crate) fn prepare_wallet_home(lez_repo: &Path, wallet_home: &Path, port: u16
     }
     let text = fs::read_to_string(&cfg_dst)?;
     let mut config: serde_json::Value = serde_json::from_str(&text).map_err(|err| {
-        anyhow::anyhow!("failed to parse wallet config at {}: {err}", cfg_dst.display())
+        anyhow::anyhow!(
+            "failed to parse wallet config at {}: {err}",
+            cfg_dst.display()
+        )
     })?;
     let root = config.as_object_mut().ok_or_else(|| {
-        anyhow::anyhow!("wallet config at {} is not a JSON object", cfg_dst.display())
+        anyhow::anyhow!(
+            "wallet config at {} is not a JSON object",
+            cfg_dst.display()
+        )
     })?;
     let sequencer = root
         .entry("sequencer")
@@ -243,7 +249,10 @@ mod tests {
             &fs::read_to_string(wallet_home.join(WALLET_CONFIG_PRIMARY)).expect("read"),
         )
         .expect("json");
-        assert_eq!(copied["sequencer"]["sequencer_addr"], "http://127.0.0.1:3055");
+        assert_eq!(
+            copied["sequencer"]["sequencer_addr"],
+            "http://127.0.0.1:3055"
+        );
         assert_eq!(copied["seq_poll_timeout"], "30s");
 
         // A later port change is applied to the existing config.
@@ -252,7 +261,10 @@ mod tests {
             &fs::read_to_string(wallet_home.join(WALLET_CONFIG_PRIMARY)).expect("read"),
         )
         .expect("json");
-        assert_eq!(updated["sequencer"]["sequencer_addr"], "http://127.0.0.1:3077");
+        assert_eq!(
+            updated["sequencer"]["sequencer_addr"],
+            "http://127.0.0.1:3077"
+        );
     }
 
     #[test]

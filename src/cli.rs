@@ -81,9 +81,7 @@ enum Commands {
     #[command(about = "Alias for `create`")]
     #[command(before_long_help = NEW_ABOUT.as_str())]
     New(NewArgs),
-    #[command(
-        about = "Sync dependencies and build project-local binaries (sequencer, wallet)"
-    )]
+    #[command(about = "Sync dependencies and build project-local binaries (sequencer, wallet)")]
     Setup(SetupArgs),
     #[command(about = "Build the project workspace and guest programs")]
     Build(BuildArgs),

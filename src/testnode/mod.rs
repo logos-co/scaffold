@@ -895,7 +895,7 @@ pub fn acquire_run_slot(cache_root: &Path, max_parallel: usize) -> DynResult<Run
 mod tests {
     use std::fs;
 
-    use crate::constants::{SEQUENCER_CONFIG_NESTED_REL_PATH, SEQUENCER_CONFIG_REL_PATH};
+    use crate::constants::SEQUENCER_CONFIG_REL_PATH;
     use tempfile::tempdir;
 
     use super::*;
@@ -914,19 +914,18 @@ mod tests {
         fs::create_dir_all(config_path.parent().unwrap()).unwrap();
         fs::write(
             &config_path,
-            r#"{ "home": ".", "genesis_id": 1, "port": 3040, "block_create_timeout": "2s", "retry_pending_blocks_timeout": "3s" }"#,
+            r#"{ "home": ".", "port": 3040, "block_create_timeout": "2s", "retry_pending_blocks_timeout": "3s" }"#,
         )
         .unwrap();
 
         let (dest, genesis) =
-            write_node_config(&lez, &work, 41234, BlockTimingOverrides::default()).unwrap();
-        assert_eq!(genesis, 1);
+            write_node_config(&lez, &work, BlockTimingOverrides::default()).unwrap();
+        assert_eq!(genesis, GENESIS_BLOCK_ID);
         assert_eq!(dest, work.join("sequencer_config.json"));
 
         let doc: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
         assert_eq!(doc["home"], serde_json::json!(work.display().to_string()));
-        assert_eq!(doc["port"], serde_json::json!(41234));
         assert_eq!(doc["max_block_size"], serde_json::json!("8 MiB"));
         assert_eq!(doc["block_create_timeout"], serde_json::json!("2s"));
         assert_eq!(doc["retry_pending_blocks_timeout"], serde_json::json!("3s"));
@@ -935,35 +934,6 @@ mod tests {
         let src: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
         assert_eq!(src["home"], serde_json::json!("."));
-        assert_eq!(src["port"], serde_json::json!(3040));
-    }
-
-    #[test]
-    fn write_node_config_accepts_nested_lez_layout() {
-        let temp = tempdir().unwrap();
-        let lez = temp.path().join("lez");
-        let work = temp.path().join("node");
-        fs::create_dir_all(&work).unwrap();
-
-        // Newer LEZ pins moved the repository payload under a `lez/` prefix.
-        // Test-node startup should use the same config probing as localnet.
-        let config_path = lez.join(SEQUENCER_CONFIG_NESTED_REL_PATH);
-        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        fs::write(
-            &config_path,
-            r#"{ "home": ".", "genesis_id": 7, "port": 3040 }"#,
-        )
-        .unwrap();
-
-        let (dest, genesis) =
-            write_node_config(&lez, &work, 41235, BlockTimingOverrides::default()).unwrap();
-        assert_eq!(genesis, 7);
-
-        let doc: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
-        assert_eq!(doc["home"], serde_json::json!(work.display().to_string()));
-        assert_eq!(doc["port"], serde_json::json!(41235));
-        assert_eq!(doc["max_block_size"], serde_json::json!("8 MiB"));
     }
 
     #[test]
@@ -974,11 +944,11 @@ mod tests {
         fs::create_dir_all(&work).unwrap();
         let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
         fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        fs::write(&config_path, r#"{ "home": ".", "genesis_id": 1 }"#).unwrap();
+        fs::write(&config_path, r#"{ "home": "." }"#).unwrap();
 
         let (dest, genesis) =
-            write_node_config(&lez, &work, 41234, BlockTimingOverrides::default()).unwrap();
-        assert_eq!(genesis, 1);
+            write_node_config(&lez, &work, BlockTimingOverrides::default()).unwrap();
+        assert_eq!(genesis, GENESIS_BLOCK_ID);
 
         let doc: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
@@ -996,7 +966,7 @@ mod tests {
         fs::create_dir_all(config_path.parent().unwrap()).unwrap();
         fs::write(
             &config_path,
-            r#"{ "home": ".", "genesis_id": 1, "block_create_timeout": "2s", "retry_pending_blocks_timeout": "3s" }"#,
+            r#"{ "home": ".", "block_create_timeout": "2s", "retry_pending_blocks_timeout": "3s" }"#,
         )
         .unwrap();
 
@@ -1005,8 +975,8 @@ mod tests {
             retry_pending_blocks_timeout_ms: Some(250),
         };
 
-        let (dest, genesis) = write_node_config(&lez, &work, 41234, block_timing).unwrap();
-        assert_eq!(genesis, 1);
+        let (dest, genesis) = write_node_config(&lez, &work, block_timing).unwrap();
+        assert_eq!(genesis, GENESIS_BLOCK_ID);
 
         let doc: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
@@ -1030,15 +1000,15 @@ mod tests {
         fs::create_dir_all(&work).unwrap();
         let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
         fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        fs::write(&config_path, r#"{ "home": ".", "genesis_id": 1 }"#).unwrap();
+        fs::write(&config_path, r#"{ "home": "." }"#).unwrap();
 
         let block_timing = BlockTimingOverrides {
             block_create_timeout_ms: Some(MIN_BLOCK_TIMING_TIMEOUT_MS),
             retry_pending_blocks_timeout_ms: Some(MAX_BLOCK_TIMING_TIMEOUT_MS),
         };
 
-        let (dest, genesis) = write_node_config(&lez, &work, 41234, block_timing).unwrap();
-        assert_eq!(genesis, 1);
+        let (dest, genesis) = write_node_config(&lez, &work, block_timing).unwrap();
+        assert_eq!(genesis, GENESIS_BLOCK_ID);
 
         let doc: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
@@ -1057,17 +1027,17 @@ mod tests {
         fs::create_dir_all(&work).unwrap();
         let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
         fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        fs::write(&config_path, r#"{ "home": ".", "genesis_id": 7 }"#).unwrap();
+        fs::write(&config_path, r#"{ "home": "." }"#).unwrap();
         fs::write(runtime_config_path(&work), "old config").unwrap();
 
         let (dest, genesis) =
-            write_node_config(&lez, &work, 41234, BlockTimingOverrides::default()).unwrap();
-        assert_eq!(genesis, 7);
+            write_node_config(&lez, &work, BlockTimingOverrides::default()).unwrap();
+        assert_eq!(genesis, GENESIS_BLOCK_ID);
         assert_eq!(dest, runtime_config_path(&work));
 
         let doc: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
-        assert_eq!(doc["genesis_id"], serde_json::json!(7));
+        assert_eq!(doc["home"], serde_json::json!(work.display().to_string()));
     }
 
     #[test]
@@ -1098,14 +1068,18 @@ mod tests {
     }
 
     #[test]
-    fn write_node_config_injects_seeded_initial_accounts() {
+    fn write_node_config_replaces_genesis_with_seeded_supply() {
         let temp = tempdir().unwrap();
         let lez = temp.path().join("lez");
         let work = temp.path().join("node");
         fs::create_dir_all(&work).unwrap();
         let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
         fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        fs::write(&config_path, r#"{ "home": ".", "genesis_id": 1 }"#).unwrap();
+        fs::write(
+            &config_path,
+            r#"{ "home": ".", "genesis": [{"supply_account": {"account_id": "debugAcct", "balance": 9}}] }"#,
+        )
+        .unwrap();
 
         // Place a seed.json as `--state <seeded dir>` would.
         fs::write(
@@ -1121,42 +1095,23 @@ mod tests {
         )
         .unwrap();
 
-        let (dest, _) =
-            write_node_config(&lez, &work, 41234, BlockTimingOverrides::default()).unwrap();
+        let (dest, _) = write_node_config(&lez, &work, BlockTimingOverrides::default()).unwrap();
         let doc: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
+        let genesis = doc["genesis"].as_array().unwrap();
+        // The debug genesis is replaced; the seeded account and the dev funder remain.
+        assert_eq!(genesis.len(), 2, "{genesis:?}");
         assert_eq!(
-            doc["initial_public_accounts"][0]["account_id"],
+            genesis[0]["supply_account"]["account_id"],
             serde_json::json!("6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV")
         );
         assert_eq!(
-            doc["initial_public_accounts"][0]["balance"],
+            genesis[0]["supply_account"]["balance"],
             serde_json::json!(42)
         );
         assert_eq!(
-            doc["initial_private_accounts"],
-            serde_json::json!([]),
-            "private accounts key must be present (empty) so the sequencer skips the \
-             testnet default state"
-        );
-    }
-
-    #[test]
-    fn write_node_config_requires_genesis_id() {
-        let temp = tempdir().unwrap();
-        let lez = temp.path().join("lez");
-        let work = temp.path().join("node");
-        fs::create_dir_all(&work).unwrap();
-        let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
-        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        fs::write(&config_path, r#"{ "home": "." }"#).unwrap();
-
-        let err =
-            write_node_config(&lez, &work, 41234, BlockTimingOverrides::default()).unwrap_err();
-        assert!(err.to_string().contains("genesis_id"), "{err}");
-        assert!(
-            !runtime_config_path(&work).exists(),
-            "runtime config must not be written when genesis_id is invalid"
+            genesis[1]["supply_account"]["account_id"],
+            serde_json::json!(crate::constants::DEV_FUNDER_ACCOUNT_ID)
         );
     }
 
@@ -1171,32 +1126,23 @@ mod tests {
         fs::write(&config_path, r#"{ "home": "." }"#).unwrap();
         let existing = r#"{"existing":true}"#;
         fs::write(runtime_config_path(&work), existing).unwrap();
+        // A seed LEZ 0.3 genesis cannot apply (private accounts) fails validation.
+        fs::write(
+            work.join("seed.json"),
+            serde_json::json!({
+                "format": "lgs-state-snapshot/1",
+                "public_accounts": [],
+                "private_accounts": [{ "npk": vec![1_u8; 32], "account": {} }],
+            })
+            .to_string(),
+        )
+        .unwrap();
 
-        let err =
-            write_node_config(&lez, &work, 41234, BlockTimingOverrides::default()).unwrap_err();
-        assert!(err.to_string().contains("genesis_id"), "{err}");
+        let err = write_node_config(&lez, &work, BlockTimingOverrides::default()).unwrap_err();
+        assert!(err.to_string().contains("private account"), "{err:#}");
         assert_eq!(
             fs::read_to_string(runtime_config_path(&work)).unwrap(),
             existing
-        );
-    }
-
-    #[test]
-    fn write_node_config_rejects_non_numeric_genesis_id_without_writing_runtime_config() {
-        let temp = tempdir().unwrap();
-        let lez = temp.path().join("lez");
-        let work = temp.path().join("node");
-        fs::create_dir_all(&work).unwrap();
-        let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
-        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        fs::write(&config_path, r#"{ "home": ".", "genesis_id": "1" }"#).unwrap();
-
-        let err =
-            write_node_config(&lez, &work, 41234, BlockTimingOverrides::default()).unwrap_err();
-        assert!(err.to_string().contains("genesis_id"), "{err}");
-        assert!(
-            !runtime_config_path(&work).exists(),
-            "runtime config must not be written when genesis_id is invalid"
         );
     }
 
@@ -1210,8 +1156,7 @@ mod tests {
         fs::create_dir_all(config_path.parent().unwrap()).unwrap();
         fs::write(&config_path, "{ not json").unwrap();
 
-        let err =
-            write_node_config(&lez, &work, 41234, BlockTimingOverrides::default()).unwrap_err();
+        let err = write_node_config(&lez, &work, BlockTimingOverrides::default()).unwrap_err();
         assert!(
             err.to_string()
                 .contains("failed to parse sequencer_config.json"),
@@ -1233,8 +1178,7 @@ mod tests {
         fs::create_dir_all(config_path.parent().unwrap()).unwrap();
         fs::write(&config_path, "[]").unwrap();
 
-        let err =
-            write_node_config(&lez, &work, 41234, BlockTimingOverrides::default()).unwrap_err();
+        let err = write_node_config(&lez, &work, BlockTimingOverrides::default()).unwrap_err();
         assert!(err.to_string().contains("is not a JSON object"), "{err}");
         assert!(
             !runtime_config_path(&work).exists(),
@@ -1312,13 +1256,13 @@ mod tests {
         fs::write(src_a.join("rocksdb/sub/file.sst"), "data").unwrap();
         let work_a = temp.path().join("node-a");
         fs::create_dir_all(&work_a).unwrap();
-        seed_state_dir(&src_a, &work_a).unwrap();
+        seed_state_dir(&src_a, &work_a, "rocksdb-01").unwrap();
         assert_eq!(
-            fs::read_to_string(work_a.join("rocksdb/CURRENT")).unwrap(),
+            fs::read_to_string(work_a.join("rocksdb-01/CURRENT")).unwrap(),
             "manifest"
         );
         assert_eq!(
-            fs::read_to_string(work_a.join("rocksdb/sub/file.sst")).unwrap(),
+            fs::read_to_string(work_a.join("rocksdb-01/sub/file.sst")).unwrap(),
             "data"
         );
 
@@ -1328,10 +1272,23 @@ mod tests {
         fs::write(src_b.join("CURRENT"), "manifest-b").unwrap();
         let work_b = temp.path().join("node-b");
         fs::create_dir_all(&work_b).unwrap();
-        seed_state_dir(&src_b, &work_b).unwrap();
+        seed_state_dir(&src_b, &work_b, "rocksdb-01").unwrap();
         assert_eq!(
-            fs::read_to_string(work_b.join("rocksdb/CURRENT")).unwrap(),
+            fs::read_to_string(work_b.join("rocksdb-01/CURRENT")).unwrap(),
             "manifest-b"
+        );
+
+        // Layout C: a LEZ 0.3 sequencer home (an exported node work dir).
+        let src_c = temp.path().join("state-c");
+        fs::create_dir_all(src_c.join("rocksdb-0101")).unwrap();
+        fs::write(src_c.join("rocksdb-0101/CURRENT"), "manifest-c").unwrap();
+        fs::write(src_c.join("bedrock_signing_key"), "key").unwrap();
+        let work_c = temp.path().join("node-c");
+        fs::create_dir_all(&work_c).unwrap();
+        seed_state_dir(&src_c, &work_c, "rocksdb-01").unwrap();
+        assert_eq!(
+            fs::read_to_string(work_c.join("rocksdb-01/CURRENT")).unwrap(),
+            "manifest-c"
         );
     }
 
@@ -1340,7 +1297,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let work = temp.path().join("node");
         fs::create_dir_all(&work).unwrap();
-        let err = seed_state_dir(&temp.path().join("nope"), &work).unwrap_err();
+        let err = seed_state_dir(&temp.path().join("nope"), &work, "rocksdb-01").unwrap_err();
         assert!(err.to_string().contains("state directory"), "{err}");
     }
 

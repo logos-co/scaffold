@@ -51,7 +51,10 @@ pub(crate) fn read_deployments(project_root: &Path) -> BTreeMap<String, Deployme
         .unwrap_or_default()
 }
 
-pub(crate) fn record_deployments(project_root: &Path, records: &[DeploymentRecord]) -> DynResult<()> {
+pub(crate) fn record_deployments(
+    project_root: &Path,
+    records: &[DeploymentRecord],
+) -> DynResult<()> {
     let mut programs = read_deployments(project_root);
     for record in records {
         programs.insert(record.program.clone(), record.clone());
@@ -59,8 +62,7 @@ pub(crate) fn record_deployments(project_root: &Path, records: &[DeploymentRecor
     let path = deployments_path(project_root);
     let text = serde_json::to_string_pretty(&DeploymentsFile { programs })
         .context("failed to serialize deployments")?;
-    write_text(&path, &(text + "\n"))
-        .with_context(|| format!("failed to write {}", path.display()))
+    write_text(&path, &(text + "\n")).with_context(|| format!("failed to write {}", path.display()))
 }
 
 /// Forget every deployment (the chain they lived on is gone).
