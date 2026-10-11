@@ -13,7 +13,7 @@ use crate::constants::{
     DEFAULT_FRAMEWORK_VERSION, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL, FRAMEWORK_KIND_DEFAULT,
     SCAFFOLD_TOML_SCHEMA_VERSION,
 };
-use crate::migrate::migrate_to_v0_2_0;
+use crate::migrate::migrate_to_current;
 use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RunConfig};
 use crate::state::write_text_atomic;
 use crate::template::project::ensure_scaffold_in_gitignore;
@@ -46,7 +46,7 @@ pub(crate) fn cmd_init_at(
             )
         })?;
 
-        let report = migrate_to_v0_2_0(&mut doc)?;
+        let report = migrate_to_current(&mut doc)?;
         let migrated = !report.changes.is_empty();
 
         if migrated {
