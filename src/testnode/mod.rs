@@ -1,7 +1,7 @@
 //! Isolated, short-lived sequencer test nodes.
 //!
 //! Unlike `localnet` — one long-lived developer sequencer per project, on a
-//! fixed port, with state inside the vendored LEZ checkout — a test node is
+//! fixed port, with its chain under `.scaffold/localnet` — a test node is
 //! an independent sequencer instance with its own RPC port, patched config,
 //! database, log file, and runtime directory. Test nodes are designed for
 //! integration tests: repeatable startup, isolated state, dynamic ports,
@@ -11,12 +11,20 @@
 //! `<project>/.scaffold/test-nodes/<id>`) containing:
 //!
 //! - `sequencer_config.json` — patched copy of the pinned LEZ debug config
-//!   with `home` pointed at the runtime directory;
-//! - `rocksdb/` — the node's own chain database (created by the sequencer,
-//!   or pre-seeded from a caller-provided state directory);
+//!   (the runtime directory is passed as the sequencer's `--home`);
+//! - `rocksdb-<channel id>/` — the node's own chain database (created by the
+//!   sequencer, or pre-seeded from a caller-provided state directory), next
+//!   to the keys the sequencer generates in its home;
 //! - `sequencer.log` — captured stdout/stderr;
 //! - `node.json` — node metadata used by `status` / `stop` and by handles
 //!   reconnecting from another process.
+
+/// Block id LEZ 0.3 gives the genesis block (`lee_core::GENESIS_BLOCK_ID`).
+const GENESIS_BLOCK_ID: u64 = 1;
+/// Prometheus exporter address handed to every test node. The sequencer's
+/// default (a fixed port) would make a second node — or a localnet — fail to
+/// start; port 0 lets the OS pick a free one.
+pub(crate) const METRICS_ADDRESS: &str = "127.0.0.1:0";
 
 pub mod accounts;
 pub mod blocks;
@@ -37,7 +45,6 @@ use anyhow::{anyhow, bail, Context};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::circuits::ensure_circuits_for_project;
 use crate::commands::localnet::find_r0vm_path_for_lez;
 use crate::commands::wallet_support::{rpc_get_last_block_id, RpcReachabilityError};
 use crate::constants::SEQUENCER_BIN_REL_PATH;
@@ -261,7 +268,8 @@ impl TestNode {
 
         // Seed the database before the sequencer first opens it.
         if let Some(state_src) = &config.state {
-            seed_state_dir(state_src, &work_dir)?;
+            let db_dir_name = sequencer_db_dir_name(&prepared.lez)?;
+            seed_state_dir(state_src, &work_dir, &db_dir_name)?;
         }
 
         let port = match config.port {
@@ -279,7 +287,7 @@ impl TestNode {
         };
 
         let (config_path, genesis_block_id) =
-            write_node_config(&prepared.lez, &work_dir, port, block_timing)?;
+            write_node_config(&prepared.lez, &work_dir, block_timing)?;
         let log_path = work_dir.join("sequencer.log");
         let rpc_url = format!("http://127.0.0.1:{port}");
 
@@ -288,6 +296,12 @@ impl TestNode {
             .arg(&config_path)
             .arg("--port")
             .arg(port.to_string())
+            .arg("--listen-address")
+            .arg("127.0.0.1")
+            .arg("--home")
+            .arg(&work_dir)
+            .arg("--metrics-address")
+            .arg(METRICS_ADDRESS)
             .env("RUST_LOG", "info")
             .env(
                 "RISC0_DEV_MODE",
@@ -457,7 +471,6 @@ fn verify_prepared(project: &Project) -> DynResult<StartPrereqs> {
             sequencer_binary.display()
         );
     }
-    ensure_circuits_for_project(project)?;
     Ok(StartPrereqs {
         lez,
         sequencer_binary,
@@ -639,27 +652,23 @@ fn ensure_dir_empty_enough(dir: &Path) -> DynResult<()> {
 
 /// Materialise a caller-provided state into the node work dir before the
 /// sequencer first opens it. Accepts:
-/// - a directory containing `rocksdb/` (or a bare database directory):
-///   copied verbatim — the node resumes from that exact state;
+/// - a directory containing `rocksdb/` (scaffold's portable layout), a LEZ
+///   0.3 sequencer home containing `rocksdb-<channel id>/`, or a bare
+///   database directory: the database is copied verbatim to
+///   `<work_dir>/<db_dir_name>`, where the sequencer opens it, and the node
+///   resumes from that exact state;
 /// - a `state seed`-produced directory containing `seed.json`: the seed is
-///   copied and later injected into the node's sequencer config as genesis
-///   `initial_public_accounts` / `initial_private_accounts`, so the node
-///   starts from exactly those accounts and nothing else.
-fn seed_state_dir(state_src: &Path, work_dir: &Path) -> DynResult<()> {
+///   copied and later written into the node's sequencer config as its
+///   genesis `supply_account` actions, so the node starts from exactly those
+///   balances.
+fn seed_state_dir(state_src: &Path, work_dir: &Path, db_dir_name: &str) -> DynResult<()> {
     if !state_src.is_dir() {
         bail!("state directory not found at {}", state_src.display());
     }
 
     let seed_file = state_src.join(state::SEED_FILE);
-    let has_db = state_src.join("rocksdb").is_dir() || state_src.join("CURRENT").exists();
-
-    if has_db {
-        let src_db = if state_src.join("rocksdb").is_dir() {
-            state_src.join("rocksdb")
-        } else {
-            state_src.to_path_buf()
-        };
-        let dest_db = work_dir.join("rocksdb");
+    if let Some(src_db) = state::find_database_dir(state_src) {
+        let dest_db = work_dir.join(db_dir_name);
         return copy_dir_recursive(&src_db, &dest_db).with_context(|| {
             format!(
                 "failed to seed state from {} into {}",
@@ -685,6 +694,26 @@ fn seed_state_dir(state_src: &Path, work_dir: &Path) -> DynResult<()> {
     )
 }
 
+/// Directory name the pinned sequencer gives its database inside `--home`:
+/// `rocksdb-<bedrock_config.channel_id>` (LEZ 0.3).
+fn sequencer_db_dir_name(lez: &Path) -> DynResult<String> {
+    let config_path = crate::lez_layout::lez_file(
+        lez,
+        crate::constants::SEQUENCER_CONFIG_REL_PATH,
+        "sequencer debug config",
+    )?;
+    let text = fs::read_to_string(&config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    let config: Value = serde_json::from_str(&text)
+        .with_context(|| format!("failed to parse {}", config_path.display()))?;
+    let channel_id = config
+        .get("bedrock_config")
+        .and_then(|bedrock| bedrock.get("channel_id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("{} has no bedrock_config.channel_id", config_path.display()))?;
+    Ok(format!("rocksdb-{channel_id}"))
+}
+
 fn copy_dir_recursive(src: &Path, dest: &Path) -> DynResult<()> {
     fs::create_dir_all(dest)?;
     for entry in fs::read_dir(src)? {
@@ -700,22 +729,28 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> DynResult<()> {
 }
 
 /// Produce the node's sequencer config: the pinned LEZ debug config with
-/// `home` pointed at the node's runtime directory, the port recorded, and
-/// `max_block_size` widened (same rationale as localnet). Returns the config
-/// path and the genesis block id.
+/// `home` pointed at the node's runtime directory (also passed as `--home`),
+/// block timing applied, and the common scaffold overrides (see
+/// [`apply_common_runtime_overrides`]). Returns the config path and the
+/// genesis block id.
 fn write_node_config(
     lez: &Path,
     work_dir: &Path,
-    port: u16,
     block_timing: BlockTimingOverrides,
 ) -> DynResult<(PathBuf, u64)> {
-    let (dest_path, genesis_block_id) = patch_runtime_sequencer_config(lez, work_dir, |obj| {
+    let (dest_path, ()) = patch_runtime_sequencer_config(lez, work_dir, |obj| {
         obj.insert(
             "home".to_string(),
             Value::String(work_dir.display().to_string()),
         );
-        // Recorded for tooling; the pinned sequencer takes the port via --port.
-        apply_common_runtime_overrides(obj, port);
+        // Genesis-config seeding: a seed.json placed in the work dir (by
+        // `--state <seeded dir>`) replaces the debug genesis, so the node
+        // starts from exactly the seeded balances (the dev funder is added
+        // back below so `wallet topup` keeps working against it).
+        if let Some(snapshot) = state::load_seed_from_state_dir(work_dir)? {
+            obj.insert("genesis".to_string(), snapshot.to_genesis_actions());
+        }
+        apply_common_runtime_overrides(obj);
         if let Some(timeout_ms) = block_timing.block_create_timeout_ms {
             obj.insert(
                 "block_create_timeout".to_string(),
@@ -728,23 +763,10 @@ fn write_node_config(
                 Value::String(format!("{timeout_ms}ms")),
             );
         }
-
-        // Genesis-config seeding: a seed.json placed in the work dir (by
-        // `--state <seeded dir>`) becomes the node's initial accounts. The
-        // sequencer builds its genesis state from exactly these values when no
-        // database exists — no testnet default accounts are added.
-        if let Some(snapshot) = state::load_seed_from_state_dir(work_dir)? {
-            let (public, private) = snapshot.to_config_values();
-            obj.insert("initial_public_accounts".to_string(), public);
-            obj.insert("initial_private_accounts".to_string(), private);
-        }
-
-        obj.get("genesis_id")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| anyhow!("sequencer_config.json has no numeric `genesis_id`"))
+        Ok(())
     })?;
 
-    Ok((dest_path, genesis_block_id))
+    Ok((dest_path, GENESIS_BLOCK_ID))
 }
 
 fn write_node_meta(meta: &NodeMeta) -> DynResult<()> {

@@ -162,15 +162,15 @@ impl TestNode {
     }
 }
 
-/// Resolve the LEZ and circuits pins test-node commands will use for
+/// Resolve the LEZ pin test-node commands will use for
 /// `project`: overrides win, then the project's `scaffold.toml`, then
 /// scaffold defaults. Read-only — nothing is cloned, built, or downloaded.
 pub fn resolve_test_node_pins(project: &Project, overrides: &PinOverrides) -> Result<TestNodePins> {
     crate::testnode::pins::resolve_test_node_pins(&project.inner, overrides).map_err(classify)
 }
 
-/// Resolve pins, materialise the LEZ checkout and circuits release, and
-/// build the standalone sequencer for those pins. Managed cache checkouts
+/// Resolve pins, materialise the LEZ checkout, and build the standalone
+/// sequencer for those pins. Managed cache checkouts
 /// may be cloned/fetched/checked out; caller-provided checkouts are only
 /// validated (clean worktree at the requested commit) and never modified.
 pub fn prepare_test_node(
@@ -183,8 +183,8 @@ pub fn prepare_test_node(
 }
 
 /// Run the test-node health checks: pin drift, checkout state (missing,
-/// dirty, mismatched commit), sequencer binary, circuits release, platform
-/// support — each reported as a separate categorized check.
+/// dirty, mismatched commit), sequencer binary, and whether the checkout is a
+/// LEZ 0.3 release — each reported as a separate categorized check.
 pub fn doctor_test_node(project: &Project) -> Result<TestNodeDoctorReport> {
     crate::testnode::pins::doctor_test_node(&project.inner).map_err(classify)
 }

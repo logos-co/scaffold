@@ -344,11 +344,6 @@ pub(crate) fn cmd_test_node(action: TestNodeAction) -> DynResult<()> {
                     pins.checkout_ownership
                 );
                 println!("sequencer binary: {}", pins.sequencer_binary.display());
-                println!(
-                    "circuits version: {} ({:?})",
-                    pins.circuits_version, pins.circuits_version_origin
-                );
-                println!("circuits path: {}", pins.circuits_path.display());
             }
             Ok(())
         }
@@ -376,11 +371,6 @@ pub(crate) fn cmd_test_node(action: TestNodeAction) -> DynResult<()> {
                 println!(
                     "  sequencer binary: {}",
                     prepared.sequencer_binary.display()
-                );
-                println!(
-                    "  circuits: v{} at {}",
-                    prepared.circuits_version,
-                    prepared.circuits_path.display()
                 );
             }
             Ok(())

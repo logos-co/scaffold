@@ -368,6 +368,8 @@ fn start_localnet(
         .arg("127.0.0.1")
         .arg("--home")
         .arg(&chain_home)
+        .arg("--metrics-address")
+        .arg(crate::testnode::METRICS_ADDRESS)
         .env("RUST_LOG", "info")
         .env("RISC0_DEV_MODE", if risc0_dev_mode { "1" } else { "0" });
 

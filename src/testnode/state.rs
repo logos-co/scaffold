@@ -1,25 +1,22 @@
 //! Caller-provided state seeding for test nodes.
 //!
-//! Integration tests usually construct a precise pre-state (token mints,
-//! vaults, program-owned accounts) and need the sequencer to start from
-//! that same world. The pinned sequencer offers exactly two supported ways
-//! to begin from caller-defined state, and this module wraps both — with
-//! validation up front so incompatible snapshots fail with a targeted error
-//! instead of a confusing runtime failure deep inside the node:
+//! Integration tests usually construct a precise pre-state (funded
+//! accounts) and need the sequencer to start from that same world. The
+//! pinned sequencer offers exactly two supported ways to begin from
+//! caller-defined state, and this module wraps both — with validation up
+//! front so incompatible snapshots fail with a targeted error instead of a
+//! confusing runtime failure deep inside the node:
 //!
 //! 1. **Genesis-config seeding.** When the sequencer starts with no
-//!    database, its config may carry `initial_public_accounts`
-//!    (`{account_id, balance}` pairs) and `initial_private_accounts`
-//!    (`{npk, account}` commitments); the genesis state is then built from
-//!    exactly those accounts — no implicit wallets, sample programs, or
-//!    testnet default accounts. Limitations of this path at the pinned
-//!    revision: public accounts can seed **balance only** (no data, nonce,
-//!    or program owner), while private accounts seed a full account behind
-//!    a commitment. Snapshots that need unsupported public-account fields
+//!    database, its config's `genesis` list is applied as genesis
+//!    transactions. LEZ 0.3 genesis can only *supply public balances*
+//!    (`{"supply_account": {account_id, balance}}`, balance ≤ u64): no account
+//!    data, nonces, or private accounts. Snapshots that need anything else
 //!    are rejected during validation as a storage-schema mismatch.
-//! 2. **Database seeding.** A state directory containing a `rocksdb/`
-//!    database (exported from a previous node) is copied verbatim; the
-//!    sequencer resumes from it exactly.
+//! 2. **Database seeding.** A state directory containing a database
+//!    (`rocksdb/`, or a sequencer home's `rocksdb-<channel id>/`, exported
+//!    from a previous node) is copied verbatim; the sequencer resumes from it
+//!    exactly.
 //!
 //! `lgs test-node state seed` validates a snapshot and produces a state
 //! directory; `lgs test-node start --state <dir>` consumes either kind.
@@ -43,8 +40,8 @@ pub(crate) const SEED_FILE: &str = "seed.json";
 pub const STATE_SNAPSHOT_FORMAT: &str = "lgs-state-snapshot/1";
 /// Account snapshot format produced by `test-node snapshot accounts`.
 pub const ACCOUNT_SNAPSHOT_FORMAT: &str = "lgs-account-snapshot/1";
-/// The NSSA state layout the pinned LEZ revision uses.
-pub const STATE_FORMAT_VERSION: &str = "nssa-v03";
+/// The LEE state layout the pinned LEZ revision uses (`lee::V03State`).
+pub const STATE_FORMAT_VERSION: &str = "lee-v03";
 
 /// Validation failures, distinguished per class so harnesses can branch.
 #[derive(Debug, Error)]
@@ -52,8 +49,8 @@ pub enum SeedError {
     /// The input file's `format` marker is unknown or missing.
     #[error("snapshot format mismatch: {0}")]
     FormatMismatch(String),
-    /// The snapshot needs state the pinned sequencer cannot seed (e.g.
-    /// public-account data/nonce/owner via genesis config).
+    /// The snapshot needs state the pinned sequencer cannot seed (account
+    /// data, nonces, private accounts, or balances above u64).
     #[error("storage schema mismatch: {0}")]
     StorageSchemaMismatch(String),
     /// The snapshot was produced against a different LEZ pin.
@@ -67,7 +64,7 @@ pub enum SeedError {
 /// What the current project pins accept as seedable state.
 #[derive(Clone, Debug, Serialize)]
 pub struct StateSchema {
-    /// NSSA state layout of the pinned sequencer.
+    /// LEE state layout of the pinned sequencer.
     pub state_format_version: String,
     /// LEZ ref the project pins.
     pub lez_ref: String,
@@ -77,7 +74,8 @@ pub struct StateSchema {
     pub accepted_inputs: Vec<String>,
     /// Public-account fields seedable through the genesis config.
     pub public_account_fields: Vec<String>,
-    /// Private accounts are seeded as full accounts behind commitments.
+    /// Private-account fields seedable through the genesis config (none in
+    /// LEZ 0.3; kept so the schema shape stays stable).
     pub private_account_fields: Vec<String>,
     /// Sequencer config keys the seed is applied through.
     pub config_keys: Vec<String>,
@@ -96,26 +94,18 @@ impl StateSchema {
             accepted_inputs: vec![
                 format!("{STATE_SNAPSHOT_FORMAT} (JSON)"),
                 format!("{ACCOUNT_SNAPSHOT_FORMAT} (JSON, public balances only)"),
-                "state directory containing a rocksdb/ database".to_string(),
+                "state directory containing a rocksdb/ (or rocksdb-<channel id>/) database"
+                    .to_string(),
             ],
-            public_account_fields: vec!["account_id".to_string(), "balance".to_string()],
-            private_account_fields: vec![
-                "npk".to_string(),
-                "account.program_owner".to_string(),
-                "account.balance".to_string(),
-                "account.data".to_string(),
-                "account.nonce".to_string(),
-            ],
-            config_keys: vec![
-                "initial_public_accounts".to_string(),
-                "initial_private_accounts".to_string(),
-            ],
+            public_account_fields: vec!["account_id".to_string(), "balance (u64)".to_string()],
+            private_account_fields: Vec::new(),
+            config_keys: vec!["genesis[].supply_account".to_string()],
         })
     }
 }
 
 /// One public account to seed (`{account_id, balance}` — the only public
-/// fields the pinned genesis config supports).
+/// fields LEZ 0.3 genesis supports; the balance must fit in a u64).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PublicSeedAccount {
     /// Base58 account id.
@@ -236,17 +226,28 @@ impl StateSnapshot {
                     )))
                 }
             }
-            let data_len = entry.get("data_len").and_then(Value::as_u64).unwrap_or(0);
+            let program_shards = entry
+                .get("shards")
+                .and_then(Value::as_array)
+                .map(|shards| {
+                    shards
+                        .iter()
+                        .filter(|shard| {
+                            shard.get("program").and_then(Value::as_str)
+                                != Some(NATIVE_TOKEN_PROGRAM_ID_B58)
+                        })
+                        .count()
+                })
+                .unwrap_or(0);
             let nonce = entry
                 .get("nonce")
                 .and_then(|nonce| serde_json::from_value::<u128>(nonce.clone()).ok())
                 .unwrap_or(0);
-            if data_len > 0 || nonce > 0 {
+            if program_shards > 0 || nonce > 0 {
                 return Err(SeedError::StorageSchemaMismatch(format!(
-                    "account {account_id} carries data ({data_len} bytes) or a non-zero nonce \
-                     ({nonce}); the pinned sequencer's genesis config can seed public accounts \
-                     with balance only. Export the node's database directory instead for \
-                     full-fidelity seeding."
+                    "account {account_id} carries program data ({program_shards} shard(s)) or a \
+                     non-zero nonce ({nonce}); LEZ 0.3 genesis can seed public balances only. \
+                     Export the node's database directory instead for full-fidelity seeding."
                 )));
             }
             let balance = entry
@@ -273,10 +274,26 @@ impl StateSnapshot {
         Ok(snapshot)
     }
 
-    /// Validate account encodings: base58 ids of 32 bytes, 32-byte npks,
-    /// 8-word program owners.
+    /// Validate account encodings (base58 ids of 32 bytes) and that the
+    /// snapshot only needs what LEZ 0.3 genesis can seed: public balances
+    /// that fit a u64, no private accounts.
     pub fn validate(&self) -> Result<(), SeedError> {
+        if !self.private_accounts.is_empty() {
+            return Err(SeedError::StorageSchemaMismatch(format!(
+                "the snapshot seeds {} private account(s); LEZ 0.3 genesis can seed public \
+                 balances only. Export the node's database directory instead for \
+                 full-fidelity seeding.",
+                self.private_accounts.len()
+            )));
+        }
         for account in &self.public_accounts {
+            if u64::try_from(account.balance).is_err() {
+                return Err(SeedError::StorageSchemaMismatch(format!(
+                    "public account `{}` balance {} exceeds u64, the largest balance LEZ 0.3 \
+                     genesis can supply",
+                    account.account_id, account.balance
+                )));
+            }
             let decoded = bs58::decode(&account.account_id)
                 .into_vec()
                 .map_err(|err| {
@@ -293,60 +310,58 @@ impl StateSnapshot {
                 )));
             }
         }
-        for (index, private) in self.private_accounts.iter().enumerate() {
-            if private.npk.len() != 32 {
-                return Err(SeedError::AccountDecode(format!(
-                    "private account #{index}: npk has {} bytes, expected 32",
-                    private.npk.len()
-                )));
-            }
-            if !private.account.program_owner.is_empty() && private.account.program_owner.len() != 8
-            {
-                return Err(SeedError::AccountDecode(format!(
-                    "private account #{index}: program_owner has {} words, expected 8 (or empty \
-                     for the default owner)",
-                    private.account.program_owner.len()
-                )));
-            }
-        }
         Ok(())
     }
 
-    /// The `initial_public_accounts` / `initial_private_accounts` values to
-    /// inject into the sequencer config.
-    pub(crate) fn to_config_values(&self) -> (Value, Value) {
-        let public: Vec<Value> = self
-            .public_accounts
-            .iter()
-            .map(|account| {
-                json!({
-                    "account_id": account.account_id,
-                    "balance": account.balance,
+    /// The snapshot as LEZ 0.3 genesis actions (`[{"supply_account":
+    /// {account_id, balance}}]`). Call after [`Self::validate`]; balances are
+    /// known to fit a u64 then.
+    pub(crate) fn to_genesis_actions(&self) -> Value {
+        Value::Array(
+            self.public_accounts
+                .iter()
+                .map(|account| {
+                    json!({
+                        "supply_account": {
+                            "account_id": account.account_id,
+                            "balance": u64::try_from(account.balance).unwrap_or(u64::MAX),
+                        }
+                    })
                 })
-            })
-            .collect();
-        let private: Vec<Value> = self
-            .private_accounts
-            .iter()
-            .map(|private| {
-                let owner = if private.account.program_owner.is_empty() {
-                    vec![0_u32; 8]
-                } else {
-                    private.account.program_owner.clone()
-                };
-                json!({
-                    "npk": private.npk,
-                    "account": {
-                        "program_owner": owner,
-                        "balance": private.account.balance,
-                        "data": private.account.data,
-                        "nonce": private.account.nonce,
-                    },
-                })
-            })
-            .collect();
-        (Value::Array(public), Value::Array(private))
+                .collect(),
+        )
     }
+}
+
+/// Base58 of the native token program id (all-zero bytes): the shard that
+/// holds an account's balance.
+const NATIVE_TOKEN_PROGRAM_ID_B58: &str = "11111111111111111111111111111111";
+
+/// The database inside a state directory: `rocksdb/` (scaffold's portable
+/// layout), a sequencer home's `rocksdb-<channel id>/`, or the directory
+/// itself when it is a bare RocksDB (has a `CURRENT` file).
+pub(crate) fn find_database_dir(dir: &Path) -> Option<PathBuf> {
+    let portable = dir.join("rocksdb");
+    if portable.join("CURRENT").exists() {
+        return Some(portable);
+    }
+    if let Ok(entries) = fs::read_dir(dir) {
+        let mut homes: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("rocksdb-"))
+                    && path.join("CURRENT").exists()
+            })
+            .collect();
+        homes.sort();
+        if let Some(db) = homes.into_iter().next() {
+            return Some(db);
+        }
+    }
+    dir.join("CURRENT").exists().then(|| dir.to_path_buf())
 }
 
 /// Result of `state seed`: a directory `test-node start --state` accepts,
@@ -397,18 +412,13 @@ pub fn seed_state(
 
     // Database-directory input: validate and copy verbatim.
     if input.is_dir() {
-        let db_dir = if input.join("rocksdb").is_dir() {
-            input.join("rocksdb")
-        } else {
-            input.to_path_buf()
-        };
-        if !db_dir.join("CURRENT").exists() {
+        let Some(db_dir) = find_database_dir(input) else {
             return Err(SeedError::FormatMismatch(format!(
                 "{} is neither a snapshot file nor a rocksdb state directory (no CURRENT file)",
                 input.display()
             ))
             .into());
-        }
+        };
         copy_dir_recursive(&db_dir, &state_dir.join("rocksdb"))?;
         return Ok(SeededState {
             state_dir,
@@ -487,14 +497,18 @@ pub fn export_state_snapshot(
             AccountValue::Present {
                 balance,
                 nonce,
-                data_len,
+                shards,
                 ..
             } => {
-                if data_len > 0 || nonce > 0 {
+                let program_shards = shards
+                    .iter()
+                    .filter(|shard| shard.program != NATIVE_TOKEN_PROGRAM_ID_B58)
+                    .count();
+                if program_shards > 0 || nonce > 0 {
                     return Err(SeedError::StorageSchemaMismatch(format!(
-                        "account {} carries data ({data_len} bytes) or nonce ({nonce}); the \
-                         genesis config can seed public balances only. Export the node's \
-                         database directory for full-fidelity seeding.",
+                        "account {} carries program data ({program_shards} shard(s)) or nonce \
+                         ({nonce}); LEZ 0.3 genesis can seed public balances only. Export the \
+                         node's database directory for full-fidelity seeding.",
                         entry.account_id
                     ))
                     .into());
