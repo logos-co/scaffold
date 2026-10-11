@@ -228,6 +228,11 @@ construction.
 
 ## Vendoring `spel` Per-Project for Program ID Surfacing
 
+> **Superseded** by "Scaffold Supports One LEZ Release (0.3)" below. In LEZ
+> 0.3 a program id is the `program_loader` header account a deployment
+> creates, not the image ID, and no spel release targets LEZ 0.3, so scaffold
+> no longer vendors spel. Kept for the history of the decision.
+
 `deploy` needs to print the deployed program's on-chain ID (the risc0 image
 ID) so the user can hand it to a client without rerunning a separate tool.
 Three options were considered:
@@ -447,9 +452,8 @@ Post-deploy hooks run via `sh -c` with `cwd` at the project root. The env
 they see is stable, documented in README, and validated by unit and
 integration tests:
 
-- `SEQUENCER_URL` / `NSSA_WALLET_HOME_DIR` / `LEE_WALLET_HOME_DIR` /
-  `SCAFFOLD_PROJECT_ROOT` / `SCAFFOLD_IDL_DIR` — pipeline state. The two
-  wallet-home vars always carry the same path.
+- `SEQUENCER_URL` / `LEE_WALLET_HOME_DIR` / `SCAFFOLD_PROJECT_ROOT` —
+  pipeline state.
 - `SCAFFOLD_TOPUP_SKIPPED` / `SCAFFOLD_DEPLOY_SKIPPED` — run-level outcome
   of the two skippable steps, `1` or `0`. Always set, never absent: a hook
   that had to treat "unset" as "scaffold did it" could not distinguish that
@@ -474,21 +478,17 @@ The wallet home is exported under its upstream-wallet names rather than
 under a `SCAFFOLD_*` prefix: hooks that exec the wallet binary (directly
 or via `cargo run --bin run_*`) need the var under the name the binary's
 `WalletCore::from_env()` reads. Renaming for hook ergonomics would
-silently break those hooks. That reasoning is unchanged — but upstream
-now has two such names. LEZ v0.2.0 renamed `NSSA_WALLET_HOME_DIR` to
-`LEE_WALLET_HOME_DIR`, and a v0.2.0 wallet that sees only the old name
-does not error: it falls back to `~/.lee/wallet`. Scaffold therefore
-sets *both* names, to the same path, on every wallet subprocess that
-touches the wallet home and on every hook — the exception is doctor's
-`wallet --version` probe, which only reads the binary's version string.
-The list lives in `WALLET_HOME_ENV_VARS` (`constants.rs`); wallet
-subprocesses apply it through `set_wallet_home_env`. Follow that
-pattern for any future rename: add the new name, keep the old one,
-never swap.
+silently break those hooks. LEZ 0.3 reads only `LEE_WALLET_HOME_DIR`
+(LEZ v0.2.0 renamed it from `NSSA_WALLET_HOME_DIR`; while scaffold
+supported both release lines it exported both names). A wallet that does
+not see it does not error: it falls back to `~/.lee/wallet`. The name lives
+in `WALLET_HOME_ENV_VAR` (`constants.rs`); wallet subprocesses apply it
+through `set_wallet_home_env`.
 
-The single-program metadata is resolved once per `lgs run` invocation
-and reused across every hook so multiple hooks don't multiply the cost
-of `spel program-id`.
+`SCAFFOLD_PROGRAM_ID*` values are the program ids `deploy` recorded in
+`.scaffold/state/deployments.json`, read once per `lgs run` invocation and
+reused across every hook — also when the deploy step was skipped by the
+cache, which is why a cache hit requires every program to have a record.
 
 ## Build Output Discovery
 
@@ -561,3 +561,74 @@ does by rebuilding and diffing its committed `artifacts/`. Without it, the pinne
 could drift or a future risc0 release could reintroduce nondeterminism and nothing
 would notice — the unit tests only pin the invocation, and Template E2E exercises the
 host-toolchain path (`--guest local`).
+
+## Scaffold Supports One LEZ Release (0.3)
+
+Scaffold builds against exactly one LEZ release line — 0.3, pinned to
+`v0.3.1` in `DEFAULT_LEZ` — and keeps no compatibility code for older pins.
+LEZ 0.3 changed every layer scaffold drives at once, so "support 0.3 too"
+would have meant two implementations of each:
+
+- **Program model.** Guests use `lee_core::program::{Plan, run_program}`
+  and write per-program account *shards*; accounts no longer carry a
+  `program_owner`/`balance`/`data` triple. The `nssa`/`nssa_core` crates are
+  `lee`/`lee_core`.
+- **Deployment.** `wallet deploy-program <bin>` is gone. A program is
+  uploaded through the `program_loader` builtin into fresh segment accounts
+  (96 KiB of the user ELF each) and a header account; the header account id
+  is the program id. `deploy` therefore parses the risc0 `ProgramBinary`
+  header to count segments, creates the accounts, runs `wallet
+  program-loader deploy`, and records the resulting id in
+  `.scaffold/state/deployments.json` — the id cannot be recomputed from the
+  ELF later, so it has to be stored. The wallet confirms every transaction,
+  so the old "submitted, not verified" caveat and the per-block deploy pacing
+  (a workaround for oversized multi-ELF blocks) are both gone.
+- **Funding and fees.** There is no Piñata faucet, and public transactions
+  pay fees (the payer must hold a ~16M-unit reserve). A chain's only supply
+  is its sequencer config's `genesis` `supply_account` list. Scaffold uses the
+  account LEZ's own debug genesis funds (`CbgR6…`), whose key LEZ publishes in
+  its `Justfile`: every scaffold-started chain is guaranteed that genesis
+  entry, `setup` imports the key into the project wallet, and `wallet topup`
+  is an `auth-transfer send` from it. The key is public by design; it must
+  never fund anything outside a local chain.
+- **Sequencer.** Port, listen address, home and metrics address are CLI
+  flags (`--port`, `--listen-address`, `--home`, `--metrics-address`), not
+  config keys, which finally makes `[localnet].port` take effect, and lets
+  the chain live in `.scaffold/localnet` instead of the shared LEZ checkout.
+  `max_block_size` above Bedrock's 1,835,008-byte inscription limit is
+  refused at startup, so the old 8 MiB widening had to go (segments make it
+  unnecessary). LEZ's debug config produces a block every 15 s and its
+  wallet sleeps 30 s between confirmation polls; scaffold sets 2-second
+  localnet blocks and 1-second wallet polling so a confirmed transaction
+  costs seconds.
+- **Wire formats.** Block headers lost their signature (80 bytes), every
+  block ends with fee-exempt fee-distribution and clock transactions, and
+  `getProofForCommitment` became `getProofsAndRoot`; test-node's hand-rolled
+  borsh readers follow the new layout.
+- **Circuits.** LEZ 0.3's build fetches its own `logos-blockchain-circuits`
+  release, so the `[circuits]` download machinery was deleted.
+
+spel has no release for LEZ 0.3's program model, so the `lez-framework`
+template, `lgs spel`, `build idl` and `build client` were removed rather
+than left pointing at an incompatible toolchain. Projects using them are
+refused with an explanation; the template can return once spel ships a
+LEZ 0.3 release.
+
+`scaffold.toml` moved to schema `0.3.0` so a LEZ 0.1/0.2-era project fails
+fast with the usual "run `init`" hint instead of failing deep inside a
+wallet call. `init` re-pins `[repos.lez]` (a fork keeps its pin and gets a
+hand-edit hint) and drops `[repos.spel]`, `[circuits]` and
+`[framework.idl]`. It cannot port user program code; the README says so.
+
+The default template now copies LEZ's `examples/program_deployment`
+verbatim, runners included, and overlays only the workspace manifest,
+README and toolchain files: the upstream runners are already written for
+0.3, and keeping scaffold-specific copies is what let the old ones drift.
+`new` seeds the project's `Cargo.lock` from the pinned LEZ lockfile so new
+projects resolve the dependency versions LEZ was tested with.
+
+Bumping within 0.3 (`v0.3.x`) should be a pin change plus a dogfood run.
+Moving to a later release line is a migration like this one: change
+`DEFAULT_LEZ`, re-derive the wire facts in `testnode/`, re-check the wallet
+CLI surface `wallet_support`/`deploy` rely on, and bump the schema if old
+projects cannot keep working.
