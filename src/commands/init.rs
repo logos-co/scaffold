@@ -5,13 +5,10 @@ use std::path::Path;
 use anyhow::{bail, Context};
 use toml_edit::DocumentMut;
 
-use crate::config::{
-    default_basecamp_repo, default_lez_repo, default_lgpm_repo, default_spel_repo, serialize_config,
-};
+use crate::config::{default_basecamp_repo, default_lez_repo, default_lgpm_repo, serialize_config};
 use crate::constants::{
-    DEFAULT_BASECAMP_PIN, DEFAULT_FRAMEWORK_IDL_PATH, DEFAULT_FRAMEWORK_IDL_SPEC,
-    DEFAULT_FRAMEWORK_VERSION, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL, FRAMEWORK_KIND_DEFAULT,
-    SCAFFOLD_TOML_SCHEMA_VERSION,
+    DEFAULT_BASECAMP_PIN, DEFAULT_FRAMEWORK_VERSION, DEFAULT_LEZ, DEFAULT_LGPM_PIN,
+    FRAMEWORK_KIND_DEFAULT, SCAFFOLD_TOML_SCHEMA_VERSION,
 };
 use crate::migrate::migrate_to_current;
 use crate::model::{Config, FrameworkConfig, LocalnetConfig, RunConfig};
