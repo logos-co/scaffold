@@ -35,17 +35,12 @@ const GUEST_BIN_REL_PATH: &str =
 /// context to exist (no basecamp section). Older tests in this file inline
 /// the same content; new tests should prefer this helper.
 const MINIMAL_SCAFFOLD_TOML: &str = r#"[scaffold]
-version = "0.2.0"
+version = "0.3.0"
 cache_root = "cache"
 
 [repos.lez]
 source = "https://example/lez.git"
 path = "lez"
-pin = "deadbeef"
-
-[repos.spel]
-source = "https://example/spel.git"
-path = "spel"
 pin = "deadbeef"
 
 [wallet]
@@ -54,10 +49,6 @@ home_dir = ".scaffold/wallet"
 [framework]
 kind = "default"
 version = "0.1.0"
-
-[framework.idl]
-spec = "lssa-idl/0.1.0"
-path = "idl"
 
 [localnet]
 port = 3040
@@ -129,15 +120,19 @@ fn localnet_reset_dry_run_prints_plan_without_mutations() {
         .assert()
         .success()
         .stdout(
-            predicate::str::contains("dry-run: localnet reset")
-                .and(predicate::str::contains("planned: delete sequencer DB")),
+            predicate::str::contains("dry-run: localnet reset").and(predicate::str::contains(
+                format!(
+                    "planned: delete localnet chain home (sequencer DB + keys) at {}",
+                    temp.path().join(".scaffold/localnet").display()
+                ),
+            )),
         );
 
-    let rocksdb = lez_path.join("rocksdb");
+    let chain_home = temp.path().join(".scaffold/localnet");
     assert!(
-        !rocksdb.exists(),
-        "dry-run must not create or require rocksdb at {}",
-        rocksdb.display()
+        !chain_home.exists(),
+        "dry-run must not create the chain home at {}",
+        chain_home.display()
     );
 }
 
@@ -151,10 +146,14 @@ fn localnet_reset_without_yes_or_dry_run_refuses_destructive_default() {
     let lez_path = temp.path().join("lez");
     fs::create_dir_all(&lez_path).expect("create lez path");
     write_scaffold_toml(temp.path(), &lez_path);
-    // Seed the sequencer DB so we can verify the refusal does NOT delete it.
-    let rocksdb = lez_path.join("rocksdb");
+    // Seed the chain home (sequencer DB) and the deployment records so we
+    // can verify the refusal deletes neither.
+    let rocksdb = temp.path().join(".scaffold/localnet/rocksdb-test");
     fs::create_dir_all(&rocksdb).expect("seed rocksdb");
     fs::write(rocksdb.join("CURRENT"), b"sentinel").expect("seed db file");
+    let deployments = temp.path().join(".scaffold/state/deployments.json");
+    fs::create_dir_all(deployments.parent().expect("parent")).expect("create state dir");
+    fs::write(&deployments, r#"{"programs": {}}"#).expect("seed deployments.json");
 
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(temp.path())
@@ -172,6 +171,10 @@ fn localnet_reset_without_yes_or_dry_run_refuses_destructive_default() {
         rocksdb.join("CURRENT").exists(),
         "refusal must leave rocksdb untouched at {}",
         rocksdb.display()
+    );
+    assert!(
+        deployments.exists(),
+        "refusal must leave deployments.json untouched"
     );
 }
 
@@ -199,7 +202,7 @@ fn wallet_passthrough_works_with_leading_quiet_flag() {
         .arg("list")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Preconfigured Public/"));
+        .stdout(predicate::str::contains(VALID_PUBLIC_ADDRESS));
 
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(temp.path())
@@ -230,7 +233,7 @@ fn wallet_passthrough_accepts_quiet_between_subcommand_and_separator() {
         .arg("list")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Preconfigured Public/"));
+        .stdout(predicate::str::contains(VALID_PUBLIC_ADDRESS));
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
     assert!(
         !stdout.contains("$ "),
@@ -984,6 +987,94 @@ fn doctor_uses_password_env_override_for_wallet_health() {
     );
 }
 
+fn doctor_check<'a>(report: &'a serde_json::Value, name: &str) -> Option<&'a serde_json::Value> {
+    report["checks"]
+        .as_array()
+        .expect("checks array")
+        .iter()
+        .find(|c| c.get("name").and_then(serde_json::Value::as_str) == Some(name))
+}
+
+fn doctor_json(project_root: &Path) -> serde_json::Value {
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(project_root)
+        .arg("doctor")
+        .arg("--json")
+        .output()
+        .expect("run doctor --json");
+    serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("valid doctor json")
+}
+
+#[test]
+fn doctor_reports_dev_funder_in_wallet() {
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+
+    let report = doctor_json(temp.path());
+    let funder = doctor_check(&report, "dev funder in wallet").expect("dev funder row");
+    assert_eq!(funder["status"], "pass", "{funder}");
+
+    mark_dev_funder_missing(temp.path());
+    let report = doctor_json(temp.path());
+    let funder = doctor_check(&report, "dev funder in wallet").expect("dev funder row");
+    assert_eq!(funder["status"], "warn", "{funder}");
+
+    // spel and circuits are gone from LEZ 0.3 projects.
+    let names: Vec<&str> = report["checks"]
+        .as_array()
+        .expect("checks array")
+        .iter()
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    assert!(
+        !names
+            .iter()
+            .any(|n| n.contains("spel") || n.contains("circuits")),
+        "no spel/circuits rows expected: {names:?}"
+    );
+}
+
+#[test]
+fn doctor_wallet_network_config_reads_nested_sequencer_addr() {
+    // LEZ 0.3 nests the address under `sequencer`; a remote one must warn.
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://10.1.2.3:3040"));
+
+    let report = doctor_json(temp.path());
+    let wallet_net = doctor_check(&report, "wallet network config").expect("wallet network row");
+    assert_eq!(wallet_net["status"], "warn", "{wallet_net}");
+    assert!(
+        wallet_net["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("http://10.1.2.3:3040")),
+        "{wallet_net}"
+    );
+}
+
+#[test]
+fn doctor_wallet_failure_hint_exports_lee_wallet_home_dir() {
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+
+    // Wrong password: the stub's check-health fails.
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .env("EXPECT_PASSWORD", "something-else")
+        .env_remove("LOGOS_SCAFFOLD_WALLET_PASSWORD")
+        .arg("doctor")
+        .output()
+        .expect("run doctor");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("export LEE_WALLET_HOME_DIR=$(pwd)/.scaffold/wallet"),
+        "doctor must hint the LEZ 0.3 wallet home variable; got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("NSSA_WALLET_HOME_DIR"),
+        "the LEZ 0.1 variable is gone; got:\n{stdout}"
+    );
+}
+
 #[test]
 fn doctor_sequencer_port_and_wallet_network_track_custom_localnet_port() {
     // PR #84 made deploy/wallet derive the sequencer URL from `[localnet]
@@ -1047,12 +1138,11 @@ fn localnet_start_fails_when_process_exits_before_ready() {
     let temp = tempdir().expect("tempdir");
     let lez_path = temp.path().join("lez");
     let sequencer_bin = lez_path.join("target/release/sequencer_service");
-    let config_path = lez_path.join("sequencer/service/configs/debug/sequencer_config.json");
+    let config_path = lez_path.join("lez/sequencer/service/configs/debug/sequencer_config.json");
     let localnet_port = unused_local_port();
     fs::create_dir_all(sequencer_bin.parent().expect("parent")).expect("create dirs");
     fs::create_dir_all(config_path.parent().expect("parent")).expect("create config dir");
-    fs::write(&config_path, format!(r#"{{"port": {localnet_port}}}"#))
-        .expect("write sequencer config");
+    fs::write(&config_path, r#"{"home": "."}"#).expect("write sequencer config");
     fs::write(&sequencer_bin, "#!/bin/sh\nexit 1\n").expect("write fake sequencer");
 
     #[cfg(unix)]
@@ -1098,23 +1188,26 @@ fn localnet_start_patches_config_and_uses_configured_port() {
     let temp = tempdir().expect("tempdir");
     let lez_path = temp.path().join("lez");
     let sequencer_bin = lez_path.join("target/release/sequencer_service");
-    let config_path = lez_path.join("sequencer/service/configs/debug/sequencer_config.json");
+    let config_path = lez_path.join("lez/sequencer/service/configs/debug/sequencer_config.json");
     let args_log = temp.path().join("sequencer-args.log");
     let env_log = temp.path().join("sequencer-env.log");
+    let cwd_log = temp.path().join("sequencer-cwd.log");
     let localnet_port = unused_local_port();
 
     fs::create_dir_all(sequencer_bin.parent().expect("parent")).expect("create dirs");
     fs::create_dir_all(config_path.parent().expect("parent")).expect("create config dir");
-    fs::write(&config_path, r#"{"port": 3040}"#).expect("write sequencer config");
+    let vendored = r#"{"home": ".", "block_create_timeout": "10s", "genesis": [{"supply_account": {"account_id": "6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV", "balance": 5}}]}"#;
+    fs::write(&config_path, vendored).expect("write sequencer config");
 
-    // Fake sequencer: reads port from sequencer_config.json (like the real one),
-    // logs args and env for assertions.
+    // Fake sequencer: takes the port from `--port` (like LEZ 0.3's
+    // sequencer_service), logs args, env and cwd for assertions.
     fs::write(
         &sequencer_bin,
         format!(
-            "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s' \"${{RISC0_DEV_MODE:-}}\" > '{}'\nport=$(python3 -c \"import json,sys; print(json.load(open(sys.argv[1]))['port'])\" \"$1\")\nexec python3 -m http.server \"$port\" --bind 127.0.0.1\n",
+            "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s' \"${{RISC0_DEV_MODE:-}}\" > '{}'\npwd > '{}'\nport=''\nprev=''\nfor a in \"$@\"; do if [ \"$prev\" = '--port' ]; then port=\"$a\"; fi; prev=\"$a\"; done\nexec python3 -m http.server \"$port\" --bind 127.0.0.1\n",
             args_log.display(),
             env_log.display(),
+            cwd_log.display(),
         ),
     )
     .expect("write fake sequencer");
@@ -1152,12 +1245,9 @@ fn localnet_start_patches_config_and_uses_configured_port() {
     // Regression for #114: in-place mutation broke `git_clean(lez)` and
     // silently disabled the cache-repo auto-reclone safety net.
     let vendored_after = fs::read_to_string(&config_path).expect("read vendored config");
-    let vendored_json: serde_json::Value =
-        serde_json::from_str(&vendored_after).expect("parse vendored config");
     assert_eq!(
-        vendored_json["port"],
-        serde_json::Value::Number(3040.into()),
-        "vendored sequencer_config.json must not be mutated, got: {vendored_after}"
+        vendored_after, vendored,
+        "vendored sequencer_config.json must not be mutated"
     );
 
     // The patched copy lives under the project's `.scaffold/state/`. Resolve
@@ -1172,15 +1262,29 @@ fn localnet_start_patches_config_and_uses_configured_port() {
     let patched_config = fs::read_to_string(&patched_path).expect("read patched config");
     let config_json: serde_json::Value =
         serde_json::from_str(&patched_config).expect("parse patched config");
-    assert_eq!(
-        config_json["port"],
-        serde_json::Value::Number(localnet_port.into()),
-        "expected port in patched sequencer_config.json to be {localnet_port}, got: {patched_config}"
+    // LEZ 0.3 takes the port on the command line; the config carries no
+    // port and keeps the upstream max_block_size.
+    assert!(
+        config_json.get("port").is_none(),
+        "patched config must not carry a port, got: {patched_config}"
+    );
+    assert!(
+        config_json.get("max_block_size").is_none(),
+        "patched config must not widen max_block_size, got: {patched_config}"
     );
     assert_eq!(
-        config_json["max_block_size"],
-        serde_json::Value::String("8 MiB".to_string()),
-        "expected max_block_size in patched sequencer_config.json to be widened so multi-program deploys fit, got: {patched_config}"
+        config_json["block_create_timeout"],
+        serde_json::json!("2s"),
+        "localnet shortens the block interval, got: {patched_config}"
+    );
+    // Existing genesis entries are kept and the dev funder is added.
+    assert_eq!(
+        config_json["genesis"],
+        serde_json::json!([
+            {"supply_account": {"account_id": "6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV", "balance": 5}},
+            {"supply_account": {"account_id": DEV_FUNDER_ACCOUNT_ID, "balance": 10_000_000_000_000_u64}}
+        ]),
+        "dev funder genesis entry expected, got: {patched_config}"
     );
 
     // The sequencer must have been invoked with the absolute path to the
@@ -1193,10 +1297,32 @@ fn localnet_start_patches_config_and_uses_configured_port() {
         patched_path.display()
     );
 
-    // Verify --port was NOT passed as a CLI arg
-    assert!(
-        !args.contains("--port"),
-        "expected --port NOT to appear in sequencer args, got: {args}"
+    let chain_home = temp
+        .path()
+        .canonicalize()
+        .expect("canonical temp")
+        .join(".scaffold/localnet");
+    let expected_args = vec![
+        patched_path.display().to_string(),
+        "--port".to_string(),
+        localnet_port.to_string(),
+        "--listen-address".to_string(),
+        "127.0.0.1".to_string(),
+        "--home".to_string(),
+        chain_home.display().to_string(),
+        "--metrics-address".to_string(),
+        "127.0.0.1:0".to_string(),
+    ];
+    assert_eq!(
+        args.lines().map(ToString::to_string).collect::<Vec<_>>(),
+        expected_args,
+        "unexpected sequencer argv"
+    );
+    let cwd = fs::read_to_string(&cwd_log).expect("read cwd log");
+    assert_eq!(
+        Path::new(cwd.trim()).canonicalize().expect("canonical cwd"),
+        lez_path.canonicalize().expect("canonical lez"),
+        "sequencer must run from the lez checkout"
     );
 
     let env = fs::read_to_string(&env_log).expect("read env log");
@@ -1231,6 +1357,58 @@ fn test_node_start_patches_block_timing_flags() {
     );
 
     assert_vendored_test_node_timing_preserved(&fixtures);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_node_start_uses_lez_0_3_argv_and_funds_dev_funder_at_genesis() {
+    let temp = tempdir().expect("tempdir");
+    let fixtures = setup_test_node_project(temp.path());
+    let work_dir = temp.path().join("node-work");
+
+    let runtime_json =
+        start_test_node_and_read_runtime_config(temp.path(), &fixtures, &work_dir, &[]);
+    assert_eq!(
+        runtime_json["home"],
+        serde_json::json!(work_dir.display().to_string()),
+        "node home must be its work dir"
+    );
+    assert!(
+        runtime_json.get("port").is_none() && runtime_json.get("genesis_id").is_none(),
+        "LEZ 0.3 config carries neither port nor genesis_id: {runtime_json}"
+    );
+    assert_eq!(
+        runtime_json["genesis"],
+        serde_json::json!([
+            {"supply_account": {"account_id": DEV_FUNDER_ACCOUNT_ID, "balance": 10_000_000_000_000_u64}}
+        ])
+    );
+
+    let observation: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&fixtures.sequencer_observation_path).expect("read observation"),
+    )
+    .expect("parse observation");
+    let args: Vec<String> = observation["args"]
+        .as_array()
+        .expect("args array")
+        .iter()
+        .map(|a| a.as_str().expect("string arg").to_string())
+        .collect();
+    let port = observation["port"].as_u64().expect("port").to_string();
+    assert_eq!(
+        args[1..],
+        [
+            "--port".to_string(),
+            port,
+            "--listen-address".to_string(),
+            "127.0.0.1".to_string(),
+            "--home".to_string(),
+            work_dir.display().to_string(),
+            "--metrics-address".to_string(),
+            "127.0.0.1:0".to_string(),
+        ],
+        "unexpected sequencer argv: {args:?}"
+    );
 }
 
 #[cfg(unix)]
@@ -1347,7 +1525,6 @@ fn test_node_run_forwards_child_exit_status_with_block_timing_flags() {
 
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(temp.path())
-        .env("LOGOS_BLOCKCHAIN_CIRCUITS", &fixtures.circuits_path)
         .arg("test-node")
         .arg("run")
         .arg("--block-create-timeout-ms")
@@ -1482,7 +1659,7 @@ fn wallet_list_proxies_account_list() {
         .success()
         .stdout(
             predicate::str::contains("account list")
-                .and(predicate::str::contains("Preconfigured Public/")),
+                .and(predicate::str::contains(VALID_PUBLIC_ADDRESS)),
         );
 }
 
@@ -1505,10 +1682,14 @@ fn wallet_list_json_emits_structured_envelope() {
         .get("accounts")
         .and_then(|v| v.as_array())
         .expect("accounts array");
-    assert_eq!(accounts.len(), 2, "stub lists two accounts: {stdout}");
-    assert!(accounts.iter().any(|a| a
-        .as_str()
-        .is_some_and(|s| s.contains("Preconfigured Public/"))));
+    assert_eq!(
+        accounts.len(),
+        3,
+        "stub lists two derived accounts plus the dev funder: {stdout}"
+    );
+    assert!(accounts
+        .iter()
+        .any(|a| a.as_str() == Some(&format!("/ {VALID_PUBLIC_ADDRESS}"))));
 }
 
 #[test]
@@ -1542,7 +1723,11 @@ fn wallet_topup_json_dry_run_is_structured() {
         .is_some_and(|s| s.contains("Public/")));
     assert_eq!(
         value.get("method").and_then(|v| v.as_str()),
-        Some("pinata faucet claim")
+        Some("dev funder transfer")
+    );
+    assert_eq!(
+        value.get("amount").and_then(|v| v.as_u64()),
+        Some(1_000_000_000)
     );
     // Stable schema: `tx` key is always present (null for a dry run).
     assert!(value.get("tx").is_some_and(serde_json::Value::is_null));
@@ -1574,8 +1759,16 @@ fn wallet_topup_json_success_reports_tx() {
     );
     assert_eq!(
         value.get("tx").and_then(|v| v.as_str()),
-        Some("pinata-topup-hash"),
-        "stub emits tx_hash=pinata-topup-hash"
+        Some("a0a1a2a3"),
+        "stub emits `Transaction hash is a0a1a2a3`"
+    );
+    assert_eq!(
+        value.get("method").and_then(|v| v.as_str()),
+        Some("dev funder transfer")
+    );
+    assert_eq!(
+        value.get("amount").and_then(|v| v.as_u64()),
+        Some(1_000_000_000)
     );
     // stdout must be a single clean JSON object — no `$ <cmd>` echo lines.
     assert!(
@@ -1618,7 +1811,7 @@ fn wallet_topup_json_connectivity_failure_categorizes_reason() {
         .is_some_and(|s| s.contains("Public/")));
     assert_eq!(
         value.get("method").and_then(|v| v.as_str()),
-        Some("pinata faucet claim")
+        Some("dev funder transfer")
     );
     assert_eq!(
         value.get("network").and_then(|v| v.as_str()),
@@ -1643,7 +1836,7 @@ fn wallet_passthrough_account_list_works() {
         .success()
         .stdout(
             predicate::str::contains("account list")
-                .and(predicate::str::contains("Preconfigured Public/")),
+                .and(predicate::str::contains(VALID_PUBLIC_ADDRESS)),
         );
 }
 
@@ -1688,7 +1881,7 @@ fn wallet_topup_dry_run_planned_network_uses_localnet_port_without_wallet_sequen
 }
 
 #[test]
-fn wallet_topup_dry_run_renders_pinata_claim_command() {
+fn wallet_topup_dry_run_renders_dev_funder_transfer_command() {
     let temp = tempdir().expect("tempdir");
     setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
 
@@ -1703,19 +1896,28 @@ fn wallet_topup_dry_run_renders_pinata_claim_command() {
         .success()
         .stdout(
             predicate::str::contains("dry-run: wallet topup command will not be executed")
+                .and(predicate::str::contains(format!(
+                    "LEE_WALLET_HOME_DIR={}",
+                    temp.path().join(".scaffold/wallet").display()
+                )))
+                .and(predicate::str::contains(format!(
+                    "auth-transfer send --from {DEV_FUNDER_ADDRESS} --to {VALID_PUBLIC_ADDRESS} --amount 1000000000"
+                )))
                 .and(predicate::str::contains(
-                    "planned preflight: check destination wallet initialization",
+                    "planned method: dev funder transfer",
                 ))
-                .and(predicate::str::contains("auth-transfer init --account-id"))
-                .and(predicate::str::contains("pinata claim --to"))
-                .and(predicate::str::contains(
-                    "planned method: pinata faucet claim",
-                )),
+                .and(predicate::str::contains("pinata").not())
+                .and(predicate::str::contains("NSSA_WALLET_HOME_DIR").not()),
         );
+    assert!(
+        wallet_stub_calls(temp.path()).is_empty(),
+        "dry-run must not invoke the wallet: {:?}",
+        wallet_stub_calls(temp.path())
+    );
 }
 
 #[test]
-fn wallet_topup_runs_pinata_claim_with_explicit_address() {
+fn wallet_topup_sends_from_dev_funder_with_explicit_address() {
     let temp = tempdir().expect("tempdir");
     setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
 
@@ -1728,20 +1930,36 @@ fn wallet_topup_runs_pinata_claim_with_explicit_address() {
         .assert()
         .success()
         .stdout(
-            predicate::str::contains("pinata claim --to Public/")
-                .and(predicate::str::contains("wallet topup complete")),
+            predicate::str::contains(format!(
+                "auth-transfer send --from {DEV_FUNDER_ADDRESS} --to {VALID_PUBLIC_ADDRESS} --amount 1000000000"
+            ))
+            .and(predicate::str::contains("wallet topup complete"))
+            .and(predicate::str::contains("Method: dev funder transfer"))
+            .and(predicate::str::contains("Tx: a0a1a2a3")),
         );
+
+    let calls = wallet_stub_calls(temp.path());
+    assert!(
+        !calls.iter().any(|c| c.starts_with("account import")),
+        "funder already in the wallet: no import expected, got {calls:?}"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.starts_with("pinata") || c.starts_with("auth-transfer init")),
+        "LEZ 0.3 topup has no pinata/init steps, got {calls:?}"
+    );
 }
 
 #[test]
-fn wallet_topup_initializes_when_account_uninitialized_before_pinata() {
+fn wallet_topup_imports_dev_funder_when_missing() {
     let temp = tempdir().expect("tempdir");
     setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+    mark_dev_funder_missing(temp.path());
 
-    let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(temp.path())
-        .env("TOPUP_ACCOUNT_STATE", "uninitialized")
-        .env("TOPUP_GUARD_REQUIRE_INIT", "1")
+        .env("EXPECT_PASSWORD", DEFAULT_WALLET_PASSWORD)
         .arg("wallet")
         .arg("topup")
         .arg("--address")
@@ -1750,67 +1968,76 @@ fn wallet_topup_initializes_when_account_uninitialized_before_pinata() {
         .success()
         .stdout(predicate::str::contains("wallet topup complete"));
 
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
-    let init_pos = stdout
-        .find("auth-transfer init --account-id Public/")
-        .expect("init command should be present");
-    let pinata_pos = stdout
-        .find("pinata claim --to Public/")
-        .expect("pinata command should be present");
-    assert!(
-        init_pos < pinata_pos,
-        "auth-transfer init must run before pinata claim, got output:\n{stdout}"
-    );
+    let calls = wallet_stub_calls(temp.path());
+    let import_pos = calls
+        .iter()
+        .position(|c| {
+            *c == format!("account import public --private-key {DEV_FUNDER_PRIVATE_KEY_HEX}")
+        })
+        .unwrap_or_else(|| panic!("funder import expected, got {calls:?}"));
+    let send_pos = calls
+        .iter()
+        .position(|c| c.starts_with("auth-transfer send"))
+        .unwrap_or_else(|| panic!("transfer expected, got {calls:?}"));
+    assert!(import_pos < send_pos, "import must precede send: {calls:?}");
 }
 
 #[test]
-fn wallet_topup_skips_init_when_account_already_initialized() {
+fn wallet_topup_rejects_dev_funder_as_destination() {
     let temp = tempdir().expect("tempdir");
     setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
 
-    let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(temp.path())
-        .env("TOPUP_ACCOUNT_STATE", "initialized")
         .arg("wallet")
         .arg("topup")
         .arg("--address")
-        .arg(VALID_PUBLIC_ADDRESS)
+        .arg(DEV_FUNDER_ACCOUNT_ID)
         .assert()
-        .success();
+        .failure()
+        .stderr(predicate::str::contains("is the dev funder itself"));
 
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
     assert!(
-        !stdout.contains("auth-transfer init --account-id"),
-        "init command must not run for initialized accounts, got output:\n{stdout}"
-    );
-    assert!(
-        stdout.contains("pinata claim --to Public/"),
-        "pinata claim should still run, got output:\n{stdout}"
+        !wallet_stub_calls(temp.path())
+            .iter()
+            .any(|c| c.starts_with("auth-transfer send")),
+        "no transfer may be attempted to the funder itself"
     );
 }
 
 #[test]
-fn wallet_topup_preflight_failure_blocks_pinata() {
+fn wallet_topup_funder_listing_connectivity_failure_shows_sequencer_hint_in_json() {
     let temp = tempdir().expect("tempdir");
     setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
 
     let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(temp.path())
-        .env("TOPUP_PREFLIGHT_FAIL", "1")
-        .arg("wallet")
-        .arg("topup")
-        .arg("--address")
-        .arg(VALID_PUBLIC_ADDRESS)
+        .env("ACCOUNT_LIST_FAIL_CONNECT", "1")
+        .args([
+            "wallet",
+            "topup",
+            "--address",
+            VALID_PUBLIC_ADDRESS,
+            "--json",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "wallet topup failed while checking account initialization",
+            "wallet topup could not prepare the dev funder",
         ));
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    assert_eq!(value.get("status").and_then(|v| v.as_str()), Some("error"));
+    assert_eq!(
+        value.get("reason").and_then(|v| v.as_str()),
+        Some("connectivity")
+    );
     assert!(
-        !stdout.contains("pinata claim --to"),
-        "pinata must not run when preflight fails, got output:\n{stdout}"
+        !wallet_stub_calls(temp.path())
+            .iter()
+            .any(|c| c.starts_with("auth-transfer send")),
+        "transfer must not run when the funder preflight fails"
     );
 }
 
@@ -1840,6 +2067,7 @@ fn wallet_topup_falls_back_to_default_password_when_env_missing() {
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(temp.path())
         .env("EXPECT_PASSWORD", DEFAULT_WALLET_PASSWORD)
+        .env_remove("LOGOS_SCAFFOLD_WALLET_PASSWORD")
         .arg("wallet")
         .arg("topup")
         .arg("--address")
@@ -1869,7 +2097,9 @@ fn wallet_topup_uses_default_wallet_when_address_is_omitted() {
         .arg("topup")
         .assert()
         .success()
-        .stdout(predicate::str::contains("pinata claim --to Public/"));
+        .stdout(predicate::str::contains(format!(
+            "--to {VALID_PUBLIC_ADDRESS} --amount 1000000000"
+        )));
 }
 
 #[test]
@@ -1930,61 +2160,6 @@ fn wallet_topup_shows_sequencer_hint_on_connectivity_failure() {
 }
 
 #[test]
-fn wallet_topup_init_connectivity_failure_shows_sequencer_hint() {
-    let temp = tempdir().expect("tempdir");
-    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
-
-    let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
-        .current_dir(temp.path())
-        .env("TOPUP_ACCOUNT_STATE", "uninitialized")
-        .env("TOPUP_INIT_FAIL_CONNECT", "1")
-        .arg("wallet")
-        .arg("topup")
-        .arg("--address")
-        .arg(VALID_PUBLIC_ADDRESS)
-        .assert()
-        .failure()
-        .stderr(
-            predicate::str::contains("sequencer appears unavailable")
-                .and(predicate::str::contains("logos-scaffold localnet start"))
-                .and(predicate::str::contains("Another project's sequencer")),
-        );
-
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
-    assert!(
-        !stdout.contains("pinata claim --to"),
-        "pinata must not run when init fails with connectivity error, got output:\n{stdout}"
-    );
-}
-
-#[test]
-fn wallet_topup_continues_when_init_reports_already_initialized() {
-    let temp = tempdir().expect("tempdir");
-    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
-
-    let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
-        .current_dir(temp.path())
-        .env("TOPUP_ACCOUNT_STATE", "uninitialized")
-        .env("TOPUP_INIT_FAIL_ALREADY", "1")
-        .arg("wallet")
-        .arg("topup")
-        .arg("--address")
-        .arg(VALID_PUBLIC_ADDRESS)
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("destination already initialized; continuing")
-                .and(predicate::str::contains("wallet topup complete")),
-        );
-
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
-    assert!(
-        stdout.contains("pinata claim --to Public/"),
-        "pinata should run after tolerated init race, got output:\n{stdout}"
-    );
-}
-
-#[test]
 fn wallet_topup_timeout_exits_non_zero_with_pending_status() {
     // C3: confirmation timeout means we don't actually know whether the
     // submission landed. Surface that to the agent via a non-zero exit and
@@ -2010,18 +2185,12 @@ fn wallet_topup_timeout_exits_non_zero_with_pending_status() {
 
 #[test]
 fn wallet_topup_timeout_with_transport_token_reports_pending_not_connectivity() {
-    // Blocking guard finding: once the classifier sees stdout+stderr combined,
-    // a sequencer dying mid-claim can carry BOTH the confirmation-timeout line
-    // AND a transport token ("connection refused"). The tx reached the
-    // sequencer but did not settle, so the confirmation-timeout branch must win
+    // Once the classifier sees stdout+stderr combined, a sequencer dying
+    // mid-transfer can carry BOTH the confirmation-timeout line AND a
+    // transport token ("connection refused"). The tx reached the sequencer
+    // but did not settle, so the confirmation-timeout branch must win
     // (status: pending, with the tx id) rather than the connectivity hint.
-    //
-    // `sequencer_connectivity_failure` no longer excludes the confirmation
-    // phrase itself, so the ONLY thing keeping this correct is the check
-    // ordering at the pinata-claim site (is_confirmation_timeout_failure before
-    // the connectivity check). Reverting that order makes this fail: the
-    // connectivity classifier matches "connection refused" and prints
-    // "sequencer appears unavailable" instead, dropping the pending tx id.
+    // Reverting the check ordering at the transfer site makes this fail.
     let temp = tempdir().expect("tempdir");
     setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
 
@@ -2037,7 +2206,7 @@ fn wallet_topup_timeout_with_transport_token_reports_pending_not_connectivity() 
         .stderr(
             predicate::str::contains("wallet topup submitted, but confirmation timed out")
                 .and(predicate::str::contains("status: pending"))
-                .and(predicate::str::contains("Tx: pinata-topup-hash"))
+                .and(predicate::str::contains("Tx: a0a1a2a3"))
                 .and(predicate::str::contains("sequencer appears unavailable").not()),
         );
 }
@@ -2099,7 +2268,7 @@ fn wallet_default_set_accepts_flag_form() {
 #[test]
 fn deploy_unknown_program_lists_available_programs() {
     let temp = tempdir().expect("tempdir");
-    setup_wallet_project(temp.path(), None);
+    setup_deploy_project(temp.path(), None);
     write_guest_program(temp.path(), "alpha");
     write_guest_program(temp.path(), "beta");
 
@@ -2117,10 +2286,10 @@ fn deploy_unknown_program_lists_available_programs() {
 }
 
 #[test]
-fn deploy_single_program_submits_successfully() {
+fn deploy_single_program_deploys_successfully() {
     let temp = tempdir().expect("tempdir");
     let rpc = RpcStub::start();
-    setup_wallet_project(temp.path(), Some(&rpc.url));
+    setup_deploy_project(temp.path(), Some(&rpc.url));
     write_guest_program(temp.path(), "hello");
     write_guest_binary(temp.path(), "hello");
 
@@ -2131,11 +2300,11 @@ fn deploy_single_program_submits_successfully() {
         .assert()
         .success()
         .stdout(
-            predicate::str::contains("OK  hello submitted")
+            predicate::str::contains("OK  hello deployed")
                 .and(predicate::str::contains(
-                    "Submission confirmed by wallet exit status",
+                    "deployed through program_loader (1 segment)",
                 ))
-                .and(predicate::str::contains("Succeeded: 1"))
+                .and(predicate::str::contains("Deployed: 1"))
                 .and(predicate::str::contains("Failed: 0"))
                 .and(predicate::str::contains("reachability probe failed").not()),
         );
@@ -2145,7 +2314,7 @@ fn deploy_single_program_submits_successfully() {
 fn deploy_uses_password_env_override() {
     let temp = tempdir().expect("tempdir");
     let rpc = RpcStub::start();
-    setup_wallet_project(temp.path(), Some(&rpc.url));
+    setup_deploy_project(temp.path(), Some(&rpc.url));
     write_guest_program(temp.path(), "hello");
     write_guest_binary(temp.path(), "hello");
 
@@ -2157,14 +2326,14 @@ fn deploy_uses_password_env_override() {
         .arg("hello")
         .assert()
         .success()
-        .stdout(predicate::str::contains("OK  hello submitted"));
+        .stdout(predicate::str::contains("OK  hello deployed"));
 }
 
 #[test]
 fn deploy_missing_binary_shows_build_hint() {
     let temp = tempdir().expect("tempdir");
     let rpc = RpcStub::start();
-    setup_wallet_project(temp.path(), Some(&rpc.url));
+    setup_deploy_project(temp.path(), Some(&rpc.url));
     write_guest_program(temp.path(), "hello");
 
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
@@ -2183,7 +2352,7 @@ fn deploy_missing_binary_shows_build_hint() {
 fn deploy_continues_and_summarizes_mixed_results() {
     let temp = tempdir().expect("tempdir");
     let rpc = RpcStub::start();
-    setup_wallet_project(temp.path(), Some(&rpc.url));
+    setup_deploy_project(temp.path(), Some(&rpc.url));
     write_guest_program(temp.path(), "alpha");
     write_guest_program(temp.path(), "beta");
     write_guest_binary(temp.path(), "alpha");
@@ -2196,9 +2365,9 @@ fn deploy_continues_and_summarizes_mixed_results() {
         .assert()
         .failure()
         .stdout(
-            predicate::str::contains("OK  alpha submitted")
+            predicate::str::contains("OK  alpha deployed")
                 .and(predicate::str::contains("FAIL beta deployment failed"))
-                .and(predicate::str::contains("Succeeded: 1"))
+                .and(predicate::str::contains("Deployed: 1"))
                 .and(predicate::str::contains("Failed: 1")),
         );
 }
@@ -2212,6 +2381,7 @@ fn deploy_preflight_targets_localnet_port_when_wallet_omits_sequencer_addr() {
     let port = unused_local_port();
     write_scaffold_toml_with_localnet(temp.path(), &lez_path, Some(port), Some(true));
     write_wallet_config(temp.path(), None);
+    write_default_wallet_state(temp.path());
     write_guest_program(temp.path(), "hello");
     write_guest_binary(temp.path(), "hello");
 
@@ -2232,7 +2402,7 @@ fn deploy_preflight_targets_localnet_port_when_wallet_omits_sequencer_addr() {
 #[test]
 fn deploy_shows_hint_when_sequencer_is_unreachable_with_configured_addr() {
     let temp = tempdir().expect("tempdir");
-    setup_wallet_project(temp.path(), Some("http://127.0.0.1:65535"));
+    setup_deploy_project(temp.path(), Some("http://127.0.0.1:65535"));
     write_guest_program(temp.path(), "hello");
     write_guest_binary(temp.path(), "hello");
 
@@ -2258,7 +2428,7 @@ fn deploy_shows_hint_when_sequencer_is_unreachable_with_fallback_addr() {
     }
 
     let temp = tempdir().expect("tempdir");
-    setup_wallet_project(temp.path(), None);
+    setup_deploy_project(temp.path(), None);
     write_guest_program(temp.path(), "hello");
     write_guest_binary(temp.path(), "hello");
 
@@ -2288,7 +2458,7 @@ fn deploy_classifies_mid_deploy_both_tokens_failure_as_connectivity() {
     // generic retry line).
     let temp = tempdir().expect("tempdir");
     let rpc = RpcStub::start();
-    setup_wallet_project(temp.path(), Some(&rpc.url));
+    setup_deploy_project(temp.path(), Some(&rpc.url));
     write_guest_program(temp.path(), "hello");
     write_guest_binary(temp.path(), "hello");
 
@@ -2317,13 +2487,13 @@ fn deploy_classifies_mid_deploy_both_tokens_failure_as_connectivity() {
 }
 
 #[test]
-fn deploy_prints_program_id_from_vendored_spel() {
+fn deploy_prints_program_id_from_program_loader_header() {
     let temp = tempdir().expect("tempdir");
     let rpc = RpcStub::start();
-    setup_wallet_project(temp.path(), Some(&rpc.url));
+    setup_deploy_project(temp.path(), Some(&rpc.url));
     write_guest_program(temp.path(), "hello");
     write_guest_binary(temp.path(), "hello");
-    let expected = expected_stub_program_id("hello.bin");
+    let expected = STUB_NEW_ACCOUNT_IDS[0];
 
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(temp.path())
@@ -2332,7 +2502,7 @@ fn deploy_prints_program_id_from_vendored_spel() {
         .assert()
         .success()
         .stdout(
-            predicate::str::contains("OK  hello submitted").and(predicate::str::contains(format!(
+            predicate::str::contains("OK  hello deployed").and(predicate::str::contains(format!(
                 "  program_id: {expected}"
             ))),
         );
@@ -2346,7 +2516,7 @@ fn deploy_plain_output_has_single_program_id_line_per_program() {
     // the user deploys one program or many.
     let temp = tempdir().expect("tempdir");
     let rpc = RpcStub::start();
-    setup_wallet_project(temp.path(), Some(&rpc.url));
+    setup_deploy_project(temp.path(), Some(&rpc.url));
     write_guest_program(temp.path(), "alpha");
     write_guest_program(temp.path(), "beta");
     write_guest_binary(temp.path(), "alpha");
@@ -2370,54 +2540,13 @@ fn deploy_plain_output_has_single_program_id_line_per_program() {
 }
 
 #[test]
-fn deploy_aborts_remaining_programs_when_head_stalls() {
-    // PR #241 review: a pacing timeout must gate the next submission.
-    // Continuing unpaced after a stalled head can batch the remaining ELFs
-    // into one block and recreate the fatal oversized-inscription sequencer
-    // crash, so the deploy aborts fail-closed: first program submitted,
-    // every remaining program marked failed, non-zero exit.
-    let temp = tempdir().expect("tempdir");
-    let rpc = RpcStub::start_stalled();
-    setup_wallet_project(temp.path(), Some(&rpc.url));
-    write_guest_program(temp.path(), "alpha");
-    write_guest_program(temp.path(), "beta");
-    write_guest_binary(temp.path(), "alpha");
-    write_guest_binary(temp.path(), "beta");
-
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
-        .current_dir(temp.path())
-        .env("LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS", "200")
-        .arg("deploy")
-        .output()
-        .expect("run deploy against a stalled head");
-
-    assert!(
-        !output.status.success(),
-        "a pacing abort must exit non-zero"
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("OK  alpha submitted"),
-        "first program must be submitted before the stall is detected:\n{stdout}"
-    );
-    assert!(
-        stdout.contains("FAIL beta not submitted") && stdout.contains("deploy pacing aborted"),
-        "remaining program must be aborted fail-closed, not submitted unpaced:\n{stdout}"
-    );
-    assert!(
-        stdout.contains("Succeeded: 1") && stdout.contains("Failed: 1"),
-        "summary must reflect one submitted + one aborted program:\n{stdout}"
-    );
-}
-
-#[test]
 fn deploy_program_path_json_includes_program_id() {
     let temp = tempdir().expect("tempdir");
     let rpc = RpcStub::start();
-    setup_wallet_project(temp.path(), Some(&rpc.url));
+    setup_deploy_project(temp.path(), Some(&rpc.url));
     let custom = temp.path().join("custom.bin");
-    fs::write(&custom, b"stub-program-bin").expect("write custom bin");
-    let expected = expected_stub_program_id("custom.bin");
+    fs::write(&custom, minimal_r0bf_binary()).expect("write custom bin");
+    let expected = STUB_NEW_ACCOUNT_IDS[0];
 
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(temp.path())
@@ -2433,39 +2562,15 @@ fn deploy_program_path_json_includes_program_id() {
 }
 
 #[test]
-fn deploy_program_id_unavailable_when_spel_missing() {
-    let temp = tempdir().expect("tempdir");
-    let rpc = RpcStub::start();
-    setup_wallet_project(temp.path(), Some(&rpc.url));
-    write_guest_program(temp.path(), "hello");
-    write_guest_binary(temp.path(), "hello");
-    // Remove the spel stub the helper placed; deploy should still succeed
-    // and print the "unavailable" hint instead of a hex.
-    fs::remove_file(temp.path().join("spel/target/release/spel")).expect("remove spel stub");
-
-    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
-        .current_dir(temp.path())
-        .arg("deploy")
-        .arg("hello")
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("OK  hello submitted")
-                .and(predicate::str::contains("program_id: unavailable"))
-                .and(predicate::str::contains("logos-scaffold setup")),
-        );
-}
-
-#[test]
 fn deploy_json_output_is_pure_json_no_command_echo() {
     // --json must produce a single JSON line on stdout; the wallet
-    // subprocess command-echo (`$ .../wallet deploy-program …`) belongs
+    // subprocess command-echo (`$ .../wallet program-loader deploy …`) belongs
     // off-channel so consumers can pipe directly to `jq`.
     let temp = tempdir().expect("tempdir");
     let rpc = RpcStub::start();
-    setup_wallet_project(temp.path(), Some(&rpc.url));
+    setup_deploy_project(temp.path(), Some(&rpc.url));
     let custom = temp.path().join("custom.bin");
-    fs::write(&custom, b"stub-program-bin").expect("write custom bin");
+    fs::write(&custom, minimal_r0bf_binary()).expect("write custom bin");
 
     let output = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(temp.path())
@@ -2504,9 +2609,9 @@ fn deploy_json_stdout_stays_pure_json_when_preflight_probe_returns_other() {
     // the JSON-parse assertion below fail.
     let temp = tempdir().expect("tempdir");
     let rpc = RpcStub::start_http_error();
-    setup_wallet_project(temp.path(), Some(&rpc.url));
+    setup_deploy_project(temp.path(), Some(&rpc.url));
     let custom = temp.path().join("custom.bin");
-    fs::write(&custom, b"stub-program-bin").expect("write custom bin");
+    fs::write(&custom, minimal_r0bf_binary()).expect("write custom bin");
 
     let output = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(temp.path())
@@ -2547,13 +2652,14 @@ fn deploy_multi_program_json_emits_deploys_array() {
     // populated when extraction succeeds.
     let temp = tempdir().expect("tempdir");
     let rpc = RpcStub::start();
-    setup_wallet_project(temp.path(), Some(&rpc.url));
+    setup_deploy_project(temp.path(), Some(&rpc.url));
     write_guest_program(temp.path(), "alpha");
     write_guest_program(temp.path(), "beta");
     write_guest_binary(temp.path(), "alpha");
     write_guest_binary(temp.path(), "beta");
-    let alpha_id = expected_stub_program_id("alpha.bin");
-    let beta_id = expected_stub_program_id("beta.bin");
+    // Each program takes a header + one segment account, in order.
+    let alpha_id = STUB_NEW_ACCOUNT_IDS[0];
+    let beta_id = STUB_NEW_ACCOUNT_IDS[2];
 
     let output = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(temp.path())
@@ -2593,7 +2699,7 @@ fn deploy_multi_program_json_emits_deploys_array() {
         "missing beta program_id in:\n{trimmed}"
     );
     assert_eq!(
-        trimmed.matches("\"status\":\"submitted\"").count(),
+        trimmed.matches("\"status\":\"deployed\"").count(),
         2,
         "expected exactly two submitted entries in:\n{trimmed}"
     );
@@ -2607,9 +2713,9 @@ fn deploy_json_output_parses_as_valid_json() {
     // structural counterpart.
     let temp = tempdir().expect("tempdir");
     let rpc = RpcStub::start();
-    setup_wallet_project(temp.path(), Some(&rpc.url));
+    setup_deploy_project(temp.path(), Some(&rpc.url));
     let custom = temp.path().join("custom.bin");
-    fs::write(&custom, b"stub-program-bin").expect("write custom bin");
+    fs::write(&custom, minimal_r0bf_binary()).expect("write custom bin");
 
     let output = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(temp.path())
@@ -2630,7 +2736,7 @@ fn deploy_json_output_parses_as_valid_json() {
         .expect("top-level value must be an object");
     assert_eq!(
         obj.get("status").and_then(|v| v.as_str()),
-        Some("submitted"),
+        Some("deployed"),
         "missing or wrong status in: {trimmed}"
     );
     assert!(
@@ -2645,7 +2751,7 @@ fn deploy_multi_program_json_output_parses_as_valid_json() {
     // array shape via serde_json (rather than substring matching).
     let temp = tempdir().expect("tempdir");
     let rpc = RpcStub::start();
-    setup_wallet_project(temp.path(), Some(&rpc.url));
+    setup_deploy_project(temp.path(), Some(&rpc.url));
     write_guest_program(temp.path(), "alpha");
     write_guest_program(temp.path(), "beta");
     write_guest_binary(temp.path(), "alpha");
@@ -2698,7 +2804,7 @@ fn deploy_multi_program_json_records_failed_entries_with_error() {
     // Process exits non-zero (any failure fails the deploy).
     let temp = tempdir().expect("tempdir");
     let rpc = RpcStub::start();
-    setup_wallet_project(temp.path(), Some(&rpc.url));
+    setup_deploy_project(temp.path(), Some(&rpc.url));
     write_guest_program(temp.path(), "alpha");
     write_guest_program(temp.path(), "beta");
     write_guest_binary(temp.path(), "alpha");
@@ -2722,7 +2828,7 @@ fn deploy_multi_program_json_records_failed_entries_with_error() {
         "stdout must remain a JSON object even with failures; got:\n{stdout}"
     );
     assert!(
-        trimmed.contains("\"status\":\"submitted\"") && trimmed.contains("\"program\":\"alpha\""),
+        trimmed.contains("\"status\":\"deployed\"") && trimmed.contains("\"program\":\"alpha\""),
         "alpha must be present and submitted in:\n{trimmed}"
     );
     assert!(
@@ -2737,15 +2843,15 @@ fn deploy_multi_program_json_records_failed_entries_with_error() {
 
 #[test]
 fn deploy_json_omits_tx_when_wallet_returns_none() {
-    // Wallet stub today emits a `tx_hash=…` line. To prove the JSON shape
+    // Wallet stub today emits `Transaction hash is …` lines. To prove the JSON shape
     // omits `tx` when no value is available, set WALLET_NO_TX=1 — the stub
     // honors that and skips the tx line. Result: presence of the `tx` key
     // should now imply a real value (not `null`).
     let temp = tempdir().expect("tempdir");
     let rpc = RpcStub::start();
-    setup_wallet_project(temp.path(), Some(&rpc.url));
+    setup_deploy_project(temp.path(), Some(&rpc.url));
     let custom = temp.path().join("custom.bin");
-    fs::write(&custom, b"stub-program-bin").expect("write custom bin");
+    fs::write(&custom, minimal_r0bf_binary()).expect("write custom bin");
 
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(temp.path())
@@ -2760,170 +2866,175 @@ fn deploy_json_omits_tx_when_wallet_returns_none() {
 }
 
 #[test]
-fn spel_proxy_forwards_args_to_vendored_binary() {
+fn deploy_requires_default_wallet_payer() {
     let temp = tempdir().expect("tempdir");
-    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+    let rpc = RpcStub::start();
+    setup_wallet_project(temp.path(), Some(&rpc.url));
+    write_guest_program(temp.path(), "hello");
+    write_guest_binary(temp.path(), "hello");
 
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(temp.path())
-        .arg("spel")
-        .arg("--")
-        .arg("program-id")
-        .arg("methods/guest/foo.bin")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("ImageID (hex bytes):"));
-}
-
-#[test]
-fn spel_proxy_works_with_leading_quiet_flag() {
-    // Suppressed copilot comment on PR #86: `spel_passthrough_args` was
-    // hard-coded to look at args[1], so `lgs -q spel -- ...` skipped the
-    // passthrough entirely and fell through to clap (which has no `spel`
-    // subcommand). Mirrors `wallet_passthrough_works_with_leading_quiet_flag`
-    // for symmetry with the other passthrough.
-    let temp = tempdir().expect("tempdir");
-    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
-
-    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
-        .current_dir(temp.path())
-        .arg("--quiet")
-        .arg("spel")
-        .arg("--")
-        .arg("program-id")
-        .arg("methods/guest/foo.bin")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("ImageID (hex bytes):"));
-
-    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
-        .current_dir(temp.path())
-        .arg("-q")
-        .arg("spel")
-        .arg("--")
-        .arg("program-id")
-        .arg("methods/guest/foo.bin")
-        .assert()
-        .success();
-}
-
-#[test]
-fn spel_proxy_accepts_quiet_between_subcommand_and_separator() {
-    // Copilot review on PR #86: same global-quiet composition fix as for
-    // wallet passthrough. `lgs spel -q -- inspect ...` must be intercepted
-    // (not handed to clap, which has no `spel` subcommand) and must
-    // suppress the `$ <spel-bin>` echo on stdout.
-    let temp = tempdir().expect("tempdir");
-    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
-
-    let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
-        .current_dir(temp.path())
-        .arg("spel")
-        .arg("-q")
-        .arg("--")
-        .arg("program-id")
-        .arg("methods/guest/foo.bin")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("ImageID (hex bytes):"));
-    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
-    assert!(
-        !stdout.contains("$ "),
-        "in-between -q must suppress the `$ <cmd>` echo line, got:\n{stdout}"
-    );
-
-    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
-        .current_dir(temp.path())
-        .arg("spel")
-        .arg("--quiet")
-        .arg("--")
-        .arg("program-id")
-        .arg("methods/guest/foo.bin")
-        .assert()
-        .success();
-}
-
-#[test]
-fn spel_proxy_forwards_nonzero_exit_code() {
-    let temp = tempdir().expect("tempdir");
-    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
-
-    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
-        .current_dir(temp.path())
-        .env("SPEL_FAIL", "1")
-        .arg("spel")
-        .arg("--")
-        .arg("program-id")
-        .arg("foo.bin")
-        .assert()
-        .failure();
-}
-
-#[test]
-fn spel_proxy_hints_when_binary_missing() {
-    let temp = tempdir().expect("tempdir");
-    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
-    fs::remove_file(temp.path().join("spel/target/release/spel")).expect("remove spel stub");
-
-    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
-        .current_dir(temp.path())
-        .arg("spel")
-        .arg("--")
-        .arg("program-id")
-        .arg("foo.bin")
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("logos-scaffold setup"));
-}
-
-#[test]
-fn spel_proxy_requires_args_after_dash_dash() {
-    let temp = tempdir().expect("tempdir");
-    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
-
-    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
-        .current_dir(temp.path())
-        .arg("spel")
-        .arg("--")
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "spel passthrough requires at least one argument",
-        ));
-}
-
-#[test]
-fn spel_without_dash_dash_suggests_passthrough_form() {
-    let temp = tempdir().expect("tempdir");
-    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
-
-    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
-        .current_dir(temp.path())
-        .arg("spel")
-        .arg("program-id")
-        .arg("foo.bin")
+        .arg("deploy")
+        .arg("hello")
         .assert()
         .failure()
         .stderr(
-            predicate::str::contains("Did you mean").and(predicate::str::contains(
-                "logos-scaffold spel -- program-id",
-            )),
+            predicate::str::contains("deploy needs a funded default wallet")
+                .and(predicate::str::contains("wallet topup")),
         );
+    assert!(
+        !wallet_stub_calls(temp.path())
+            .iter()
+            .any(|c| c.starts_with("program-loader")),
+        "no deployment may be attempted without a payer"
+    );
 }
 
 #[test]
-fn spel_help_accepts_clap_help_spellings() {
-    for help_arg in ["--help", "-h", "help", "-?"] {
-        Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
-            .arg("spel")
-            .arg(help_arg)
-            .assert()
-            .success()
-            .stdout(
-                predicate::str::contains("Forward arguments to the project-vendored `spel` binary")
-                    .and(predicate::str::contains("logos-scaffold spel --")),
-            );
-    }
+fn deploy_rejects_non_risc0_program_binary() {
+    let temp = tempdir().expect("tempdir");
+    let rpc = RpcStub::start();
+    setup_deploy_project(temp.path(), Some(&rpc.url));
+    let custom = temp.path().join("custom.bin");
+    fs::write(&custom, b"stub-program-bin").expect("write custom bin");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("deploy")
+        .arg("--program-path")
+        .arg(&custom)
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("is not a risc0 program binary"));
+    assert!(
+        !wallet_stub_calls(temp.path())
+            .iter()
+            .any(|c| c.starts_with("account new") || c.starts_with("program-loader")),
+        "a non-R0BF file must fail before any wallet account is created"
+    );
+}
+
+#[test]
+fn deploy_runs_program_loader_with_fresh_header_and_segment_accounts() {
+    // A user ELF of 98_305 bytes spans two 96 KiB `program_loader`
+    // segments, so deploy creates three fresh accounts (header + 2
+    // segments) and pays with the default wallet.
+    let temp = tempdir().expect("tempdir");
+    let rpc = RpcStub::start();
+    setup_deploy_project(temp.path(), Some(&rpc.url));
+    let user_elf_len: u32 = 98_305;
+    let mut bin = b"R0BF".to_vec();
+    bin.extend_from_slice(&1u32.to_le_bytes());
+    bin.extend_from_slice(&3u32.to_le_bytes());
+    bin.extend_from_slice(b"hdr");
+    bin.extend_from_slice(&user_elf_len.to_le_bytes());
+    bin.extend(std::iter::repeat_n(0u8, user_elf_len as usize));
+    bin.extend_from_slice(b"kernel");
+    let custom = temp.path().join("big.bin");
+    fs::write(&custom, &bin).expect("write big bin");
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("deploy")
+        .arg("--program-path")
+        .arg(&custom)
+        .arg("--json")
+        .output()
+        .expect("run deploy");
+    assert!(
+        output.status.success(),
+        "deploy must succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let calls = wallet_stub_calls(temp.path());
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.as_str() == "account new public")
+            .count(),
+        3,
+        "header + 2 segment accounts expected: {calls:?}"
+    );
+    let deploy_call = calls
+        .iter()
+        .find(|c| c.starts_with("program-loader deploy"))
+        .unwrap_or_else(|| panic!("program-loader deploy expected: {calls:?}"));
+    assert_eq!(
+        deploy_call,
+        &format!(
+            "program-loader deploy --elf {} --header Public/{} --segments Public/{} Public/{} --payer {}",
+            custom.display(),
+            STUB_NEW_ACCOUNT_IDS[0],
+            STUB_NEW_ACCOUNT_IDS[1],
+            STUB_NEW_ACCOUNT_IDS[2],
+            VALID_PUBLIC_ADDRESS
+        )
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).expect("json");
+    assert_eq!(value["status"], "deployed");
+    assert_eq!(value["program"], "big");
+    assert_eq!(value["program_id"], STUB_NEW_ACCOUNT_IDS[0]);
+    assert_eq!(value["tx"], "deploy-big.bin", "last tx hash is reported");
+    let expected_sha: String = {
+        use sha2::{Digest as _, Sha256};
+        Sha256::digest(&bin)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    };
+    assert_eq!(value["elf_sha256"], serde_json::json!(expected_sha));
+}
+
+#[test]
+fn deploy_records_program_ids_in_deployments_json() {
+    let temp = tempdir().expect("tempdir");
+    let rpc = RpcStub::start();
+    setup_deploy_project(temp.path(), Some(&rpc.url));
+    write_guest_program(temp.path(), "alpha");
+    write_guest_program(temp.path(), "beta");
+    write_guest_binary(temp.path(), "alpha");
+    write_guest_binary(temp.path(), "beta");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .env("FAIL_PROGRAM", "beta.bin")
+        .arg("deploy")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("Program ids are recorded in"));
+
+    let text = fs::read_to_string(temp.path().join(".scaffold/state/deployments.json"))
+        .expect("deployments.json written");
+    let value: serde_json::Value = serde_json::from_str(&text).expect("parse deployments.json");
+    let programs = value["programs"].as_object().expect("programs object");
+    assert_eq!(
+        programs.keys().collect::<Vec<_>>(),
+        vec!["alpha"],
+        "only successful deploys are recorded: {text}"
+    );
+    assert_eq!(programs["alpha"]["program"], "alpha");
+    assert_eq!(programs["alpha"]["program_id"], STUB_NEW_ACCOUNT_IDS[0]);
+    assert_eq!(programs["alpha"]["payer"], VALID_PUBLIC_ADDRESS);
+    assert!(programs["alpha"]["elf_sha256"].is_string(), "{text}");
+}
+
+#[test]
+fn spel_subcommand_is_gone() {
+    // LEZ 0.3 has no spel release: the `spel` passthrough was removed and
+    // clap now rejects it like any other unknown subcommand.
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["spel", "--", "program-id", "x.bin"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unrecognized subcommand 'spel'"));
 }
 
 #[test]
@@ -3563,7 +3674,6 @@ fn start_test_node_and_read_runtime_config(
     let mut command = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"));
     command
         .current_dir(project_root)
-        .env("LOGOS_BLOCKCHAIN_CIRCUITS", &fixtures.circuits_path)
         .arg("test-node")
         .arg("start")
         .arg("--work-dir")
@@ -3599,7 +3709,6 @@ fn run_test_node_and_observe_config(
     let mut command = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"));
     command
         .current_dir(project_root)
-        .env("LOGOS_BLOCKCHAIN_CIRCUITS", &fixtures.circuits_path)
         .arg("test-node")
         .arg("run");
     command.args(extra_args);
@@ -3730,17 +3839,14 @@ fn write_scaffold_toml_with_localnet(
     localnet_port: Option<u16>,
     risc0_dev_mode: Option<bool>,
 ) {
-    let spel_path = project_root.join("spel");
-    // Schema 0.2.0: no url, no [basecamp] / [basecamp.modules.*],
-    // path is set on lez/spel for back-compat (tests need a literal path
-    // to a local stub repo).
+    // Schema 0.3.0: no url, no [basecamp] / [basecamp.modules.*], no
+    // [repos.spel]; path is set on lez (tests need a literal path to a local
+    // stub repo).
     let mut content = format!(
-        "[scaffold]\nversion = \"0.2.0\"\ncache_root = \"{}\"\n\n[repos.lez]\nsource = \"https://github.com/logos-blockchain/logos-execution-zone.git\"\npin = \"{}\"\npath = \"{}\"\n\n[repos.spel]\nsource = \"https://github.com/logos-co/spel.git\"\npin = \"{}\"\npath = \"{}\"\n\n[wallet]\nhome_dir = \".scaffold/wallet\"\n",
+        "[scaffold]\nversion = \"0.3.0\"\ncache_root = \"{}\"\n\n[repos.lez]\nsource = \"https://github.com/logos-blockchain/logos-execution-zone.git\"\npin = \"{}\"\npath = \"{}\"\n\n[wallet]\nhome_dir = \".scaffold/wallet\"\n",
         project_root.join("cache").display(),
         TEST_PIN,
         lez_path.display(),
-        TEST_PIN,
-        spel_path.display(),
     );
 
     if let Some(port) = localnet_port {
@@ -3765,81 +3871,14 @@ fn setup_wallet_project(project_root: &Path, sequencer_addr: Option<&str>) {
     let lez_path = project_root.join("lez");
     fs::create_dir_all(&lez_path).expect("create lez path");
     write_wallet_stub(&lez_path);
-    write_spel_stub(&project_root.join("spel"));
     write_scaffold_toml(project_root, &lez_path);
     write_wallet_config(project_root, sequencer_addr);
 }
 
-/// Place a minimal `spel` stub at `<spel_path>/target/release/spel`. It
-/// mirrors the spel v0.5.0 surface: `program-id <FILE>` emits the canonical
-/// `   ImageID (hex bytes): <hex>` line that `extract_program_id` parses,
-/// with a deterministic-per-binary hash so tests can assert exact values.
-/// Honors:
-///   `SPEL_FAIL=1`              → exit non-zero (proxy exit-code test)
-///   `SPEL_PROGRAM_ID_FAIL=<n>` → exit non-zero only when arg2 basename
-///                                contains `<n>` (program-id-unavailable
-///                                test for one program out of several).
-fn write_spel_stub(spel_path: &Path) {
-    let bin = spel_path.join("target/release/spel");
-    fs::create_dir_all(bin.parent().expect("parent")).expect("mkdir spel target");
-    let script = r#"#!/bin/sh
-set -eu
-
-if [ "${SPEL_FAIL:-0}" = "1" ]; then
-  echo "spel stub: forced failure" >&2
-  exit 7
-fi
-
-if [ "$#" -ge 2 ] && [ "$1" = "program-id" ]; then
-  bin_path="$2"
-  bin_name="$(basename "$bin_path")"
-  if [ -n "${SPEL_PROGRAM_ID_FAIL:-}" ]; then
-    case "$bin_name" in
-      *"$SPEL_PROGRAM_ID_FAIL"*)
-        echo "spel stub: forced program-id failure for $bin_name" >&2
-        exit 8
-        ;;
-    esac
-  fi
-  # Build a deterministic 64-char hex ID directly from the basename: emit
-  # each byte as two lowercase hex digits, repeat the resulting string until
-  # it is at least 64 chars, then truncate. No CRC or hash table — both the
-  # stub and `expected_stub_program_id` in Rust use the same trivial formula.
-  hex="$(printf '%s' "$bin_name" | od -An -vtx1 | tr -d ' \n')"
-  while [ "${#hex}" -lt 64 ]; do
-    hex="$hex$hex"
-  done
-  full="$(printf '%s' "$hex" | cut -c1-64)"
-  printf '   ImageID (hex bytes): %s\n' "$full"
-  exit 0
-fi
-
-# Echo other invocations so the proxy test can verify args reach the binary.
-echo "spel stub invoked: $*"
-exit 0
-"#;
-    fs::write(&bin, script).expect("write spel stub");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&bin).expect("stub metadata").permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&bin, perms).expect("chmod spel stub");
-    }
-}
-
-/// Recompute the program ID the spel stub emits for a given binary basename.
-/// Mirrors the trivial hex-of-basename formula in `write_spel_stub` (`od -tx1`
-/// then repeat to 64 chars) so tests can assert exact hex without invoking
-/// the stub themselves. No hash table, no polynomial — if the formula ever
-/// drifts, both sides of the equation are right next to each other.
-fn expected_stub_program_id(bin_name: &str) -> String {
-    let mut hex: String = bin_name.bytes().map(|b| format!("{b:02x}")).collect();
-    while hex.len() < 64 {
-        hex = format!("{hex}{hex}");
-    }
-    hex.truncate(64);
-    hex
+/// `setup_wallet_project` plus a default wallet (the deploy payer).
+fn setup_deploy_project(project_root: &Path, sequencer_addr: Option<&str>) {
+    setup_wallet_project(project_root, sequencer_addr);
+    write_default_wallet_state(project_root);
 }
 
 fn write_wallet_config(project_root: &Path, sequencer_addr: Option<&str>) {
@@ -3847,24 +3886,68 @@ fn write_wallet_config(project_root: &Path, sequencer_addr: Option<&str>) {
     fs::create_dir_all(&wallet_home).expect("create wallet home");
     let path = wallet_home.join("wallet_config.json");
 
+    // LEZ 0.3 wallet config shape: `sequencer_addr` is nested under
+    // `sequencer`; there is no `initial_accounts` list any more.
     let mut value = serde_json::json!({
-        "initial_accounts": [
-            { "Public": { "account_id": VALID_ACCOUNT_ID } }
-        ]
+        "seq_poll_timeout": "1s",
+        "seq_tx_poll_max_blocks": 120
     });
     if let Some(addr) = sequencer_addr {
-        value["sequencer_addr"] = serde_json::Value::String(addr.to_string());
+        value["sequencer"] = serde_json::json!({ "sequencer_addr": addr });
     }
 
     let text = serde_json::to_string_pretty(&value).expect("wallet config json");
     fs::write(path, text).expect("write wallet config");
 }
 
+/// Write `default_address=<VALID_PUBLIC_ADDRESS>` to
+/// `.scaffold/state/wallet.state` — the payer `deploy` requires.
+fn write_default_wallet_state(project_root: &Path) {
+    let state_dir = project_root.join(".scaffold/state");
+    fs::create_dir_all(&state_dir).expect("create state dir");
+    fs::write(
+        state_dir.join("wallet.state"),
+        format!("default_address={VALID_PUBLIC_ADDRESS}\n"),
+    )
+    .expect("write wallet.state");
+}
+
+const DEV_FUNDER_ACCOUNT_ID: &str = "CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r";
+const DEV_FUNDER_ADDRESS: &str = "Public/CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r";
+const DEV_FUNDER_PRIVATE_KEY_HEX: &str =
+    "7f273098f25b71e6c005a9519f2678da8d1c7f01f6a27778e2d9948abdf901fb";
+
+/// Account ids the wallet stub hands out (in order, cycling) for
+/// `wallet account new public`. All decode to 32 bytes of base58.
+const STUB_NEW_ACCOUNT_IDS: [&str; 6] = [
+    "6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV",
+    "8zxWNm1qh6FLsJpVBuDxdxcTm55qHPgFEdqJpPVu1fuy",
+    "2ECgkFTaXzwjJBXR7ZKmXYQtpHbvTTHK9Auma4NL9AUo",
+    "EkA2CTdiiPw6b2syzMxBZcZ33n4W5RCbWH3DDsonWy6w",
+    "B6aAVxTLwsYhMhyF9w58WqxCYXMhjTHij82baLZabncL",
+    "BzdBoL4JRa5M873cuWb9rbYgASr1pXyaAZ1YW9ertWH9",
+];
+
+/// LEZ 0.3 `wallet` stub. State lives in `$LEE_WALLET_HOME_DIR`:
+///   `.funder-missing`   → the dev funder is not in the wallet until
+///                         `account import public` runs (which deletes it)
+///   `.account-counter`  → index into `STUB_NEW_ACCOUNT_IDS`
+///   `.calls`            → one line per invocation (argv), for assertions
+/// Env knobs:
+///   `EXPECT_PASSWORD`     → password-reading commands require it on stdin
+///   `TOPUP_FAIL_CONNECT`, `TOPUP_FAIL_TIMEOUT`, `TOPUP_FAIL_TIMEOUT_TRANSPORT`
+///   `FAIL_PROGRAM=<bin>`, `DEPLOY_FAIL_TIMEOUT_TRANSPORT=<bin>`, `WALLET_NO_TX=1`
+///   `ACCOUNT_LIST_FAIL_CONNECT=1` → `account list` fails with a transport error
 fn write_wallet_stub(lez_path: &Path) {
     let path = lez_path.join("target/release/wallet");
     fs::create_dir_all(path.parent().expect("parent")).expect("create wallet binary dir");
     let script = r#"#!/bin/sh
 set -eu
+
+home="${LEE_WALLET_HOME_DIR:-.}"
+if [ -d "$home" ]; then
+  printf '%s\n' "$*" >> "$home/.calls"
+fi
 
 require_password_if_configured() {
   if [ "${EXPECT_PASSWORD:-}" = "" ]; then
@@ -3877,49 +3960,61 @@ require_password_if_configured() {
   fi
 }
 
+funder_id="CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r"
+funder_key="7f273098f25b71e6c005a9519f2678da8d1c7f01f6a27778e2d9948abdf901fb"
+
 if [ "$#" -ge 2 ] && [ "$1" = "account" ] && [ "$2" = "list" ]; then
-  echo "Preconfigured Public/6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV"
-  echo "/ Public/8zxWNm1qh6FLsJpVBuDxdxcTm55qHPgFEdqJpPVu1fuy"
-  exit 0
-fi
-
-if [ "$#" -ge 2 ] && [ "$1" = "account" ] && [ "$2" = "get" ]; then
-  if [ "${TOPUP_PREFLIGHT_FAIL:-0}" = "1" ]; then
-    echo "simulated account get failure" >&2
-    exit 4
-  fi
-  if [ "${TOPUP_ACCOUNT_STATE:-initialized}" = "uninitialized" ]; then
-    echo "Account is Uninitialized"
-  else
-    echo "Account state: Initialized"
-  fi
-  exit 0
-fi
-
-if [ "$#" -ge 3 ] && [ "$1" = "auth-transfer" ] && [ "$2" = "init" ] && [ "$3" = "--account-id" ]; then
-  require_password_if_configured
-  if [ "${TOPUP_INIT_FAIL_CONNECT:-0}" = "1" ]; then
-    echo "connection refused" >&2
+  if [ "${ACCOUNT_LIST_FAIL_CONNECT:-0}" = "1" ]; then
+    echo "error sending request for url (http://127.0.0.1:3040/): Connection refused (os error 111)" >&2
     exit 1
   fi
-  if [ "${TOPUP_INIT_FAIL_ALREADY:-0}" = "1" ]; then
-    echo "Error: Account must be uninitialized" >&2
-    exit 1
+  echo "/ Public/6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV"
+  echo "/ Private/8zxWNm1qh6FLsJpVBuDxdxcTm55qHPgFEdqJpPVu1fuy"
+  if [ ! -f "$home/.funder-missing" ]; then
+    echo "Public/$funder_id"
   fi
-  marker_path="${NSSA_WALLET_HOME_DIR:-.}/.topup-init-ran"
-  : > "$marker_path"
-  echo "init ok"
   exit 0
 fi
 
-if [ "$#" -ge 2 ] && [ "$1" = "pinata" ] && [ "$2" = "claim" ]; then
+if [ "$#" -ge 5 ] && [ "$1" = "account" ] && [ "$2" = "import" ] && [ "$3" = "public" ] && [ "$4" = "--private-key" ]; then
   require_password_if_configured
-  if [ "${TOPUP_GUARD_REQUIRE_INIT:-0}" = "1" ]; then
-    marker_path="${NSSA_WALLET_HOME_DIR:-.}/.topup-init-ran"
-    if [ ! -f "$marker_path" ]; then
-      echo "pinata called before init" >&2
-      exit 9
-    fi
+  if [ "$5" != "$funder_key" ]; then
+    echo "unexpected private key" >&2
+    exit 5
+  fi
+  rm -f "$home/.funder-missing"
+  echo "Imported public account Public/$funder_id"
+  exit 0
+fi
+
+if [ "$#" -ge 3 ] && [ "$1" = "account" ] && [ "$2" = "new" ] && [ "$3" = "public" ]; then
+  require_password_if_configured
+  n=0
+  if [ -f "$home/.account-counter" ]; then
+    n="$(cat "$home/.account-counter")"
+  fi
+  echo $((n + 1)) > "$home/.account-counter"
+  case $((n % 6)) in
+    0) id=6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV ;;
+    1) id=8zxWNm1qh6FLsJpVBuDxdxcTm55qHPgFEdqJpPVu1fuy ;;
+    2) id=2ECgkFTaXzwjJBXR7ZKmXYQtpHbvTTHK9Auma4NL9AUo ;;
+    3) id=EkA2CTdiiPw6b2syzMxBZcZ33n4W5RCbWH3DDsonWy6w ;;
+    4) id=B6aAVxTLwsYhMhyF9w58WqxCYXMhjTHij82baLZabncL ;;
+    *) id=BzdBoL4JRa5M873cuWb9rbYgASr1pXyaAZ1YW9ertWH9 ;;
+  esac
+  echo "Generated new account with account_id Public/$id at path /$n"
+  exit 0
+fi
+
+if [ "$#" -ge 2 ] && [ "$1" = "auth-transfer" ] && [ "$2" = "send" ]; then
+  require_password_if_configured
+  if [ "${3:-}" != "--from" ] || [ "${4:-}" != "Public/$funder_id" ]; then
+    echo "unexpected send source: $*" >&2
+    exit 6
+  fi
+  if [ -f "$home/.funder-missing" ]; then
+    echo "Error: account Public/$funder_id not found in wallet storage" >&2
+    exit 9
   fi
   if [ "${TOPUP_FAIL_CONNECT:-0}" = "1" ]; then
     echo "connection refused" >&2
@@ -3930,22 +4025,32 @@ if [ "$#" -ge 2 ] && [ "$1" = "pinata" ] && [ "$2" = "claim" ]; then
     exit 1
   fi
   if [ "${TOPUP_FAIL_TIMEOUT_TRANSPORT:-0}" = "1" ]; then
-    # A sequencer dying mid-claim: the tx was submitted (tx_hash on stdout) and
-    # the poller then failed with BOTH the confirmation-timeout line AND a
-    # transport token in the same combined output. The confirmation-timeout
+    # A sequencer dying mid-transfer: the tx was submitted (hash on stdout)
+    # and the poller then failed with BOTH the confirmation-timeout line AND
+    # a transport token in the same combined output. The confirmation-timeout
     # branch must own this (status: pending), not the connectivity classifier.
-    echo "tx_hash=pinata-topup-hash"
+    echo "Transaction hash is a0a1a2a3"
     echo "Error: Transaction not found in preconfigured amount of blocks" >&2
     echo "error sending request for url (http://127.0.0.1:3040/): Connection refused (os error 111)" >&2
     exit 1
   fi
-  echo "tx_hash=pinata-topup-hash"
+  echo "Transaction hash is a0a1a2a3"
+  echo "Transaction data is Transfer"
   exit 0
 fi
 
-if [ "$#" -ge 2 ] && [ "$1" = "deploy-program" ]; then
+if [ "$#" -ge 2 ] && [ "$1" = "program-loader" ] && [ "$2" = "deploy" ]; then
   require_password_if_configured
-  bin_path="$2"
+  shift 2
+  bin_path=""
+  header=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --elf) bin_path="$2"; shift 2 ;;
+      --header) header="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
   bin_name="$(basename "$bin_path")"
   if [ "${FAIL_PROGRAM:-}" = "$bin_name" ]; then
     echo "simulated deploy failure for $bin_name" >&2
@@ -3962,15 +4067,16 @@ if [ "$#" -ge 2 ] && [ "$1" = "deploy-program" ]; then
   fi
   # WALLET_NO_TX=1: simulate the wallet not surfacing a tx identifier so
   # tests can assert the deploy JSON omits the `tx` key when None.
-  if [ "${WALLET_NO_TX:-0}" = "1" ]; then
-    exit 0
+  if [ "${WALLET_NO_TX:-0}" != "1" ]; then
+    echo "Transaction hash is segment-$bin_name"
+    echo "Transaction hash is deploy-$bin_name"
   fi
-  echo "tx_hash=deploy-$bin_name"
+  echo "Program deployed. Header account id: ${header#Public/}"
   exit 0
 fi
 
 if [ "$#" -ge 1 ] && [ "$1" = "--version" ]; then
-  echo "wallet stub 0.1.0"
+  echo "wallet stub 0.3.1"
   exit 0
 fi
 
@@ -3994,6 +4100,21 @@ exit 2
     }
 }
 
+/// Mark the stub wallet as not (yet) holding the dev funder key.
+fn mark_dev_funder_missing(project_root: &Path) {
+    fs::write(project_root.join(".scaffold/wallet/.funder-missing"), "")
+        .expect("write funder-missing marker");
+}
+
+/// argv lines the stub wallet recorded, in invocation order.
+fn wallet_stub_calls(project_root: &Path) -> Vec<String> {
+    fs::read_to_string(project_root.join(".scaffold/wallet/.calls"))
+        .unwrap_or_default()
+        .lines()
+        .map(ToString::to_string)
+        .collect()
+}
+
 fn write_guest_program(project_root: &Path, name: &str) {
     let dir = project_root.join("methods/guest/src/bin");
     fs::create_dir_all(&dir).expect("create guest program dir");
@@ -4003,7 +4124,20 @@ fn write_guest_program(project_root: &Path, name: &str) {
 fn write_guest_binary(project_root: &Path, name: &str) {
     let dir = project_root.join(GUEST_BIN_REL_PATH);
     fs::create_dir_all(&dir).expect("create guest binary dir");
-    fs::write(dir.join(format!("{name}.bin")), b"stub-program-bin").expect("write guest binary");
+    fs::write(dir.join(format!("{name}.bin")), minimal_r0bf_binary()).expect("write guest binary");
+}
+
+/// Smallest valid risc0 `ProgramBinary` container: `R0BF`, format version 1,
+/// an empty header, a 4-byte user ELF (one `program_loader` segment) and a
+/// stub kernel.
+fn minimal_r0bf_binary() -> Vec<u8> {
+    let mut bytes = b"R0BF".to_vec();
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&4u32.to_le_bytes());
+    bytes.extend_from_slice(b"\x7fELF");
+    bytes.extend_from_slice(b"kernel");
+    bytes
 }
 
 struct RpcStub {
@@ -4014,22 +4148,9 @@ struct RpcStub {
 }
 
 impl RpcStub {
-    /// Monotonically increasing head: deploy pacing waits for the block id
-    /// to advance between submissions, so a constant value would park every
-    /// multi-program deploy test in the pacing timeout. Incrementing per
-    /// poll mirrors a live sequencer.
+    /// Sequencer RPC stub answering every request with an advancing
+    /// last-block id.
     fn start() -> Self {
-        Self::start_with_advance(true)
-    }
-
-    /// Constant head: models a sequencer whose block production has stalled,
-    /// for asserting that deploy pacing aborts fail-closed instead of
-    /// batching the remaining ELFs unpaced.
-    fn start_stalled() -> Self {
-        Self::start_with_advance(false)
-    }
-
-    fn start_with_advance(advance: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind rpc stub");
         let addr = listener.local_addr().expect("local addr");
         let addr_str = addr.to_string();
@@ -4046,9 +4167,7 @@ impl RpcStub {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         respond_last_block(&mut stream, block_id);
-                        if advance {
-                            block_id += 1;
-                        }
+                        block_id += 1;
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
@@ -4485,10 +4604,10 @@ fn init_creates_scaffold_toml_and_dirs() {
 }
 
 #[test]
-fn init_refreshes_skills_when_already_at_v0_2_0_scaffold_toml() {
+fn init_refreshes_skills_when_already_at_v0_3_0_scaffold_toml() {
     let temp = tempdir().expect("tempdir");
     let scaffold_path = temp.path().join("scaffold.toml");
-    // First, run init to lay down a fresh v0.2.0 file plus the AI skill set.
+    // First, run init to lay down a fresh v0.3.0 file plus the AI skill set.
     Command::new(assert_cmd::cargo::cargo_bin!("lgs"))
         .current_dir(temp.path())
         .arg("init")
@@ -4512,12 +4631,7 @@ fn init_refreshes_skills_when_already_at_v0_2_0_scaffold_toml() {
         "init must not overwrite an already-migrated scaffold.toml"
     );
 
-    for skill in [
-        "lgs-cli",
-        "lez-template",
-        "lez-framework-template",
-        "basecamp",
-    ] {
+    for skill in ["lgs-cli", "lez-template", "basecamp"] {
         assert!(
             temp.path()
                 .join(format!(".claude/skills/{skill}/SKILL.md"))
@@ -4532,13 +4646,20 @@ fn init_refreshes_skills_when_already_at_v0_2_0_scaffold_toml() {
         );
     }
     assert!(
+        !temp
+            .path()
+            .join(".claude/skills/lez-framework-template")
+            .exists(),
+        "the spel-era lez-framework skill is no longer shipped"
+    );
+    assert!(
         temp.path().join("AGENTS.md").is_file(),
         "AGENTS.md must be present after re-init"
     );
 }
 
 #[test]
-fn init_migrates_pre_v0_2_0_scaffold_toml_in_place() {
+fn init_migrates_pre_v0_3_0_scaffold_toml_in_place() {
     let temp = tempdir().expect("tempdir");
     let scaffold_path = temp.path().join("scaffold.toml");
     let original = "# user comment\n[scaffold]\nversion = \"0.1.0\"\n\n[repos.lez]\nurl = \"u\"\nsource = \"u\"\npath = \"p\"\npin = \"abc\"\n";
@@ -4549,7 +4670,12 @@ fn init_migrates_pre_v0_2_0_scaffold_toml_in_place() {
         .arg("init")
         .assert()
         .success()
-        .stdout(predicate::str::contains("migrated to schema v0.2.0"));
+        .stdout(
+            predicate::str::contains("migrated to schema v0.3.0")
+                // `source = "u"` is not upstream LEZ: the pin is kept and the
+                // user is asked to re-pin by hand.
+                .and(predicate::str::contains("points at a fork (u)")),
+        );
 
     let after = fs::read_to_string(&scaffold_path).expect("read scaffold.toml");
     assert!(
@@ -4557,16 +4683,144 @@ fn init_migrates_pre_v0_2_0_scaffold_toml_in_place() {
         "user comments must be preserved; got:\n{after}"
     );
     assert!(
-        after.contains("version = \"0.2.0\""),
+        after.contains("version = \"0.3.0\""),
         "[scaffold].version must be bumped; got:\n{after}"
     );
     assert!(
-        after.contains("[repos.spel]"),
-        "[repos.spel] must be appended; got:\n{after}"
+        !after.contains("[repos.spel]"),
+        "no [repos.spel] in the 0.3.0 schema; got:\n{after}"
+    );
+    assert!(
+        after.contains("pin = \"abc\""),
+        "a fork pin must be kept; got:\n{after}"
     );
     assert!(
         !after.contains("url ="),
         "url field must be stripped; got:\n{after}"
+    );
+}
+
+#[test]
+fn init_migrates_v0_2_0_scaffold_toml_to_lez_0_3() {
+    // The LEZ 0.1/0.2-era schema: spel repo, circuits, IDL settings and an
+    // old upstream LEZ pin. `init` drops the spel-era sections and re-pins
+    // LEZ to the supported 0.3 release, keeping everything else.
+    let temp = tempdir().expect("tempdir");
+    let scaffold_path = temp.path().join("scaffold.toml");
+    let original = r#"# my project
+[scaffold]
+version = "0.2.0"
+
+[repos.lez]
+source = "https://github.com/logos-blockchain/logos-execution-zone.git"
+pin = "cf3639d8252040d13b3d4e933feb19b42c76e14a"
+
+[repos.spel]
+source = "https://github.com/logos-co/spel.git"
+pin = "73fc462eb8f0a4d00f1a846437c627ec2e523f83"
+
+[wallet]
+home_dir = ".scaffold/wallet"
+
+[framework]
+kind = "default"
+version = "0.1.0"
+
+[framework.idl]
+spec = "lssa-idl/0.1.0"
+path = "idl"
+
+[localnet]
+port = 3055
+risc0_dev_mode = true
+
+[circuits]
+version = "0.4.1"
+"#;
+    fs::write(&scaffold_path, original).expect("seed scaffold.toml");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("lgs"))
+        .current_dir(temp.path())
+        .arg("init")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("migrated to schema v0.3.0")
+                .and(predicate::str::contains("removed [repos.spel]"))
+                .and(predicate::str::contains("removed [circuits]"))
+                .and(predicate::str::contains("removed [framework.idl]"))
+                .and(predicate::str::contains("re-pinned [repos.lez]")),
+        );
+
+    let after = fs::read_to_string(&scaffold_path).expect("read scaffold.toml");
+    assert!(after.starts_with("# my project"), "{after}");
+    assert!(after.contains("version = \"0.3.0\""), "{after}");
+    for gone in ["[repos.spel]", "[circuits]", "[framework.idl]"] {
+        assert!(!after.contains(gone), "{gone} must be removed:\n{after}");
+    }
+    assert!(
+        after.contains("pin = \"1a003bfbfb89fcf987f62975cd08a401169e1b8c\""),
+        "LEZ must be re-pinned to v0.3.1:\n{after}"
+    );
+    assert!(after.contains("port = 3055"), "{after}");
+
+    // The migrated file is accepted by project-scoped commands.
+    Command::new(assert_cmd::cargo::cargo_bin!("lgs"))
+        .current_dir(temp.path())
+        .arg("init")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("already at schema"));
+}
+
+#[test]
+fn init_refuses_lez_framework_projects_without_touching_them() {
+    let temp = tempdir().expect("tempdir");
+    let scaffold_path = temp.path().join("scaffold.toml");
+    let original = "[scaffold]\nversion = \"0.2.0\"\n\n[repos.lez]\nsource = \"https://github.com/logos-blockchain/logos-execution-zone.git\"\npin = \"abc\"\n\n[repos.spel]\nsource = \"https://github.com/logos-co/spel.git\"\npin = \"abc\"\n\n[framework]\nkind = \"lez-framework\"\nversion = \"0.1.0\"\n";
+    fs::write(&scaffold_path, original).expect("seed scaffold.toml");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("lgs"))
+        .current_dir(temp.path())
+        .arg("init")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("spel").and(predicate::str::contains("LEZ 0.3")));
+
+    assert_eq!(
+        fs::read_to_string(&scaffold_path).expect("read scaffold.toml"),
+        original,
+        "a refused migration must leave scaffold.toml untouched"
+    );
+}
+
+#[test]
+fn lez_framework_project_is_rejected_with_spel_explanation() {
+    let temp = tempdir().expect("tempdir");
+    let toml = MINIMAL_SCAFFOLD_TOML.replace("kind = \"default\"", "kind = \"lez-framework\"");
+    fs::write(temp.path().join("scaffold.toml"), toml).expect("seed scaffold.toml");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("doctor")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("spel").and(predicate::str::contains("LEZ 0.3")));
+}
+
+#[test]
+fn new_rejects_lez_framework_template() {
+    let temp = tempdir().expect("tempdir");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["new", "demo", "--template", "lez-framework"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("spel").and(predicate::str::contains("LEZ 0.3")));
+    assert!(
+        !temp.path().join("demo").exists(),
+        "a rejected template must not create the project directory"
     );
 }
 
@@ -4773,9 +5027,43 @@ role = "project"
 "#;
 
 fn assert_pre_v0_2_0_rejection(args: &[&str]) {
+    assert_old_schema_rejection(PRE_V0_2_0_SCAFFOLD_TOML, args);
+}
+
+/// The LEZ 0.1/0.2-era (v0.2.0) schema with spel, circuits and IDL settings.
+/// LEZ 0.3 scaffold rejects it everywhere except `init`.
+const V0_2_0_SCAFFOLD_TOML: &str = r#"[scaffold]
+version = "0.2.0"
+cache_root = "cache"
+
+[repos.lez]
+source = "https://github.com/logos-blockchain/logos-execution-zone.git"
+path = "lez"
+pin = "cf3639d8252040d13b3d4e933feb19b42c76e14a"
+
+[repos.spel]
+source = "https://github.com/logos-co/spel.git"
+path = "spel"
+pin = "73fc462eb8f0a4d00f1a846437c627ec2e523f83"
+
+[wallet]
+home_dir = ".scaffold/wallet"
+
+[framework]
+kind = "default"
+version = "0.1.0"
+
+[framework.idl]
+spec = "lssa-idl/0.1.0"
+path = "idl"
+
+[circuits]
+version = "0.4.1"
+"#;
+
+fn assert_old_schema_rejection(fixture: &str, args: &[&str]) {
     let temp = tempdir().expect("tempdir");
-    fs::write(temp.path().join("scaffold.toml"), PRE_V0_2_0_SCAFFOLD_TOML)
-        .expect("seed pre-v0.2.0 scaffold.toml");
+    fs::write(temp.path().join("scaffold.toml"), fixture).expect("seed pre-v0.2.0 scaffold.toml");
 
     let output = Command::new(assert_cmd::cargo::cargo_bin!("lgs"))
         .current_dir(temp.path())
@@ -4785,7 +5073,7 @@ fn assert_pre_v0_2_0_rejection(args: &[&str]) {
 
     assert!(
         !output.status.success(),
-        "lgs {args:?} must hard-fail on pre-0.2.0 scaffold.toml; got status {:?}, stdout:\n{}\nstderr:\n{}",
+        "lgs {args:?} must hard-fail on an old-schema scaffold.toml; got status {:?}, stdout:\n{}\nstderr:\n{}",
         output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
@@ -4799,38 +5087,29 @@ fn assert_pre_v0_2_0_rejection(args: &[&str]) {
     let after = fs::read_to_string(temp.path().join("scaffold.toml"))
         .expect("scaffold.toml still readable");
     assert_eq!(
-        after, PRE_V0_2_0_SCAFFOLD_TOML,
-        "lgs {args:?} must not mutate scaffold.toml when it rejects pre-0.2.0",
+        after, fixture,
+        "lgs {args:?} must not mutate scaffold.toml when it rejects an old schema",
     );
+}
+
+#[test]
+fn setup_hard_fails_on_v0_2_0_scaffold_toml() {
+    assert_old_schema_rejection(V0_2_0_SCAFFOLD_TOML, &["setup"]);
+}
+
+#[test]
+fn deploy_hard_fails_on_v0_2_0_scaffold_toml() {
+    assert_old_schema_rejection(V0_2_0_SCAFFOLD_TOML, &["deploy"]);
+}
+
+#[test]
+fn doctor_hard_fails_on_v0_2_0_scaffold_toml() {
+    assert_old_schema_rejection(V0_2_0_SCAFFOLD_TOML, &["doctor"]);
 }
 
 #[test]
 fn setup_hard_fails_on_pre_v0_2_0_scaffold_toml() {
     assert_pre_v0_2_0_rejection(&["setup"]);
-}
-
-/// F1: `doctor` must surface the configured circuits install directory when
-/// the release has not been fetched yet.
-#[test]
-fn doctor_reports_configured_circuits_missing() {
-    let temp = tempdir().expect("tempdir");
-    let project = temp.path();
-    fs::write(project.join("scaffold.toml"), MINIMAL_SCAFFOLD_TOML).expect("write scaffold.toml");
-
-    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
-        .current_dir(project)
-        .env_remove("LOGOS_BLOCKCHAIN_CIRCUITS")
-        .arg("doctor")
-        .assert()
-        .failure()
-        .stdout(
-            predicate::str::contains("logos-blockchain-circuits")
-                .and(predicate::str::contains(".scaffold/circuits"))
-                .and(predicate::str::contains("logos-scaffold setup"))
-                // Must NOT surface a raw cargo build-script panic.
-                .and(predicate::str::contains("logos-blockchain-pol").not())
-                .and(predicate::str::contains("build script").not()),
-        );
 }
 
 /// scaffold#259: a project that opts into the host-toolchain guest build gets
@@ -4894,21 +5173,21 @@ fn build_guest_flag_rejects_unknown_modes() {
         .stderr(predicate::str::contains("local").and(predicate::str::contains("docker")));
 }
 
-/// `--guest` only means something for the guest-compiling `build`; on
-/// `build idl` / `build client` it had no effect, so accepting it silently
-/// would hand back a local build to someone who asked for a deterministic one.
 #[test]
-fn build_guest_flag_is_rejected_on_subcommands_rather_than_ignored() {
-    for sub in ["idl", "client"] {
-        Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
-            .arg("build")
-            .arg("--guest")
-            .arg("docker")
-            .arg(sub)
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains("`--guest` applies to"));
-    }
+fn build_idl_and_client_subcommands_are_gone() {
+    // spel's IDL / client generation was removed with LEZ 0.3; `build`
+    // has no subcommands left and its help must not advertise them.
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .arg("build")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("build idl")
+                .not()
+                .and(predicate::str::contains("build client").not())
+                .and(predicate::str::contains("IDL").not()),
+        );
 }
 
 #[test]
@@ -4982,46 +5261,6 @@ fn load_project_commands_in_stale_schema_project_show_init_hint_not_cd_hint() {
              the user is already inside a project; got:\n{stderr}"
         );
     }
-}
-
-#[test]
-fn build_idl_fails_loudly_on_default_framework() {
-    // C4: explicit `build idl` against a non-lez-framework project used to
-    // print `Skipping…` and exit 0. Agents that piped `lgs build idl &&
-    // next-step` would silently carry on with no IDL produced. The fix
-    // bails with an explicit framework-kind message so the agent stops.
-    let temp = tempdir().expect("tempdir");
-    fs::write(temp.path().join("scaffold.toml"), MINIMAL_SCAFFOLD_TOML)
-        .expect("seed scaffold.toml");
-
-    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
-        .current_dir(temp.path())
-        .args(["build", "idl"])
-        .assert()
-        .failure()
-        .stderr(
-            predicate::str::contains("`build idl` is only supported for `lez-framework`")
-                .and(predicate::str::contains("framework.kind = `default`")),
-        );
-}
-
-#[test]
-fn build_client_fails_loudly_on_default_framework() {
-    // C4: same as `build idl` — explicit `build client` on a default-framework
-    // project must fail rather than silently no-op.
-    let temp = tempdir().expect("tempdir");
-    fs::write(temp.path().join("scaffold.toml"), MINIMAL_SCAFFOLD_TOML)
-        .expect("seed scaffold.toml");
-
-    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
-        .current_dir(temp.path())
-        .args(["build", "client"])
-        .assert()
-        .failure()
-        .stderr(
-            predicate::str::contains("`build client` is only supported for `lez-framework`")
-                .and(predicate::str::contains("framework.kind = `default`")),
-        );
 }
 
 #[test]
@@ -5174,12 +5413,13 @@ fn run_fails_at_build_step_in_mock_project() {
         .arg("run")
         .assert()
         .failure()
-        .stdout(predicate::str::contains("[1/5] Building..."));
+        .stdout(predicate::str::contains("[1/4] Building..."));
 }
 
 #[test]
-fn run_with_post_deploy_hook_shows_6_steps_in_output() {
-    // When a post_deploy hook is configured, the step counter shows /6.
+fn run_with_post_deploy_hook_shows_5_steps_in_output() {
+    // When a post_deploy hook is configured, the step counter shows /5 (build, localnet,
+    // topup, deploy, hooks).
     let temp = tempdir().expect("tempdir");
     setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
     append_run_config(temp.path(), &["echo hello"]);
@@ -5189,12 +5429,12 @@ fn run_with_post_deploy_hook_shows_6_steps_in_output() {
         .arg("run")
         .assert()
         .failure() // still fails at build
-        .stdout(predicate::str::contains("[1/6] Building..."));
+        .stdout(predicate::str::contains("[1/5] Building..."));
 }
 
 #[test]
 fn run_with_multiple_post_deploy_hooks_uses_array_form() {
-    // Multiple hooks are configured as a TOML inline array; pipeline still has 6 steps.
+    // Multiple hooks are configured as a TOML inline array; pipeline still has 5 steps.
     let temp = tempdir().expect("tempdir");
     setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
     append_run_config(temp.path(), &["echo one", "echo two"]);
@@ -5204,12 +5444,12 @@ fn run_with_multiple_post_deploy_hooks_uses_array_form() {
         .arg("run")
         .assert()
         .failure() // still fails at build
-        .stdout(predicate::str::contains("[1/6] Building..."));
+        .stdout(predicate::str::contains("[1/5] Building..."));
 }
 
 #[test]
 fn run_no_post_deploy_flag_skips_configured_hooks() {
-    // --no-post-deploy must collapse total_steps back to 5 even when
+    // --no-post-deploy must collapse total_steps back to 4 even when
     // scaffold.toml configures hooks. The build still fails first, but the
     // step counter in stdout proves the override was honored.
     let temp = tempdir().expect("tempdir");
@@ -5222,13 +5462,13 @@ fn run_no_post_deploy_flag_skips_configured_hooks() {
         .arg("--no-post-deploy")
         .assert()
         .failure()
-        .stdout(predicate::str::contains("[1/5] Building..."));
+        .stdout(predicate::str::contains("[1/4] Building..."));
 }
 
 #[test]
 fn run_post_deploy_flag_overrides_configured_hooks() {
-    // --post-deploy replaces config hooks. With one config hook ([1/6]) and
-    // two flag overrides, the resulting step count stays at /6 — proving
+    // --post-deploy replaces config hooks. With one config hook ([1/5]) and
+    // two flag overrides, the resulting step count stays at /5 — proving
     // that the flag took effect and config wasn't merged on top.
     let temp = tempdir().expect("tempdir");
     setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
@@ -5243,7 +5483,7 @@ fn run_post_deploy_flag_overrides_configured_hooks() {
         .arg("echo override-b")
         .assert()
         .failure()
-        .stdout(predicate::str::contains("[1/6] Building..."));
+        .stdout(predicate::str::contains("[1/5] Building..."));
 }
 
 fn append_run_config(project_root: &Path, post_deploy: &[&str]) {
@@ -5295,7 +5535,7 @@ fn run_with_reset_flag_starts_pipeline() {
         .arg("--reset")
         .assert()
         .failure()
-        .stdout(predicate::str::contains("[1/5] Building..."))
+        .stdout(predicate::str::contains("[1/4] Building..."))
         .stderr(predicate::str::contains("scaffold.toml requested reset = true").not());
 }
 
@@ -5314,7 +5554,7 @@ fn run_with_reset_in_config_emits_destructive_intent_warning() {
         .arg("run")
         .assert()
         .failure()
-        .stdout(predicate::str::contains("[1/5] Building..."))
+        .stdout(predicate::str::contains("[1/4] Building..."))
         .stderr(predicate::str::contains(
             "scaffold.toml requested reset = true",
         ));
@@ -5335,7 +5575,7 @@ fn run_no_reset_flag_overrides_config_reset_true() {
         .arg("--no-reset")
         .assert()
         .failure()
-        .stdout(predicate::str::contains("[1/5] Building..."))
+        .stdout(predicate::str::contains("[1/4] Building..."))
         .stderr(predicate::str::contains("scaffold.toml requested reset = true").not());
 }
 
