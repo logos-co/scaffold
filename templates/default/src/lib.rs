@@ -1,7 +1,7 @@
 #[allow(dead_code)]
 pub mod runner_support {
     use anyhow::{Context, Result};
-    use nssa::{AccountId, program::Program};
+    use lee::{AccountId, program::Program};
 
     pub fn parse_account_id(raw: &str) -> Result<AccountId> {
         let normalized = raw
@@ -22,6 +22,7 @@ pub mod runner_support {
             embedded_elf.to_vec()
         };
 
-        Program::new(bytes).with_context(|| format!("failed to parse {label} program"))
+        // LEZ v0.2.x takes the ELF as a `Cow<'static, [u8]>`.
+        Program::new(bytes.into()).with_context(|| format!("failed to parse {label} program"))
     }
 }
