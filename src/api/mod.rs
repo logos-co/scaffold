@@ -558,7 +558,9 @@ pub struct LocalnetStartOptions {
 
 impl Default for LocalnetStartOptions {
     fn default() -> Self {
-        Self { timeout_sec: 20 }
+        Self {
+            timeout_sec: DEFAULT_RUN_LOCALNET_TIMEOUT_SEC,
+        }
     }
 }
 

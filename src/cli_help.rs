@@ -68,7 +68,11 @@ Environment:
 
 pub(crate) const EXAMPLES_LOCALNET_START: &str = r"Examples:
   logos-scaffold localnet start
-  logos-scaffold localnet start --timeout-sec 45";
+  logos-scaffold localnet start --timeout-sec 600
+
+Restarts replay the stored chain before the RPC opens (LEZ 0.3 standalone mode
+never finalizes blocks), so restart time grows with the chain's age;
+`localnet reset --yes` starts over from genesis.";
 
 pub(crate) const EXAMPLES_LOCALNET_STOP: &str = r"Examples:
   logos-scaffold localnet stop";

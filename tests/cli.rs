@@ -1284,7 +1284,7 @@ fn localnet_start_patches_config_and_uses_configured_port() {
     );
     assert_eq!(
         config_json["block_create_timeout"],
-        serde_json::json!("2s"),
+        serde_json::json!("5s"),
         "localnet shortens the block interval, got: {patched_config}"
     );
     // Existing genesis entries are kept and the dev funder is added.

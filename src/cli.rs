@@ -906,7 +906,10 @@ enum LocalnetSubcommand {
 
 #[derive(Debug, clap::Args)]
 struct LocalnetStartArgs {
-    #[arg(long, default_value_t = 20)]
+    /// Seconds to wait for the sequencer RPC. A restart replays the whole
+    /// stored chain first (LEZ 0.3 standalone mode never finalizes blocks),
+    /// so an older localnet takes longer to come back.
+    #[arg(long, default_value_t = crate::constants::DEFAULT_RUN_LOCALNET_TIMEOUT_SEC)]
     timeout_sec: u64,
 }
 

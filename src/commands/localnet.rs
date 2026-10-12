@@ -27,8 +27,11 @@ const LOCALNET_HOME_DIR: &str = "localnet";
 /// Block interval of the localnet sequencer. LEZ's debug config uses 15s,
 /// and every wallet transaction waits for its block, so a `deploy` (several
 /// segment transactions per program, each confirmed before the next) would
-/// spend minutes idle. A short interval keeps the dev loop interactive.
-pub(crate) const LOCALNET_BLOCK_CREATE_TIMEOUT: &str = "2s";
+/// spend minutes idle. Shorter is not free either: standalone mode never
+/// finalizes, so a restart replays every block since genesis (measured at
+/// ~0.25s per block), and an empty block is produced every interval. 5s keeps
+/// deploys interactive while a day-old localnet still restarts in minutes.
+pub(crate) const LOCALNET_BLOCK_CREATE_TIMEOUT: &str = "5s";
 
 /// Chain home for the localnet whose state file is `state_path`
 /// (`<project>/.scaffold/state/localnet.state` → `<project>/.scaffold/localnet`).

@@ -598,9 +598,13 @@ would have meant two implementations of each:
   `max_block_size` above Bedrock's 1,835,008-byte inscription limit is
   refused at startup, so the old 8 MiB widening had to go (segments make it
   unnecessary). LEZ's debug config produces a block every 15 s and its
-  wallet sleeps 30 s between confirmation polls; scaffold sets 2-second
+  wallet sleeps 30 s between confirmation polls; scaffold sets 5-second
   localnet blocks and 1-second wallet polling so a confirmed transaction
-  costs seconds.
+  costs seconds. Faster blocks were tried and rejected: standalone mode
+  (mock Bedrock) never finalizes, so a sequencer restart replays every
+  block since genesis (~0.25 s per block), and 2-second blocks made a
+  day-old localnet take hours to restart. `localnet start` therefore also
+  waits up to 120 s by default and its timeout error names the replay.
 - **Wire formats.** Block headers lost their signature (80 bytes), every
   block ends with fee-exempt fee-distribution and clock transactions, and
   `getProofForCommitment` became `getProofsAndRoot`; test-node's hand-rolled

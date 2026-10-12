@@ -91,7 +91,7 @@
 
 ### Performance
 
-1. The run is bounded by the underlying tools (cargo build, sequencer startup, wallet topup, `wallet program-loader deploy`); scaffold adds no waiting steps beyond what each underlying command already imposes, and it configures the localnet (2-second blocks) and the project wallet (1-second confirmation polling) so a confirmed transaction costs seconds, not LEZ's debug-config 15–30.
+1. The run is bounded by the underlying tools (cargo build, sequencer startup, wallet topup, `wallet program-loader deploy`); scaffold adds no waiting steps beyond what each underlying command already imposes, and it configures the localnet (5-second blocks) and the project wallet (1-second confirmation polling) so a confirmed transaction costs seconds, not LEZ's debug-config 15–30.
 2. Single-program metadata (program ID, guest binary path) is resolved once per invocation from `deployments.json` and reused across every post-deploy hook.
 
 ### Supportability
