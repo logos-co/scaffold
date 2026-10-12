@@ -94,7 +94,7 @@ enum Commands {
         about = "Manage isolated, short-lived sequencer test nodes for integration tests"
     )]
     TestNode(TestNodeArgs),
-    #[command(about = "Manage project wallet accounts and faucet top-ups")]
+    #[command(about = "Manage project wallet accounts and dev-funder top-ups")]
     Wallet(WalletArgs),
     #[command(about = "Manage pre-seeded basecamp profiles for p2p dogfooding")]
     Basecamp(BasecampArgs),
@@ -967,7 +967,7 @@ enum WalletSubcommand {
     #[command(about = "List wallet accounts (same as `wallet account list`)")]
     #[command(after_long_help = EXAMPLES_WALLET_LIST)]
     List(WalletListArgs),
-    #[command(about = "Top up wallet using pinata faucet claim")]
+    #[command(about = "Top up wallet with a transfer from the localnet dev funder")]
     #[command(after_long_help = EXAMPLES_WALLET_TOPUP)]
     Topup(WalletTopupArgs),
     #[command(about = "Manage project default wallet")]

@@ -163,11 +163,11 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
     let topup_skipped = topup_step_skipped(&params.resolved);
     if topup_skipped {
         // `topup = false`: the project funds its own accounts (e.g. claims
-        // from the faucet at runtime, from a demo binary or a post_deploy
+        // from its own funded key at runtime, from a demo binary or a post_deploy
         // hook). Skip scaffold's topup — including its requirement that a
         // destination address be resolvable — and proceed to deploy/hooks.
         println!(
-            "[3/{total_steps}] Topup skipped (`topup = false` in the run profile; this project funds its own accounts — e.g. via faucet claims at runtime)"
+            "[3/{total_steps}] Topup skipped (`topup = false` in the run profile; this project funds its own accounts — e.g. from a post_deploy hook)"
         );
     } else {
         println!("[3/{total_steps}] Topping up wallet...");

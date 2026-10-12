@@ -54,3 +54,11 @@ clap.workspace = true
 # Same patch LEZ's own workspace applies; a git dependency does not inherit it.
 [patch.crates-io]
 keccak = { git = "https://github.com/logos-blockchain/sponges", rev = "3a56e99771beedf04946eab21a4a62adc2951377" }
+
+# Same profiles as LEZ's workspace: keep backtraces but drop full DWARF type
+# info. Full debuginfo makes every runner ~500 MB and the debug target ~14 GB.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"

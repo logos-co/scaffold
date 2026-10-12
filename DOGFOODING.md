@@ -1723,7 +1723,7 @@ SJ=$("$SCAFFOLD_BIN" test-node start --project "$P" --port <[localnet].port> --b
 URL=$(echo "$SJ" | jq -r .rpc_url); NODE=$(echo "$SJ" | jq -r .state_dir | xargs basename)
 HEAD0=$("$SCAFFOLD_BIN" test-node blocks head --url "$URL" --json | jq -r .block_id)
 
-# Submit a REAL faucet transaction against the test-node:
+# Submit a REAL user transaction against the test-node:
 TX=$("$SCAFFOLD_BIN" wallet topup --json | jq -r .tx)   # auth-transfer send from the dev funder
 
 # Observe the committed USER transaction(s) through the test-node client:

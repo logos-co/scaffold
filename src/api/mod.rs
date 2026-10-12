@@ -306,7 +306,7 @@ impl Project {
         wallet_list_for_project(&self.inner, long).map_err(error::classify)
     }
 
-    /// Top up a wallet from the localnet faucet. With `address: None`, the
+    /// Top up a wallet with a transfer from the localnet dev funder. With `address: None`, the
     /// project's default wallet is used. A [`TopupOutcome::ConfirmationTimeout`]
     /// means the submission reached the sequencer but confirmation timed out —
     /// funding is uncertain, not failed.

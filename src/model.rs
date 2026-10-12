@@ -400,7 +400,7 @@ pub(crate) struct RunProfile {
     pub(crate) deploy: bool,
     /// Whether `lgs run` performs its own wallet-topup step. Defaults to
     /// `true`. Set `topup = false` for a project that funds its own accounts
-    /// (e.g. claims from the faucet at runtime, from a demo binary or a
+    /// (e.g. transfers from its own funded key at runtime, from a demo binary or a
     /// `post_deploy` hook): the pipeline then skips step 4's topup — along
     /// with its requirement that a destination address be resolvable — and
     /// proceeds straight to deploy/hooks. Hooks observe the choice through
