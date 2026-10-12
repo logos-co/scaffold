@@ -4828,6 +4828,94 @@ fn doctor_reports_configured_circuits_missing() {
         );
 }
 
+/// scaffold#259: a project that opts into the host-toolchain guest build gets
+/// told, in doctor, that its `program_id` is not reproducible.
+#[test]
+fn doctor_reports_the_guest_build_strategy() {
+    let temp = tempdir().expect("tempdir");
+    let project = temp.path();
+    fs::write(
+        project.join("scaffold.toml"),
+        format!("{MINIMAL_SCAFFOLD_TOML}\n[build]\nguest = \"local\"\n"),
+    )
+    .expect("write scaffold.toml");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(project)
+        .arg("doctor")
+        .assert()
+        .code(predicate::in_iter([0, 1]))
+        .stdout(
+            predicate::str::contains("guest build")
+                .and(predicate::str::contains("not reproducible")),
+        );
+}
+
+/// scaffold#259: deterministic (the default) guest builds must say so
+/// in doctor, tag included — that tag is part of what makes `program_id`
+/// reproducible. Asserted independently of whether this machine happens to
+/// have `cargo-risczero`/`docker` installed, which only changes PASS vs FAIL.
+#[test]
+fn doctor_reports_the_pinned_risc0_docker_tag_in_deterministic_mode() {
+    let temp = tempdir().expect("tempdir");
+    let project = temp.path();
+    fs::write(
+        project.join("scaffold.toml"),
+        format!(
+            "{MINIMAL_SCAFFOLD_TOML}\n{}",
+            "[build]\nguest = \"docker\"\nrisc0_docker_tag = \"r0.1.91.1\"\n"
+        ),
+    )
+    .expect("write scaffold.toml");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(project)
+        .arg("doctor")
+        .assert()
+        .code(predicate::in_iter([0, 1]))
+        .stdout(predicate::str::contains("risc0-guest-builder:r0.1.91.1"));
+}
+
+/// `--guest` is a closed set; a typo must fail at parse time rather than
+/// silently falling back to the default.
+#[test]
+fn build_guest_flag_rejects_unknown_modes() {
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .arg("build")
+        .arg("--guest")
+        .arg("podman")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("local").and(predicate::str::contains("docker")));
+}
+
+/// `--guest` only means something for the guest-compiling `build`; on
+/// `build idl` / `build client` it had no effect, so accepting it silently
+/// would hand back a local build to someone who asked for a deterministic one.
+#[test]
+fn build_guest_flag_is_rejected_on_subcommands_rather_than_ignored() {
+    for sub in ["idl", "client"] {
+        Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+            .arg("build")
+            .arg("--guest")
+            .arg("docker")
+            .arg(sub)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("`--guest` applies to"));
+    }
+}
+
+#[test]
+fn build_help_documents_the_guest_build_modes() {
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .arg("build")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--guest").and(predicate::str::contains("program_id")));
+}
+
 /// F4: clap's leading `error: ` is stripped before we re-wrap with anyhow,
 /// so the user sees a single `error:` prefix instead of `error: error: ...`.
 #[test]
@@ -5276,14 +5364,14 @@ fn basecamp_paths_json_resolves_custom_profile_manifest() {
         );
 }
 
-/// Basecamp 0.2.x keeps two more trees under its base directory —
+/// Basecamp keeps two more trees under its base directory —
 /// `module_data/` (per-module persisted state) and `logs/` (its own rotated
 /// session logs) — and both sit inside the tree `launch` scrubs, so a relaunch
 /// discards them. `paths` is where that becomes visible: without these fields a
 /// developer hunting for module state or an app log has no way to learn either
 /// where it lives or that it will not survive the next launch.
 #[test]
-fn basecamp_paths_json_lists_the_0_2_x_base_dir_children() {
+fn basecamp_paths_json_lists_the_base_dir_children() {
     let temp = tempdir().expect("tempdir");
     let lez_path = temp.path().join("lez");
     fs::create_dir_all(&lez_path).expect("create lez path");

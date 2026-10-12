@@ -19,16 +19,19 @@ use super::wallet_support::{
     RpcReachabilityError,
 };
 
-/// Roots searched (in order) for guest `.bin` artefacts. Both layouts exist in
-/// the wild: risc0's default workspace layout emits to `target/riscv-guest/...`
-/// (used by the scaffold template), while sub-crate builds can land in
-/// `methods/target/...`. Discovery walks both so renamed projects work
-/// regardless of which layout cargo/risc0 chose. The `methods/...` half of
-/// this constant is the same project-relative directory that `build.rs`
-/// compiles via `crate::constants::METHODS_DIR`; keep them in sync.
-// `methods/guest/target` is where `cargo risczero build` (spel projects)
-// writes, under a `docker/` directory rather than `release/`.
+/// Roots searched for guest `.bin` artefacts. Three layouts exist: risc0's
+/// default workspace layout emits to `target/riscv-guest/...` (what
+/// `embed_methods()` produces for the scaffold template), sub-crate builds can
+/// land in `methods/target/...`, and the deterministic Docker build
+/// (`[build].guest = "docker"`) emits to
+/// `target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/`. Discovery
+/// walks all three so renamed projects work regardless of which layout
+/// cargo/risc0 chose. The `methods/...` entry is the same project-relative
+/// directory that `build.rs` compiles via `crate::constants::METHODS_DIR`;
+/// keep them in sync. `methods/guest/target` is where `cargo risczero build`
+/// (`make build` in spel projects) writes, under a `docker/` directory.
 const GUEST_BIN_SEARCH_ROOTS: &[&str] = &[
+    crate::constants::GUEST_DOCKER_TARGET_DIR,
     "target/riscv-guest",
     "methods/target",
     "methods/guest/target",
@@ -788,14 +791,24 @@ fn is_valid_program_name(program: &str) -> bool {
 }
 
 /// Walk every `GUEST_BIN_SEARCH_ROOTS` once and return a `program -> binary_path`
-/// map. A path must contain a `riscv32im*` target-triple component to match at
-/// all. Among matches, release-grade builds win: a `release` component (cargo /
-/// risc0-build, the `default` template) or a `docker` component
-/// (`cargo risczero build`, spel projects — the reproducible build whose
-/// ImageID is the ProgramId). Any other match, e.g. `debug`, is used only when
-/// no release-grade binary exists for that program. Within a tier, the
-/// shallowest path wins (preferring the canonical risc0 layout over nested
-/// workspace duplicates).
+/// map. Only paths whose components include a `riscv32im*` target triple match.
+///
+/// Ranking, highest first:
+///
+/// 1. a `docker` component *directly under* the `riscv32im*` one — the
+///    deterministic `cargo risczero build` output, whose layout is always
+///    `<target-dir>/riscv32im-risc0-zkvm-elf/docker/`;
+/// 2. a `release` component — the host-toolchain `embed_methods()` output;
+/// 3. anything else (a `debug` build) as a last-resort fallback.
+///
+/// Docker outranks release because a `docker/` artefact only exists when a
+/// deterministic build produced it, and `lgs build` deletes that tree whenever
+/// it runs in `local` mode — so if both are present, docker is the one the
+/// last build meant (scaffold#259). The adjacency requirement keeps a guest
+/// crate (or any other directory) that happens to be named `docker` from
+/// being promoted: `embed_methods()` puts package names *above* the target
+/// triple, never below it. Within a rank the shallowest path wins, preferring
+/// the canonical risc0 layout over nested workspace duplicates.
 pub(crate) fn discover_program_binaries(
     project_root: &Path,
     programs: &[String],
@@ -809,6 +822,7 @@ pub(crate) fn discover_program_binaries(
         return HashMap::new();
     }
 
+    let mut docker: HashMap<String, (usize, PathBuf)> = HashMap::new();
     let mut release: HashMap<String, (usize, PathBuf)> = HashMap::new();
     let mut debug_fallback: HashMap<String, (usize, PathBuf)> = HashMap::new();
 
@@ -832,29 +846,29 @@ pub(crate) fn discover_program_binaries(
 
             let mut has_riscv32im = false;
             let mut has_release = false;
+            let mut has_docker = false;
             let mut depth = 0usize;
+            let mut prev_was_riscv32im = false;
             for component in path.components() {
                 if let std::path::Component::Normal(name) = component {
                     depth += 1;
-                    if let Some(name) = name.to_str() {
-                        if name.starts_with("riscv32im") {
-                            has_riscv32im = true;
-                        }
-                        // `docker` is `cargo risczero build`'s output
-                        // directory and is the reproducible build, so treat
-                        // it the same as `release` rather than as a debug
-                        // fallback.
-                        if name == "release" || name == "docker" {
-                            has_release = true;
-                        }
-                    }
+                    let name = name.to_str().unwrap_or_default();
+                    let is_riscv32im = name.starts_with("riscv32im");
+                    has_riscv32im |= is_riscv32im;
+                    has_release |= name == "release";
+                    // Only the segment immediately below the target triple —
+                    // see the ranking notes on this function.
+                    has_docker |= name == "docker" && prev_was_riscv32im;
+                    prev_was_riscv32im = is_riscv32im;
                 }
             }
             if !has_riscv32im {
                 continue;
             }
 
-            let bucket = if has_release {
+            let bucket = if has_docker {
+                &mut docker
+            } else if has_release {
                 &mut release
             } else {
                 &mut debug_fallback
@@ -869,8 +883,11 @@ pub(crate) fn discover_program_binaries(
     }
 
     let mut out = HashMap::new();
-    for (program, (_, path)) in release {
+    for (program, (_, path)) in docker {
         out.insert(program, path);
+    }
+    for (program, (_, path)) in release {
+        out.entry(program).or_insert(path);
     }
     for (program, (_, path)) in debug_fallback {
         out.entry(program).or_insert(path);
@@ -1115,6 +1132,76 @@ mod tests {
 
         let result = lookup(tmp.path(), "my_program").unwrap();
         assert!(result.components().any(|c| c.as_os_str() == "release"));
+    }
+
+    /// The deterministic build's artefact must win over a host-toolchain
+    /// `release/` one: they have different bytes, and therefore different
+    /// `program_id`s, so silently picking either would make deploy
+    /// unpredictable (scaffold#259).
+    #[test]
+    fn prefers_deterministic_docker_output_over_local_release() {
+        let tmp = TempDir::new().unwrap();
+        let release_dir = tmp.path().join(
+            "target/riscv-guest/my_app_methods/my_app_programs/riscv32im-risc0-zkvm-elf/release",
+        );
+        let docker_dir = tmp
+            .path()
+            .join(crate::constants::GUEST_DOCKER_TARGET_DIR)
+            .join("riscv32im-risc0-zkvm-elf/docker");
+        fs::create_dir_all(&release_dir).unwrap();
+        fs::create_dir_all(&docker_dir).unwrap();
+        fs::write(release_dir.join("my_program.bin"), b"local").unwrap();
+        fs::write(docker_dir.join("my_program.bin"), b"deterministic").unwrap();
+
+        let result = lookup(tmp.path(), "my_program").unwrap();
+        assert!(
+            result.components().any(|c| c.as_os_str() == "docker"),
+            "expected the docker artefact, got {}",
+            result.display()
+        );
+    }
+
+    /// A guest package named `docker` lives *above* the target triple in the
+    /// `embed_methods()` layout, so it must not be mistaken for deterministic
+    /// output and promoted over a real one.
+    #[test]
+    fn docker_named_crate_is_not_mistaken_for_deterministic_output() {
+        let tmp = TempDir::new().unwrap();
+        let release_dir = tmp
+            .path()
+            .join("target/riscv-guest/docker/docker/riscv32im-risc0-zkvm-elf/release");
+        fs::create_dir_all(&release_dir).unwrap();
+        fs::write(release_dir.join("my_program.bin"), b"local").unwrap();
+
+        let docker_dir = tmp
+            .path()
+            .join(crate::constants::GUEST_DOCKER_TARGET_DIR)
+            .join("riscv32im-risc0-zkvm-elf/docker");
+        fs::create_dir_all(&docker_dir).unwrap();
+        fs::write(docker_dir.join("my_program.bin"), b"deterministic").unwrap();
+
+        let result = lookup(tmp.path(), "my_program").unwrap();
+        assert_eq!(
+            fs::read(&result).unwrap(),
+            b"deterministic",
+            "a crate named `docker` must not outrank the real deterministic \
+             artefact; got {}",
+            result.display()
+        );
+    }
+
+    #[test]
+    fn finds_binary_in_deterministic_docker_layout() {
+        let tmp = TempDir::new().unwrap();
+        let docker_dir = tmp
+            .path()
+            .join(crate::constants::GUEST_DOCKER_TARGET_DIR)
+            .join("riscv32im-risc0-zkvm-elf/docker");
+        fs::create_dir_all(&docker_dir).unwrap();
+        fs::write(docker_dir.join("my_program.bin"), b"deterministic").unwrap();
+
+        let result = lookup(tmp.path(), "my_program").unwrap();
+        assert!(result.ends_with("my_program.bin"));
     }
 
     #[test]

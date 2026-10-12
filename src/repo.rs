@@ -55,10 +55,12 @@ pub(crate) fn sync_repo_to_pin_at_path_with_opts(
 
     let resolved_pin = ensure_pin_exists(path, source, pin, label)?;
 
+    // Pins are commits, so the checkout is always a detached HEAD; git's
+    // multi-paragraph advice about that is noise on every `setup`.
     run_checked(
         Command::new("git")
             .current_dir(path)
-            .arg("checkout")
+            .args(["-c", "advice.detachedHead=false", "checkout"])
             .arg(pin),
         &format!("git checkout pin ({label})"),
     )?;

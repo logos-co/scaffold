@@ -387,6 +387,7 @@ fn cmd_new_default(
                 path: DEFAULT_FRAMEWORK_IDL_PATH.to_string(),
             },
         },
+        build: crate::model::BuildConfig::default(),
         localnet: LocalnetConfig::default(),
         modules: std::collections::BTreeMap::new(),
         basecamp: None,
@@ -479,6 +480,7 @@ fn build_scaffold_config(cmd: &NewCommand, framework_kind: &str) -> Config {
                 path: DEFAULT_FRAMEWORK_IDL_PATH.to_string(),
             },
         },
+        build: crate::model::BuildConfig::default(),
         localnet: LocalnetConfig::default(),
         modules: std::collections::BTreeMap::new(),
         basecamp: None,
@@ -533,6 +535,7 @@ mod tests {
         let log = sandbox.join("stub-spel.log");
         let script = format!(
             r#"#!/bin/sh
+[ -n "$STUB_SPEL_PROBE" ] && exit 0
 cwd=$(pwd -P)
 case "$cwd" in
   "{sandbox}"*) ;;
@@ -553,7 +556,28 @@ printf '%s|%s\n' "$cwd" "$*" >> "{log}"
         );
         std::fs::write(&bin, script).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        (bin, log)
+        // Exec'ing a file that any process still holds open for writing fails
+        // with ETXTBSY. The write handle above is closed, but a test running on
+        // another thread may have forked in that window and inherited it until
+        // its own exec. Probe until the kernel lets the stub run; it is never
+        // opened for writing again, so once one exec succeeds the real
+        // invocations will too. The probe exits before logging anything.
+        for _ in 0..200 {
+            match std::process::Command::new(&bin)
+                .env("STUB_SPEL_PROBE", "1")
+                .status()
+            {
+                Ok(status) => {
+                    assert!(status.success(), "stub spel probe failed: {status}");
+                    return (bin, log);
+                }
+                Err(e) if e.raw_os_error() == Some(26) => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(e) => panic!("stub spel probe could not run: {e}"),
+            }
+        }
+        panic!("stub spel stayed busy (ETXTBSY) after 200 probes");
     }
 
     #[cfg(unix)]

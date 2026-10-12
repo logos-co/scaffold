@@ -93,6 +93,12 @@ jobs:
           set -euo pipefail
           cd "$RUNNER_TEMP"
           "$GITHUB_WORKSPACE/target/release/logos-scaffold" new e2e-app --template "${{ matrix.template }}"
+          # The default guest build is the pinned Docker container, which needs
+          # `cargo-risczero` (not installed here; guest-reproducibility.yml
+          # covers that path). This job exercises the host-toolchain build, so
+          # opt the rendered project into it — otherwise doctor FAILs on the
+          # missing deterministic toolchain.
+          printf '\n[build]\nguest = "local"\n' >> e2e-app/scaffold.toml
 
       - name: Setup (clone + build lez/spel at configured pins)
         run: |

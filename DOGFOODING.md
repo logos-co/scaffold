@@ -79,7 +79,7 @@ Scaffold is also consumable as a Rust library (`logos_scaffold::api`): the same 
 - Network access available for setup/build flows that fetch dependencies.
 - No preinstalled `wallet` binary is required. If one exists on `PATH`, do not treat it as the runtime under test for scaffold wallet scenarios.
 - Optional but supported: `LOGOS_SCAFFOLD_WALLET_PASSWORD` when validating password override behavior.
-- For `B`-series (basecamp) scenarios: Nix with flakes enabled, plus a module project on disk whose `flake.nix` exposes a `packages.<system>.lgx` output built with `logos-module-builder` 0.2.x (a `tictactoe`-style project, or that repo's `templates/minimal-module`). Tutorial-era packages no longer install: scaffold's pinned `lgpm` validates content hashes they don't carry. `docs/basecamp-module-requirements.md` (also reachable via `"$SCAFFOLD_BIN" basecamp docs`) is the canonical contract.
+- For `B`-series (basecamp) scenarios: Nix with flakes enabled, plus a module project on disk whose `flake.nix` exposes a `packages.<system>.lgx` output built with `logos-module-builder` 0.3.0 (a `tictactoe`-style project, or that repo's `templates/minimal-module` / `templates/ui-qml` at tag `0.3.0`). Scaffold supports basecamp 0.3.0 only: tutorial-era packages do not install (scaffold's pinned `lgpm` validates content hashes they don't carry), and modules from module-builder 0.2.x link a `logos-protocol` basecamp 0.3.0 no longer speaks. `docs/basecamp-module-requirements.md` (also reachable via `"$SCAFFOLD_BIN" basecamp docs`) is the canonical contract.
 
 The `lgs` binary is a short alias for `logos-scaffold` produced by the same crate; `"$SCAFFOLD_BIN"` and `lgs` are interchangeable in the commands below.
 
@@ -169,6 +169,7 @@ If any of these is missing, do not "skip the real run" — go back and fix the s
 | D5 | `default` | Advanced | Diagnostics bundle and support artifact hygiene | `report`, `report --out`, `report --tail` |
 | D6 | `default` | Core | Example runner interaction and account state verification | `cargo run --bin run_hello_world`, `cargo run --bin run_hello_world_with_move_function`, `wallet -- account get` |
 | D7 | `default` | Core | One-step `run` pipeline and post-deploy hooks | `run`, `run --post-deploy`, `run --no-post-deploy`, `[run]` config |
+| D8 | `default` | Advanced | Reproducible guest builds and the `program_id` they produce | `build`, `build --guest docker`, `[build]` config, `doctor`, `deploy --json` |
 | L1 | `spel` | Core | Fresh SPEL project bootstrap to ready state | `new --template spel`, `setup`, `localnet start`, `doctor`, `build` |
 | L2 | `spel` | Core | SPEL IDL regeneration | `build idl` |
 | L3 | `spel` | Advanced | SPEL FFI/client generation from current IDL | `build client` |
@@ -235,7 +236,7 @@ Use `new` for the main runnable project and `create` as the lightweight alias-pa
 - Generated `scaffold.toml` includes a `[circuits]` table. The default install dir is project-local (`.scaffold/circuits`), and the configured version/download template/install dir become the single source of truth for commands that need `logos-blockchain-circuits`.
 - `setup` completes after syncing LEZ to the configured pin, building both `sequencer_service` and `wallet` inside the project's LEZ tree, and either seeding the default wallet or reporting that a default wallet is already configured. Both seeding paths are a PASS: `default wallet seeded from preconfigured account` when the pinned LEZ debug config ships an `initial_accounts` entry, and `default wallet seeded by initializing wallet storage (config ships no preconfigured account)` on LEZ v0.2.0, whose debug config ships none — there `setup` runs the freshly built `wallet` to create its persistent storage and adopts the first `Public/` account on a `/ `-prefixed listing line, ignoring `Public/` addresses on lines that are not `/ `-prefixed — notably the wallet's own `Preconfigured …` entries, which it prints above the stored accounts even when the config ships no `initial_accounts`, and which a first-token scan would adopt instead of the account the wallet just created. Only if no `/ `-prefixed line yields a usable `Public/` address does it fall back to the first `Public/` token anywhere in the output; if the wallet ever stops `/ `-prefixing stored accounts, that fallback starts adopting a preconfigured address, so a seeded address matching a `Preconfigured` line rather than a `/ ` one is worth reporting. Either line is followed by `  Address:` and `  State file:`. Only `warning: could not seed default wallet automatically` is a failure. With `--prebuilt`: `sequencer_service` is downloaded instead of built from source (falls back to source build if no artifact is published); `wallet` is always built from source regardless of `--prebuilt`.
 - `localnet start` reports a ready localnet rather than only a spawned PID.
-- `build` exits successfully after preparing the project workspace, resolving the configured circuits release, and — when the project has a `methods/Cargo.toml` (Risc0 guest crate excluded from the main workspace) — also prints `Building guest methods...` and produces guest `.bin` files under `target/riscv-guest/<methods-crate>/<guest-crate>/riscv32im-risc0-zkvm-elf/release/`, the same paths `deploy` submits from. The default template uses the workspace `target/` tree, not `methods/target/`.
+- `build` exits successfully after preparing the project workspace, resolving the configured circuits release, and — when the project has a `methods/Cargo.toml` (Risc0 guest crate excluded from the main workspace) — also prints `Building guest methods...` and produces guest `.bin` files under `target/riscv-guest/<methods-crate>/<guest-crate>/riscv32im-risc0-zkvm-elf/release/`, the same paths `deploy` submits from. The default template uses the workspace `target/` tree, not `methods/target/`. This describes the `--guest local` / `[build].guest = "local"` path; the default is the deterministic container build, whose artefacts land under `target/riscv-guest-docker/` instead (see D8).
 - `deploy` prints a submission summary with zero failures when built binaries are present. Multi-program deploys are paced one program per sequencer block (`Waiting for a new block past N before the next deployment ...` between submissions): the pinned LEZ settles each block as a single bedrock inscription with a ~896 KiB payload cap and panics fatally when a block exceeds it, so batching several ~370 KiB deployment ELFs into one block kills the sequencer. Expect roughly one `block_create_timeout` (15s) of wait per additional program. Pacing fails closed: a stalled head or an unreadable post-submission baseline aborts the remaining submissions with `deploy pacing aborted ...` and a non-zero exit rather than batching unpaced (re-run `deploy` for the rest once the sequencer recovers, or raise `LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS` for slow block intervals). A deploy that continues unpaced and crashes localnet mid-flow is a regression; equally, record it if the upstream cap is lifted and pacing becomes dead weight.
 - `wallet topup` succeeds without an explicit address because the project default wallet was seeded during setup.
 - `wallet -- check-health` succeeds against the running localnet without requiring a global `wallet` install or manual `PATH` changes.
@@ -352,6 +353,7 @@ Both deploy paths honor `--json`, with a different shape each. `--program-path -
 - `deploy <name> --json` and bare `deploy --json` print a parseable `{"deploys":[…]}` object whose entries carry the same fields.
 - `deploy --program-path ...` without `--json` prints a human-readable `OK` line with the binary path.
 - `deploy nonexistent_program` fails with an error listing the available discovered programs.
+- The echoed `wallet deploy-program <path>` names which artefact was shipped. With only a `local` build on disk that is the `target/riscv-guest/.../release/` one; a `target/riscv-guest-docker/.../docker/` artefact, when present, outranks it. With the guest artefacts removed (and localnet up — the missing-binary report comes after the sequencer preflight), `deploy` names the searched roots, which must list all three in ranking order: `target/riscv-guest-docker`, `target/riscv-guest`, `methods/target`. A missing root is why a built program looks undeployable. See `D8` for the ranking itself.
 
 ### Failure Signals / Common Pitfalls
 
@@ -650,6 +652,103 @@ post_deploy = ["echo 'topup skipped:' $SCAFFOLD_TOPUP_SKIPPED"]
 - Output of `run --no-post-deploy` showing the deployed-programs summary instead of hooks.
 - Output of `run --profile self-deploy` showing the ``[5/6] Deploy skipped (`deploy = false` ...)`` header and the `post_deploy` hook reporting `deploy skipped: 1`.
 - Output of `run --profile self-fund` showing the ``[4/6] Topup skipped (`topup = false` ...)`` header followed by the deploy step and the `post_deploy` hook reporting `topup skipped: 1`, plus the profile-less run of the same hook reporting `topup skipped: 0`.
+
+## D8. Reproducible Guest Builds and `program_id` Stability
+
+### Goal
+
+Validate that `program_id` is a stable identifier when the project asks for it: that the default (`docker`) build produces the same guest ELF on any machine, that opting into `local` is reported as non-reproducible, and that `deploy` ships whichever artefact the last `build` produced.
+
+### Preconditions
+
+- D1 completed in `dogfood-default` (localnet running, wallet seeded).
+- Docker daemon running and `cargo-risczero` on `PATH`. `cargo-risczero` is a separate rzup component — `rzup install rust` does **not** provide it; run `rzup install cargo-risczero`. If either is missing, run only the `local`-mode steps and the negative check below, and report the partial coverage — do not skip the scenario silently.
+
+### Commands / Actions
+
+From the generated project root:
+
+```bash
+# sha256sum is coreutils; on macOS use `shasum -a 256` throughout.
+DOCKER_BINS=target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker
+
+# 1. Local mode (opt-out): baseline program_id.
+"$SCAFFOLD_BIN" build --guest local
+"$SCAFFOLD_BIN" deploy --json | tee /tmp/d8-local.json
+
+# 2. Negative check: the default is docker, so a bare build on a machine
+#    without it must fail fast. (Run this with the Docker daemon stopped, or
+#    skip if you cannot stop it.)
+"$SCAFFOLD_BIN" build; echo "exit=$?"
+
+# 3. Deterministic mode (the default).
+"$SCAFFOLD_BIN" build
+ls "$DOCKER_BINS"
+
+# 4. Same build again from a clean artefact tree — bytes must be identical.
+sha256sum "$DOCKER_BINS"/*.bin > /tmp/d8-first.sha
+rm -rf target/riscv-guest-docker
+"$SCAFFOLD_BIN" build
+sha256sum -c /tmp/d8-first.sha
+
+# 5. With no [build] section, doctor and deploy agree on docker.
+"$SCAFFOLD_BIN" doctor | grep "guest build"
+"$SCAFFOLD_BIN" deploy --json | tee /tmp/d8-docker.json
+
+# 6. Opt out in config and confirm the deterministic tree is cleared and
+#    doctor says the build is not reproducible.
+cp scaffold.toml /tmp/d8-scaffold.toml.bak
+printf '\n[build]\nguest = "local"\n' >> scaffold.toml
+"$SCAFFOLD_BIN" build
+"$SCAFFOLD_BIN" doctor | grep "guest build"
+ls target/riscv-guest-docker 2>&1
+cp /tmp/d8-scaffold.toml.bak scaffold.toml
+```
+
+Steps 3 and 4 are also run in CI by
+[`.github/workflows/guest-reproducibility.yml`](.github/workflows/guest-reproducibility.yml)
+(path-gated to `src/commands/build.rs` and `src/constants.rs`, plus manual
+dispatch), which renders a project, builds the guests through the container
+twice, and diffs the digests. Run them by hand when changing the pinned tag or
+when a host disagrees with CI; otherwise CI is the standing check.
+
+Only steps 3 and 4 run a container. On a host that cannot build containers
+at all, run 1, 2, and 6 and additionally check the discovery ranking by
+hand: copy the `release/` `.bin` into `$DOCKER_BINS/` and confirm the next
+`deploy` echoes `wallet deploy-program <…/docker/…>` rather than the
+`release/` path. That covers everything except reproducibility itself.
+
+### Expected Success Signals
+
+- Step 1 builds with the host toolchain and succeeds without Docker or `cargo-risczero`; it prints no non-reproducibility note (the choice was explicit).
+- Step 2 fails *before* `setup` compiles anything or Docker pulls anything, with a message naming the missing piece (`cargo-risczero`, `docker`, or a daemon that is not running) and offering `[build].guest = "local"` as the alternative. A raw `docker build` error or a hung pull is a regression.
+- Step 3 prints `Building guest methods (deterministic, risc0-guest-builder:<tag>)...`, then risc0's own `ELFs ready at: ImageID: <hex> - <path>` lines, and leaves one `<program>.bin` per program under `target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/`.
+- Step 4's `sha256sum -c` passes. This is the whole point of the scenario: a differing hash between two builds of unchanged source means the deterministic path is not deterministic, and is the single most important thing to report from D8.
+- Comparing against **another machine** only proves anything if both used the same `Cargo.lock`. The container builds `--locked`, and cargo's MSRV-aware resolver picks dependency versions from the host toolchain, so two machines that each generated their own lockfile legitimately produce different `program_id`s. Copy the lockfile across, or compare within one commit that has it committed. A mismatch with differing lockfiles is not a D8 failure — record the two lockfiles before concluding anything.
+- Step 5's `doctor` row names the mode and the pin either way, with no `[build]` section needed: `PASS | guest build | docker — reproducible via risczero/risc0-guest-builder:<tag>` when the toolchain is installed, `FAIL | guest build | docker (risczero/risc0-guest-builder:<tag>) — … not found on PATH` when it is not. A `docker` row that does not mention the tag at all is a regression — the tag is what makes the ID reproducible. The `program_id` in `/tmp/d8-docker.json` matches the `ImageID` risc0 printed in step 3 and is **different** from the one in `/tmp/d8-local.json` (different toolchains, different bytes) — record both values.
+- Step 6's `doctor` row reads `PASS | guest build | local — host risc0 toolchain ... not reproducible ...`. It also prints `Clearing deterministic guest artefacts in ...` and `target/riscv-guest-docker` no longer exists, so a later `deploy` cannot ship a stale deterministic ELF.
+
+### Failure Signals / Common Pitfalls
+
+- The same `program_id` from steps 1 and 5 usually means `deploy` picked the same artefact twice — check which path `deploy` reported as the binary, not just the ID.
+- `deploy` reporting a `release/` binary while the effective mode is `docker` (the default) is a discovery-ranking regression.
+- A deterministic build that succeeds but produces no `.bin` (only extension-less ELFs) means risc0's output layout moved; capture `ls -R target/riscv-guest-docker`.
+- Very slow builds are expected on the first run (~1.7 GB image pull, no cargo cache reuse inside the container). Slowness is worth recording as a DX finding, but it is not a correctness failure.
+- Any large directory in the project root inflates the Docker build context (risc0 excludes only `.git`, `target`, `node_modules`, `tmp`). If the context transfer dominates the build, capture its reported size.
+- An MSRV error naming `rustc 1.88.0-dev` (`... requires rustc 1.89`) means the build used risc0's **default** image `r0.1.88.0`, not scaffold's pin — `RISC0_DOCKER_CONTAINER_TAG` did not reach `cargo risczero`. Through `lgs build` that is a real regression worth reporting; running `cargo risczero build` by hand without exporting the variable is the expected behaviour of the underlying tool, not a scaffold defect. Check which of the two you ran before filing.
+- `Cargo.lock not found in path .../methods/guest/Cargo.lock` on stderr is expected and non-fatal — risc0 looks next to the guest manifest, while scaffold projects keep one lockfile at the workspace root. A *fatal* lockfile error is different: the container builds with `--locked`, so a stale root `Cargo.lock` fails the build. Re-run a plain `lgs build` first and report it if that does not clear it.
+
+### Evidence to Capture
+
+- Both `deploy --json` outputs and the `program_id` from each. `--json` does not carry the binary path; for that, run one `deploy <program>` without `--json` in each mode and capture the echoed `$ … wallet deploy-program <path>` line. That line is the only direct evidence of which artefact was shipped.
+- The `sha256sum -c` result from step 4 and the `ImageID` lines from step 3.
+- The `doctor` `guest build` row in both modes.
+- The exact failure text from step 2.
+
+### Execution Notes
+
+- Steps 4 and 5 are the load-bearing ones. If time is short, run 1, 3, 4, and 5.
+- A second machine (or a CI runner) building the same commit and comparing hashes is stronger evidence than two builds on one host; do that when it is available.
 
 ## L1. SPEL Template Bootstrap
 
@@ -1088,10 +1187,21 @@ Validate that a module project can fetch the pinned basecamp + `lgpm` binaries, 
 
 ### Preconditions
 
-- Nix with flakes enabled — **and unrestricted GitHub access for Nix specifically**. This is a stricter requirement than the rest of this runbook and the usual reason a `B`-series run stalls in an agent container, so check it before installing anything. Nix resolves `github:` flake inputs over `https://api.github.com/repos/…/commits/HEAD` and `https://github.com/…/archive/<rev>.tar.gz`; a proxy that allowlists GitHub per repository answers `403` on both, and the basecamp closure is large — its `flake.lock` carries ~10k nodes across `logos-co`, `NixOS/nixpkgs` and `oxalica/rust-overlay` (it was ~250 at the v0.1.1 pin, so budget accordingly for a cold run). Neither `git clone` working nor `nix --version` working proves this — probe it directly with `curl -sS -o /dev/null -w '%{http_code}\n' https://api.github.com/repos/NixOS/nixpkgs/commits/HEAD` (expect `200`) before starting. Rewriting the project's own input to `git+https://` does not help: the transitive inputs are already locked as `github:` inside each dependency's own `flake.lock`. If the probe fails, `B1`–`B6` are out of reach in that environment and the honest result is to record the blocker — the scaffold-side surface that needs no Nix (`basecamp --help`, `basecamp docs`, the missing-Nix hint, `basecamp doctor`, out-of-project errors) is still worth exercising and reporting as partial coverage.
+- Nix with flakes enabled — **and unrestricted GitHub access for Nix specifically**. This is a stricter requirement than the rest of this runbook and the usual reason a `B`-series run stalls in an agent container, so check it before installing anything. Nix resolves `github:` flake inputs over `https://api.github.com/repos/…/commits/HEAD` and `https://github.com/…/archive/<rev>.tar.gz`; a proxy that allowlists GitHub per repository answers `403` on both, and the basecamp closure is large — its `flake.lock` carries ~3.3k nodes (119 distinct sources) across `logos-co`, `NixOS/nixpkgs` and `oxalica/rust-overlay`, so budget accordingly for a cold run. Neither `git clone` working nor `nix --version` working proves this — probe it directly with `curl -sS -o /dev/null -w '%{http_code}\n' https://api.github.com/repos/NixOS/nixpkgs/commits/HEAD` (expect `200`) before starting. Rewriting the project's own input to `git+https://` does not help: the transitive inputs are already locked as `github:` inside each dependency's own `flake.lock`. If the probe fails, `B1`–`B6` are out of reach in that environment and the honest result is to record the blocker — the scaffold-side surface that needs no Nix (`basecamp --help`, `basecamp docs`, the missing-Nix hint, `basecamp doctor`, out-of-project errors) is still worth exercising and reporting as partial coverage.
 - Latest scaffold binary built from the repo root (`"$SCAFFOLD_BIN"`).
-- A module project on disk whose `flake.nix` exposes `packages.<system>.lgx`, built with `logos-module-builder` 0.2.x (see `"$SCAFFOLD_BIN" basecamp docs`). Reachable as `$MODULE_PROJECT`. That repo's `templates/minimal-module` is the smallest one that satisfies the contract.
+- A module project on disk whose `flake.nix` exposes `packages.<system>.lgx`, built with `logos-module-builder` 0.3.0 (see `"$SCAFFOLD_BIN" basecamp docs`). Reachable as `$MODULE_PROJECT`. That repo's `templates/minimal-module` (a core module) is the smallest one that satisfies the contract; add `templates/ui-qml` as a second sub-flake to exercise a UI plugin too. Pin the template's `logos-module-builder` input to `github:logos-co/logos-module-builder/0.3.0` — the templates track `main`, which may already be ahead of basecamp 0.3.0.
 - Optional but strongly recommended for a cold run: basecamp's own binary cache. The pinned flake declares `extra-substituters = https://cache.nix.logos.co/public`, but scaffold invokes a plain `nix build`, and a flake-declared substituter is only honored for a trusted user who accepts it. Without it, a cold `basecamp setup` builds a Qt-heavy closure from source. Add the substituter and its key to `~/.config/nix/nix.conf` (as a `trusted-users` member) before timing anything, and say which mode a reported duration was measured in.
+- **Memory.** Evaluating the basecamp 0.3.0 flake peaks above ~4.8 GB of RAM before any build starts (measured: SIGKILLed three times at 4.75–4.83 GB with ~5 GB available on an 8 GB container). On a smaller host, reuse a build instead of evaluating: basecamp's own CI builds `#app` and pushes it to `https://cache.nix.logos.co/ci` (0.3.0 on x86_64-linux: `/nix/store/yf8mbqrxkgw0kjyfgs8f4491rjx9vypz-logos-basecamp-0.3.0`, from the `test-linux` job of the tag's `Build & Release` run). Realise it without evaluating anything, then point scaffold's pin-keyed result link at it — `setup` reuses an existing build for an unchanged commit pin, so from there on it runs the real code path:
+
+  ```bash
+  OUT=/nix/store/yf8mbqrxkgw0kjyfgs8f4491rjx9vypz-logos-basecamp-0.3.0
+  nix-store -r "$OUT" --option extra-substituters https://cache.nix.logos.co/ci --option require-sigs false
+  CACHE=$("$SCAFFOLD_BIN" doctor --json | jq -r '.checks[] | select(.name=="cache root") | .detail' | cut -d' ' -f1)   # or $LOGOS_SCAFFOLD_CACHE_ROOT
+  mkdir -p "$CACHE/basecamp/bbe5da0e038ef19095690f4164a8ddaab0915821"
+  nix build "$OUT" --out-link "$CACHE/basecamp/bbe5da0e038ef19095690f4164a8ddaab0915821/app-result"
+  ```
+
+  Record that `setup` ran in this mode; everything after the basecamp build (clone, `lgpm`, seeding, state, idempotency, install, launch) is exercised for real.
 - `scaffold.toml` is present at the project root; if not, run `"$SCAFFOLD_BIN" init` once.
 
 ### Commands / Actions
@@ -1119,8 +1229,10 @@ ls .scaffold/basecamp/profiles
 - If `[repos.basecamp.attr]` is a per-platform map, setup uses the current host's attr and preserves the map plus scalar fallback on serialize.
 - `basecamp doctor` reports the basecamp + lgpm binaries as present and both profiles as seeded; `--json` returns parseable JSON with the same checks. Immediately after a green first `setup` (before `basecamp modules`) that is four PASS rows — `basecamp binary`, `lgpm binary`, `basecamp profile alice`, `basecamp profile bob`. A doctor that summarizes `0 PASS` there is the regression: it leaves the user with no confirmation that `setup` actually landed.
 - `basecamp doctor` shows a `basecamp pin set` row. On a project using scaffold's defaults it passes and names both pins. It warns only when *one* of the pair is at the default and the other is not — that split is what silently breaks module loading, since the app embeds the same package-manager library the CLI installs with. A project deliberately pinned away from both defaults passes with a note, not a warning.
-- On a fresh `setup` against the default pin, the built basecamp carries its own bundled modules inside the nix output (`result/modules`, `result/plugins`) rather than pushing them into the profile — so a freshly seeded profile's `modules/` holding only the project's own modules is correct.
-- Second `basecamp setup` is idempotent: pin unchanged → no rebuild reported, exit 0.
+- On a fresh `setup` against the default pin, the built basecamp carries its own bundled modules inside the nix output (`result/modules`: `capability_module`, `modules_state`, `package_downloader`, `package_manager`; `result/plugins`: `package_manager_ui` plus the manifest-less `main_ui` shell library) rather than pushing them into the profile — so a freshly seeded profile's `modules/` holding only the project's own modules is correct.
+- Second `basecamp setup` is idempotent: pin unchanged → it prints `basecamp (.#<attr>) already built at /nix/store/…; skipping nix build` and exits 0 in seconds. It must not re-evaluate the basecamp flake (that alone costs minutes and ~5 GB of RAM), so a second run that shows a `building basecamp` step for an unchanged commit pin is the regression. `lgpm` is still re-built each time; it substitutes in seconds.
+- Retired default pins move forward. Put the previous default set in `scaffold.toml` (`[repos.basecamp].pin = "aa237766baf61404e12da86b7303cb41065464c9"`, `[repos.lgpm].pin = "202af6fa0f0f4493bc59c8a609dff9326f78a18d"` — basecamp 0.2.3) and run `basecamp doctor`: the `basecamp pin set` row warns `basecamp 0.2.3, a retired scaffold default; scaffold supports basecamp 0.3.0 only`. `basecamp setup` then prints one `[repos.basecamp].pin: … -> …` and one `[repos.lgpm].pin: … -> …` line, rewrites both in `scaffold.toml`, and doctor passes again. With only *one* half on a retired default and the other hand-picked, setup moves nothing and doctor's remediation names both pins to set by hand — moving one half would manufacture a split pair.
+- After a pin edit that `setup` has not been re-run for, `basecamp install` and `basecamp launch` refuse with `basecamp was set up for pin <old> but scaffold.toml now pins <new>; run: logos-scaffold basecamp setup`, and doctor shows a `basecamp build pin` warning. Installing with the old `lgpm` or launching the old app silently would run the previous release under scaffold's assumptions about the new one.
 - All commands run only inside the project; running them from outside the project must fail with the existing scaffold "not a logos-scaffold project" message.
 
 ### Failure Signals / Common Pitfalls
@@ -1154,7 +1266,7 @@ Validate the per-project source of truth for module identity (`[modules]` in `sc
 
 - B1 completed in the same project.
 - Module project's `flake.nix` (root or one or more sub-flakes) exposes `packages.<system>.lgx`. Sub-flake projects (e.g., `tictactoe-ui-cpp/`, `tictactoe-ui-qml/`) are valid.
-- A graphical environment if you intend to actually drive the launched basecamp UI; `launch` itself does not require X/Wayland to start, but interactive validation does.
+- A graphical environment. Basecamp 0.3.0 with `QT_QPA_PLATFORM=xcb` and no reachable X display aborts at startup (SIGABRT, empty log, no `launch.state`) — in a headless container start `Xvfb :<n>` first and confirm it with `xdpyinfo` before blaming the launch; `QT_QPA_PLATFORM=offscreen` starts the app and its modules but cannot be driven. `xdotool` + `import` (ImageMagick) are enough to open an app tile and screenshot it. The project's UI plugin appears as a sidebar tile under basecamp's own; opening it must log `Module loaded: <dep>` for each core dependency it declares.
 
 ### Commands / Actions
 
@@ -1200,7 +1312,7 @@ If your project does not auto-discover correctly, capture explicit sources:
 ### Expected Success Signals
 
 - `basecamp modules` either auto-discovers project sub-flakes exposing `.#lgx` or accepts explicit `--path` / `--flake` sources and writes one `[modules.<name>]` sub-section per source into `scaffold.toml`. The file remains human-editable; re-runs are byte-identical and never overwrite existing keys.
-- For each captured project source, scaffold also resolves declared `dependencies` and inserts `role = "dependency"` entries unless the dep is already keyed, is a module basecamp bundles itself (`capability_module`, `main_ui`, `package_downloader`, `package_manager`, `package_manager_ui`; see `BASECAMP_PREINSTALLED_MODULES` in `src/constants.rs` for the authoritative list — basecamp 0.2.x installs these next to its own binary, so they never appear in a profile's `modules/`), or is resolvable via the source's own `flake.lock` / the scaffold-default table.
+- For each captured project source, scaffold also resolves declared `dependencies` and inserts `role = "dependency"` entries unless the dep is already keyed, is a module basecamp bundles itself (`capability_module`, `modules_state`, `package_downloader`, `package_manager`, `package_manager_ui`; see `BASECAMP_PREINSTALLED_MODULES` in `src/constants.rs` for the authoritative list — basecamp installs these next to its own binary, so they never appear in a profile's `modules/`), or is resolvable via the source's own `flake.lock` / the scaffold-default table. Both `dependencies` and `optional_dependencies` are read, in plain-name and `{name, version, signer}` object form; an optional dep that resolves nowhere is skipped with a `note:` rather than failing the capture. A dependency on a name an older basecamp bundled (`main_ui`, `counter`, `counter_qml`, `webview_app`) fails with a message naming the declaring module's `metadata.json` as the fix — the generic "capture it / add `[modules.<name>]`" advice there is the regression, since no such flake exists.
 - An unresolvable dep fails fast with a targeted error naming the dep and the two user-side fixes (capture as a project source, or add `[modules.<name>]` with `role = "dependency"`); no silent drop.
 - `basecamp modules --show` prints the captured set without mutating state.
 - `basecamp install` builds each project source (sibling `--override-input` rewrites apply for `path:../<sibling>` inputs in multi-flake projects) and shells out to `lgpm` to install into both `alice` and `bob`. By default it logs to `.scaffold/logs/<ts>-install.log` and prints a one-line status; `--print-output` (or `LOGOS_SCAFFOLD_PRINT_OUTPUT=1`) streams nix output directly.
@@ -1275,14 +1387,14 @@ Within the running UIs, exercise whatever p2p surface the module exposes (chat e
 - Custom profile pairs open against their own profile dirs under `.scaffold/basecamp/profiles/<profile>/` and their configured runtime/log/env paths.
 - Each window shows the project's `.lgx` modules installed and ready.
 - `LOGOS_PROFILE=alice` and `LOGOS_PROFILE=bob` are visible in each respective process environment (helpful for debugging).
-- Every process environment carries an absolute `LOGOS_USER_DIR` pointing at that profile's own module root (`.scaffold/basecamp/profiles/<profile>/xdg-data/Logos/LogosBasecamp` on a portable stack, `…/LogosBasecampDev` on the dev stack) — set automatically by `launch` on every host and stack, no manual export needed. On the macOS portable stack an absolute `LOGOS_DATA_DIR` accompanies it: that is the 0.1.x name for the same override, kept so a project pinned to a 0.1.x basecamp behaves identically. Which one the app honors depends on the `[repos.basecamp]` pin; `launch` writes both there, so the check is the same either way.
+- Every process environment carries an absolute `LOGOS_USER_DIR` pointing at that profile's own module root (`.scaffold/basecamp/profiles/<profile>/xdg-data/Logos/LogosBasecamp` on a portable stack, `…/LogosBasecampDev` on the dev stack) — set automatically by `launch` on every host and stack, no manual export needed. `LOGOS_DATA_DIR` (basecamp 0.1.x's name for it) is no longer exported; finding it in the environment means it came from `[basecamp.env]` or the calling shell.
 - The two instances do not collide on Qt remote-objects or any non-module port. Do not go hunting for per-module port-override env vars in the process environment: the registry they would flow in through is empty in v1 (no module has published a name yet), so `launch` exports none. A module-level port collision between `alice` and `bob` is therefore still possible, and belongs to the owning module rather than to scaffold.
 - A p2p interaction triggered from `alice` is observable in `bob` (and vice versa) within the module's expected latency window.
 
 ### Failure Signals / Common Pitfalls
 
 - Two windows opening but sharing identity keys, profile state, or message history is a clean-slate / XDG-isolation regression.
-- On macOS — either stack, since 0.2.x ships a runnable dev build there too — both windows showing only basecamp's bundled modules and none of the project's `.lgx` modules, while their logs report a base data directory under the shared `~/Library/Application Support/Logos/LogosBasecamp[Dev]`, is the profile-collapse signature: the app is not reading the per-profile module root at all. Check that `LOGOS_USER_DIR` (plus `LOGOS_DATA_DIR` on the portable stack) is present, absolute, and distinct per profile in each process environment.
+- On macOS — either stack — both windows showing only basecamp's bundled modules and none of the project's `.lgx` modules, while their logs report a base data directory under the shared `~/Library/Application Support/Logos/LogosBasecamp[Dev]`, is the profile-collapse signature: the app is not reading the per-profile module root at all. Check that `LOGOS_USER_DIR` is present, absolute, and distinct per profile in each process environment.
 - A non-module port collision (Qt remote objects, etc.) is a real finding — file upstream against the affected component, do not patch around it inside scaffold.
 - A module that hardcodes its port is a known gap pending an upstream fix on that module. Scaffold exports no override for it to honor (see the signal above), so capture the module name and the observed collision — not a missing env var.
 - One window crashing while the other survives is recordable evidence; capture the crashing instance's logs from `.scaffold/basecamp/profiles/<name>/` before relaunching.
@@ -1334,7 +1446,7 @@ test -e .scaffold/basecamp/profiles/alice/.scaffold-xdg-data/scratch/marker.txt 
 - `rm -rf` on `launch` is bounded to `<project>/.scaffold/basecamp/profiles/<profile>/`. Never any path outside that root.
 - A `launch` that finds no modules in `[modules]` bails before scrubbing (the empty-install + scrubbed profile combination is the regression we're guarding against).
 - `basecamp paths` rejects the same unsafe profile names as `launch` and remains non-mutating for valid profiles.
-- A second `launch alice` while the first is still running terminates the first, leaving no orphan behind. Check with `pgrep -fl LogosBasecamp` (or `ps -o comm=`) before and after. The reported process name is never simply the file `launch` execed, because both generations start through a Qt-env launcher script: **0.2.x's dev build reports `.LogosBasecamp`** (`bin/LogosBasecamp` wraps the hidden real binary), **0.1.x reports `LogosBasecamp` even though `launch` execs `bin/logos-basecamp`** (that launcher execs its differently-named sibling), and the portable stacks report `LogosBasecamp` directly. All three are expected — a surviving process of any of those names after the second launch is the regression, and it is a silent one: the kill is skipped rather than failing loudly.
+- A second `launch alice` while the first is still running terminates the first, leaving no orphan behind. Check with `pgrep -fl LogosBasecamp` (or `ps -o comm=`) before and after. The reported process name is usually not the file `launch` execed, because the Linux entry points are Qt-env launcher scripts: **the dev build reports `.LogosBasecamp`** (`bin/LogosBasecamp` execs the hidden real binary), **the Linux portable bundle (`bin-bundle-dir`) reports `.LogosBasecamp.`** (its launcher execs `bin/.LogosBasecamp.elf`, cut to the kernel's 15-byte `comm`), and the macOS bundle reports `LogosBasecamp` directly. All are expected — a surviving process of any of those names after the second launch is the regression, and it is a silent one: the kill is skipped rather than failing loudly.
 - `module_data/` and basecamp's own `logs/` under the profile's module root are gone after a relaunch, like every other child of that root. That is clean-slate working as designed, not data loss: `basecamp paths <profile>` names both directories so their lifetime is discoverable before a module puts anything there.
 
 ### Failure Signals / Common Pitfalls
@@ -1383,7 +1495,7 @@ find .scaffold/basecamp -maxdepth 3 -type f -o -type l | sort
 ### Expected Success Signals
 
 - `basecamp build --variant all` builds both `.#lgx` and `.#lgx-portable` for each `role = "project"` entry in dependency order, then writes/symlinks outputs under `.scaffold/basecamp/<variant-dir>/`.
-- `--module <module-name>` builds only that captured project module and fails clearly for an unknown module.
+- `--module <module-name>` builds only that captured project module and fails clearly for an unknown module. The narrowed build still gets the sibling `--override-input` for every `path:../<sibling>` input, even though the sibling itself is not being built: a UI module whose flake declares `minimal.url = "path:../minimal"` must build with `--module <ui> --variant lgx-portable` exactly as it does under `--variant all`. `access to absolute path '/nix/store/<sibling>/flake.nix' is forbidden in pure evaluation mode` there is the regression.
 - `build-portable` behaves like `basecamp build --variant lgx-portable` and keeps the historical `.scaffold/basecamp/portable/` output directory.
 - `role = "dependency"` entries are skipped by build commands; dependencies are runtime inputs provided by install/basecamp.
 - A flake that does not expose the requested variant fails with a targeted error naming the missing attribute, not a raw nix trace or silent fallback.
@@ -1433,7 +1545,7 @@ For one negative-path check, capture or hand-edit a module entry that points at 
 
 ### Expected Success Signals
 
-- `--host standalone` invokes `nix run` for the module flake's default app, or `#<standalone_app>` when that config key is set.
+- `--host standalone` invokes `nix run` for the module flake's default app, or `#<standalone_app>` when that config key is set, with the same sibling `--override-input`s `install` uses — a module with a `path:../<sibling>` input runs (its log shows `Module loaded: <sibling>` and `Loaded UI plugin: …`) instead of failing pure evaluation. `basecamp develop <module>` applies the same overrides to `nix develop`.
 - With no `--host`, the run defaults to `standalone` (the only host today).
 - A module captured as a prebuilt `.lgx` path is rejected with guidance to edit/remove the entry and capture a flake source; `nix run` is not attempted.
 - Running a module as a configured Basecamp peer (one-shot build + install + launch) is not yet available; use `basecamp install` then `basecamp launch <profile>`. Tracked as follow-up work.
@@ -1456,12 +1568,12 @@ For one negative-path check, capture or hand-edit a module entry that points at 
 
 Validate the half of the basecamp pin set that does not require building basecamp itself: that `[repos.lgpm]` builds, that the project's `.lgx` carries what that `lgpm` validates, that a real `lgpm install` succeeds with the exact flags scaffold passes, and that the launcher scaffold would exec is the one that actually starts.
 
-This exists because `B1`'s Nix precondition is the heaviest in this runbook and fails for a second reason beyond network policy: **memory**. Evaluating the basecamp `0.2.3` flake (~10k lock nodes) needs more RAM than a small container has, and the failure is a bare `SIGKILL` with no error text. `B1` is then out of reach while most of the pin set is still verifiable — this scenario is what to run instead of reporting "no coverage".
+This exists because `B1`'s Nix precondition is the heaviest in this runbook and fails for a second reason beyond network policy: **memory**. Evaluating the basecamp `0.3.0` flake (~3.3k lock nodes) needs more RAM than a small container has, and the failure is a bare `SIGKILL` with no error text. `B1` is then out of reach while most of the pin set is still verifiable — this scenario is what to run instead of reporting "no coverage".
 
 ### Preconditions
 
 - Nix with flakes enabled and the GitHub access `B1` describes.
-- A module project built with `logos-module-builder` 0.2.x, reachable as `$MODULE_PROJECT`.
+- A module project built with `logos-module-builder` 0.3.0, reachable as `$MODULE_PROJECT`.
 - No basecamp build required. If you have one, prefer `B1`–`B6`.
 
 ### Commands / Actions
@@ -1504,9 +1616,10 @@ env -i HOME=/tmp PATH=/usr/bin:/bin QT_QPA_PLATFORM=offscreen "$APP"/bin/<entry>
 - The real install prints `Installed to: <modules-dir>` and exits 0, creating `<modules-dir>/<module_name>/`. `Warning: Package is unsigned` is expected and not a failure — the default signature policy is `warn`, and validation still runs underneath it.
 - Repacking matters: `tar czf out.lgx .` produces `./`-prefixed members and lgpm rejects the package for an unrelated reason. Pack member names exactly as the original (`tar czf out.lgx manifest.json variants`) or the negative test proves nothing.
 - Hash-stripped install fails with **`Package validation failed: Missing content hashes in manifest`** — the string `basecamp install` maps to its rebuild hint.
-- Dev `.lgx` under the portable `lgpm` fails with **`Package does not contain variant for platform: <host> (package provides: <host>-dev)`** — the string mapped to the stack-mismatch hint.
+- Dev `.lgx` under the portable `lgpm` fails with **`Package does not contain variant for platform: <host> (package provides: <variant>-dev)`** — the string mapped to the stack-mismatch hint. With the 0.3.0 `lgpm` the two names differ in spelling on x86_64 Linux (`platform: linux-x86_64 (package provides: linux-amd64-dev)`); lgpm treats them as aliases, so this is still the stack mismatch, not an architecture one.
+- The reverse skew — a package from `logos-module-builder` 0.3.x installed by an older `lgpm` (e.g. the retired `202af6fa…` pin, `nix build github:logos-co/logos-package-manager/202af6fa0f0f4493bc59c8a609dff9326f78a18d#cli`) — fails with **`Package validation failed: Forbidden root entry: assets`** for any package with an icon (every `ui_qml` one). `basecamp install` maps it to the pin-set hint (`… built by newer module tooling than the installer …`).
 - **Not every `Package validation failed:` is a hash problem.** The same banner covers malformed manifests (e.g. `Manifest: 'name' field is empty`). A hint that answers those with "rebuild with newer tooling" is a regression — the raw stderr is the better message there.
-- The entry point scaffold resolves is a **launcher**, not a raw binary. Both generations ship a `/bin/sh` script that exports `QT_PLUGIN_PATH` / `QML2_IMPORT_PATH` / `LD_LIBRARY_PATH` and then execs the real binary, but they name it differently: 0.1.x uses `bin/logos-basecamp` (its `bin/LogosBasecamp` is the raw ELF), while 0.2.x has no `bin/logos-basecamp` and makes `bin/LogosBasecamp` the launcher over a hidden `bin/.LogosBasecamp`. Launching the raw binary dies at exec with `libQt6RemoteObjects.so.6: cannot open shared object file`; the launcher reaches `Logos Core started successfully!`. That one-line difference is the whole check.
+- The entry point scaffold resolves is a **launcher**, not a raw binary: `bin/LogosBasecamp` is a `/bin/sh` script that exports `QT_PLUGIN_PATH` / `QML2_IMPORT_PATH` / `LD_LIBRARY_PATH` and then execs the hidden `bin/.LogosBasecamp`. `ls "$APP"/bin` shows `LogosBasecamp`, `logos_host` and `ui-host` (the hidden binary needs `ls -a`); there is no `bin/logos-basecamp` — that was 0.1.x's launcher name and scaffold no longer probes for it. Launching the hidden binary directly starts an app without its Qt environment; the launcher reaches `Module loaded: package_downloader`. That difference is the whole check.
 
 ### Failure Signals / Common Pitfalls
 
@@ -1841,6 +1954,7 @@ HEAD0=$("$SCAFFOLD_BIN" test-node blocks head --url "$URL" --json | jq -r .block
 - Changes to diagnostics, report contents, or redaction logic: rerun `D5`.
 - Changes to example runner binaries or template `src/bin/*` code: rerun `D6`.
 - Changes to `run` step ordering, the `deploy = false` deploy-skip branch, the `topup = false` topup-skip branch, post-deploy env vars, post-deploy CLI override flag handling, or `[run]` config parsing: rerun `D7`.
+- Changes to guest build strategy (`[build]` config, `--guest`, `build_methods_guests`, `DEFAULT_RISC0_DOCKER_TAG`, `GUEST_DOCKER_TARGET_DIR`) or to deploy-side binary discovery/ranking (`GUEST_BIN_SEARCH_ROOTS`, `discover_program_binaries`): rerun `D8` (its container steps also run in CI — see the Guest Build Reproducibility workflow), plus `D1` and `D3` — `D1` covers the default build, `D3` covers the artefact `deploy` actually submits. Bumping `DEFAULT_RISC0_DOCKER_TAG` changes every `program_id`, so record the before/after values.
 - Changes to LEZ template scaffolding or generated outputs: rerun `L1`, `L2`, `L3`, and `L4`.
 - Changes to CLI argument parsing, help text, or error messages: rerun `E1`.
 - Changes to `create`/`new` flags or template selection logic: rerun `E2`.

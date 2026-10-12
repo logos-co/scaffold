@@ -145,8 +145,9 @@ independently. Two corollaries follow from the same coupling:
   whose `.lgx` predates that tooling stops installing. `BASECAMP_DEPENDENCIES`
   entries move with the pair.
 - **The bundled-module list is read off the release.** Which modules basecamp
-  ships itself changed between 0.1.x and 0.2.x (`counter`, `counter_qml`,
-  `webview_app` left; `package_downloader` arrived), and dep resolution skips
+  ships itself changes between releases (0.2.x dropped `counter`,
+  `counter_qml` and `webview_app` and added `package_downloader`; 0.3.0 folded
+  `main_ui` into the app and added `modules_state`), and dep resolution skips
   exactly those names. A stale list either sends `basecamp modules` hunting for
   a flake that does not exist, or captures a module basecamp already provides.
 
@@ -162,6 +163,44 @@ Cost: a basecamp bump is never a one-line change, and the pins cannot be updated
 by a dependency bot that treats each repo separately. That is the honest shape of
 the dependency, and `DOGFOODING.md` re-opens the whole `B` series when any member
 of the set changes.
+
+## Scaffold Supports One Basecamp Release
+
+Until 0.2.3 scaffold kept compatibility code for every basecamp generation it
+had ever pinned: two launcher names (`bin/logos-basecamp` for 0.1.x,
+`bin/LogosBasecamp` for 0.2.x), two data-tree env vars (`LOGOS_DATA_DIR` and
+`LOGOS_USER_DIR`, gated differently per host and stack), and a process-name
+table mapping each generation's launcher onto what it execs. None of it was
+exercised: the `B` series only ever runs against the default pin, and a
+compatibility branch nobody runs is a claim, not a feature.
+
+With the move to basecamp 0.3.0 scaffold supports **exactly one basecamp
+release — the one `DEFAULT_BASECAMP_PIN` names**. Launcher resolution, the
+process-name candidates, the exported env and the bundled-module list describe
+that release and nothing older. A project may still pin another rev (a fork,
+an unreleased commit); scaffold builds it, and `basecamp doctor` names the
+release it actually supports, but it carries no code for the difference.
+
+That only works if projects do not silently stay behind. `new`, `init` and
+`setup` write the literal default pins into `scaffold.toml`, and `basecamp
+modules` writes default companion flakes into `[modules]`, so a pin bump alone
+never reaches an existing project. Scaffold therefore keeps a short table of
+the *retired defaults* it wrote (`RETIRED_BASECAMP_PIN_SETS`,
+`RETIRED_DEPENDENCY_FLAKES`): `basecamp setup` rewrites a value that is exactly
+one of them to the current default and prints each rewrite, and `basecamp
+doctor` warns until it has. The line is drawn at rev equality, not intent:
+scaffold records no provenance, so a user who deliberately pins basecamp 0.2.3
+with its matching `lgpm` is indistinguishable from one an old default left
+behind, and both get moved (per the rejected alternative below, such a user
+stays on the scaffold release that shipped with 0.2.3). Any pin that is *not*
+exactly a retired default from scaffold's default source is left alone.
+
+Rejected alternative: keep the compat branches "because they are cheap". They
+were not: each one came with its own doc paragraph, test and DOGFOODING caveat,
+and the 0.2.x → 0.3.0 research had to re-verify every one before it could be
+trusted or deleted. The cost of the rule is that a user who deliberately stays
+on an older basecamp gets no help from scaffold with its quirks; that user can
+stay on the scaffold release that shipped with it.
 
 ## Sibling `--override-input` Resolves By Declared Input Name
 
@@ -539,8 +578,9 @@ guest this way, for two independent reasons:
    binary whose ImageID **is** the ProgramId. A host-side build never creates it.
 
 So `build` delegates spel projects to their own Makefile, and discovery gained a
-third search root (`methods/guest/target`) plus a second release-equivalent path
-component (`docker`, ranked with `release` rather than as a debug fallback).
+third search root (`methods/guest/target`) and spel's `make build` output lands under a
+`docker` path component, which discovery ranks above `release` (see "Deterministic
+Guest Builds are the Default" below).
 The invariant is unchanged and still designed as a pair — there are simply now
 two producers, and both land somewhere discovery looks.
 
@@ -550,3 +590,48 @@ to *stdout*, and the Makefile's `idl:` recipe is what redirects it to the file
 subcommand. Scaffold drives `make idl` / `make ffi-gen` rather than restating
 either layout, pointing `SPEL_CLIENT_GEN` at the vendored build so the project
 never depends on what happens to be on `PATH`.
+
+## Deterministic Guest Builds are the Default
+
+`risc0_build::embed_methods()` — what "Guest Build Discovery" above describes — compiles the
+guest against the host's Rust and clang. The ELF it emits, and therefore the risc0 image ID that
+becomes the deployed `program_id`, is not guaranteed to be bit-identical across machines, OS
+versions, or toolchain versions. That defeats the purpose of a `program_id` as a stable,
+verifiable identifier for deployed bytecode (scaffold#259).
+
+The reproducible alternative is the one `lssa` uses for the artefacts it ships: `cargo risczero
+build`, which compiles the guest inside a pinned `risczero/risc0-guest-builder:<tag>` container.
+Same source plus same tag gives the same bytes on every machine.
+
+Scaffold offers both, selected by `[build].guest` in `scaffold.toml` (`"docker"` | `"local"`,
+overridable per invocation with `lgs build --guest`), and defaults to `docker`. An earlier
+revision defaulted to the host toolchain and only warned; review rejected that, because a default
+whose failure mode is a silently non-portable `program_id` is a footgun — the damage shows up
+later, on someone else's machine, after the ID has been published. Requiring Docker is a loud,
+immediate, one-line-fixable failure; a wrong `program_id` is neither. So:
+
+- the default is the safe one, and `local` is an explicit opt-out for machines without Docker or
+  for inner-loop speed on a program whose `program_id` does not matter yet;
+- the missing-toolchain failure is made as cheap as possible: `lgs build` checks `cargo-risczero`,
+  `docker`, and the daemon *before* `setup` can spend minutes compiling, and each error names the
+  `[build].guest = "local"` escape hatch; `lgs doctor` reports the same condition as a FAIL;
+- a project that sets `guest = "local"` has made the choice deliberately, so `lgs build` no longer
+  nags; `lgs doctor` still reports the active strategy and says it is not reproducible.
+
+The two modes write to disjoint trees — `embed_methods()` owns `target/riscv-guest/`, the
+deterministic build gets `target/riscv-guest-docker/` via `CARGO_TARGET_DIR`. Deploy-side
+discovery ranks a `docker` path component above `release`, and a `local` build deletes
+`target/riscv-guest-docker/` before it runs. Together those give one invariant: **the last `lgs
+build` decides what `lgs deploy` ships.** Without the delete, switching back to `local` would
+leave a deterministic `.bin` on disk that outranks the fresh local one and would keep being
+deployed; without the ranking, the reverse. The pin itself (`DEFAULT_RISC0_DOCKER_TAG`) is a
+scaffold constant, not risc0's default, so the emitted ELF never depends on which
+`cargo-risczero` version happens to be installed.
+
+Reproducibility is a claim, so CI checks it rather than asserting it: the Guest Build
+Reproducibility workflow renders a project, builds its guests through the container
+twice from a clean tree, and fails on any digest difference. This mirrors what `lssa`
+does by rebuilding and diffing its committed `artifacts/`. Without it, the pinned tag
+could drift or a future risc0 release could reintroduce nondeterminism and nothing
+would notice — the unit tests only pin the invocation, and Template E2E exercises the
+host-toolchain path (`--guest local`).
