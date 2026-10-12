@@ -81,16 +81,17 @@ fn guest_build_row(build: &BuildConfig, missing: &[&str]) -> CheckRow {
         return CheckRow {
             status: CheckStatus::Pass,
             name: "guest build".to_string(),
-            detail: "local — host risc0 toolchain (opted in via [build].guest); program_id is \
+            detail:
+                "local — host risc0 toolchain (opted in via [build].guest); the guest image ID is \
                      not reproducible across machines. Remove the setting or use \"docker\" \
                      for reproducible builds."
-                .to_string(),
+                    .to_string(),
             remediation: None,
         };
     }
 
     // The pinned tag is reported on both branches: it is the value that makes
-    // `program_id` reproducible, so it belongs in the diagnostic whether or
+    // guest image ID reproducible, so it belongs in the diagnostic whether or
     // not this machine can currently run the build.
     if missing.is_empty() {
         CheckRow {
@@ -114,7 +115,7 @@ fn guest_build_row(build: &BuildConfig, missing: &[&str]) -> CheckRow {
             remediation: Some(
                 "Install Docker and run `rzup install cargo-risczero` (a separate component \
                  from `rzup install rust`), or set [build].guest = \"local\" in scaffold.toml \
-                 (non-reproducible program_id)"
+                 (non-reproducible guest image ID)"
                     .to_string(),
             ),
         }

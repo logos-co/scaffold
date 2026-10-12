@@ -5154,7 +5154,7 @@ fn setup_hard_fails_on_pre_v0_2_0_scaffold_toml() {
 }
 
 /// scaffold#259: a project that opts into the host-toolchain guest build gets
-/// told, in doctor, that its `program_id` is not reproducible.
+/// told, in doctor, that its guest image ID is not reproducible.
 #[test]
 fn doctor_reports_the_guest_build_strategy() {
     let temp = tempdir().expect("tempdir");
@@ -5238,7 +5238,7 @@ fn build_help_documents_the_guest_build_modes() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("--guest").and(predicate::str::contains("program_id")));
+        .stdout(predicate::str::contains("--guest").and(predicate::str::contains("image ID")));
 }
 
 /// F4: clap's leading `error: ` is stripped before we re-wrap with anyhow,

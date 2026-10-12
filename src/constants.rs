@@ -76,8 +76,8 @@ pub(crate) const METHODS_DIR: &str = "methods";
 pub(crate) const DEFAULT_RISC0_METHODS_ENTRY: &str = "guest";
 /// Docker image tag scaffold pins for the deterministic guest build
 /// (`risczero/risc0-guest-builder:<tag>`). The tag fixes the guest Rust
-/// toolchain, so it is part of what makes the emitted ELF — and therefore the
-/// `program_id` derived from it — reproducible across machines.
+/// toolchain, so it is part of what makes the emitted ELF — and therefore its
+/// risc0 image ID — reproducible across machines.
 ///
 /// Verified in CI: this image reports `rustc 1.97.0-dev (e638c6cfe 2026-07-15)`,
 /// the same compiler build as rzup's `v1.97.0` toolchain, so the container and

@@ -511,7 +511,7 @@ pub struct BuildOptions {
 /// same `program_id` everywhere.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GuestBuild {
-    /// Host toolchain. Non-reproducible `program_id`.
+    /// Host toolchain. Non-reproducible guest image ID.
     Local,
     /// Pinned Docker container. Reproducible `program_id`.
     Docker,

@@ -81,16 +81,16 @@ impl Default for LocalnetConfig {
 }
 
 /// Which toolchain `lgs build` compiles the `methods/` risc0 guest programs
-/// with. The choice decides whether the emitted guest ELF — and therefore the
-/// `program_id` the sequencer stores for it — is reproducible.
+/// with. The choice decides whether the emitted guest ELF — and therefore its
+/// risc0 image ID, which private executions prove against — is reproducible.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GuestBuildMode {
     /// `cargo build --release --manifest-path methods/Cargo.toml`, i.e. the
     /// guest crate's own `risc0_build::embed_methods()`. Uses the host's Rust
-    /// and clang, needs no Docker, and is fast — but the ELF (and its
-    /// `program_id`) can differ between machines, OS versions, and toolchain
-    /// versions. Opt-in: choose it when Docker is unavailable or the
-    /// `program_id` does not need to be portable.
+    /// and clang, needs no Docker, and is fast — but the ELF (and its image
+    /// ID) can differ between machines, OS versions, and toolchain versions.
+    /// Opt-in: choose it when Docker is unavailable or the image ID does not
+    /// need to be portable.
     Local,
     /// `cargo risczero build` inside the pinned
     /// `risczero/risc0-guest-builder:<tag>` container — the strategy `lssa`

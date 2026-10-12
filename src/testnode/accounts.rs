@@ -280,7 +280,7 @@ fn parse_account_value(value: &Value, balance: &Value) -> AccountValue {
         };
         shards.push((raw, program.clone(), bytes));
     }
-    shards.sort_by(|a, b| a.0.cmp(&b.0));
+    shards.sort_by_key(|shard| shard.0);
 
     if balance == 0 && nonce == 0 && shards.is_empty() {
         return AccountValue::Missing;

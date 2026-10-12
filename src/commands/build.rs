@@ -276,14 +276,14 @@ fn preflight_deterministic_toolchain() -> DynResult<()> {
              Install it with `rzup install cargo-risczero` (a separate component from \
              `rzup install rust`), or `cargo install cargo-risczero`. Or set \
              [build].guest = \"local\" in scaffold.toml to build guests with the host \
-             toolchain (non-reproducible `program_id`)."
+             toolchain (non-reproducible guest image ID)."
         );
     }
     if which("docker").is_none() {
         bail!(
             "[build].guest = \"docker\" needs `docker` on PATH, which was not found.\n\
              Install Docker, or set [build].guest = \"local\" in scaffold.toml to build guests \
-             with the host toolchain (non-reproducible `program_id`)."
+             with the host toolchain (non-reproducible guest image ID)."
         );
     }
     let daemon_ok = Command::new("docker")
@@ -298,7 +298,7 @@ fn preflight_deterministic_toolchain() -> DynResult<()> {
         bail!(
             "[build].guest = \"docker\" needs a running Docker daemon; `docker info` failed.\n\
              Start Docker and retry, or set [build].guest = \"local\" in scaffold.toml to build \
-             guests with the host toolchain (non-reproducible `program_id`)."
+             guests with the host toolchain (non-reproducible guest image ID)."
         );
     }
     Ok(())

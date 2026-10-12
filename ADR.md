@@ -562,6 +562,11 @@ could drift or a future risc0 release could reintroduce nondeterminism and nothi
 would notice — the unit tests only pin the invocation, and Template E2E exercises the
 host-toolchain path (`--guest local`).
 
+LEZ 0.3 note: a deployed program is now addressed by its `program_loader` header account,
+which is fresh on every deploy, so the `program_id` is no longer derived from the ELF. The
+decision stands for what still is: the guest bytes (`deploy --json` reports `elf_sha256`) and
+the risc0 image ID that private executions prove against.
+
 ## Scaffold Supports One LEZ Release (0.3)
 
 Scaffold builds against exactly one LEZ release line — 0.3, pinned to

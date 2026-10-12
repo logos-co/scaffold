@@ -227,9 +227,9 @@ struct BuildArgs {
     prebuilt: bool,
     /// Override [build].guest for this invocation. `docker` (the default)
     /// builds guest programs inside the pinned risc0-guest-builder container
-    /// (reproducible program_id, needs Docker and cargo-risczero); `local`
+    /// (reproducible guest image ID, needs Docker and cargo-risczero); `local`
     /// uses the host risc0 toolchain (fast, no Docker, non-reproducible
-    /// program_id).
+    /// guest image ID).
     #[arg(long, value_enum, value_name = "MODE")]
     guest: Option<GuestBuildModeArg>,
     project_path: Option<PathBuf>,
