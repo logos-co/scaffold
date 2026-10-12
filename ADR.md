@@ -494,11 +494,13 @@ of `spel program-id`.
 
 The deploy command must work for any scaffolded project regardless of its name.
 Binary discovery should derive paths from the actual project structure, not assume the template's naming.
-The implementation walks both `target/riscv-guest/` (the canonical risc0 layout used by the
-scaffold template) and `methods/target/` (the sub-crate workspace layout), matching `<program>.bin`
-files whose path components include both a `riscv32im*` target triple and a `release` directory.
-Release builds are preferred; if only a debug build exists, that is used as a fallback. When
-multiple matches exist, the shallowest path wins. This keeps the scaffold general and avoids
+The implementation walks four roots: `target/riscv-guest-docker/` (the deterministic build
+output, see "Deterministic Guest Builds are the Default" below), `target/riscv-guest/` (the
+canonical risc0 layout used by the scaffold template), `methods/target/` (the sub-crate workspace
+layout) and `methods/guest/target/` (a guest crate with its own workspace), matching
+`<program>.bin` files whose path components include a `riscv32im*` target triple. A `docker`
+build in `target/riscv-guest-docker/` ranks first, then `release` builds; if only a debug build
+exists, that is used as a fallback. Within a rank the shallowest path wins. This keeps the scaffold general and avoids
 coupling to a specific project name or workspace layout.
 
 ## Guest Build Discovery
@@ -553,6 +555,12 @@ leave a deterministic `.bin` on disk that outranks the fresh local one and would
 deployed; without the ranking, the reverse. The pin itself (`DEFAULT_RISC0_DOCKER_TAG`) is a
 scaffold constant, not risc0's default, so the emitted ELF never depends on which
 `cargo-risczero` version happens to be installed.
+
+The `docker` rank applies only inside `target/riscv-guest-docker/`, the one tree scaffold both
+writes (via `CARGO_TARGET_DIR`) and clears. A `docker/` component under any other search root,
+for example from a hand-run `cargo risczero build` in `methods/guest`, earns no `docker` rank;
+with no `release` component it is only a last-resort fallback. Otherwise a stale artefact in a tree scaffold never clears could outrank a fresh
+`local` build and break the invariant above (scaffold#262).
 
 Reproducibility is a claim, so CI checks it rather than asserting it: the Guest Build
 Reproducibility workflow renders a project, builds its guests through the container
