@@ -92,7 +92,13 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
     rows.push(check_container_runtime());
     rows.push(check_pcsc_library());
     rows.push(check_binary("nix", false));
-    rows.push(check_guest_build(&project.config.build));
+    // `[build].guest` and scaffold's pinned builder image only govern the
+    // `default` template's guest build. spel projects build through `make
+    // build` regardless, and get their own `cargo-risczero` row below, so this
+    // row would describe a build that never happens.
+    if project.config.framework.kind != FRAMEWORK_KIND_SPEL {
+        rows.push(check_guest_build(&project.config.build));
+    }
     rows.push(check_logos_blockchain_circuits(
         &project.root,
         &project.config.circuits,

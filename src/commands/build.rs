@@ -29,9 +29,26 @@ pub(crate) fn cmd_build_shortcut(
         // step: `setup` can compile the LEZ sequencer from source for
         // minutes, and telling someone their Docker daemon is down only
         // after that is a bad trade for one `which` and one `docker info`.
-        let early_mode = guest_override.unwrap_or(load_project()?.config.build.guest);
-        if early_mode.is_deterministic() && cwd.join(METHODS_DIR).join("Cargo.toml").is_file() {
-            preflight_deterministic_toolchain()?;
+        let early_project = load_project()?;
+        if early_project.config.framework.kind == FRAMEWORK_KIND_SPEL {
+            // spel projects always build in Docker through `make build`
+            // (`cargo risczero build`), whatever `[build].guest` says, so the
+            // check always applies and there is no `local` fallback to offer.
+            if guest_override == Some(GuestBuildMode::Local) {
+                println!(
+                    "Note: --guest local does not apply to spel projects; `make build` always \
+                     builds the guest in Docker."
+                );
+            }
+            preflight_docker_toolchain(SPEL_TOOLCHAIN_NEEDED_BY, None)?;
+        } else {
+            let early_mode = guest_override.unwrap_or(early_project.config.build.guest);
+            if early_mode.is_deterministic() && cwd.join(METHODS_DIR).join("Cargo.toml").is_file() {
+                preflight_docker_toolchain(
+                    DETERMINISTIC_TOOLCHAIN_NEEDED_BY,
+                    Some(LOCAL_GUEST_ALTERNATIVE),
+                )?;
+            }
         }
 
         cmd_setup(prebuilt)?;
@@ -168,7 +185,10 @@ fn build_methods_guests_docker(
     // Deliberately re-checked here even though `cmd_build_shortcut` already
     // ran it: `setup` in between can take minutes, and this is the function's
     // own precondition rather than the caller's.
-    preflight_deterministic_toolchain()?;
+    preflight_docker_toolchain(
+        DETERMINISTIC_TOOLCHAIN_NEEDED_BY,
+        Some(LOCAL_GUEST_ALTERNATIVE),
+    )?;
 
     // One `CARGO_TARGET_DIR` is shared by every guest package, so clear it
     // once up front rather than per package — otherwise the second package's
@@ -315,25 +335,35 @@ fn risc0_guest_manifests(cwd: &Path, methods_manifest: &Path) -> DynResult<Vec<P
 
 /// Fail before the first (slow) container pull if the deterministic path
 /// cannot possibly work, with the fix rather than a raw docker/cargo error.
-fn preflight_deterministic_toolchain() -> DynResult<()> {
+const DETERMINISTIC_TOOLCHAIN_NEEDED_BY: &str = "[build].guest = \"docker\"";
+const SPEL_TOOLCHAIN_NEEDED_BY: &str = "Building a spel project (`make build`)";
+const LOCAL_GUEST_ALTERNATIVE: &str = "set [build].guest = \"local\" in scaffold.toml to build \
+     guests with the host toolchain (non-reproducible `program_id`)";
+
+/// Check for what a Docker guest build needs (`cargo-risczero`, `docker` and
+/// a running daemon) before `setup` spends minutes compiling. `needed_by`
+/// names what requires it. `alternative` is an escape hatch to offer, if one
+/// exists: spel projects have none, because `make build` always builds in
+/// Docker.
+fn preflight_docker_toolchain(needed_by: &str, alternative: Option<&str>) -> DynResult<()> {
+    let or_alternative = alternative
+        .map(|alt| format!(" Or {alt}."))
+        .unwrap_or_default();
     if which("cargo-risczero").is_none() {
         // `rzup install rust` — the command people actually run to get a
         // risc0 setup — does NOT install this; it is a separate component.
         // Naming the exact command matters: someone with a working guest
         // toolchain will otherwise assume they already have it.
         bail!(
-            "[build].guest = \"docker\" needs `cargo-risczero` on PATH, which was not found.\n\
+            "{needed_by} needs `cargo-risczero` on PATH, which was not found.\n\
              Install it with `rzup install cargo-risczero` (a separate component from \
-             `rzup install rust`), or `cargo install cargo-risczero`. Or set \
-             [build].guest = \"local\" in scaffold.toml to build guests with the host \
-             toolchain (non-reproducible `program_id`)."
+             `rzup install rust`), or `cargo install cargo-risczero`.{or_alternative}"
         );
     }
     if which("docker").is_none() {
         bail!(
-            "[build].guest = \"docker\" needs `docker` on PATH, which was not found.\n\
-             Install Docker, or set [build].guest = \"local\" in scaffold.toml to build guests \
-             with the host toolchain (non-reproducible `program_id`)."
+            "{needed_by} needs `docker` on PATH, which was not found.\n\
+             Install Docker.{or_alternative}"
         );
     }
     let daemon_ok = Command::new("docker")
@@ -346,9 +376,8 @@ fn preflight_deterministic_toolchain() -> DynResult<()> {
         .unwrap_or(false);
     if !daemon_ok {
         bail!(
-            "[build].guest = \"docker\" needs a running Docker daemon; `docker info` failed.\n\
-             Start Docker and retry, or set [build].guest = \"local\" in scaffold.toml to build \
-             guests with the host toolchain (non-reproducible `program_id`)."
+            "{needed_by} needs a running Docker daemon; `docker info` failed.\n\
+             Start Docker and retry.{or_alternative}"
         );
     }
     Ok(())
