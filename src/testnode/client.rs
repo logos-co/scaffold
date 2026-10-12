@@ -13,8 +13,9 @@
 //!   bytes, base64 encoded — and returns the transaction hash as a hex
 //!   string. Stateless check failures (e.g. `InvalidSignature`) surface as a
 //!   JSON-RPC error before the transaction enters the mempool.
-//! - `getTransaction` returns the borsh+base64 echo of a transaction once it
-//!   is part of a committed block, `null` before that.
+//! - `getTransaction` returns `[<borsh+base64 transaction>, <block id>]` once
+//!   the transaction is part of a committed block (LEZ 0.3 returns
+//!   `Option<(LeeTransaction, BlockId)>`), `null` before that.
 //! - `getBlock` returns the whole block as borsh+base64. The header prefix
 //!   is fixed-layout: `block_id: u64` at bytes 0..8 and `timestamp: u64` at
 //!   bytes 72..80 (after two 32-byte hashes). Because borsh serialization is
@@ -322,12 +323,19 @@ impl TestNodeClient {
     }
 
     /// `getTransaction` — base64 borsh echo of a committed transaction, or
-    /// `None` when the node does not (yet) have it in a block.
+    /// `None` when the node does not (yet) have it in a block. LEZ 0.3 pairs
+    /// the echo with the containing block id (`[tx, block_id]`); the block is
+    /// located from the block bytes anyway, so only the echo is returned.
     pub fn transaction(&self, tx_hash: &str) -> Result<Option<String>, RpcError> {
         let result = self.call("getTransaction", json!([tx_hash]))?;
         match result {
             Value::Null => Ok(None),
             Value::String(encoded) => Ok(Some(encoded)),
+            Value::Array(ref pair)
+                if pair.len() == 2 && pair[0].is_string() && pair[1].is_u64() =>
+            {
+                Ok(pair[0].as_str().map(ToString::to_string))
+            }
             other => Err(RpcError::Other {
                 operation: "getTransaction".to_string(),
                 message: format!("unexpected result shape: {}", one_line(&other.to_string())),
@@ -641,7 +649,7 @@ mod tests {
         let node = FakeNode::start(move |method, params| match method {
             "getLastBlockId" => json!(7),
             "sendTransaction" => json!(TX_HASH),
-            "getTransaction" => json!(tx_echo.clone()),
+            "getTransaction" => json!([tx_echo.clone(), 12]),
             "getBlock" => {
                 let id = params[0].as_u64().unwrap();
                 if id == 7 {
@@ -805,7 +813,7 @@ mod tests {
             "getLastBlockId" => json!(3),
             "sendTransaction" => json!(TX_HASH),
             // Echo different bytes than submitted.
-            "getTransaction" => json!(b64(&[42, 42, 42])),
+            "getTransaction" => json!([b64(&[42, 42, 42]), 4]),
             other => panic!("unexpected method {other}"),
         });
 

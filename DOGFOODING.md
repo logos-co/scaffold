@@ -1714,18 +1714,23 @@ The capstone end-to-end proof: a real wallet transaction, executed by a real tes
 From the project root:
 
 ```bash
-SJ=$("$SCAFFOLD_BIN" test-node start --project "$P" --port 3040 --json)
+# The localnet holds the wallet's port; stop it for this scenario. Test nodes
+# keep LEZ's 15s debug block interval unless told otherwise.
+"$SCAFFOLD_BIN" localnet stop
+SJ=$("$SCAFFOLD_BIN" test-node start --project "$P" --port <[localnet].port> --block-create-timeout-ms 2000 --json)
 URL=$(echo "$SJ" | jq -r .rpc_url); NODE=$(echo "$SJ" | jq -r .state_dir | xargs basename)
 HEAD0=$("$SCAFFOLD_BIN" test-node blocks head --url "$URL" --json | jq -r .block_id)
 
 # Submit a REAL faucet transaction against the test-node:
-"$SCAFFOLD_BIN" wallet topup        # auth-transfer send from the dev funder
+TX=$("$SCAFFOLD_BIN" wallet topup --json | jq -r .tx)   # auth-transfer send from the dev funder
 
 # Observe the committed USER transaction(s) through the test-node client:
 "$SCAFFOLD_BIN" test-node blocks wait --url "$URL" --after "$HEAD0" --count 6 --timeout-sec 90 --json \
-  | jq -c '.blocks[] | select(.has_user_transactions) | {block_id, transaction_count, user:[.transactions[]|select(.is_clock|not)|{hash:.hash[0:12],kind}]}'
+  | jq -c '.blocks[] | select(.has_user_transactions) | {block_id, transaction_count, user:[.transactions[]|select(.is_system|not)|{hash,kind}]}'
+"$SCAFFOLD_BIN" test-node tx wait --url "$URL" --hash "$TX" --json
 
 "$SCAFFOLD_BIN" test-node stop --node "$NODE" --project "$P"
+"$SCAFFOLD_BIN" localnet start
 ```
 
 ### Expected Success Signals
