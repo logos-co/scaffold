@@ -94,7 +94,7 @@ JSON: `--program-path … --json` prints one object (`status`, `program`, `progr
 
 ## Example Runners
 
-The runners are LEZ's own and **deploy their own copy** of the program before calling it. Arguments are the guest `.bin` path(s), plain base58 account ids (no `Public/`), and a funded payer:
+The runners are LEZ's own and **deploy their own copy** of the program before calling it. The five public runners are scaffold's patched copies: upstream v0.3.1 submits fee-exempt transactions (rejected with `Incorrect fee`), so they submit through `program_deployment::send_paid_public_transaction` in `src/lib.rs`, which declares the fee paid by the payer argument and waits for inclusion. Use that helper for your own public transactions too. Arguments are the guest `.bin` path(s), plain base58 account ids (no `Public/`), and a funded payer:
 
 ```bash
 export LEE_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet"     # the only variable the 0.3 wallet reads
@@ -107,7 +107,7 @@ cargo run --bin run_hello_world_with_authorization -- "$BIN_DIR/hello_world_with
 cargo run --bin run_hello_world_through_tail_call -- "$BIN_DIR/simple_tail_call.bin" "$BIN_DIR/hello_world.bin" <id> "$PAYER"
 cargo run --bin run_hello_world_with_move_function -- "$BIN_DIR/hello_world_with_move_function.bin" "$PAYER" write-public <id> Hola
 cargo run --bin run_hello_world_with_authorization_through_tail_call_with_pda -- "$BIN_DIR/tail_call_with_pda.bin" "$BIN_DIR/hello_world_with_authorization.bin" "$PAYER"
-lgs wallet -- account get --account-id Public/<id>      # shows the program's shard
+lgs wallet -- account get --scope all --account-id Public/<id>   # shows the program's shard
 ```
 
 The `_private` runners prove locally; keep `RISC0_DEV_MODE=1` unless you have a machine that can run the real prover.
@@ -118,7 +118,7 @@ The `_private` runners prove locally; keep `RISC0_DEV_MODE=1` unless you have a 
 2. `lgs build`.
 3. `lgs deploy <program>` and take `program_id` from the output or `deployments.json` — or let a runner deploy its own copy.
 4. Send transactions (runner, or your own client using `lee::public_transaction::Message::try_new(program_account_id, selectors, nonces, instruction)` with a fee declaration via the wallet).
-5. `lgs wallet -- account get --account-id Public/<id>` to verify.
+5. `lgs wallet -- account get --scope all --account-id Public/<id>` to verify.
 
 ## Key Rules
 

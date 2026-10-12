@@ -525,24 +525,25 @@ export LEE_WALLET_HOME_DIR="$PWD/.scaffold/wallet"
 export BIN_DIR="$PWD/target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker"   # or the local-build release dir (D3)
 export PAYER=$(sed -n 's/^default_address=Public\///p' .scaffold/state/wallet.state)
 cargo run --bin run_hello_world -- "$BIN_DIR/hello_world.bin" <account-id-a> "$PAYER"
-"$SCAFFOLD_BIN" wallet -- account get --account-id Public/<account-id-a>
+"$SCAFFOLD_BIN" wallet -- account get --scope all --account-id Public/<account-id-a>
 cargo run --bin run_hello_world_with_move_function -- "$BIN_DIR/hello_world_with_move_function.bin" "$PAYER" write-public <account-id-b> dogfood-test-message
-"$SCAFFOLD_BIN" wallet -- account get --account-id Public/<account-id-b>
+"$SCAFFOLD_BIN" wallet -- account get --raw --scope all --account-id Public/<account-id-b>
 ```
 
-These are LEZ's own `examples/program_deployment` runners: each one first deploys a fresh copy of its program through `program_loader` (paid by `$PAYER`), then sends one transaction to it. The first writes `Hola mundo!` into the hello_world program's shard on account A; the second writes the given greeting into the move-function program's shard on account B.
+These are LEZ's own `examples/program_deployment` runners: each one first deploys a fresh copy of its program through `program_loader` (paid by `$PAYER`), then sends one transaction to it. The five public runners are scaffold's patched copies: upstream v0.3.1 builds their transactions fee-exempt, which the sequencer rejects with `Incorrect fee`; scaffold's versions submit through `send_paid_public_transaction` (generated `src/lib.rs`), which declares the fee, has `$PAYER` co-sign, and waits for inclusion (printing `Transaction <hash> is included in block <n>`). The first writes `Hola mundo!` into the hello_world program's shard on account A; the second writes the given greeting into the move-function program's shard on account B.
 
 ### Expected Success Signals
 
-- Both runners exit 0. They print little of their own; the wallet's `Transaction hash is …` / `Transaction is included in block …` lines for the deployment transactions appear along the way.
-- `wallet -- account get --account-id Public/<account-id-a>` shows a shard keyed by the runner's program account whose decoded bytes are `Hola mundo!` (`--raw` prints the hex `486f6c61206d756e646f21`).
+- Both runners exit 0, printing the wallet's `Transaction hash is …` / `Transaction is included in block …` lines for the deployment transactions and, last, `Transaction <hash> is included in block <n>` for the call itself.
+- `wallet -- account get --scope all --account-id Public/<account-id-a>` shows `Record of program <runner's program id>` with `486f6c61206d756e646f21` (`Hola mundo!`). Without `--scope all` only the native balance is shown, which looks like an empty account.
 - Account B's shard contains the hex-encoded `dogfood-test-message`.
 - The payer's balance (`wallet -- account get --account-id Public/$PAYER`) decreased by the deployment and transaction fees.
 
 ### Failure Signals / Common Pitfalls
 
 - A runner that exits 0 while the account stays `Uninitialized` means the transaction was submitted without effect. Record both the runner output and the account state, and check the sequencer log (`localnet logs --tail 200`) for an execution failure.
-- `Incorrect fee` from a runner means the payer cannot cover the reserve plus fees: run `wallet topup` and retry.
+- `Incorrect fee` from a runner means the payer cannot cover the reserve plus fees (run `wallet topup` and retry) — or, if it comes from the call rather than a deployment, that the runner is upstream's fee-exempt version rather than scaffold's patched copy: a regression in the template overlay.
+- `Nonce mismatch` in the sequencer log after back-to-back runner invocations means a runner returned before its transaction was included; scaffold's helper waits for inclusion, so this is a regression.
 - Panic output from a runner (the upstream runners `unwrap()` liberally) instead of a structured error is worth recording as upstream feedback, not a scaffold regression.
 - If localnet is down, runners fail with a connection error. Capture the exact error text.
 

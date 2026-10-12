@@ -625,9 +625,16 @@ hand-edit hint) and drops `[repos.spel]`, `[circuits]` and
 `[framework.idl]`. It cannot port user program code; the README says so.
 
 The default template now copies LEZ's `examples/program_deployment`
-verbatim, runners included, and overlays only the workspace manifest,
-README and toolchain files: the upstream runners are already written for
-0.3, and keeping scaffold-specific copies is what let the old ones drift.
+(guests, private runners) and overlays the workspace manifest, README,
+toolchain files, `src/lib.rs` and the five public runners. The overlay
+exists because dogfooding found that LEZ v0.3.1's public runners build
+fee-exempt transactions (`Message::try_new`), which a 0.3 sequencer rejects
+with `Incorrect fee`. Scaffold's copies differ from upstream only in the
+submit step, which goes through `send_paid_public_transaction` (added to
+`src/lib.rs`): it re-issues the message with a fee declaration paid by the
+runner's payer argument, co-signs for the payer as the wallet does, and waits
+for inclusion so consecutive runs do not race on the payer's nonce. Drop the
+overlay once upstream examples pay fees.
 `new` seeds the project's `Cargo.lock` from the pinned LEZ lockfile so new
 projects resolve the dependency versions LEZ was tested with.
 

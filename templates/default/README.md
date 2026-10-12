@@ -66,7 +66,11 @@ Every deploy creates a new header, so re-deploying gives a new program id.
 ## Run the examples
 
 The runners are LEZ's own: each one deploys a fresh copy of its program (paid
-by the account you pass), then sends a transaction to it. They take the guest
+by the account you pass), then sends a transaction to it. The public ones are
+patched by scaffold: LEZ v0.3.1 ships them building fee-exempt transactions,
+which a 0.3 sequencer rejects with `Incorrect fee`, so scaffold's copies submit
+through `program_deployment::send_paid_public_transaction` (in `src/lib.rs`),
+which adds the fee declaration paid by the payer and waits for inclusion. They take the guest
 binary path, plain base58 account ids (no `Public/` prefix), and a funded
 payer.
 
@@ -86,12 +90,15 @@ export ACCOUNT=<id>
 
 export LEE_WALLET_HOME_DIR=$(pwd)/.scaffold/wallet
 cargo run --bin run_hello_world -- "$BIN_DIR/hello_world.bin" "$ACCOUNT" "$PAYER"
-logos-scaffold wallet -- account get --account-id "Public/$ACCOUNT"
+logos-scaffold wallet -- account get --scope all --account-id "Public/$ACCOUNT"
 ```
 
-The runners read the wallet from `LEE_WALLET_HOME_DIR` and its password from
-stdin, exactly like `logos-scaffold wallet -- ...`. The other runners follow
-the same pattern:
+`account get` shows only the native balance unless you pass `--scope all`;
+with it, each program's shard is printed (`--raw` gives hex, e.g.
+`486f6c61206d756e646f21` for `Hola mundo!`).
+
+The runners read the wallet from `LEE_WALLET_HOME_DIR`. The other runners
+follow the same pattern:
 
 ```bash
 cargo run --bin run_hello_world_with_authorization -- "$BIN_DIR/hello_world_with_authorization.bin" "$ACCOUNT" "$PAYER"
@@ -101,9 +108,10 @@ cargo run --bin run_hello_world_with_authorization_through_tail_call_with_pda --
 ```
 
 The `_private` runners execute privately and generate a zero-knowledge proof
-on your machine; with `RISC0_DEV_MODE=1` (see `.env.local`) the proof is
-skipped. They need a private account (`logos-scaffold wallet -- account new
-private`).
+on your machine; export `RISC0_DEV_MODE=1` (as in `.env.local`) to skip real
+proving. They need a private account (`logos-scaffold wallet -- account new
+private`); run `logos-scaffold wallet -- account sync-private` before reading
+it back.
 
 ## Useful commands
 

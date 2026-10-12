@@ -180,6 +180,12 @@ mod tests {
             ".env.local",
             ".scaffold/commands.md",
             "rust-toolchain.toml",
+            "src/lib.rs",
+            "src/bin/run_hello_world.rs",
+            "src/bin/run_hello_world_with_authorization.rs",
+            "src/bin/run_hello_world_with_move_function.rs",
+            "src/bin/run_hello_world_through_tail_call.rs",
+            "src/bin/run_hello_world_with_authorization_through_tail_call_with_pda.rs",
         ];
 
         for path in expected {
