@@ -3,86 +3,66 @@ pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Bumped when the file's section/field shape changes in a way that requires
 /// a one-shot migration through `init`. Parsers reject any other value with
 /// a targeted error pointing at `init`.
-pub(crate) const SCAFFOLD_TOML_SCHEMA_VERSION: &str = "0.2.0";
+pub(crate) const SCAFFOLD_TOML_SCHEMA_VERSION: &str = "0.3.0";
 /// Default `source` for `[repos.lez]`. Single field — `url` was dropped in
 /// the 0.2.0 schema after audit confirmed `LEZ_URL == lez.source` in every
 /// production code path.
 pub(crate) const LEZ_SOURCE: &str = "https://github.com/logos-blockchain/logos-execution-zone.git";
-pub(crate) const SPEL_SOURCE: &str = "https://github.com/logos-co/spel.git";
 
 /// Two-form git pin: SHA (used in scaffold.toml `[repos.*].pin` and in
-/// `check_repo` git-head comparisons) plus tag (used by `check_spel_lez_alignment`
-/// and by user-project Cargo.toml git-dep substitution).
+/// `check_repo` git-head comparisons) plus tag (shown to users and used by
+/// the release-line check in `doctor`).
 pub(crate) struct GitRef {
     pub(crate) sha: &'static str,
     pub(crate) tag: &'static str,
 }
 
-// Cross-framework invariant: DEFAULT_SPEL must point at a spel commit
-// whose `spel-cli/Cargo.toml` vendors LEZ at the same ref as DEFAULT_LEZ.
-// Otherwise spel's sequencer-RPC client speaks a different protocol than
-// scaffold's own wallet/sequencer build. `check_spel_lez_alignment` in
-// `commands/doctor.rs` enforces this at runtime — re-run `doctor` after
-// bumping either pin.
+/// LEZ release scaffold builds against. Scaffold supports exactly one LEZ
+/// release line — 0.3.x — because every layer it drives changed in 0.3.0:
+/// the guest program model (`lee_core::program::{Plan, run_program}`,
+/// per-program account shards), deployment (`wallet program-loader deploy`
+/// over segment accounts instead of `deploy-program`), funding (genesis
+/// `supply_account` entries instead of a piñata faucet), fees on public
+/// transactions, and the sequencer's RPC and block encoding. Nothing in
+/// scaffold carries compatibility code for older pins.
 pub(crate) const DEFAULT_LEZ: GitRef = GitRef {
-    sha: "cf3639d8252040d13b3d4e933feb19b42c76e14a",
-    tag: "v0.1.2",
-};
-pub(crate) const DEFAULT_SPEL: GitRef = GitRef {
-    sha: "73fc462eb8f0a4d00f1a846437c627ec2e523f83",
-    tag: "v0.5.0",
+    sha: "1a003bfbfb89fcf987f62975cd08a401169e1b8c",
+    tag: "v0.3.1",
 };
 
-/// `logos-blockchain-circuits` GitHub release version that contains the
-/// proving/verification keys and witness generators every
-/// `logos-blockchain-{pol,poc,poq,zksign}` build script reads at compile time
-/// via `logos-blockchain-circuits-utils::circuits_dir()`.
+/// Funding account for scaffold-managed sequencers (localnet and test-node).
 ///
-/// Pinned to the version LEZ v0.1.2's `flake.lock` resolves to (its
-/// `logos-blockchain-circuits` input is `d6cf41f…`, whose `flake.nix` declares
-/// `circuitsVersion = "0.4.1"`). A mismatched circuits release silently
-/// produces incompatible verifier keys, so bump this in lock-step with
-/// `DEFAULT_LB_PIN` / `DEFAULT_LEZ`.
-///
-/// Default for `[circuits].version`. Materialised on demand into the
-/// project's `[circuits].install_dir` (default `.scaffold/circuits`) by
-/// `circuits::ensure_circuits_for_project`. Override by setting
-/// `LOGOS_BLOCKCHAIN_CIRCUITS` to a populated checkout; the env var
-/// short-circuits the download.
-pub(crate) const DEFAULT_CIRCUITS_VERSION: &str = "0.4.1";
-pub(crate) const LOGOS_BLOCKCHAIN_CIRCUITS_ENV: &str = "LOGOS_BLOCKCHAIN_CIRCUITS";
-pub(crate) const CIRCUITS_RELEASE_BASE_URL: &str =
-    "https://github.com/logos-blockchain/logos-blockchain-circuits/releases/download";
+/// LEZ 0.3 has no faucet program: a chain's only native supply is what its
+/// sequencer config's `genesis` hands out as `supply_account` entries. LEZ's
+/// own debug config funds `CbgR6tj5…` and publishes its key in the
+/// repository's `Justfile` (`wallet-import-test-accounts`), so it is a
+/// well-known *development* key, never a secret. Scaffold writes the same
+/// account into the genesis of every chain it starts, imports the key into
+/// the project wallet during `setup`, and `wallet topup` transfers from it.
+pub(crate) const DEV_FUNDER_PRIVATE_KEY_HEX: &str =
+    "7f273098f25b71e6c005a9519f2678da8d1c7f01f6a27778e2d9948abdf901fb";
+pub(crate) const DEV_FUNDER_ACCOUNT_ID: &str = "CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r";
+/// Genesis balance of [`DEV_FUNDER_ACCOUNT_ID`] (LEZ debug config value).
+pub(crate) const DEV_FUNDER_GENESIS_BALANCE: u64 = 10_000_000_000_000;
+/// Amount `wallet topup` transfers. LEZ 0.3 charges fees on public
+/// transactions and the payer must hold the full fee *reserve* (about
+/// 16,003,000 at the default `gas_limit`) plus any amount it sends before a
+/// transaction is accepted, so the top-up covers a few dozen deployments and
+/// runner calls.
+pub(crate) const DEFAULT_TOPUP_AMOUNT: u64 = 1_000_000_000;
 
-pub(crate) const DEFAULT_HELLO_WORLD_IMAGE_ID_HEX: &str =
-    "4880b298f59699c1e4263c5c2245c80123632d608b9116f4b253c63e6c340771";
 pub(crate) const DEFAULT_WALLET_PASSWORD: &str = "logos-scaffold-v0";
-/// Env vars naming the wallet home directory for wallet subprocesses. LEZ
-/// v0.2.0 renamed the variable to `LEE_WALLET_HOME_DIR`; earlier pins read
-/// `NSSA_WALLET_HOME_DIR`. Scaffold sets both on every wallet invocation that
-/// touches the wallet home, so the binary from either pin targets the project
-/// wallet — a v0.2.0 wallet that only sees the old name silently falls back to
-/// `~/.lee/wallet` (scaffold#240). `doctor`'s `wallet --version` probe is the
-/// one deliberate exception: it reads no wallet state.
-///
-/// Every name is set to the *same* path, so the order of this list is not
-/// significant. If a future pin ever reads two of these with different
-/// meanings, that stops being true and the callers of
-/// [`crate::commands::wallet_support::set_wallet_home_env`] need revisiting.
-/// When upstream renames the variable again: add the new name, keep the old
-/// one, never swap.
-pub(crate) const WALLET_HOME_ENV_VARS: &[&str] = &["NSSA_WALLET_HOME_DIR", "LEE_WALLET_HOME_DIR"];
-pub(crate) const WALLET_CONFIG_REL_PATH: &str = "wallet/configs/debug/wallet_config.json";
-pub(crate) const WALLET_CONFIG_NESTED_REL_PATH: &str =
-    "lez/wallet/configs/debug/wallet_config.json";
-pub(crate) const WALLET_CONFIG_REL_PATHS: &[&str] =
-    &[WALLET_CONFIG_NESTED_REL_PATH, WALLET_CONFIG_REL_PATH];
+/// Env var naming the wallet home directory for wallet subprocesses. LEZ
+/// 0.3 reads only this name (the pre-0.2 `NSSA_WALLET_HOME_DIR` is gone);
+/// without it the wallet silently falls back to `~/.lee/wallet`.
+pub(crate) const WALLET_HOME_ENV_VAR: &str = "LEE_WALLET_HOME_DIR";
+/// Debug wallet config inside the pinned LEZ checkout; copied into the
+/// project wallet home by `setup`.
+pub(crate) const WALLET_CONFIG_REL_PATH: &str = "lez/wallet/configs/debug/wallet_config.json";
 pub(crate) const WALLET_BIN_REL_PATH: &str = "target/release/wallet";
 pub(crate) const FRAMEWORK_KIND_DEFAULT: &str = "default";
 pub(crate) const FRAMEWORK_KIND_LEZ_FRAMEWORK: &str = "lez-framework";
 pub(crate) const DEFAULT_FRAMEWORK_VERSION: &str = "0.1.0";
-pub(crate) const DEFAULT_FRAMEWORK_IDL_SPEC: &str = "lssa-idl/0.1.0";
-pub(crate) const DEFAULT_FRAMEWORK_IDL_PATH: &str = "idl";
 pub(crate) const SEQUENCER_BIN_REL_PATH: &str = "target/release/sequencer_service";
 /// Project-relative directory holding the Risc0 guest crate (`methods/Cargo.toml`,
 /// `methods/guest/...`). Shared between the build side (`build_methods_guests`),
@@ -96,8 +76,8 @@ pub(crate) const METHODS_DIR: &str = "methods";
 pub(crate) const DEFAULT_RISC0_METHODS_ENTRY: &str = "guest";
 /// Docker image tag scaffold pins for the deterministic guest build
 /// (`risczero/risc0-guest-builder:<tag>`). The tag fixes the guest Rust
-/// toolchain, so it is part of what makes the emitted ELF — and therefore the
-/// `program_id` derived from it — reproducible across machines.
+/// toolchain, so it is part of what makes the emitted ELF — and therefore its
+/// risc0 image ID — reproducible across machines.
 ///
 /// Verified in CI: this image reports `rustc 1.97.0-dev (e638c6cfe 2026-07-15)`,
 /// the same compiler build as rzup's `v1.97.0` toolchain, so the container and
@@ -123,13 +103,11 @@ pub(crate) const DEFAULT_RISC0_DOCKER_TAG: &str = "r0.1.97.0";
 /// the same directory, and so a mode switch can clear one without touching the
 /// other. Also a `deploy`-side search root — see `GUEST_BIN_SEARCH_ROOTS`.
 pub(crate) const GUEST_DOCKER_TARGET_DIR: &str = "target/riscv-guest-docker";
+/// Debug sequencer config inside the pinned LEZ checkout. Scaffold never runs
+/// it as-is: localnet and test-node write a patched copy (see
+/// `sequencer_config`) and pass that path to `sequencer_service`.
 pub(crate) const SEQUENCER_CONFIG_REL_PATH: &str =
-    "sequencer/service/configs/debug/sequencer_config.json";
-pub(crate) const SEQUENCER_CONFIG_NESTED_REL_PATH: &str =
     "lez/sequencer/service/configs/debug/sequencer_config.json";
-pub(crate) const SEQUENCER_CONFIG_REL_PATHS: &[&str] =
-    &[SEQUENCER_CONFIG_NESTED_REL_PATH, SEQUENCER_CONFIG_REL_PATH];
-pub(crate) const SPEL_BIN_REL_PATH: &str = "target/release/spel";
 /// Default seconds to wait for the sequencer to become ready when `lgs run`
 /// has to start localnet itself. Cold first runs (fresh repo clone, cold
 /// nix/cargo caches) routinely overshoot the previous 20s ceiling. Override

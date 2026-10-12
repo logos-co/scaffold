@@ -1,10 +1,9 @@
 pub(crate) mod basecamp;
 pub(crate) mod build;
-pub(crate) mod client;
 pub(crate) mod completions;
 pub(crate) mod deploy;
+pub(crate) mod deployments;
 pub(crate) mod doctor;
-pub(crate) mod idl;
 pub(crate) mod init;
 pub(crate) mod localnet;
 pub(crate) mod new;
@@ -13,7 +12,6 @@ pub(crate) mod run;
 pub(crate) mod run_state;
 pub(crate) mod self_test;
 pub(crate) mod setup;
-pub(crate) mod spel;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub(crate) mod testnode;

@@ -12,8 +12,6 @@ static TEMPLATES_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templates");
 pub(crate) struct OverlayRenderContext<'a> {
     pub(crate) crate_name: &'a str,
     pub(crate) lez_pin: &'a str,
-    pub(crate) lez_tag: &'a str,
-    pub(crate) spel_pin: &'a str,
 }
 
 pub(crate) fn apply_overlay(
@@ -107,9 +105,7 @@ fn normalize_template_file_name(file_name: &std::ffi::OsStr) -> std::ffi::OsStri
 fn render_template_text(raw: &str, ctx: &OverlayRenderContext<'_>) -> DynResult<String> {
     let rendered = raw
         .replace("{{crate_name}}", ctx.crate_name)
-        .replace("{{lez_pin}}", ctx.lez_pin)
-        .replace("{{lez_tag}}", ctx.lez_tag)
-        .replace("{{spel_pin}}", ctx.spel_pin);
+        .replace("{{lez_pin}}", ctx.lez_pin);
 
     if let Some(token) = find_unresolved_placeholder(&rendered) {
         bail!("unresolved template token `{token}`");
@@ -173,8 +169,6 @@ mod tests {
         let ctx = OverlayRenderContext {
             crate_name: "my-app",
             lez_pin: "abc123",
-            lez_tag: "v1.2.3",
-            spel_pin: "def456",
         };
 
         apply_overlay(&target, "default", &ctx).expect("failed to apply default overlay");
@@ -185,14 +179,13 @@ mod tests {
             ".gitignore",
             ".env.local",
             ".scaffold/commands.md",
+            "rust-toolchain.toml",
             "src/lib.rs",
             "src/bin/run_hello_world.rs",
-            "src/bin/run_hello_world_private.rs",
             "src/bin/run_hello_world_with_authorization.rs",
-            "src/bin/run_hello_world_through_tail_call.rs",
-            "src/bin/run_hello_world_through_tail_call_private.rs",
-            "src/bin/run_hello_world_with_authorization_through_tail_call_with_pda.rs",
             "src/bin/run_hello_world_with_move_function.rs",
+            "src/bin/run_hello_world_through_tail_call.rs",
+            "src/bin/run_hello_world_with_authorization_through_tail_call_with_pda.rs",
         ];
 
         for path in expected {
@@ -207,56 +200,11 @@ mod tests {
     }
 
     #[test]
-    fn lez_framework_overlay_converts_template_manifests_to_cargo_toml() {
-        let target = mk_temp_dir("lez-manifests");
-        let ctx = OverlayRenderContext {
-            crate_name: "my-app",
-            lez_pin: "abc123",
-            lez_tag: "v1.2.3",
-            spel_pin: "def456",
-        };
-
-        apply_overlay(&target, "lez-framework", &ctx).expect("failed to apply lez-framework");
-
-        for path in [
-            "Cargo.toml",
-            "crates/lez-client-gen/Cargo.toml",
-            "methods/guest/Cargo.toml",
-        ] {
-            assert!(
-                target.join(path).exists(),
-                "missing expected manifest in generated project: {path}"
-            );
-        }
-
-        for path in [
-            "Cargo.toml.template",
-            "crates/lez-client-gen/Cargo.toml.template",
-            "methods/guest/Cargo.toml.template",
-        ] {
-            assert!(
-                !target.join(path).exists(),
-                "template manifest should not leak into output: {path}"
-            );
-        }
-
-        let cargo = fs::read_to_string(target.join("Cargo.toml"))
-            .expect("failed to read generated Cargo.toml");
-        assert!(cargo.contains("tag = \"v1.2.3\""));
-        assert!(cargo.contains("rev = \"def456\""));
-        assert!(!cargo.contains("{{"));
-
-        fs::remove_dir_all(&target).expect("failed to cleanup temporary test directory");
-    }
-
-    #[test]
     fn overlay_renders_tokens_and_leaves_no_unresolved_placeholders() {
         let target = mk_temp_dir("tokens");
         let ctx = OverlayRenderContext {
             crate_name: "example-name",
             lez_pin: "deadbeef",
-            lez_tag: "v1.2.3",
-            spel_pin: "feedface",
         };
 
         apply_overlay(&target, "default", &ctx).expect("failed to apply default overlay");
@@ -277,34 +225,29 @@ mod tests {
         // pointed back at the same git URL. Cargo treats a self-source patch
         // as a no-op and refuses to resolve, breaking `lgs build` on every
         // freshly-scaffolded project. The user-side build-script panic the
-        // patch was meant to mitigate is now handled by
-        // `circuits::ensure_circuits_for_project` (which exports
-        // `LOGOS_BLOCKCHAIN_CIRCUITS` and bypasses the version check inside
-        // every `logos-blockchain` rev's circuits-utils crate).
-        for variant in ["default", "lez-framework"] {
-            let target = mk_temp_dir(&format!("no-self-patch-{variant}"));
-            let ctx = OverlayRenderContext {
-                crate_name: "my-app",
-                lez_pin: "abc123",
-                lez_tag: "v1.2.3",
-                spel_pin: "def456",
-            };
-            apply_overlay(&target, variant, &ctx)
-                .unwrap_or_else(|e| panic!("apply_overlay({variant}) failed: {e}"));
-            let cargo = fs::read_to_string(target.join("Cargo.toml"))
-                .expect("failed to read generated Cargo.toml");
-            assert!(
-                !cargo.contains(
-                    "[patch.\"https://github.com/logos-blockchain/logos-blockchain.git\"]"
-                ),
-                "{variant}: generated Cargo.toml must not self-patch the logos-blockchain git URL; got:\n{cargo}"
-            );
-            // Final guard: the rendered Cargo.toml must still parse as TOML.
-            toml_edit::DocumentMut::from_str(&cargo).unwrap_or_else(|e| {
-                panic!("{variant}: generated Cargo.toml is not valid TOML: {e}\n---\n{cargo}")
-            });
-            fs::remove_dir_all(&target).expect("failed to cleanup temporary test directory");
-        }
+        // patch was meant to mitigate no longer exists: LEZ 0.3's circuits
+        // build crate downloads its own release.
+        let variant = "default";
+        let target = mk_temp_dir(&format!("no-self-patch-{variant}"));
+        let ctx = OverlayRenderContext {
+            crate_name: "my-app",
+            lez_pin: "abc123",
+        };
+        apply_overlay(&target, variant, &ctx)
+            .unwrap_or_else(|e| panic!("apply_overlay({variant}) failed: {e}"));
+        let cargo = fs::read_to_string(target.join("Cargo.toml"))
+            .expect("failed to read generated Cargo.toml");
+        assert!(
+            !cargo.contains(
+                "[patch.\"https://github.com/logos-blockchain/logos-blockchain.git\"]"
+            ),
+            "{variant}: generated Cargo.toml must not self-patch the logos-blockchain git URL; got:\n{cargo}"
+        );
+        // Final guard: the rendered Cargo.toml must still parse as TOML.
+        toml_edit::DocumentMut::from_str(&cargo).unwrap_or_else(|e| {
+            panic!("{variant}: generated Cargo.toml is not valid TOML: {e}\n---\n{cargo}")
+        });
+        fs::remove_dir_all(&target).expect("failed to cleanup temporary test directory");
     }
 
     #[test]
@@ -313,8 +256,6 @@ mod tests {
         let ctx = OverlayRenderContext {
             crate_name: "my-app",
             lez_pin: "abc123",
-            lez_tag: "v1.2.3",
-            spel_pin: "def456",
         };
 
         apply_overlay(&target, "default", &ctx).expect("failed to apply default overlay");
@@ -330,11 +271,11 @@ mod tests {
             include_str!("../../templates/default/.scaffold/commands.md")
         );
 
-        let runner_text = fs::read_to_string(target.join("src/bin/run_hello_world.rs"))
-            .expect("failed to read generated run_hello_world.rs");
+        let toolchain_text = fs::read_to_string(target.join("rust-toolchain.toml"))
+            .expect("failed to read generated rust-toolchain.toml");
         assert_eq!(
-            runner_text,
-            include_str!("../../templates/default/src/bin/run_hello_world.rs")
+            toolchain_text,
+            include_str!("../../templates/default/rust-toolchain.toml")
         );
 
         fs::remove_dir_all(&target).expect("failed to cleanup temporary test directory");
@@ -346,8 +287,6 @@ mod tests {
         let ctx = OverlayRenderContext {
             crate_name: "my-app",
             lez_pin: "abc123",
-            lez_tag: "v1.2.3",
-            spel_pin: "def456",
         };
 
         apply_overlay(&target, "default", &ctx).expect("failed to apply default overlay");
@@ -391,8 +330,6 @@ mod tests {
         let ctx = OverlayRenderContext {
             crate_name: "my-app",
             lez_pin: "abc123",
-            lez_tag: "v1.2.3",
-            spel_pin: "def456",
         };
 
         let err = render_template_text("name = \"{{unknown_token}}\"", &ctx)

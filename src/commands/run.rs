@@ -8,9 +8,9 @@ use notify::{RecursiveMode, Watcher};
 
 use crate::commands::build::cmd_build_shortcut;
 use crate::commands::deploy::{
-    cmd_deploy, discover_deployable_programs, discover_program_binaries, extract_program_id,
+    cmd_deploy, discover_deployable_programs, discover_program_binaries,
 };
-use crate::commands::idl::{build_idl_for_current_project, IDL_STATE_REL};
+use crate::commands::deployments::read_deployments;
 use crate::commands::localnet::{
     build_localnet_status_for_project, cmd_localnet, cmd_localnet_reset, LocalnetAction,
 };
@@ -20,11 +20,8 @@ use crate::commands::run_state::{
 };
 use crate::commands::setup::ensure_default_wallet_seeded;
 use crate::commands::wallet::{cmd_wallet_topup_inner, TopupOutcome};
-use crate::commands::wallet_support::set_wallet_home_env;
-use crate::constants::{
-    DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, FRAMEWORK_KIND_LEZ_FRAMEWORK, SPEL_BIN_REL_PATH,
-    WALLET_BIN_REL_PATH,
-};
+use crate::commands::wallet_support::{ensure_dev_funder_imported, set_wallet_home_env};
+use crate::constants::{DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, WALLET_BIN_REL_PATH};
 use crate::model::{LocalnetOwnership, Project, RunProfile};
 use crate::project::{load_project, resolve_repo_path, run_in_project_dir};
 use crate::state::prepare_wallet_home;
@@ -55,7 +52,7 @@ pub(crate) fn cmd_run(inv: RunInvocation) -> DynResult<()> {
     run_for_project(&project, inv)
 }
 
-/// Execute the `lgs run` pipeline (build → IDL → localnet → topup → deploy →
+/// Execute the `lgs run` pipeline (build → localnet → topup → deploy →
 /// hooks) for `project`. Streams step progress to stdout. With `inv.watch`
 /// set, blocks in the watch loop until interrupted — API callers normally
 /// leave `watch` off.
@@ -82,7 +79,7 @@ pub(crate) fn run_for_project(project: &Project, inv: RunInvocation) -> DynResul
 
     // Anchor the pipeline at the discovered project root. Otherwise commands
     // that resolve paths relative to cwd (`cmd_build_shortcut`,
-    // `build_idl_for_current_project`, etc.) would build/deploy from whichever
+    // etc.) would build/deploy from whichever
     // subdirectory the user invoked `lgs run` in.
     run_in_project_dir(Some(&project.root), || {
         run_pipeline_once(&project, &params)?;
@@ -115,8 +112,8 @@ struct PipelineParams {
 
 fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()> {
     let has_hooks = !params.hooks.is_empty();
-    // Steps: build, build idl, localnet, topup, deploy, [+1 if hooks]
-    let total_steps: u32 = if has_hooks { 6 } else { 5 };
+    // Steps: build, localnet, topup, deploy, [+1 if hooks]
+    let total_steps: u32 = if has_hooks { 5 } else { 4 };
     let effective_reset = params.reset_override.unwrap_or(params.resolved.reset);
 
     // Surface destructive intent up front when reset comes from config
@@ -126,24 +123,8 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
     // before step 1 instead of after the build has run.
     if effective_reset && params.reset_override.is_none() {
         eprintln!(
-            "warning: scaffold.toml requested reset = true; step 3 will wipe sequencer state + wallet. Pass --no-reset to override."
+            "warning: scaffold.toml requested reset = true; step 2 will wipe sequencer state + wallet. Pass --no-reset to override."
         );
-    }
-
-    // A reset means "start fresh": clear the IDL cache *before* the IDL
-    // step (step 2) so it re-runs this invocation. The deploy cache is
-    // cleared later in step 3, after the on-chain wipe. Tolerate a missing
-    // file (no prior run).
-    if effective_reset {
-        let idl_state = project.root.join(IDL_STATE_REL);
-        match std::fs::remove_file(&idl_state) {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(e)
-                    .with_context(|| format!("clear stale IDL cache at {}", idl_state.display()));
-            }
-        }
     }
 
     // Step 1: Build (chains setup internally)
@@ -153,23 +134,9 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
     // would have produced.
     cmd_build_shortcut(None, false, None)?;
 
-    // Step 2: Build IDL (no-op for non-lez-framework projects). `build_idl_for_current_project`
-    // deliberately bails when typed directly against a non-lez-framework project, so the
-    // pipeline must gate on framework kind here the same way `lgs build` does — otherwise
-    // `lgs run` aborts at this step for every `default`-template project.
-    println!("[2/{total_steps}] Building IDL...");
-    if project.config.framework.kind == FRAMEWORK_KIND_LEZ_FRAMEWORK {
-        build_idl_for_current_project()?;
-    } else {
-        println!(
-            "Skipping IDL build for framework kind `{}`",
-            project.config.framework.kind
-        );
-    }
-
-    // Step 3: Reset OR ensure localnet.
+    // Step 2: Reset OR ensure localnet.
     if effective_reset {
-        println!("[3/{total_steps}] Resetting localnet (wipes sequencer + wallet)...");
+        println!("[2/{total_steps}] Resetting localnet (wipes sequencer + wallet)...");
         reset_for_run(project, params.localnet_timeout_sec)?;
         // A reset wipes on-chain state, so any prior deploy is gone:
         // the next deploy must run regardless of hash equality. Tolerate
@@ -185,26 +152,26 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
             }
         }
     } else {
-        println!("[3/{total_steps}] Ensuring localnet...");
+        println!("[2/{total_steps}] Ensuring localnet...");
         ensure_localnet(project, params.localnet_timeout_sec)?;
     }
 
-    // Step 4: Wallet topup. Skipped entirely when the run profile sets
+    // Step 3: Wallet topup. Skipped entirely when the run profile sets
     // `topup = false` (project funds its own accounts). The branch below and
     // the value hooks read from `SCAFFOLD_TOPUP_SKIPPED` come from the same
     // expression, so what the hook is told can't drift from what step 4 did.
     let topup_skipped = topup_step_skipped(&params.resolved);
     if topup_skipped {
         // `topup = false`: the project funds its own accounts (e.g. claims
-        // from the faucet at runtime, from a demo binary or a post_deploy
+        // from its own funded key at runtime, from a demo binary or a post_deploy
         // hook). Skip scaffold's topup — including its requirement that a
         // destination address be resolvable — and proceed to deploy/hooks.
         println!(
-            "[4/{total_steps}] Topup skipped (`topup = false` in the run profile; this project funds its own accounts — e.g. via faucet claims at runtime)"
+            "[3/{total_steps}] Topup skipped (`topup = false` in the run profile; this project funds its own accounts — e.g. from a post_deploy hook)"
         );
     } else {
-        println!("[4/{total_steps}] Topping up wallet...");
-        let outcome = cmd_wallet_topup_inner(project, None, false, false)?;
+        println!("[3/{total_steps}] Topping up wallet...");
+        let outcome = cmd_wallet_topup_inner(project, None, None, false, false)?;
         if let TopupOutcome::ConfirmationTimeout { message } = outcome {
             bail!(
                 "{message}\n\
@@ -214,7 +181,7 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
         }
     }
 
-    // Step 5: Deploy. Skipped entirely when the run profile sets
+    // Step 4: Deploy. Skipped entirely when the run profile sets
     // `deploy = false` (project owns deployment); otherwise idempotent —
     // see the branches below.
     let deploy_skipped = if !params.resolved.deploy {
@@ -224,11 +191,11 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
         // including the program-hash computation, which otherwise bails when
         // the default program directory is absent — and go straight to hooks.
         println!(
-            "[5/{total_steps}] Deploy skipped (`deploy = false` in the run profile; this project owns program deployment — e.g. via a post_deploy hook)"
+            "[4/{total_steps}] Deploy skipped (`deploy = false` in the run profile; this project owns program deployment — e.g. via a post_deploy hook)"
         );
         true
     } else {
-        // Step 5 deploy is idempotent: skip when guest .bin + IDL + deploy
+        // Step 4 deploy is idempotent: skip when guest .bin + deploy
         // config hashes match the prior deploy AND the sequencer is the same
         // instance that received it. A `lgs localnet stop && start` cycle
         // changes the sequencer PID and wipes on-chain state, so PID equality
@@ -239,13 +206,19 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
         let current_hashes = compute_program_hashes(project)?;
         let current_pid = current_localnet_pid(project);
         let prior = load_state(project);
-        if deploy_can_be_skipped(&current_hashes, current_pid, &prior) {
+        // The hooks need every program's id, which only a recorded
+        // deployment carries, so a cache hit also requires the record.
+        let recorded = read_deployments(&project.root);
+        let all_recorded = current_hashes
+            .keys()
+            .all(|program| recorded.contains_key(program));
+        if all_recorded && deploy_can_be_skipped(&current_hashes, current_pid, &prior) {
             println!(
-                "[5/{total_steps}] Deploy skipped (guest binaries + IDL + config + sequencer unchanged; pass `--reset` to wipe and re-deploy, or delete `.scaffold/state/run_deploy.json` to force a re-deploy without a wipe)"
+                "[4/{total_steps}] Deploy skipped (guest binaries + config + sequencer unchanged; pass `--reset` to wipe and re-deploy, or delete `.scaffold/state/run_deploy.json` to force a re-deploy without a wipe)"
             );
             true
         } else {
-            println!("[5/{total_steps}] Deploying programs...");
+            println!("[4/{total_steps}] Deploying programs...");
             cmd_deploy(None, None, false)?;
             save_state(
                 project,
@@ -261,14 +234,14 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
     // Collect deployed-program metadata for hook env injection regardless
     // of whether deploy ran or was skipped — hooks address programs by
     // name and shouldn't have to care about cache state.
-    // `extract_program_id` shells out to `spel program-id` once per program
-    // here so the per-hook loop doesn't multiply latency by hook count.
+    // Program ids come from `.scaffold/state/deployments.json`, which every
+    // successful deploy updates.
     let deployed = collect_deployed_programs(project, deploy_skipped)?;
 
-    // Step 6: Post-deploy hooks (or summary)
+    // Step 5: Post-deploy hooks (or summary)
     if has_hooks {
         let n = params.hooks.len();
-        println!("[6/{total_steps}] Running {n} post-deploy hook(s)...");
+        println!("[5/{total_steps}] Running {n} post-deploy hook(s)...");
         check_env_var_suffix_collisions(&deployed.programs)?;
         warn_on_rewritten_program_names(&deployed.programs);
         for (i, hook) in params.hooks.iter().enumerate() {
@@ -335,18 +308,7 @@ fn watch_loop(project: &Project, params: &PipelineParams, debounce_ms: u64) -> D
         .watch(&project.root, RecursiveMode::Recursive)
         .context("watch project root")?;
 
-    // The IDL build writes JSON files into framework.idl.path on every
-    // iteration. Without ignoring that directory, those writes fire
-    // their own notify events → infinite loop. Resolve once before
-    // entering the loop. Use the project-relative form so we match
-    // both canonical and non-canonical event paths — and normalize an
-    // absolute `framework.idl.path` that points inside the project to its
-    // relative form, or the `rel.starts_with(idl_rel)` ignore check (which
-    // compares against the project-relative event path) would never match
-    // and watch mode would loop forever on IDL write-backs.
-    let idl_rel = normalize_idl_rel(&project.config.framework.idl.path, &project.root);
     let watch_ctx = WatchIgnore {
-        idl_rel,
         include: project.config.run.watch.include.clone(),
         exclude: project.config.run.watch.exclude.clone(),
     };
@@ -386,21 +348,7 @@ fn watch_loop(project: &Project, params: &PipelineParams, debounce_ms: u64) -> D
     Ok(())
 }
 
-/// Resolve `framework.idl.path` to the project-relative form the watch ignore
-/// check compares against. A relative config value is used as-is; an absolute
-/// value pointing inside the project root is rewritten relative to it (so the
-/// `rel.starts_with(idl_rel)` ignore matches and watch mode doesn't loop on IDL
-/// write-backs). An absolute value outside the project passes through unchanged.
-fn normalize_idl_rel(idl_path: &str, root: &Path) -> PathBuf {
-    let configured = PathBuf::from(idl_path);
-    configured
-        .strip_prefix(root)
-        .map(Path::to_path_buf)
-        .unwrap_or(configured)
-}
-
 struct WatchIgnore {
-    idl_rel: PathBuf,
     /// `[run.watch].include` globs. Empty → match any path.
     include: Vec<String>,
     /// `[run.watch].exclude` globs. Always win over `include`.
@@ -434,16 +382,13 @@ fn is_ignored_path(project_root: &Path, ctx: &WatchIgnore, path: &Path) -> bool 
         // — this is a notify event from outside the watched directory.
         return true;
     };
-    // Built-in ignores always win: these guard against the IDL/deploy
+    // Built-in ignores always win: these guard against the deploy
     // write-back loop and obvious noise, and are not user-overridable.
     for component in rel.components() {
         let s = component.as_os_str().to_string_lossy();
         if matches!(s.as_ref(), ".scaffold" | "target" | ".git") {
             return true;
         }
-    }
-    if rel.starts_with(&ctx.idl_rel) {
-        return true;
     }
 
     // User `[run.watch]` filters. A path is *ignored* when it doesn't
@@ -551,13 +496,15 @@ fn segment_match(pat: &[u8], seg: &[u8]) -> bool {
 fn reseed_after_wipe(project: &Project) -> DynResult<()> {
     let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
     let wallet_home = project.root.join(&project.config.wallet_home_dir);
-    prepare_wallet_home(&lez, &wallet_home)?;
-    ensure_default_wallet_seeded(&project.root, &wallet_home, &lez.join(WALLET_BIN_REL_PATH))
+    let wallet_binary = lez.join(WALLET_BIN_REL_PATH);
+    prepare_wallet_home(&lez, &wallet_home, project.config.localnet.port)?;
+    ensure_default_wallet_seeded(&project.root, &wallet_home, &wallet_binary)?;
+    ensure_dev_funder_imported(&wallet_binary, &wallet_home)
 }
 
 /// Per-program metadata exposed to post-deploy hooks via env vars.
-/// `program_id` may be `None` when `spel program-id` fails (missing vendored
-/// binary, unreadable ELF).
+/// `program_id` is `None` when the program has no recorded deployment (see
+/// [`crate::commands::deployments`]) — e.g. its deploy failed.
 #[derive(Clone, Debug)]
 pub(crate) struct DeployedProgram {
     pub(crate) name: String,
@@ -565,7 +512,7 @@ pub(crate) struct DeployedProgram {
     pub(crate) binary_path: PathBuf,
 }
 
-/// Run-level outcome of step 5 plus per-program metadata. `skipped` is
+/// Run-level outcome of step 4 plus per-program metadata. `skipped` is
 /// run-level (the cache either short-circuited the whole deploy or not),
 /// so it lives here rather than on each `DeployedProgram`.
 #[derive(Clone, Debug, Default)]
@@ -574,9 +521,8 @@ pub(crate) struct DeployedPrograms {
     pub(crate) programs: Vec<DeployedProgram>,
 }
 
-/// Errors from `discover_deployable_programs` or `resolve_repo_path` are
-/// propagated rather than swallowed: an unreadable bin dir or a
-/// misconfigured `[repos.spel]` would otherwise silently strip
+/// Errors from `discover_deployable_programs` are propagated rather than
+/// swallowed: an unreadable bin dir would otherwise silently strip
 /// `SCAFFOLD_PROGRAMS` and all indexed env vars from hooks. The
 /// missing-bin-dir case stays a successful empty result, because step 1
 /// (build) is the layer that validates project layout.
@@ -591,27 +537,20 @@ fn collect_deployed_programs(project: &Project, skipped: bool) -> DynResult<Depl
     let programs = discover_deployable_programs(&project.root)
         .context("failed to discover deployable programs for run post-deploy env")?;
     let binaries = discover_program_binaries(&project.root, &programs);
-    let spel_repo = resolve_repo_path(project, &project.config.spel, "spel")
-        .context("failed to resolve spel repo path for run post-deploy env")?;
-    let spel_bin = spel_repo.join(SPEL_BIN_REL_PATH);
-
-    // Warn early when the vendored spel binary has not been built yet.
-    // extract_program_id() spawns spel_bin and returns None on any failure,
-    // so a missing binary silently leaves SCAFFOLD_PROGRAM_ID unset — which
-    // causes post-deploy hooks to fail in confusing ways (issue #160).
-    if !spel_bin.is_file() {
-        eprintln!(
-            "warning: vendored spel binary not found at {}.              SCAFFOLD_PROGRAM_ID will be unset for all programs.              Run `lgs setup` to build spel.",
-            spel_bin.display()
-        );
-    }
+    let recorded = read_deployments(&project.root);
 
     let mut out = Vec::new();
     for stem in programs {
         let Some(bin_path) = binaries.get(&stem).cloned() else {
             continue;
         };
-        let program_id = extract_program_id(&spel_bin, &bin_path);
+        let program_id = recorded.get(&stem).map(|record| record.program_id.clone());
+        if program_id.is_none() {
+            eprintln!(
+                "warning: no recorded deployment for `{stem}`; SCAFFOLD_PROGRAM_ID_{} will be unset",
+                env_var_suffix(&stem)
+            );
+        }
         out.push(DeployedProgram {
             name: stem,
             program_id,
@@ -742,12 +681,17 @@ fn print_deploy_summary(project: &Project) -> DynResult<()> {
         return Ok(());
     }
     let binaries = discover_program_binaries(&project.root, &programs);
+    let recorded = read_deployments(&project.root);
 
     println!();
     println!("Deployed programs:");
     for stem in &programs {
         if let Some(binary_path) = binaries.get(stem) {
             println!("  {stem}");
+            match recorded.get(stem) {
+                Some(record) => println!("    program_id: {}", record.program_id),
+                None => println!("    program_id: (no recorded deployment)"),
+            }
             println!("    Binary: {}", binary_path.display());
         }
     }
@@ -784,11 +728,6 @@ fn build_hook_command(
         .root
         .canonicalize()
         .unwrap_or_else(|_| project.root.clone());
-    let idl_dir = project
-        .root
-        .join(&project.config.framework.idl.path)
-        .canonicalize()
-        .unwrap_or_else(|_| project.root.join(&project.config.framework.idl.path));
 
     let run_deploy_skipped = deployed.skipped;
 
@@ -797,7 +736,6 @@ fn build_hook_command(
         .arg(hook_command)
         .env("SEQUENCER_URL", &sequencer_url)
         .env("SCAFFOLD_PROJECT_ROOT", &project_root)
-        .env("SCAFFOLD_IDL_DIR", &idl_dir)
         // Always-on: deploy-skip state is run-level (it's the same for
         // every program in this invocation), so multi-program hooks need
         // it just as much as single-program ones.
@@ -873,9 +811,7 @@ fn run_post_deploy_hook(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{
-        Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, Project, RepoRef, RunConfig,
-    };
+    use crate::model::{Config, FrameworkConfig, LocalnetConfig, Project, RepoRef, RunConfig};
     use std::path::PathBuf;
 
     #[test]
@@ -959,7 +895,6 @@ mod tests {
     #[test]
     fn is_ignored_path_keeps_builtin_ignores_with_filters() {
         let ctx = WatchIgnore {
-            idl_rel: PathBuf::from("idl"),
             include: vec!["src/**".to_string()],
             exclude: vec![],
         };
@@ -967,39 +902,17 @@ mod tests {
         // Built-in ignores apply even though they'd match neither filter.
         assert!(is_ignored_path(root, &ctx, &root.join("target/debug/x")));
         assert!(is_ignored_path(root, &ctx, &root.join(".scaffold/state/x")));
-        assert!(is_ignored_path(root, &ctx, &root.join("idl/counter.json")));
         // An included source path is watched (not ignored)...
         assert!(!is_ignored_path(root, &ctx, &root.join("src/main.rs")));
         // ...while a path outside the include set is ignored.
         assert!(is_ignored_path(root, &ctx, &root.join("docs/readme.md")));
     }
 
-    #[test]
-    fn normalize_idl_rel_handles_relative_and_absolute_paths() {
-        let root = Path::new("/proj");
-        // Relative config value is used as-is.
-        assert_eq!(normalize_idl_rel("idl", root), PathBuf::from("idl"));
-        // Absolute value inside the project is rewritten relative to root, so
-        // the ignore check matches the project-relative event path.
-        let ctx = WatchIgnore {
-            idl_rel: normalize_idl_rel("/proj/idl", root),
-            include: vec![],
-            exclude: vec![],
-        };
-        assert_eq!(ctx.idl_rel, PathBuf::from("idl"));
-        assert!(is_ignored_path(root, &ctx, &root.join("idl/counter.json")));
-        // Absolute value outside the project passes through unchanged.
-        assert_eq!(
-            normalize_idl_rel("/elsewhere/idl", root),
-            PathBuf::from("/elsewhere/idl")
-        );
-    }
-
     fn make_test_project(root: PathBuf) -> Project {
         Project {
             root,
             config: Config {
-                version: "0.2.0".to_string(),
+                version: crate::constants::SCAFFOLD_TOML_SCHEMA_VERSION.to_string(),
                 cache_root: ".scaffold/cache".to_string(),
                 lez: RepoRef {
                     source: "lez".to_string(),
@@ -1007,23 +920,12 @@ mod tests {
                     pin: "abc123".to_string(),
                     ..Default::default()
                 },
-                spel: RepoRef {
-                    source: "spel".to_string(),
-                    path: "spel".to_string(),
-                    pin: "def456".to_string(),
-                    ..Default::default()
-                },
                 basecamp_repo: None,
                 lgpm_repo: None,
                 wallet_home_dir: ".scaffold/wallet".to_string(),
-                circuits: crate::model::CircuitsConfig::default(),
                 framework: FrameworkConfig {
                     kind: "default".to_string(),
                     version: "0.1.0".to_string(),
-                    idl: FrameworkIdlConfig {
-                        spec: "lssa-idl/0.1.0".to_string(),
-                        path: "idl".to_string(),
-                    },
                 },
                 build: crate::model::BuildConfig::default(),
                 localnet: LocalnetConfig {
@@ -1057,10 +959,9 @@ mod tests {
         let env_file = temp.path().join("env_out.txt");
         let project = make_test_project(temp.path().to_path_buf());
 
-        // Both wallet home names must reach the hook: older wallet binaries
-        // read NSSA_WALLET_HOME_DIR, LEZ v0.2.0 reads LEE_WALLET_HOME_DIR.
+        // The LEZ 0.3 wallet reads its home from LEE_WALLET_HOME_DIR only.
         let hook = format!(
-            "printf '%s\\n' \"$NSSA_WALLET_HOME_DIR\" \"$LEE_WALLET_HOME_DIR\" > '{}'",
+            "printf '%s\\n' \"$LEE_WALLET_HOME_DIR\" > '{}'",
             env_file.display()
         );
         run_post_deploy_hook(&project, &hook, &DeployedPrograms::default(), false)
@@ -1068,14 +969,11 @@ mod tests {
 
         let content = std::fs::read_to_string(&env_file).expect("read env output");
         let lines: Vec<&str> = content.lines().collect();
-        assert_eq!(lines.len(), 2, "expected both wallet home vars: {content}");
-        for line in &lines {
-            assert!(
-                line.ends_with(".scaffold/wallet"),
-                "expected wallet home to end with .scaffold/wallet, got: {content}"
-            );
-        }
-        assert_eq!(lines[0], lines[1], "both vars must agree: {content}");
+        assert_eq!(lines.len(), 1, "expected the wallet home var: {content}");
+        assert!(
+            lines[0].ends_with(".scaffold/wallet"),
+            "expected wallet home to end with .scaffold/wallet, got: {content}"
+        );
     }
 
     #[test]
@@ -1094,23 +992,6 @@ mod tests {
             .canonicalize()
             .unwrap_or_else(|_| temp.path().to_path_buf());
         assert_eq!(content.trim(), canonical.display().to_string());
-    }
-
-    #[test]
-    fn hook_receives_idl_dir_env() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let env_file = temp.path().join("env_out.txt");
-        let project = make_test_project(temp.path().to_path_buf());
-
-        let hook = format!("echo \"$SCAFFOLD_IDL_DIR\" > '{}'", env_file.display());
-        run_post_deploy_hook(&project, &hook, &DeployedPrograms::default(), false)
-            .expect("hook should succeed");
-
-        let content = std::fs::read_to_string(&env_file).expect("read env output");
-        assert!(
-            content.trim().ends_with("/idl"),
-            "expected IDL dir to end with /idl, got: {content}"
-        );
     }
 
     #[test]
@@ -1220,10 +1101,8 @@ mod tests {
         let hook = format!(
             "{{ \
                 echo \"SEQUENCER_URL=$SEQUENCER_URL\"; \
-                echo \"NSSA_WALLET_HOME_DIR=$NSSA_WALLET_HOME_DIR\"; \
                 echo \"LEE_WALLET_HOME_DIR=$LEE_WALLET_HOME_DIR\"; \
                 echo \"SCAFFOLD_PROJECT_ROOT=$SCAFFOLD_PROJECT_ROOT\"; \
-                echo \"SCAFFOLD_IDL_DIR=$SCAFFOLD_IDL_DIR\"; \
                 echo \"SCAFFOLD_TOPUP_SKIPPED=$SCAFFOLD_TOPUP_SKIPPED\"; \
                 echo \"SCAFFOLD_DEPLOY_SKIPPED=$SCAFFOLD_DEPLOY_SKIPPED\"; \
             }} > '{}'",
@@ -1241,34 +1120,24 @@ mod tests {
 
         assert_eq!(lines[0], "SEQUENCER_URL=http://127.0.0.1:3040");
         assert!(
-            lines[1].starts_with("NSSA_WALLET_HOME_DIR=") && lines[1].ends_with(".scaffold/wallet"),
+            lines[1].starts_with("LEE_WALLET_HOME_DIR=") && lines[1].ends_with(".scaffold/wallet"),
             "wallet home line was: {}",
             lines[1]
         );
-        assert!(
-            lines[2].starts_with("LEE_WALLET_HOME_DIR=") && lines[2].ends_with(".scaffold/wallet"),
-            "v0.2.0 wallet home line was: {}",
-            lines[2]
-        );
         assert_eq!(
-            lines[3],
+            lines[2],
             format!("SCAFFOLD_PROJECT_ROOT={}", canonical.display())
-        );
-        assert!(
-            lines[4].starts_with("SCAFFOLD_IDL_DIR=") && lines[4].ends_with("/idl"),
-            "idl dir line was: {}",
-            lines[4]
         );
         // `=0`, not merely "present": an empty value is what an unset variable
         // expands to in the hook shell, so asserting the concrete not-skipped
         // value is what distinguishes "scaffold reported the step ran" from
         // "scaffold reported nothing".
         assert_eq!(
-            lines[5], "SCAFFOLD_TOPUP_SKIPPED=0",
+            lines[3], "SCAFFOLD_TOPUP_SKIPPED=0",
             "topup-skip flag must be set, and 0 for this not-skipped run"
         );
         assert_eq!(
-            lines[6], "SCAFFOLD_DEPLOY_SKIPPED=0",
+            lines[4], "SCAFFOLD_DEPLOY_SKIPPED=0",
             "deploy-skip flag must be set, and 0 for this not-skipped run"
         );
     }
@@ -1594,22 +1463,38 @@ mod tests {
     }
 
     #[test]
-    fn collect_deployed_programs_propagates_spel_resolution_error() {
-        // Misconfigured `[repos.spel]` (both path and pin empty) must
-        // bubble up as a hard error rather than silently producing
-        // an empty `SCAFFOLD_PROGRAMS` for hooks.
+    fn collect_deployed_programs_reads_program_ids_from_recorded_deployments() {
         let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir_all(temp.path().join("methods/guest/src/bin")).expect("create bin dir");
-        let mut project = make_test_project(temp.path().to_path_buf());
-        project.config.spel.path = String::new();
-        project.config.spel.pin = String::new();
+        let root = temp.path().to_path_buf();
+        std::fs::create_dir_all(root.join("methods/guest/src/bin")).expect("create bin dir");
+        std::fs::write(root.join("methods/guest/src/bin/hello.rs"), "fn main() {}").unwrap();
+        std::fs::write(root.join("methods/guest/src/bin/other.rs"), "fn main() {}").unwrap();
+        for name in ["hello", "other"] {
+            let bin = root.join(format!(
+                "target/riscv-guest/m/p/riscv32im-risc0-zkvm-elf/release/{name}.bin"
+            ));
+            std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+            std::fs::write(&bin, b"bin").unwrap();
+        }
+        crate::commands::deployments::record_deployments(
+            &root,
+            &[crate::commands::deployments::DeploymentRecord {
+                program: "hello".to_string(),
+                program_id: "HeaderId1".to_string(),
+                elf_sha256: None,
+                payer: None,
+            }],
+        )
+        .unwrap();
+        let project = make_test_project(root);
 
-        let err = collect_deployed_programs(&project, false).expect_err("should be Err");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("spel"),
-            "expected error to mention spel, got: {msg}"
-        );
+        let got = collect_deployed_programs(&project, true).expect("should be Ok");
+        assert!(got.skipped);
+        assert_eq!(got.programs.len(), 2);
+        assert_eq!(got.programs[0].name, "hello");
+        assert_eq!(got.programs[0].program_id.as_deref(), Some("HeaderId1"));
+        assert_eq!(got.programs[1].name, "other");
+        assert_eq!(got.programs[1].program_id, None);
     }
 
     #[test]
@@ -1685,8 +1570,11 @@ mod tests {
     #[test]
     fn reseed_after_wipe_matches_setup_baseline() {
         use crate::commands::setup::ensure_default_wallet_seeded;
-        use crate::commands::wallet_support::{wallet_state_path, WALLET_CONFIG_PRIMARY};
+        use crate::commands::wallet_support::{
+            ensure_dev_funder_imported, wallet_state_path, WALLET_CONFIG_PRIMARY,
+        };
         use crate::state::prepare_wallet_home;
+        use std::os::unix::fs::PermissionsExt as _;
 
         // Two parallel project trees with identical fake LEZ wallet configs.
         // Both start from the same state a freshly-wiped project would: LEZ
@@ -1695,30 +1583,42 @@ mod tests {
         let post_reset = tempfile::tempdir().expect("post_reset tempdir");
 
         for root in [baseline.path(), post_reset.path()] {
-            let lez_cfg_dir = root.join("lez/wallet/configs/debug");
+            let lez_cfg_dir = root.join("lez/lez/wallet/configs/debug");
             std::fs::create_dir_all(&lez_cfg_dir).expect("create lez cfg dir");
             std::fs::write(
                 lez_cfg_dir.join("wallet_config.json"),
-                r#"{
-  "initial_accounts": [
-    { "Public": { "account_id": "6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV" } }
-  ]
-}"#,
+                r#"{ "sequencer": { "sequencer_addr": "http://127.0.0.1:3040" } }"#,
             )
             .expect("write lez wallet config");
+            // Fake LEZ 0.3 wallet: a derived default account, plus the dev
+            // funder once it has been imported.
+            let wallet_bin = root.join("lez").join(crate::constants::WALLET_BIN_REL_PATH);
+            std::fs::create_dir_all(wallet_bin.parent().unwrap()).unwrap();
+            std::fs::write(
+                &wallet_bin,
+                format!(
+                    "#!/bin/sh\ncat >/dev/null\ncase \"$1 $2\" in\n\
+                     'account list') echo '/ Public/6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV'; \
+                     [ -f \"$LEE_WALLET_HOME_DIR/imported\" ] && echo 'Public/{id}';;\n\
+                     'account import') touch \"$LEE_WALLET_HOME_DIR/imported\"; \
+                     echo 'Imported public account Public/{id}';;\n\
+                     esac\nexit 0\n",
+                    id = crate::constants::DEV_FUNDER_ACCOUNT_ID
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&wallet_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
         // Baseline: drive `cmd_setup`'s seed primitives directly.
         {
             let lez = baseline.path().join("lez");
             let wallet_home = baseline.path().join(".scaffold/wallet");
-            prepare_wallet_home(&lez, &wallet_home).expect("baseline prepare");
-            ensure_default_wallet_seeded(
-                baseline.path(),
-                &wallet_home,
-                &lez.join(crate::constants::WALLET_BIN_REL_PATH),
-            )
-            .expect("baseline seed");
+            let wallet_bin = lez.join(crate::constants::WALLET_BIN_REL_PATH);
+            prepare_wallet_home(&lez, &wallet_home, 3040).expect("baseline prepare");
+            ensure_default_wallet_seeded(baseline.path(), &wallet_home, &wallet_bin)
+                .expect("baseline seed");
+            ensure_dev_funder_imported(&wallet_bin, &wallet_home).expect("baseline funder");
         }
 
         // Post-reset: drive `reseed_after_wipe` directly.
@@ -1736,6 +1636,10 @@ mod tests {
         assert_eq!(
             baseline_state, post_reset_state,
             "post-reset wallet.state must be byte-equivalent to clean-setup baseline"
+        );
+        assert!(
+            post_reset.path().join(".scaffold/wallet/imported").exists(),
+            "post-reset reseed must re-import the dev funder"
         );
 
         let baseline_cfg = std::fs::read(

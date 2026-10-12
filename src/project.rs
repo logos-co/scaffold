@@ -207,7 +207,7 @@ pub(crate) fn default_cache_root() -> DynResult<(PathBuf, CacheRootSource)> {
     ))
 }
 
-/// Resolves the on-disk location of a pinned repo (lez, spel).
+/// Resolves the on-disk location of a pinned repo (lez, basecamp, lgpm).
 ///
 /// - If `repo.path` is set, it's authoritative — used literally if absolute, or
 ///   joined to `project.root` if relative. Covers `--vendor-deps` projects and
@@ -259,7 +259,7 @@ pub(crate) fn ensure_dir_exists(path: &Path, label: &str) -> DynResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RepoRef};
+    use crate::model::{Config, FrameworkConfig, LocalnetConfig, RepoRef};
     use std::sync::Mutex;
 
     // Tests in this module mutate process-wide env vars; run them under one lock.
@@ -272,18 +272,12 @@ mod tests {
                 version: "0.2.0".into(),
                 cache_root: cache_root.to_string(),
                 lez: RepoRef::default(),
-                spel: RepoRef::default(),
                 basecamp_repo: None,
                 lgpm_repo: None,
                 wallet_home_dir: ".scaffold/wallet".into(),
-                circuits: crate::model::CircuitsConfig::default(),
                 framework: FrameworkConfig {
                     kind: String::new(),
                     version: String::new(),
-                    idl: FrameworkIdlConfig {
-                        spec: String::new(),
-                        path: String::new(),
-                    },
                 },
                 build: crate::model::BuildConfig::default(),
                 localnet: LocalnetConfig::default(),
@@ -361,13 +355,13 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         env::set_var("LOGOS_SCAFFOLD_CACHE_ROOT", "/tmp/cache");
         let mut project = fixture_project(PathBuf::from("/proj"), "");
-        project.config.spel = RepoRef {
+        project.config.lez = RepoRef {
             pin: "cafef00d".into(),
             ..Default::default()
         };
-        let path = resolve_repo_path(&project, &project.config.spel, "spel").expect("resolve");
+        let path = resolve_repo_path(&project, &project.config.lez, "lez").expect("resolve");
         env::remove_var("LOGOS_SCAFFOLD_CACHE_ROOT");
-        assert_eq!(path, PathBuf::from("/tmp/cache/repos/spel/cafef00d"));
+        assert_eq!(path, PathBuf::from("/tmp/cache/repos/lez/cafef00d"));
     }
 
     #[test]

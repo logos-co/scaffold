@@ -1,8 +1,8 @@
 //! Persisted run state used by `cmd_run` for deploy idempotence.
 //!
 //! The state file at `.scaffold/state/run_deploy.json` records the SHA-256
-//! of every guest `.bin` (folded together with its IDL JSON and a small
-//! deploy-config digest) that was last deployed, plus the sequencer PID
+//! of every guest `.bin` (folded together with a small deploy-config
+//! digest) that was last deployed, plus the sequencer PID
 //! that received the deploy. Before re-deploying, `cmd_run` compares the
 //! current hashes against the stored ones and skips the deploy step when
 //! they match AND the sequencer is the same instance. A `lgs localnet
@@ -20,11 +20,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::commands::deploy::{discover_deployable_programs, discover_program_binaries};
-use crate::commands::idl::sanitize_file_stem;
 use crate::commands::wallet_support::{
     default_sequencer_http_url_for_project, load_wallet_runtime,
 };
-use crate::constants::FRAMEWORK_KIND_LEZ_FRAMEWORK;
 use crate::model::Project;
 use crate::state::read_localnet_state;
 use crate::DynResult;
@@ -83,9 +81,7 @@ pub(crate) fn compute_program_hashes(project: &Project) -> DynResult<BTreeMap<St
             missing.join(", ")
         );
     }
-    let idl_dir = project.root.join(&project.config.framework.idl.path);
     let cfg_digest = config_digest(project);
-    let is_lez_framework = project.config.framework.kind == FRAMEWORK_KIND_LEZ_FRAMEWORK;
 
     for (stem, bin_path) in binaries {
         let mut hasher = Sha256::new();
@@ -93,37 +89,12 @@ pub(crate) fn compute_program_hashes(project: &Project) -> DynResult<BTreeMap<St
             .with_context(|| format!("read {} for hashing", bin_path.display()))?;
         hasher.update(&bin_bytes);
         // Fold a small canonical digest of deploy-affecting config so the
-        // cache invalidates when the user switches sequencer port, wallet
-        // home, or IDL path without doing a `--reset`. Without this, a
+        // cache invalidates when the user switches sequencer port or wallet
+        // home without doing a `--reset`. Without this, a
         // run pointed at a different localnet would silently skip deploy
         // and leave the new target empty.
         hasher.update(b"\x00cfg\x00");
         hasher.update(cfg_digest.as_bytes());
-        // Fold the corresponding IDL JSON (if any) into the program's
-        // hash so that an ABI-only edit invalidates the cached deploy
-        // even when the compiled binary is byte-identical. Use the
-        // same name-sanitizer as `build_idl_for_current_project`, since
-        // that's the path the IDL was actually written to: a raw stem
-        // like `my-program` would miss the on-disk `my_program.json`
-        // and bail with a misleading "run `lgs build idl`" error.
-        let idl_path = idl_dir.join(format!("{}.json", sanitize_file_stem(&stem)));
-        if idl_path.exists() {
-            let idl_bytes = std::fs::read(&idl_path)
-                .with_context(|| format!("read {} for hashing", idl_path.display()))?;
-            hasher.update(b"\x00idl\x00");
-            hasher.update(&idl_bytes);
-        } else if is_lez_framework {
-            // For lez-framework projects, the IDL file is a documented
-            // build artifact (`<stem>.json` produced by `build idl`).
-            // Missing it would mean we cache a partial digest and silently
-            // skip deploys after later ABI-only edits. Bail loudly.
-            anyhow::bail!(
-                "expected IDL file {} for program `{stem}` is missing; \
-                 run `lgs build idl` first or delete {} to bypass the deploy cache",
-                idl_path.display(),
-                project.root.join(RUN_DEPLOY_STATE_REL).display()
-            );
-        }
         out.insert(stem, hex_encode(&hasher.finalize()));
     }
     Ok(out)
@@ -140,8 +111,8 @@ fn config_digest(project: &Project) -> String {
     let cfg = &project.config;
     let sequencer = resolved_sequencer_addr(project);
     format!(
-        "port={}|wallet={}|idl={}|sequencer={}",
-        cfg.localnet.port, cfg.wallet_home_dir, cfg.framework.idl.path, sequencer
+        "port={}|wallet={}|sequencer={}",
+        cfg.localnet.port, cfg.wallet_home_dir, sequencer
     )
 }
 
@@ -366,27 +337,19 @@ mod tests {
     }
 
     fn make_test_project(root: std::path::PathBuf) -> Project {
-        use crate::model::{
-            Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RepoRef, RunConfig,
-        };
+        use crate::model::{Config, FrameworkConfig, LocalnetConfig, RepoRef, RunConfig};
         Project {
             root,
             config: Config {
                 version: "0.2.0".to_string(),
                 cache_root: ".scaffold/cache".to_string(),
                 lez: RepoRef::default(),
-                spel: RepoRef::default(),
                 basecamp_repo: None,
                 lgpm_repo: None,
                 wallet_home_dir: ".scaffold/wallet".to_string(),
-                circuits: crate::model::CircuitsConfig::default(),
                 framework: FrameworkConfig {
                     kind: "default".to_string(),
                     version: "0.1.0".to_string(),
-                    idl: FrameworkIdlConfig {
-                        spec: "lssa-idl/0.1.0".to_string(),
-                        path: "idl".to_string(),
-                    },
                 },
                 build: crate::model::BuildConfig::default(),
                 localnet: LocalnetConfig {
@@ -456,29 +419,6 @@ mod tests {
     }
 
     #[test]
-    fn compute_hashes_finds_sanitized_idl_for_dashed_program_name() {
-        // `build_idl_for_current_project` writes the IDL at
-        // `<sanitize_file_stem(stem)>.json` (e.g. `my-program.rs` →
-        // `my_program.json`). The hash lookup must use the same
-        // sanitizer; otherwise lez-framework projects with a `-` in the
-        // program filename bail with a misleading "run `lgs build idl`"
-        // message even though `build idl` ran successfully.
-        let temp = tempfile::tempdir().expect("tempdir");
-        stage_guest_program(temp.path(), "my-program", true);
-        let idl_dir = temp.path().join("idl");
-        std::fs::create_dir_all(&idl_dir).expect("create idl dir");
-        std::fs::write(idl_dir.join("my_program.json"), br#"{"abi": []}"#)
-            .expect("stage sanitized IDL");
-
-        let mut project = make_test_project(temp.path().to_path_buf());
-        project.config.framework.kind = FRAMEWORK_KIND_LEZ_FRAMEWORK.to_string();
-
-        let hashes =
-            compute_program_hashes(&project).expect("must succeed with the sanitized IDL on disk");
-        assert!(hashes.contains_key("my-program"));
-    }
-
-    #[test]
     fn compute_hashes_includes_sequencer_addr_in_digest() {
         // Two project trees identical apart from `wallet_config.json`'s
         // sequencer_addr: hashes must differ. Without the sequencer in the
@@ -498,12 +438,12 @@ mod tests {
         }
         std::fs::write(
             temp_a.path().join(".scaffold/wallet/wallet_config.json"),
-            br#"{"sequencer_addr":"http://127.0.0.1:3040"}"#,
+            br#"{"sequencer":{"sequencer_addr":"http://127.0.0.1:3040"}}"#,
         )
         .unwrap();
         std::fs::write(
             temp_b.path().join(".scaffold/wallet/wallet_config.json"),
-            br#"{"sequencer_addr":"http://10.0.0.1:9999"}"#,
+            br#"{"sequencer":{"sequencer_addr":"http://10.0.0.1:9999"}}"#,
         )
         .unwrap();
 

@@ -37,8 +37,32 @@ const AGENTS_FOOTER: &str = "\nOpen the matching skill file when its activation 
 /// Idempotent: re-running overwrites each shipped skill file with its current
 /// canonical content. Skills the user has added under `.claude/skills/<other>/`
 /// or `.cursor/rules/<other>.mdc` are not touched.
+/// Skills earlier scaffold releases shipped and this one no longer does.
+/// `apply_skills` deletes their materialized copies so an `init` refresh
+/// does not leave an agent instructions for a removed workflow
+/// (`lez-framework-template` described the spel template, which has no
+/// LEZ 0.3 release). Only these exact scaffold-owned paths are removed;
+/// user-added skills are never touched.
+const RETIRED_SKILLS: &[&str] = &["lez-framework-template"];
+
 pub(crate) fn apply_skills(target: &Path) -> DynResult<()> {
     let mut entries: Vec<(String, String)> = Vec::new();
+
+    for retired in RETIRED_SKILLS {
+        let claude_dir = target.join(".claude").join("skills").join(retired);
+        if claude_dir.is_dir() {
+            fs::remove_dir_all(&claude_dir)
+                .with_context(|| format!("removing retired skill {}", claude_dir.display()))?;
+        }
+        let cursor_rule = target
+            .join(".cursor")
+            .join("rules")
+            .join(format!("{retired}.mdc"));
+        if cursor_rule.is_file() {
+            fs::remove_file(&cursor_rule)
+                .with_context(|| format!("removing retired rule {}", cursor_rule.display()))?;
+        }
+    }
 
     for skill_dir in SKILLS_DIR.dirs() {
         let name = skill_dir
@@ -199,13 +223,12 @@ mod tests {
     }
 
     #[test]
-    fn ships_the_expected_four_skills() {
+    fn ships_the_expected_three_skills() {
         let names = shipped_skill_names();
         assert_eq!(
             names,
             vec![
                 "basecamp".to_string(),
-                "lez-framework-template".to_string(),
                 "lez-template".to_string(),
                 "lgs-cli".to_string(),
             ],
@@ -463,5 +486,28 @@ mod tests {
             mdc,
             "---\ndescription: desc text\nalwaysApply: false\n---\n# Body\n\nLine.\n"
         );
+    }
+
+    #[test]
+    fn apply_skills_removes_retired_skills_but_keeps_user_skills() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        let retired = root.join(".claude/skills/lez-framework-template");
+        std::fs::create_dir_all(&retired).unwrap();
+        std::fs::write(retired.join("SKILL.md"), "old").unwrap();
+        std::fs::create_dir_all(root.join(".cursor/rules")).unwrap();
+        std::fs::write(root.join(".cursor/rules/lez-framework-template.mdc"), "old").unwrap();
+        let user = root.join(".claude/skills/team-notes");
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::write(user.join("SKILL.md"), "mine").unwrap();
+
+        apply_skills(root).expect("apply skills");
+
+        assert!(!retired.exists());
+        assert!(!root
+            .join(".cursor/rules/lez-framework-template.mdc")
+            .exists());
+        assert!(user.join("SKILL.md").exists(), "user skills are untouched");
+        assert!(root.join(".claude/skills/lez-template/SKILL.md").exists());
     }
 }

@@ -21,10 +21,9 @@ If your task is to *use* scaffold rather than change it, read the skills in
 |---|---|
 | `skills/lgs-cli` | Entry point. Driving the CLI, diagnosing errors, adopting scaffold in an existing project. |
 | `skills/lez-template` | Working inside a default-template project. |
-| `skills/lez-framework-template` | Working inside a `--template lez-framework` project. |
 | `skills/basecamp` | Any `lgs basecamp` subcommand, or a project that builds `.lgx` modules. |
 
-`skills/lgs-cli` routes into the other three once it knows the project type.
+`skills/lgs-cli` routes into the other two once it knows the project type.
 
 ## Layout
 
@@ -33,7 +32,7 @@ If your task is to *use* scaffold rather than change it, read the skills in
 | `src/commands/` | One module per CLI command. Start here for behaviour changes. |
 | `src/api/` | Public Rust API. Keep in sync with command behaviour. |
 | `src/cli.rs` | clap definitions. The source of truth for flags. |
-| `templates/` | Project templates: `default` and `lez-framework`. |
+| `templates/` | Project template overlay: `default` (on top of LEZ's `examples/program_deployment`). |
 | `skills/` | Agent skills, shipped into scaffolded projects. |
 | `tests/` | Integration tests driven through `assert_cmd`. |
 | `docs/` | User documentation. |
@@ -71,10 +70,12 @@ cargo test
 
 - The CLI is Unix-only. Localnet and process detection shell out to `lsof`,
   `ps`, and `kill`.
-- Dependencies (LEZ, spel, basecamp, lgpm) are pinned by commit in
+- Scaffold supports the LEZ 0.3 release line only (see ADR "Scaffold Supports
+  One LEZ Release (0.3)"); do not add compatibility code for older LEZ.
+- Dependencies (LEZ, basecamp, lgpm) are pinned by commit in
   `scaffold.toml` and resolved under a cache root at runtime. Do not hardcode
   checkout paths.
 - Project-local binaries are never installed to PATH. Reach them through
-  `lgs wallet -- …` and `lgs spel -- …`.
+  `lgs wallet -- …`.
 - Commands that produce machine-readable output take `--json`. Adding output to
   a command means considering both paths.

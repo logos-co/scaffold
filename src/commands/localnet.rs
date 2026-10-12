@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context};
 
-use crate::circuits::ensure_circuits_for_project;
 use crate::constants::SEQUENCER_BIN_REL_PATH;
 use crate::error::{LocalnetError, ResetError};
 use crate::model::{
@@ -19,6 +18,30 @@ use crate::process::{
 };
 use crate::project::{ensure_dir_exists, find_project_root, load_project, resolve_repo_path};
 use crate::sequencer_config::{apply_common_runtime_overrides, patch_runtime_sequencer_config};
+
+/// Directory (next to `.scaffold/state/`) that holds the localnet chain: the
+/// sequencer's RocksDB and its generated keys. Passed as `--home`, so chain
+/// state lives in the project and never in the shared LEZ checkout.
+const LOCALNET_HOME_DIR: &str = "localnet";
+
+/// Block interval of the localnet sequencer. LEZ's debug config uses 15s,
+/// and every wallet transaction waits for its block, so a `deploy` (several
+/// segment transactions per program, each confirmed before the next) would
+/// spend minutes idle. Shorter is not free either: standalone mode never
+/// finalizes, so a restart replays every block since genesis (measured at
+/// ~0.25s per block), and an empty block is produced every interval. 5s keeps
+/// deploys interactive while a day-old localnet still restarts in minutes.
+pub(crate) const LOCALNET_BLOCK_CREATE_TIMEOUT: &str = "5s";
+
+/// Chain home for the localnet whose state file is `state_path`
+/// (`<project>/.scaffold/state/localnet.state` → `<project>/.scaffold/localnet`).
+fn localnet_home_for(state_path: &Path) -> PathBuf {
+    state_path
+        .parent()
+        .and_then(Path::parent)
+        .map(|scaffold_dir| scaffold_dir.join(LOCALNET_HOME_DIR))
+        .unwrap_or_else(|| PathBuf::from(".scaffold").join(LOCALNET_HOME_DIR))
+}
 use crate::state::{read_localnet_state, write_localnet_state};
 use crate::DynResult;
 
@@ -134,7 +157,6 @@ pub(crate) fn localnet_start_for_project(
     timeout_sec: u64,
 ) -> DynResult<LocalnetStartOutcome> {
     let ctx = localnet_context(project)?;
-    ensure_circuits_for_project(project)?;
     let (pid, reused) = start_localnet(
         &ctx.lez,
         &ctx.state_path,
@@ -177,7 +199,6 @@ pub(crate) fn localnet_reset_for_project(
     verify_timeout_sec: u64,
 ) -> DynResult<()> {
     let ctx = localnet_context(project)?;
-    ensure_circuits_for_project(project)?;
     cmd_localnet_reset(
         project,
         &ctx.lez,
@@ -196,7 +217,6 @@ fn cmd_localnet_in_project(project: &Project, action: LocalnetAction) -> DynResu
 
     match action {
         LocalnetAction::Start { timeout_sec } => {
-            ensure_circuits_for_project(project)?;
             let (pid, _) = start_localnet(
                 &ctx.lez,
                 &ctx.state_path,
@@ -227,22 +247,17 @@ fn cmd_localnet_in_project(project: &Project, action: LocalnetAction) -> DynResu
             yes,
             reset_wallet,
             verify_timeout_sec,
-        } => {
-            if yes && !dry_run {
-                ensure_circuits_for_project(project)?;
-            }
-            cmd_localnet_reset(
-                project,
-                &ctx.lez,
-                &ctx.state_path,
-                &ctx.log_path,
-                &ctx.localnet_addr,
-                dry_run,
-                yes,
-                reset_wallet,
-                verify_timeout_sec,
-            )
-        }
+        } => cmd_localnet_reset(
+            project,
+            &ctx.lez,
+            &ctx.state_path,
+            &ctx.log_path,
+            &ctx.localnet_addr,
+            dry_run,
+            yes,
+            reset_wallet,
+            verify_timeout_sec,
+        ),
     }
 }
 
@@ -339,7 +354,12 @@ fn start_localnet(
             state_path.display()
         )
     })?;
-    let patched_config_path = prepare_sequencer_config(lez, state_dir, localnet_port)?;
+    let patched_config_path = prepare_sequencer_config(lez, state_dir)?;
+    let chain_home = localnet_home_for(state_path);
+    fs::create_dir_all(&chain_home)
+        .with_context(|| format!("failed to create {}", chain_home.display()))?;
+    let chain_home = fs::canonicalize(&chain_home)
+        .with_context(|| format!("failed to resolve {}", chain_home.display()))?;
 
     // Use a path relative to lez (the child's cwd), not relative to the
     // parent's cwd.  `current_dir(lez)` applies before exec, so a parent-
@@ -351,6 +371,14 @@ fn start_localnet(
     sequencer_cmd
         .current_dir(lez)
         .arg(&patched_config_path)
+        .arg("--port")
+        .arg(localnet_port.to_string())
+        .arg("--listen-address")
+        .arg("127.0.0.1")
+        .arg("--home")
+        .arg(&chain_home)
+        .arg("--metrics-address")
+        .arg(crate::testnode::METRICS_ADDRESS)
         .env("RUST_LOG", "info")
         .env("RISC0_DEV_MODE", if risc0_dev_mode { "1" } else { "0" });
 
@@ -364,7 +392,10 @@ fn start_localnet(
             sequencer_cmd.env("RISC0_SERVER_PATH", &r0vm_path);
         } else {
             eprintln!(
-                "warning: RISC0_SERVER_PATH is not set and r0vm was not found in the                  rzup extensions directory for the LEZ-pinned risc0 version.                  If transaction execution fails, set RISC0_SERVER_PATH to the r0vm                  binary installed by rzup."
+                "warning: RISC0_SERVER_PATH is not set and r0vm was not found in the \
+                 rzup extensions directory for the LEZ-pinned risc0 version. \
+                 If transaction execution fails, set RISC0_SERVER_PATH to the r0vm \
+                 binary installed by rzup."
             );
         }
     }
@@ -690,11 +721,11 @@ fn build_status_report(
     }
 }
 
-/// Produce a sequencer config patched for scaffold's localnet — port set to
-/// the project's configured port and `max_block_size` widened so the bundled
-/// deploy flow fits in a single block — and return the absolute path to the
-/// patched file. The pinned LEZ version does not accept `--port` as a CLI flag
-/// — it reads everything from the config file passed as its first argument.
+/// Produce a sequencer config patched for scaffold's localnet (see
+/// [`apply_common_runtime_overrides`]) and return the absolute path to the
+/// patched file. Port, listen address and chain home are not config keys in
+/// LEZ 0.3; `start_localnet` passes them as `--port`, `--listen-address` and
+/// `--home`.
 ///
 /// The patched copy is written under `dest_dir` (the project's
 /// `.scaffold/state/`), **not** back into the vendored LEZ checkout. Writing
@@ -708,16 +739,13 @@ fn build_status_report(
 ///      until scaffold re-patches.
 ///   3. `git status` in the LEZ tree would be permanently dirty after the
 ///      first `localnet start`, hiding genuine local edits.
-///
-/// Block-size bump: the upstream debug config caps `max_block_size` at 1 MiB,
-/// which a `lgs deploy` of the default template (5 risc0 guest ELFs ≈ 360 KiB
-/// each) overflows on the second block — and the pinned sequencer crashes
-/// rather than carrying the deferred tx forward. Until LEZ stops aborting on
-/// deferral, scaffold widens the limit so the documented first-success path
-/// fits in a single block.
-fn prepare_sequencer_config(lez: &Path, dest_dir: &Path, port: u16) -> DynResult<PathBuf> {
+fn prepare_sequencer_config(lez: &Path, dest_dir: &Path) -> DynResult<PathBuf> {
     let (dest_path, _) = patch_runtime_sequencer_config(lez, dest_dir, |obj| {
-        apply_common_runtime_overrides(obj, port);
+        apply_common_runtime_overrides(obj);
+        obj.insert(
+            "block_create_timeout".to_string(),
+            serde_json::Value::String(LOCALNET_BLOCK_CREATE_TIMEOUT.to_string()),
+        );
         Ok(())
     })?;
     Ok(dest_path)
@@ -741,7 +769,6 @@ fn read_log_tail(log_path: &Path, tail: usize) -> String {
 
 fn cmd_localnet_reset_dry_run(
     project: &Project,
-    lez: &Path,
     state_path: &Path,
     log_path: &Path,
     localnet_addr: &str,
@@ -750,7 +777,7 @@ fn cmd_localnet_reset_dry_run(
     verify_timeout_sec: u64,
     sequencer_bin: &Path,
 ) -> DynResult<()> {
-    // `lez` and `sequencer_bin` come out of the cache-root resolver, which can
+    // `sequencer_bin` comes out of the cache-root resolver, which can
     // return either an absolute path (env override, explicit absolute
     // `[repos.lez].path`, or scaffold default cache layer) or a path relative
     // to `project.root` (the portable default for vendored / new projects).
@@ -764,7 +791,7 @@ fn cmd_localnet_reset_dry_run(
             project.root.join(p)
         }
     };
-    let rocksdb_path = abs(&lez.join("rocksdb"));
+    let rocksdb_path = abs(&localnet_home_for(state_path));
     let sequencer_bin_abs = abs(sequencer_bin);
 
     println!("dry-run: localnet reset (no changes made)");
@@ -773,7 +800,7 @@ fn cmd_localnet_reset_dry_run(
         state_path.display()
     );
     println!(
-        "planned: delete sequencer DB at {} (exists: {})",
+        "planned: delete localnet chain home (sequencer DB + keys) at {} (exists: {})",
         rocksdb_path.display(),
         rocksdb_path.exists()
     );
@@ -858,7 +885,6 @@ pub(crate) fn cmd_localnet_reset(
     if dry_run {
         return cmd_localnet_reset_dry_run(
             project,
-            lez,
             state_path,
             log_path,
             localnet_addr,
@@ -907,7 +933,7 @@ pub(crate) fn cmd_localnet_reset(
         }
     })?;
 
-    reset_cleanup(project, lez, state_path, reset_wallet)?;
+    reset_cleanup(project, state_path, reset_wallet)?;
 
     println!("starting sequencer…");
     let (pid, _) = start_localnet(
@@ -928,14 +954,11 @@ pub(crate) fn cmd_localnet_reset(
 /// Deletes on-disk state so the next start begins with a fresh chain.
 /// Extracted from `cmd_localnet_reset` so it can be unit-tested without
 /// invoking setup or starting a real sequencer.
-fn reset_cleanup(
-    project: &Project,
-    lez: &Path,
-    state_path: &Path,
-    reset_wallet: bool,
-) -> DynResult<()> {
-    let rocksdb_path = lez.join("rocksdb");
-    remove_dir_if_exists(&rocksdb_path, "sequencer DB")?;
+fn reset_cleanup(project: &Project, state_path: &Path, reset_wallet: bool) -> DynResult<()> {
+    let chain_home = localnet_home_for(state_path);
+    remove_dir_if_exists(&chain_home, "sequencer DB")?;
+    // Program ids point into the chain that was just wiped.
+    super::deployments::clear_deployments(&project.root)?;
 
     if reset_wallet {
         let wallet_path = project.root.join(&project.config.wallet_home_dir);
@@ -1032,7 +1055,9 @@ fn verify_block_production(localnet_addr: &str, timeout_sec: u64) -> DynResult<(
 /// Resolve the r0vm binary path from the rzup installation that matches the LEZ risc0 version.
 ///
 /// Reads the risc0-zkvm version from the LEZ Cargo.lock, then looks for an exact-version
-/// rzup-managed extension dir: ~/.risc0/extensions/v<version>-cargo-risczero-<arch>-<os>/r0vm.
+/// rzup-managed extension dir, `<risc0 home>/extensions/v<version>-cargo-risczero-<arch>-<os>/r0vm`,
+/// where the risc0 home is `$RISC0_HOME` when set (rzup honours it, e.g. system-wide
+/// installs under `/usr/local/risc0`) and `~/.risc0` otherwise.
 /// Returns None (without guessing) if the version cannot be determined or the exact path
 /// does not exist. The caller should error with a clear diagnostic if None is returned.
 pub(crate) fn find_r0vm_path_for_lez(lez: &std::path::Path) -> Option<std::path::PathBuf> {
@@ -1054,18 +1079,22 @@ pub(crate) fn find_r0vm_path_for_lez(lez: &std::path::Path) -> Option<std::path:
     };
     let ext_name = format!("v{risc0_version}-cargo-risczero-{arch}-{os}");
 
-    let home = std::env::var("HOME").ok()?;
-    let r0vm = std::path::Path::new(&home)
-        .join(".risc0")
-        .join("extensions")
-        .join(&ext_name)
-        .join("r0vm");
+    risc0_homes()
+        .into_iter()
+        .map(|home| home.join("extensions").join(&ext_name).join("r0vm"))
+        .find(|r0vm| r0vm.exists())
+}
 
-    if r0vm.exists() {
-        Some(r0vm)
-    } else {
-        None
+/// Candidate rzup homes in lookup order: `$RISC0_HOME`, then `~/.risc0`.
+fn risc0_homes() -> Vec<std::path::PathBuf> {
+    let mut homes = Vec::new();
+    if let Some(home) = std::env::var_os("RISC0_HOME").filter(|v| !v.is_empty()) {
+        homes.push(std::path::PathBuf::from(home));
     }
+    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+        homes.push(std::path::PathBuf::from(home).join(".risc0"));
+    }
+    homes
 }
 
 /// Extract risc0-zkvm version from Cargo.lock content.
@@ -1102,16 +1131,16 @@ mod tests {
     use std::net::TcpListener;
     use std::time::Duration;
 
+    use std::path::Path;
+
     use super::{
-        prepare_sequencer_config, reset_cleanup, verify_block_production, wait_for_pid_exit,
-        wait_for_port_free,
+        localnet_home_for, prepare_sequencer_config, reset_cleanup, verify_block_production,
+        wait_for_pid_exit, wait_for_port_free, LOCALNET_BLOCK_CREATE_TIMEOUT,
     };
     use crate::commands::wallet_support::wallet_state_path;
     use crate::constants::SEQUENCER_CONFIG_REL_PATH;
     use crate::error::ResetError;
-    use crate::model::{
-        Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, Project, RepoRef, RunConfig,
-    };
+    use crate::model::{Config, FrameworkConfig, LocalnetConfig, Project, RepoRef, RunConfig};
     use crate::repo::git_clean;
     use std::process::Command;
 
@@ -1134,18 +1163,12 @@ mod tests {
                 attr_platform: std::collections::BTreeMap::new(),
                 path: lez_dir.display().to_string(),
             },
-            spel: RepoRef::default(),
             basecamp_repo: None,
             lgpm_repo: None,
             wallet_home_dir: ".scaffold/wallet".to_string(),
-            circuits: crate::model::CircuitsConfig::default(),
             framework: FrameworkConfig {
                 kind: String::new(),
                 version: String::new(),
-                idl: FrameworkIdlConfig {
-                    spec: String::new(),
-                    path: String::new(),
-                },
             },
             build: crate::model::BuildConfig::default(),
             localnet: LocalnetConfig {
@@ -1176,12 +1199,24 @@ mod tests {
         fs::write(&wallet_state, "default_address=Public/demo\n").unwrap();
         let state_path = project.root.join(".scaffold/state/localnet.state");
         fs::write(&state_path, "sequencer_pid=123\n").unwrap();
-        let rocksdb = lez.join("rocksdb");
-        fs::create_dir_all(&rocksdb).unwrap();
+        let chain_home = project.root.join(".scaffold/localnet");
+        fs::create_dir_all(chain_home.join("rocksdb-0101")).unwrap();
+        let deployments = crate::commands::deployments::deployments_path(&project.root);
+        fs::write(&deployments, "{}").unwrap();
+        // The shared LEZ checkout is never touched by a reset.
+        fs::create_dir_all(lez.join("keep")).unwrap();
 
-        reset_cleanup(&project, &lez, &state_path, false).unwrap();
+        reset_cleanup(&project, &state_path, false).unwrap();
 
-        assert!(!rocksdb.exists(), "rocksdb should be deleted");
+        assert!(
+            !chain_home.exists(),
+            "localnet chain home should be deleted"
+        );
+        assert!(
+            !deployments.exists(),
+            "recorded program ids should be cleared"
+        );
+        assert!(lez.join("keep").exists(), "LEZ checkout must be left alone");
         assert!(!state_path.exists(), "localnet state should be deleted");
         assert!(
             marker.exists(),
@@ -1196,7 +1231,7 @@ mod tests {
     #[test]
     fn cleanup_deletes_wallet_when_reset_wallet_true() {
         let temp = tempdir().unwrap();
-        let (project, lez) = make_test_project(&temp);
+        let (project, _lez) = make_test_project(&temp);
 
         let wallet_dir = project.root.join(&project.config.wallet_home_dir);
         fs::write(wallet_dir.join("keys.json"), "{}").unwrap();
@@ -1204,7 +1239,7 @@ mod tests {
         fs::write(&wallet_state, "default_address=Public/demo\n").unwrap();
         let state_path = project.root.join(".scaffold/state/localnet.state");
 
-        reset_cleanup(&project, &lez, &state_path, true).unwrap();
+        reset_cleanup(&project, &state_path, true).unwrap();
 
         assert!(
             !wallet_dir.exists(),
@@ -1219,14 +1254,14 @@ mod tests {
     #[test]
     fn cleanup_is_idempotent_when_nothing_exists() {
         let temp = tempdir().unwrap();
-        let (project, lez) = make_test_project(&temp);
+        let (project, _lez) = make_test_project(&temp);
 
         let wallet_dir = project.root.join(&project.config.wallet_home_dir);
         fs::remove_dir_all(&wallet_dir).unwrap();
         let state_path = project.root.join(".scaffold/state/localnet.state");
 
         // No rocksdb, no wallet, no state file — cleanup should succeed silently.
-        reset_cleanup(&project, &lez, &state_path, true).unwrap();
+        reset_cleanup(&project, &state_path, true).unwrap();
     }
 
     #[test]
@@ -1260,7 +1295,7 @@ mod tests {
         // empty and we can see any write-back to that file as a dirty diff.
         let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
         fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        fs::write(&config_path, "{\n  \"port\": 3040\n}\n").unwrap();
+        fs::write(&config_path, "{\n  \"max_block_size\": \"1 MiB\"\n}\n").unwrap();
 
         let git_init = Command::new("git")
             .args(["init", "--quiet", "--initial-branch=main"])
@@ -1301,7 +1336,7 @@ mod tests {
             "test precondition: seeded lez tree should be clean"
         );
 
-        let dest = prepare_sequencer_config(&lez, &state_dir, 4040).unwrap();
+        let dest = prepare_sequencer_config(&lez, &state_dir).unwrap();
 
         assert_eq!(
             dest,
@@ -1311,23 +1346,22 @@ mod tests {
 
         let dest_json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
-        assert_eq!(dest_json["port"], serde_json::json!(4040));
         assert_eq!(
-            dest_json["max_block_size"],
-            serde_json::json!("8 MiB"),
-            "patched copy should carry the widened max_block_size override"
+            dest_json["block_create_timeout"],
+            serde_json::json!(LOCALNET_BLOCK_CREATE_TIMEOUT),
+            "patched copy should carry the localnet block interval"
         );
 
         let src_after: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
         assert_eq!(
-            src_after["port"],
-            serde_json::json!(3040),
+            src_after["max_block_size"],
+            serde_json::json!("1 MiB"),
             "vendored sequencer_config.json must be left untouched"
         );
         assert!(
-            src_after.get("max_block_size").is_none(),
-            "vendored sequencer_config.json must be left untouched (no max_block_size injected)"
+            src_after.get("genesis").is_none(),
+            "vendored sequencer_config.json must be left untouched (no genesis injected)"
         );
 
         assert!(
@@ -1337,24 +1371,11 @@ mod tests {
     }
 
     #[test]
-    fn prepare_sequencer_config_accepts_nested_lez_layout() {
-        let temp = tempdir().unwrap();
-        let lez = temp.path().join("lez");
-        let state_dir = temp.path().join(".scaffold/state");
-
-        // Newer LEZ pins moved the repository payload under a `lez/` prefix.
-        // `localnet start` must find that config instead of only probing the
-        // pre-reorg flat path.
-        let config_path = lez.join("lez/sequencer/service/configs/debug/sequencer_config.json");
-        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        fs::write(&config_path, "{\n  \"port\": 3040\n}\n").unwrap();
-
-        let dest = prepare_sequencer_config(&lez, &state_dir, 4050).unwrap();
-        let doc: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
-
-        assert_eq!(doc["port"], serde_json::json!(4050));
-        assert_eq!(doc["max_block_size"], serde_json::json!("8 MiB"));
+    fn localnet_home_sits_next_to_the_state_dir() {
+        assert_eq!(
+            localnet_home_for(Path::new("/p/.scaffold/state/localnet.state")),
+            PathBuf::from("/p/.scaffold/localnet")
+        );
     }
 
     #[test]

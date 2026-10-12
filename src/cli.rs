@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
-use anyhow::{anyhow, bail};
+use anyhow::anyhow;
 use clap::{CommandFactory, Parser, Subcommand};
 
 use crate::cli_help::{
@@ -13,18 +13,15 @@ use crate::cli_help::{
 };
 use crate::commands::basecamp::{cmd_basecamp, BasecampAction};
 use crate::commands::build::cmd_build_shortcut;
-use crate::commands::client::cmd_client;
 use crate::commands::completions::cmd_completions;
 use crate::commands::deploy::cmd_deploy;
 use crate::commands::doctor::cmd_doctor;
-use crate::commands::idl::cmd_idl;
 use crate::commands::init::cmd_init;
 use crate::commands::localnet::{cmd_localnet, LocalnetAction};
 use crate::commands::new::{cmd_new, NewCommand};
 use crate::commands::report::cmd_report;
 use crate::commands::run::{cmd_run, RunInvocation};
 use crate::commands::setup::cmd_setup;
-use crate::commands::spel::cmd_spel;
 use crate::commands::testnode::{cmd_test_node, TestNodeAction};
 use crate::commands::wallet::{cmd_wallet, WalletAction};
 use crate::constants::{DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, VERSION};
@@ -84,9 +81,7 @@ enum Commands {
     #[command(about = "Alias for `create`")]
     #[command(before_long_help = NEW_ABOUT.as_str())]
     New(NewArgs),
-    #[command(
-        about = "Sync dependencies and build project-local binaries (sequencer, wallet, spel)"
-    )]
+    #[command(about = "Sync dependencies and build project-local binaries (sequencer, wallet)")]
     Setup(SetupArgs),
     #[command(about = "Build the project workspace and guest programs")]
     Build(BuildArgs),
@@ -99,22 +94,8 @@ enum Commands {
         about = "Manage isolated, short-lived sequencer test nodes for integration tests"
     )]
     TestNode(TestNodeArgs),
-    #[command(about = "Manage project wallet accounts and faucet top-ups")]
+    #[command(about = "Manage project wallet accounts and dev-funder top-ups")]
     Wallet(WalletArgs),
-    /// `spel` is dispatched via the early `spel_passthrough_args` intercept
-    /// before clap parses argv (the user types `lgs spel -- <args>`). The
-    /// variant exists so clap lists `spel` in `--help` output and renders
-    /// the `long_about` for `lgs spel --help`. The match arm below is
-    /// unreachable at runtime.
-    #[command(
-        about = "Forward arguments to the project-vendored `spel` binary",
-        long_about = "Forward arguments to the project-vendored `spel` binary.\n\n\
-                      Use the form: `logos-scaffold spel -- <spel-subcommand...>`\n\n\
-                      Examples:\n  \
-                      logos-scaffold spel -- program-id path/to/program.bin\n  \
-                      logos-scaffold spel -- generate-idl"
-    )]
-    Spel(SpelArgs),
     #[command(about = "Manage pre-seeded basecamp profiles for p2p dogfooding")]
     Basecamp(BasecampArgs),
     #[command(about = "Check project health and report actionable next steps")]
@@ -246,13 +227,11 @@ struct BuildArgs {
     prebuilt: bool,
     /// Override [build].guest for this invocation. `docker` (the default)
     /// builds guest programs inside the pinned risc0-guest-builder container
-    /// (reproducible program_id, needs Docker and cargo-risczero); `local`
+    /// (reproducible guest image ID, needs Docker and cargo-risczero); `local`
     /// uses the host risc0 toolchain (fast, no Docker, non-reproducible
-    /// program_id).
+    /// guest image ID).
     #[arg(long, value_enum, value_name = "MODE")]
     guest: Option<GuestBuildModeArg>,
-    #[command(subcommand)]
-    subcommand: Option<BuildSubcommand>,
     project_path: Option<PathBuf>,
 }
 
@@ -271,19 +250,6 @@ impl From<GuestBuildModeArg> for GuestBuildMode {
             GuestBuildModeArg::Docker => Self::Docker,
         }
     }
-}
-
-#[derive(Debug, Subcommand)]
-enum BuildSubcommand {
-    #[command(about = "Build IDL files from the current project")]
-    Idl(BuildSubArgs),
-    #[command(about = "Build client code from IDL files")]
-    Client(BuildSubArgs),
-}
-
-#[derive(Debug, clap::Args)]
-struct BuildSubArgs {
-    project_path: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -940,7 +906,10 @@ enum LocalnetSubcommand {
 
 #[derive(Debug, clap::Args)]
 struct LocalnetStartArgs {
-    #[arg(long, default_value_t = 20)]
+    /// Seconds to wait for the sequencer RPC. A restart replays the whole
+    /// stored chain first (LEZ 0.3 standalone mode never finalizes blocks),
+    /// so an older localnet takes longer to come back.
+    #[arg(long, default_value_t = crate::constants::DEFAULT_RUN_LOCALNET_TIMEOUT_SEC)]
     timeout_sec: u64,
 }
 
@@ -993,19 +962,12 @@ struct WalletArgs {
     command: WalletSubcommand,
 }
 
-#[derive(Debug, clap::Args)]
-struct SpelArgs {
-    /// Trailing args forwarded to the project-vendored `spel` binary.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    args: Vec<String>,
-}
-
 #[derive(Debug, Subcommand)]
 enum WalletSubcommand {
     #[command(about = "List wallet accounts (same as `wallet account list`)")]
     #[command(after_long_help = EXAMPLES_WALLET_LIST)]
     List(WalletListArgs),
-    #[command(about = "Top up wallet using pinata faucet claim")]
+    #[command(about = "Top up wallet with a transfer from the localnet dev funder")]
     #[command(after_long_help = EXAMPLES_WALLET_TOPUP)]
     Topup(WalletTopupArgs),
     #[command(about = "Manage project default wallet")]
@@ -1027,6 +989,10 @@ struct WalletTopupArgs {
     address: Option<String>,
     #[arg(long = "address", value_name = "ADDRESS")]
     address_flag: Option<String>,
+    /// Native units to transfer from the localnet dev funder (default
+    /// 1000000000, enough for a few dozen deployments and calls).
+    #[arg(long, value_name = "UNITS")]
+    amount: Option<u64>,
     #[arg(long)]
     dry_run: bool,
     /// Emit the topup outcome as a JSON object instead of human-readable text.
@@ -1249,14 +1215,8 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
         .unwrap_or("logos-scaffold")
         .to_string();
 
-    if is_spel_help_request(&args, passthrough_start) {
-        return print_spel_help(&bin_name);
-    }
     if let Some(action) = wallet_passthrough_action(&args, passthrough_start)? {
         return cmd_wallet(action);
-    }
-    if let Some(spel_args) = spel_passthrough_args(&args, passthrough_start)? {
-        return cmd_spel(spel_args);
     }
 
     let cli = match Cli::try_parse_from(&args) {
@@ -1289,33 +1249,11 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
             cache_root: args.cache_root,
         }),
         Some(Commands::Setup(args)) => cmd_setup(args.prebuilt),
-        Some(Commands::Build(args)) => match args.subcommand {
-            // `build idl` / `build client` regenerate artefacts from source
-            // and never compile a guest, so `--guest` has nothing to act on.
-            // Rejecting it beats accepting and ignoring it: someone who typed
-            // `lgs build --guest docker idl` expecting a deterministic guest
-            // would otherwise get a silent local build.
-            Some(_) if args.guest.is_some() => bail!(
-                "`--guest` applies to `logos-scaffold build`, which compiles the guest programs. \
-                 `build idl` and `build client` only regenerate IDL/client code from source. \
-                 Run `logos-scaffold build --guest <MODE>` on its own."
-            ),
-            Some(BuildSubcommand::Idl(sub)) => cmd_idl(
-                &sub.project_path
-                    .map(|p| vec!["build".to_string(), p.to_string_lossy().to_string()])
-                    .unwrap_or_else(|| vec!["build".to_string()]),
-            ),
-            Some(BuildSubcommand::Client(sub)) => cmd_client(
-                &sub.project_path
-                    .map(|p| vec!["build".to_string(), p.to_string_lossy().to_string()])
-                    .unwrap_or_else(|| vec!["build".to_string()]),
-            ),
-            None => cmd_build_shortcut(
-                args.project_path,
-                args.prebuilt,
-                args.guest.map(GuestBuildMode::from),
-            ),
-        },
+        Some(Commands::Build(args)) => cmd_build_shortcut(
+            args.project_path,
+            args.prebuilt,
+            args.guest.map(GuestBuildMode::from),
+        ),
         Some(Commands::Deploy(args)) => cmd_deploy(args.program_name, args.program_path, args.json),
         Some(Commands::Localnet(localnet)) => {
             let action = match localnet.command {
@@ -1505,17 +1443,6 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
             };
             cmd_test_node(action)
         }
-        Some(Commands::Spel(_)) => {
-            // The early `spel_passthrough_args` intercept above always
-            // wins for the runtime `spel -- <args>` form. The clap variant
-            // exists only so `--help` lists `spel` and renders its
-            // `long_about`; reaching this arm means clap parsed `spel`
-            // without `--`, which the intercept would already have
-            // rejected with a hint. Kept as `unreachable!` so a future
-            // refactor of the intercept surfaces immediately rather than
-            // silently no-op'ing.
-            unreachable!("spel is intercepted by spel_passthrough_args before clap parses argv")
-        }
         Some(Commands::Wallet(args)) => {
             let action = match args.command {
                 WalletSubcommand::List(args) => WalletAction::List {
@@ -1528,6 +1455,7 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                         args.address_flag,
                         "wallet topup",
                     )?,
+                    amount: args.amount,
                     dry_run: args.dry_run,
                     json: args.json,
                 },
@@ -1645,25 +1573,6 @@ pub(crate) fn print_help(bin_name: &str) -> DynResult<()> {
     Ok(())
 }
 
-fn print_spel_help(bin_name: &str) -> DynResult<()> {
-    let mut cmd = Cli::command().bin_name(bin_name);
-    if let Some(spel) = cmd.find_subcommand_mut("spel") {
-        spel.print_long_help()?;
-        println!();
-        Ok(())
-    } else {
-        print_help(bin_name)
-    }
-}
-
-fn is_spel_help_request(args: &[String], start: usize) -> bool {
-    args.len() > start + 1 && args[start] == "spel" && is_help_token(&args[start + 1])
-}
-
-fn is_help_token(token: &str) -> bool {
-    matches!(token, "--help" | "-h" | "help" | "-?")
-}
-
 fn apply_quiet_from_env() {
     if std::env::var("LOGOS_SCAFFOLD_QUIET")
         .map(|v| {
@@ -1688,8 +1597,8 @@ fn leading_global_flags_end(args: &[String]) -> usize {
 
 /// Advance past any consecutive `-q`/`--quiet` tokens in `args` starting
 /// at `from`. Returns the new index and whether at least one was consumed.
-/// Used inside the passthrough sniffers so `lgs wallet -q -- <args...>` /
-/// `lgs spel -q -- <args...>` are recognized, matching clap's `global = true`
+/// Used inside the passthrough sniffer so `lgs wallet -q -- <args...>`
+/// are recognized, matching clap's `global = true`
 /// semantics on the `--quiet` flag. Caller is responsible for calling
 /// `set_command_echo(false)` if the second tuple element is `true`.
 fn skip_inline_quiet(args: &[String], from: usize) -> (usize, bool) {
@@ -1700,48 +1609,6 @@ fn skip_inline_quiet(args: &[String], from: usize) -> (usize, bool) {
         i += 1;
     }
     (i, seen)
-}
-
-/// Forward `lgs spel -- <args...>` to the project-vendored `spel` binary.
-/// Mirrors `wallet_passthrough_action` so the same `--` convention applies
-/// across passthroughs. When `spel` is invoked without `--`, intercept early
-/// and surface a hint pointing at the right form — clap's "unknown
-/// subcommand" message would otherwise leave the user guessing. `start` is
-/// the index after any leading global flags (e.g. `-q`), matching the
-/// signature of `wallet_passthrough_action` so `lgs -q spel -- <args...>`
-/// composes the same way. `lgs spel -q -- <args...>` (the in-between form)
-/// is also accepted via `skip_inline_quiet`.
-fn spel_passthrough_args(args: &[String], start: usize) -> DynResult<Option<Vec<String>>> {
-    if args.len() <= start || args[start] != "spel" {
-        return Ok(None);
-    }
-    // Help spellings are handled before this function so the user sees the
-    // variant's `long_about` instead of the passthrough hint.
-    if args.len() > start + 1 && is_help_token(&args[start + 1]) {
-        return Ok(None);
-    }
-    let (sep_idx, quiet_seen) = skip_inline_quiet(args, start + 1);
-    if args.len() <= sep_idx {
-        return Err(anyhow!(
-            "`spel` requires arguments. Use the passthrough form, e.g. `logos-scaffold spel -- program-id <bin>`."
-        ));
-    }
-    if args[sep_idx] != "--" {
-        return Err(anyhow!(
-            "`spel {0} ...` is not a scaffold subcommand. Did you mean `logos-scaffold spel -- {0} ...`? \
-             The `--` separator forwards every following argument to the project-vendored `spel` binary.",
-            args[sep_idx]
-        ));
-    }
-    if args.len() == sep_idx + 1 {
-        return Err(anyhow!(
-            "spel passthrough requires at least one argument after `--`. Example: `logos-scaffold spel -- program-id <bin>`"
-        ));
-    }
-    if quiet_seen {
-        set_command_echo(false);
-    }
-    Ok(Some(args[sep_idx + 1..].to_vec()))
 }
 
 fn wallet_passthrough_action(args: &[String], start: usize) -> DynResult<Option<WalletAction>> {

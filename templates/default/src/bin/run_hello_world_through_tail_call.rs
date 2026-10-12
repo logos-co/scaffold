@@ -1,52 +1,83 @@
-use anyhow::Context;
-use clap::Parser;
-use example_program_deployment_methods::SIMPLE_TAIL_CALL_ELF;
-use nssa::{
-    PublicTransaction,
-    public_transaction::{Message, WitnessSet},
-};
-use sequencer_service_rpc::RpcClient as _;
+// logos-scaffold: identical to LEZ v0.3.1's examples/program_deployment runner
+// except that the public transaction is submitted through
+// `program_deployment::send_paid_public_transaction`, which adds the fee
+// declaration (paid by the payer argument) a LEZ 0.3 sequencer requires.
+use lee::{AccountId, ProgramShardSelector, public_transaction::Message};
+use program_deployment::{deploy_program, send_paid_public_transaction};
 use wallet::WalletCore;
 
-#[path = "../lib.rs"]
-mod scaffold_lib;
-use scaffold_lib::runner_support::{load_program, parse_account_id};
-
-#[derive(Parser, Debug)]
-struct Cli {
-    #[arg(long)]
-    program_path: Option<String>,
-    account_id: String,
-}
+// Before running this example, compile the `simple_tail_call.rs` and `hello_world.rs` guest
+// programs with:
+//
+//   cargo risczero build --manifest-path examples/program_deployment/methods/guest/Cargo.toml
+//
+// Note: you must run the above command from the root of the `logos-execution-zone` repository.
+// Note: The compiled binaries are stored in
+// methods/guest/target/riscv32im-risc0-zkvm-elf/docker/{simple_tail_call,hello_world}.bin
+//
+//
+// Usage:
+//   cargo run --bin run_hello_world_through_tail_call \
+//     /path/to/simple_tail_call/binary /path/to/hello_world/binary <account_id> <payer_account_id>
+//
+// Example:
+//   cargo run --bin run_hello_world_through_tail_call \
+//     methods/guest/target/riscv32im-risc0-zkvm-elf/docker/simple_tail_call.bin \
+//     methods/guest/target/riscv32im-risc0-zkvm-elf/docker/hello_world.bin \
+//     Ds8q5PjLcKwwV97Zi7duhRVF9uwA2PuYMoLL7FwCzsXE \
+//     <funded payer account_id>
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    let wallet_core = WalletCore::from_env().context("failed to initialize wallet from environment")?;
+async fn main() {
+    // Initialize wallet
+    let mut wallet_core = WalletCore::from_env().unwrap();
 
-    let program = load_program(
-        cli.program_path.as_deref(),
-        SIMPLE_TAIL_CALL_ELF,
-        "simple_tail_call",
-    )?;
-    let account_id = parse_account_id(&cli.account_id)?;
+    // Parse arguments
+    // First argument is the path to the caller (`simple_tail_call`) program binary
+    let caller_path = std::env::args_os().nth(1).unwrap().into_string().unwrap();
+    // Second argument is the path to the callee (`hello_world`) program binary
+    let callee_path = std::env::args_os().nth(2).unwrap().into_string().unwrap();
+    // Third argument is the account_id
+    let account_id: AccountId = std::env::args_os()
+        .nth(3)
+        .unwrap()
+        .into_string()
+        .unwrap()
+        .parse()
+        .unwrap();
+    // Fourth argument is an existing, funded account to pay the deployment fees
+    let payer: AccountId = std::env::args_os()
+        .nth(4)
+        .unwrap()
+        .into_string()
+        .unwrap()
+        .parse()
+        .unwrap();
 
-    let message = Message::try_new(program.id(), vec![account_id], vec![], ())
-        .context("failed to build tail-call transaction message")?;
-    let witness_set = WitnessSet::for_message(&message, &[]);
-    let tx = PublicTransaction::new(message, witness_set);
-
-    let response = wallet_core
-        .sequencer_client
-        .send_transaction(tx.into())
+    // Deploy both programs through `program_loader`; `simple_tail_call` reads the callee's
+    // address from its own instruction data.
+    let caller_bytecode: Vec<u8> = std::fs::read(caller_path).unwrap();
+    let caller_account_id = deploy_program(&mut wallet_core, caller_bytecode, payer)
         .await
-        .context("failed to submit public transaction to localnet")?;
+        .unwrap();
+    let callee_bytecode: Vec<u8> = std::fs::read(callee_path).unwrap();
+    let callee_account_id = deploy_program(&mut wallet_core, callee_bytecode, payer)
+        .await
+        .unwrap();
 
-    println!(
-        "submitted transaction: tx_hash={}",
-        hex::encode(response.0)
-    );
-    println!("verification hint: wallet account get --account-id Public/{account_id}");
-
-    Ok(())
+    let instruction_data = callee_account_id;
+    let nonces = vec![];
+    let signing_keys = [];
+    // The caller only needs the account ID; the callee selects its shard.
+    let message = Message::try_new(
+        caller_account_id,
+        vec![ProgramShardSelector::native_balance(account_id)],
+        nonces,
+        instruction_data,
+    )
+    .unwrap();
+    // Submit the transaction, paying its fee from `payer`.
+    let _response = send_paid_public_transaction(&wallet_core, message, &signing_keys, payer)
+        .await
+        .unwrap();
 }

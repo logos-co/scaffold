@@ -37,17 +37,14 @@ Run inside a project directory that contains scaffold.toml (after create or init
 pub(crate) const EXAMPLES_BUILD: &str = r"Examples:
   logos-scaffold build
   logos-scaffold build ./my-project
-  logos-scaffold build idl
-  logos-scaffold build idl ./my-project
-  logos-scaffold build client
-  logos-scaffold build client ./my-project
   logos-scaffold build --guest local
 
 Guest build strategy:
   Guest programs build inside the pinned risczero/risc0-guest-builder
-  container by default, for a reproducible program_id (needs Docker and
-  cargo-risczero). --guest local builds them with the host risc0 toolchain
-  instead: faster and Docker-free, but program_id can differ across machines.
+  container by default, for byte-identical guest binaries across machines
+  (needs Docker and cargo-risczero). --guest local builds them with the host
+  risc0 toolchain instead: faster and Docker-free, but the binary can differ
+  across machines.
   Set [build].guest in scaffold.toml to make the choice permanent.";
 
 pub(crate) const EXAMPLES_DEPLOY: &str = r"Examples:
@@ -57,6 +54,12 @@ pub(crate) const EXAMPLES_DEPLOY: &str = r"Examples:
   logos-scaffold deploy --json
   logos-scaffold deploy hello_world --json
 
+How it works (LEZ 0.3):
+  Each program is uploaded through the program_loader builtin into fresh
+  segment accounts plus a header account; the header account id is the
+  program_id. Fees are paid by the default wallet (run `wallet topup` first).
+  Program ids are recorded in .scaffold/state/deployments.json.
+
 Machine-readable output:
   Use --json for stable parsing (recommended for automation).
 
@@ -65,7 +68,11 @@ Environment:
 
 pub(crate) const EXAMPLES_LOCALNET_START: &str = r"Examples:
   logos-scaffold localnet start
-  logos-scaffold localnet start --timeout-sec 45";
+  logos-scaffold localnet start --timeout-sec 600
+
+Restarts replay the stored chain before the RPC opens (LEZ 0.3 standalone mode
+never finalizes blocks), so restart time grows with the chain's age;
+`localnet reset --yes` starts over from genesis.";
 
 pub(crate) const EXAMPLES_LOCALNET_STOP: &str = r"Examples:
   logos-scaffold localnet stop";
@@ -114,8 +121,13 @@ pub(crate) const EXAMPLES_WALLET_TOPUP: &str = r"Examples:
   logos-scaffold wallet topup
   logos-scaffold wallet topup Public/6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV
   logos-scaffold wallet topup --address Public/6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV
+  logos-scaffold wallet topup --amount 5000000000
   logos-scaffold wallet topup --dry-run
   logos-scaffold wallet topup --json
+
+Funding:
+  Transfers from the dev funder account every scaffold localnet funds at
+  genesis (imported into the project wallet by `setup`).
 
 Exit codes:
   0  topup confirmed.

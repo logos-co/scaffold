@@ -1,28 +1,25 @@
 # Configuring `lgs run`
 
-`lgs run` is the inner loop: it chains build (which chains setup), IDL build,
-localnet start, wallet topup, and deploy into one command. It works with no
+`lgs run` is the inner loop: it chains build (which chains setup), localnet
+start, wallet topup, and deploy into one command. It works with no
 configuration at all. This page covers the `[run]` section of `scaffold.toml`
 for projects that need to change what the pipeline does, plus the `[build]`
 section that decides how the pipeline compiles guest programs.
 
 For the command surface itself, see [commands.md](./commands.md).
 
-To run one or more post-deploy hooks automatically (e.g. submit a transaction
-with [spel](https://github.com/logos-co/spel)), add a `[run]` section to
+To run one or more post-deploy hooks automatically (e.g. send a transaction
+to the program `deploy` just created), add a `[run]` section to
 `scaffold.toml`. `post_deploy` is a list of shell commands executed in order;
 the run aborts at the first non-zero exit:
 
 ```toml
 [run]
 post_deploy = [
-  "lgs spel -- --idl $SCAFFOLD_IDL_DIR/counter.json -p $SCAFFOLD_GUEST_BIN init",
-  "lgs spel -- --idl $SCAFFOLD_IDL_DIR/counter.json -p $SCAFFOLD_GUEST_BIN increment --by 5",
+  "lgs wallet -- account get --account-id Public/$SCAFFOLD_PROGRAM_ID_hello_world",
+  "scripts/smoke.sh",
 ]
 ```
-
-The `lgs spel --` passthrough invokes the project-vendored `spel` binary
-so hooks pick up the same pinned version `deploy` used.
 
 A single command may also be written as a plain string for brevity:
 `post_deploy = "echo done"`.
@@ -33,13 +30,12 @@ environment variables pre-set:
 | Variable | Value |
 |---|---|
 | `SEQUENCER_URL` | `http://127.0.0.1:<port>` (from `scaffold.toml`) |
-| `NSSA_WALLET_HOME_DIR` | Absolute path to project wallet directory (name read by LEZ up to v0.1.2) |
-| `LEE_WALLET_HOME_DIR` | Same path under the name LEZ v0.2.0 reads. Both are always set, so a hook that execs the wallet binary works on either pin |
+| `LEE_WALLET_HOME_DIR` | Absolute path to the project wallet directory (the variable the LEZ 0.3 wallet reads) |
 | `SCAFFOLD_PROJECT_ROOT` | Absolute path to project root |
-| `SCAFFOLD_IDL_DIR` | Absolute path to IDL output directory |
-| `SCAFFOLD_TOPUP_SKIPPED` | `1` when step 4 was skipped (`topup = false`), `0` when scaffold topped up the wallet. Always set |
-| `SCAFFOLD_DEPLOY_SKIPPED` | `1` when step 5 deployed nothing — either `deploy = false`, or the deploy cache found guest binaries, IDL, config and sequencer unchanged — and `0` when it deployed. Always set |
-| `SCAFFOLD_PROGRAM_ID` | risc0 image ID (hex) of the deployed program. Set only when the project has exactly one deployable program; unset if `spel program-id` cannot extract the ID |
+| `SCAFFOLD_TOPUP_SKIPPED` | `1` when step 3 was skipped (`topup = false`), `0` when scaffold topped up the wallet. Always set |
+| `SCAFFOLD_DEPLOY_SKIPPED` | `1` when step 4 deployed nothing — either `deploy = false`, or the deploy cache found guest binaries, config and sequencer unchanged — and `0` when it deployed. Always set |
+| `SCAFFOLD_PROGRAM_ID` | Program id (base58 `program_loader` header account) recorded for the deployed program in `.scaffold/state/deployments.json`. Set only when the project has exactly one deployable program and it has a recorded deployment |
+| `SCAFFOLD_PROGRAM_ID_<name>` | The same, per program (name sanitized for env-var legality); `SCAFFOLD_PROGRAMS` lists the names |
 | `SCAFFOLD_GUEST_BIN` | Absolute path to the guest `.bin`. Set only when the project has exactly one deployable program |
 
 `SCAFFOLD_TOPUP_SKIPPED` and `SCAFFOLD_DEPLOY_SKIPPED` describe the run as a
@@ -57,8 +53,8 @@ picking up the wrong program.
 `run` deploys programs it finds under `methods/guest/src/bin`. A project
 that owns deployment itself — it deploys from a `post_deploy` hook, or keeps
 its guest program outside that default directory — can set `deploy = false`
-to skip scaffold's deploy step (step 5). The pipeline then runs
-build → IDL → localnet → topup → `post_deploy`, without requiring the default
+to skip scaffold's deploy step (step 4). The pipeline then runs
+build → localnet → topup → `post_deploy`, without requiring the default
 program directory to exist. It works inline under `[run]` or per profile:
 
 ```toml
@@ -88,12 +84,12 @@ needs it.
 
 ## Self-funding projects (`topup = false`)
 
-`run` tops up the project's default wallet before deploying (step 4). A
-project that funds its own accounts — e.g. its demo binary claims from the
-faucet at runtime, or a `post_deploy` hook handles funding — can set
+`run` tops up the project's default wallet before deploying (step 3). A
+project that funds its own accounts — e.g. its demo binary transfers from the
+dev funder at runtime, or a `post_deploy` hook handles funding — can set
 `topup = false` to skip that step and keep funding in one place instead of
 splitting it between scaffold and the project. The pipeline then runs
-build → IDL → localnet → deploy → `post_deploy`. It works inline under
+build → localnet → deploy → `post_deploy`. It works inline under
 `[run]` or per profile, and combines with `deploy = false`:
 
 ```toml
@@ -103,16 +99,17 @@ post_deploy = ["cargo run --bin demo"]
 ```
 
 Hooks see `SCAFFOLD_TOPUP_SKIPPED=1` on such a run, so a funding hook can
-claim only when scaffold did not. The topup step itself needs a destination
-address, but on a pin whose wallet config ships preconfigured accounts one is
-already in place by step 4: step 1 of every `lgs run` chains `lgs setup`,
-which seeds `.scaffold/state/wallet.state` from the first preconfigured
-public account whenever that file is missing — and `--reset`, which wipes the
-wallet later, at step 3, re-seeds it before the run continues.
+fund only when scaffold did not. The topup step itself needs a destination
+address, and one is already in place by step 3: step 1 of every `lgs run`
+chains `lgs setup`, which seeds `.scaffold/state/wallet.state` from the
+wallet's first derived public account whenever that file is missing — and
+`--reset`, which wipes the wallet later, at step 2, re-seeds it (and
+re-imports the dev funder) before the run continues.
 
 Skipping topup does not move the funding requirement, only the responsibility
-for meeting it. With the default `deploy = true`, step 5 still runs against
-whatever the wallet holds — so if the deploy path needs funds, the project
+for meeting it. LEZ 0.3 charges fees on public transactions and `deploy` pays
+them from the default wallet, so with the default `deploy = true`, step 4
+still runs against whatever that wallet holds — so if the deploy path needs funds, the project
 has to provide them *before* deploy, not from a `post_deploy` hook that runs
 after it. A project that funds from a hook generally wants `deploy = false`
 too, and to deploy from that same hook after funding.
@@ -150,8 +147,7 @@ glob (or `include` is unset, meaning "any path") **and** matches zero
 `exclude` globs — `exclude` always wins. Globs are project-relative,
 gitignore-style: `**` spans path segments, `*`/`?` match within a segment,
 and a slash-less pattern (`Cargo.lock`) matches at any depth. `.scaffold`,
-`target`, `.git`, and the IDL output dir are always ignored regardless of
-these filters. Override the debounce per invocation with
+`target`, and `.git` are always ignored regardless of these filters. Override the debounce per invocation with
 `lgs run --watch --watch-debounce-ms 1500` (CLI wins over
 `[run.watch].debounce_ms`, which wins over the 500ms default).
 
@@ -161,8 +157,12 @@ sequencer and `lgs doctor` reports the project.
 ## `[build]` — guest program build strategy
 
 `lgs build` compiles the risc0 guest programs under `methods/` one of two
-ways. The choice decides whether the guest ELF — and therefore the
-`program_id` the sequencer stores for it — is reproducible.
+ways. The choice decides whether the guest binary — and therefore its risc0
+image ID, which private executions prove against — is reproducible. (In LEZ
+0.3 the on-chain *program id* is the `program_loader` header account a deploy
+creates, so it is new on every deploy regardless; what reproducibility buys is
+that every machine deploys the same bytes. `deploy --json` reports them as
+`elf_sha256`.)
 
 ```toml
 [build]
@@ -170,10 +170,10 @@ guest = "docker"                  # "docker" (default) | "local"
 risc0_docker_tag = "r0.1.97.0"    # optional; scaffold's pin is the default
 ```
 
-| `guest` | How | Needs | `program_id` |
+| `guest` | How | Needs | Guest binary |
 |---|---|---|---|
 | `local` | `cargo build --release --manifest-path methods/Cargo.toml`, i.e. the guest crate's own `risc0_build::embed_methods()` | nothing beyond the host Rust toolchain | **Not reproducible.** Depends on the host's Rust and clang versions, so two developers — or a developer and CI — can produce different bytes from the same source |
-| `docker` (default) | `cargo risczero build` inside `risczero/risc0-guest-builder:<tag>` | Docker daemon running, `cargo-risczero` on `PATH` (see below) | **Reproducible.** Same source plus same tag gives the same bytes, and therefore the same `program_id`, on any machine |
+| `docker` (default) | `cargo risczero build` inside `risczero/risc0-guest-builder:<tag>` | Docker daemon running, `cargo-risczero` on `PATH` (see below) | **Reproducible.** Same source plus same tag gives the same bytes, and therefore the same image ID, on any machine |
 
 `cargo-risczero` is a **separate rzup component** — `rzup install rust`, which
 is what you need for a `local` build, does not provide it:
@@ -193,14 +193,14 @@ RISC0_DOCKER_CONTAINER_TAG=r0.1.97.0 cargo risczero build --manifest-path method
 `lgs build --guest docker` always sets it for you; this only bites when
 reaching past scaffold to the underlying tool.
 
-`docker` is the default so that a `program_id` is never silently
+`docker` is the default so that a guest binary is never silently
 non-portable. If you do not have Docker, or want faster inner-loop builds while
-a `program_id` does not matter yet, opt out with `guest = "local"`; it is much
+reproducibility does not matter yet, opt out with `guest = "local"`; it is much
 faster and needs no container runtime. `lgs build --guest <local|docker>`
 overrides the setting for one invocation.
 
 `risc0_docker_tag` pins the guest Rust toolchain. **Changing it changes every
-`program_id` the project produces**, so treat a bump the same way you would
+guest binary (and image ID) the project produces**, so treat a bump the same way you would
 treat a dependency bump: deliberate, and re-verified downstream.
 
 ### What each mode writes, and what `deploy` picks up
@@ -220,8 +220,8 @@ when `guest = "docker"` (the default) but Docker or `cargo-risczero` is missing.
 
 - The whole project directory is the Docker build context (risc0 excludes
   `.git`, `target`, `node_modules`, and `tmp`, but nothing else). A project
-  root holding large generated data — extracted circuits under
-  `.scaffold/circuits`, vendored dependency checkouts — makes each build's
+  root holding large generated data — the localnet chain under
+  `.scaffold/localnet`, vendored dependency checkouts — makes each build's
   context transfer slower.
 - The builder image is ~1.7 GB on first pull, and the container rebuilds the
   guest from scratch rather than reusing your local cargo cache.
@@ -235,7 +235,7 @@ when `guest = "docker"` (the default) but Docker or `cargo-risczero` is missing.
 
 The container build runs `cargo build --locked`, so the workspace `Cargo.lock`
 must exist and match `Cargo.toml`. More importantly: **the lockfile is an input
-to the `program_id`, exactly like the source and the builder tag.** Same source
+to the guest binary, exactly like the source and the builder tag.** Same source
 plus same tag plus *a different lockfile* is a different ELF.
 
 That is not hypothetical. Cargo's MSRV-aware resolver picks dependency versions
@@ -243,10 +243,12 @@ based on the host toolchain, so two developers who run `lgs build` on machines
 with different Rust versions get different lockfiles from identical source —
 measured here as `ruint 1.17.2`/`enum-ordinalize 4.3.2` on one machine and
 `1.20.0`/`4.4.2` on another. Both build fine, and both produce a *different*
-`program_id`.
+binary.
 
-So commit `Cargo.lock` (the generated `.gitignore` does not exclude it) and
-treat a lockfile change as a `program_id` change. Refresh it with a plain
+`lgs new` therefore seeds the project's `Cargo.lock` from the pinned LEZ
+release's own lockfile, so every new project starts from the dependency
+versions LEZ was tested with. Commit `Cargo.lock` (the generated `.gitignore`
+does not exclude it) and treat a lockfile change as a binary change. Refresh it with a plain
 `lgs build` when a dependency edit makes `--locked` fail.
 - risc0 prints `Cargo.lock not found in path .../methods/guest/Cargo.lock`
   before it starts. It is looking next to the guest manifest; scaffold projects

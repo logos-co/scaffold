@@ -5,7 +5,6 @@ const TEST_PIN: &str = "767b5afd388c7981bcdf6f5b5c80159607e07e5b";
 
 pub struct TestNodeFixtures {
     pub config_path: PathBuf,
-    pub circuits_path: PathBuf,
     pub sequencer_observation_path: PathBuf,
     pub python_path: PathBuf,
 }
@@ -17,11 +16,9 @@ pub fn setup_test_node_project(project_root: &Path) -> TestNodeFixtures {
     let sequencer_observation_path = project_root.join("test-node-sequencer-observation.json");
     let config_path =
         write_test_node_sequencer_stub(&lez_path, &sequencer_observation_path, &python_path);
-    let circuits_path = write_circuits_stub(project_root);
     write_scaffold_toml(project_root, &lez_path);
     TestNodeFixtures {
         config_path,
-        circuits_path,
         sequencer_observation_path,
         python_path,
     }
@@ -56,12 +53,12 @@ fn write_test_node_sequencer_stub(
     python_path: &Path,
 ) -> PathBuf {
     let sequencer_bin = lez_path.join("target/release/sequencer_service");
-    let config_path = lez_path.join("sequencer/service/configs/debug/sequencer_config.json");
+    let config_path = lez_path.join("lez/sequencer/service/configs/debug/sequencer_config.json");
     fs::create_dir_all(sequencer_bin.parent().expect("parent")).expect("create sequencer dir");
     fs::create_dir_all(config_path.parent().expect("parent")).expect("create config dir");
     fs::write(
         &config_path,
-        r#"{"home": ".", "genesis_id": 1, "block_create_timeout": "2s", "retry_pending_blocks_timeout": "3s"}"#,
+        r#"{"home": ".", "block_create_timeout": "2s", "retry_pending_blocks_timeout": "3s", "genesis": []}"#,
     )
     .expect("write sequencer config");
     fs::write(
@@ -139,24 +136,13 @@ PY
 }
 
 fn write_scaffold_toml(project_root: &Path, lez_path: &Path) {
-    let spel_path = project_root.join("spel");
     let content = format!(
-        "[scaffold]\nversion = \"0.2.0\"\ncache_root = \"{}\"\n\n[repos.lez]\nsource = \"https://github.com/logos-blockchain/logos-execution-zone.git\"\npin = \"{}\"\npath = \"{}\"\n\n[repos.spel]\nsource = \"https://github.com/logos-co/spel.git\"\npin = \"{}\"\npath = \"{}\"\n\n[wallet]\nhome_dir = \".scaffold/wallet\"\n",
+        "[scaffold]\nversion = \"0.3.0\"\ncache_root = \"{}\"\n\n[repos.lez]\nsource = \"https://github.com/logos-blockchain/logos-execution-zone.git\"\npin = \"{}\"\npath = \"{}\"\n\n[wallet]\nhome_dir = \".scaffold/wallet\"\n",
         project_root.join("cache").display(),
         TEST_PIN,
         lez_path.display(),
-        TEST_PIN,
-        spel_path.display(),
     );
     fs::write(project_root.join("scaffold.toml"), content).expect("write scaffold.toml");
-}
-
-fn write_circuits_stub(project_root: &Path) -> PathBuf {
-    let circuits_path = project_root.join("circuits");
-    let sentinel = circuits_path.join("pol/verification_key.json");
-    fs::create_dir_all(sentinel.parent().expect("parent")).expect("create circuits dir");
-    fs::write(&sentinel, "{}").expect("write circuits sentinel");
-    circuits_path
 }
 
 fn python3_path() -> PathBuf {

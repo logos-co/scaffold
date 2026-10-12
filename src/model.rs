@@ -81,16 +81,16 @@ impl Default for LocalnetConfig {
 }
 
 /// Which toolchain `lgs build` compiles the `methods/` risc0 guest programs
-/// with. The choice decides whether the emitted guest ELF — and therefore the
-/// `program_id` the sequencer stores for it — is reproducible.
+/// with. The choice decides whether the emitted guest ELF — and therefore its
+/// risc0 image ID, which private executions prove against — is reproducible.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GuestBuildMode {
     /// `cargo build --release --manifest-path methods/Cargo.toml`, i.e. the
     /// guest crate's own `risc0_build::embed_methods()`. Uses the host's Rust
-    /// and clang, needs no Docker, and is fast — but the ELF (and its
-    /// `program_id`) can differ between machines, OS versions, and toolchain
-    /// versions. Opt-in: choose it when Docker is unavailable or the
-    /// `program_id` does not need to be portable.
+    /// and clang, needs no Docker, and is fast — but the ELF (and its image
+    /// ID) can differ between machines, OS versions, and toolchain versions.
+    /// Opt-in: choose it when Docker is unavailable or the image ID does not
+    /// need to be portable.
     Local,
     /// `cargo risczero build` inside the pinned
     /// `risczero/risc0-guest-builder:<tag>` container — the strategy `lssa`
@@ -142,28 +142,10 @@ impl Default for BuildConfig {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct CircuitsConfig {
-    pub(crate) version: String,
-    pub(crate) url_template: Option<String>,
-    pub(crate) install_dir: String,
-}
-
-impl Default for CircuitsConfig {
-    fn default() -> Self {
-        Self {
-            version: crate::constants::DEFAULT_CIRCUITS_VERSION.to_string(),
-            url_template: None,
-            install_dir: ".scaffold/circuits".to_string(),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
 pub(crate) struct Config {
     pub(crate) version: String,
     pub(crate) cache_root: String,
     pub(crate) lez: RepoRef,
-    pub(crate) spel: RepoRef,
     /// `[repos.basecamp]`. Optional — projects that don't use basecamp can
     /// omit the section. When `None`, basecamp commands fail with a hint
     /// pointing at `init`.
@@ -171,7 +153,6 @@ pub(crate) struct Config {
     /// `[repos.lgpm]`. Optional, same reasoning as `basecamp_repo`.
     pub(crate) lgpm_repo: Option<RepoRef>,
     pub(crate) wallet_home_dir: String,
-    pub(crate) circuits: CircuitsConfig,
     pub(crate) framework: FrameworkConfig,
     /// `[build]` — guest-program build strategy (`lgs build`, `lgs run`) and
     /// the artefact layout `lgs deploy` ships.
@@ -398,13 +379,6 @@ pub struct ReportManifest {
 pub(crate) struct FrameworkConfig {
     pub(crate) kind: String,
     pub(crate) version: String,
-    pub(crate) idl: FrameworkIdlConfig,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct FrameworkIdlConfig {
-    pub(crate) spec: String,
-    pub(crate) path: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -426,7 +400,7 @@ pub(crate) struct RunProfile {
     pub(crate) deploy: bool,
     /// Whether `lgs run` performs its own wallet-topup step. Defaults to
     /// `true`. Set `topup = false` for a project that funds its own accounts
-    /// (e.g. claims from the faucet at runtime, from a demo binary or a
+    /// (e.g. transfers from its own funded key at runtime, from a demo binary or a
     /// `post_deploy` hook): the pipeline then skips step 4's topup — along
     /// with its requirement that a destination address be resolvable — and
     /// proceeds straight to deploy/hooks. Hooks observe the choice through

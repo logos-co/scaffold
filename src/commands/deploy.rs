@@ -2,22 +2,25 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 use walkdir::WalkDir;
 
-use crate::constants::SPEL_BIN_REL_PATH;
 use crate::process::{run_with_stdin, EchoGuard};
-use crate::project::{load_project, resolve_repo_path};
+use crate::project::load_project;
 use crate::DynResult;
 
+use super::deployments::{record_deployments, DeploymentRecord};
 use super::wallet_support::{
     default_sequencer_http_url_for_project, extract_tx_identifier, load_wallet_runtime,
-    probe_sequencer_reachable, rpc_get_last_block_id, sequencer_connectivity_failure_with_probe,
-    sequencer_unreachable_hint, set_wallet_home_env, summarize_command_failure, wallet_password,
-    RpcReachabilityError,
+    probe_sequencer_reachable, read_default_wallet_address, rpc_get_last_block_id,
+    sequencer_connectivity_failure_with_probe, sequencer_unreachable_hint, set_wallet_home_env,
+    summarize_command_failure, wallet_password, RpcReachabilityError, WalletRuntimeContext,
 };
+
+/// Bytes of a guest's user ELF that fit in one `program_loader` segment
+/// account (`program_loader_core::MAX_SEGMENT_DATA_LEN` at LEZ 0.3).
+const MAX_SEGMENT_DATA_LEN: usize = 96 * 1024;
 
 /// Roots searched for guest `.bin` artefacts. Three layouts exist: risc0's
 /// default workspace layout emits to `target/riscv-guest/...` (what
@@ -34,49 +37,6 @@ const GUEST_BIN_SEARCH_ROOTS: &[&str] = &[
     "target/riscv-guest",
     "methods/target",
 ];
-
-/// `spel program-id` line prefix that carries the risc0 image ID — the value
-/// the sequencer uses as the on-chain program ID. Format is whitespace-tolerant:
-/// `   ImageID (hex bytes): <64 hex chars>`.
-const SPEL_IMAGE_ID_PREFIX: &str = "ImageID (hex bytes):";
-
-/// Multi-program deploys are paced to one program per sequencer block.
-///
-/// The pinned LEZ sequencer settles every produced block to bedrock as a
-/// single channel inscription with a hard payload cap (917_504 bytes at the
-/// current pin). A block that batches several deployment transactions — each
-/// carrying a full guest ELF, ~370 KiB per template program — exceeds that
-/// cap and the sequencer panics fatally in `encode_channel_inscribe`, taking
-/// the localnet down mid-deploy. Until LEZ splits or rejects oversized
-/// inscriptions gracefully, wait after each successful submission for the
-/// head block id to advance (block production drains the mempool) before
-/// submitting the next program, so each deployment lands in its own block.
-///
-/// Pacing fails CLOSED: if the head cannot be confirmed to advance (stalled
-/// block production, or the post-submission baseline read keeps erroring),
-/// the remaining programs are marked failed instead of being submitted
-/// unpaced — continuing blind is exactly the batch-into-one-block crash this
-/// exists to prevent. Scope: pacing is per-process. Concurrent deploy
-/// processes (or any other client submitting deployment transactions to the
-/// same sequencer) are not serialized by scaffold; the sequencer itself is
-/// the only place that invariant can be enforced, tracked upstream.
-const DEPLOY_PACING_POLL_INTERVAL: Duration = Duration::from_millis(500);
-/// Generous ceiling: covers the 15s localnet default `block_create_timeout`
-/// with margin. On expiry the deploy aborts fail-closed (see above); raise
-/// via `LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS` when a project runs blocks
-/// longer than this ceiling.
-const DEPLOY_PACING_TIMEOUT: Duration = Duration::from_secs(90);
-
-/// `LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS` overrides the pacing ceiling —
-/// integration tests and fast-block test-node setups (500ms blocks) have no
-/// reason to sit out the full localnet-sized wait when a head never advances.
-fn deploy_pacing_timeout() -> Duration {
-    std::env::var("LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS")
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .map(Duration::from_millis)
-        .unwrap_or(DEPLOY_PACING_TIMEOUT)
-}
 
 pub(crate) fn cmd_deploy(
     program_name: Option<String>,
@@ -105,6 +65,15 @@ pub(crate) fn cmd_deploy(
 /// `json = true` the CLI JSON object is printed and `$ <cmd>` echoes are
 /// suppressed; with `json = false` per-program progress lines stream to
 /// stdout (API callers should read the returned results, not the output).
+///
+/// LEZ 0.3 deploys through the `program_loader` builtin: the guest's user
+/// ELF is split into segment accounts and a header account points at the
+/// chain; the header's account id *is* the program id every later
+/// transaction targets. Scaffold creates fresh wallet accounts for the header
+/// and segments, runs `wallet program-loader deploy`, and records the result
+/// in `.scaffold/state/deployments.json`. The wallet waits for every segment
+/// and header transaction to be included before it returns, so a successful
+/// deploy is a confirmed one.
 pub(crate) fn deploy_for_project(
     project: &crate::model::Project,
     program_name: Option<String>,
@@ -112,13 +81,17 @@ pub(crate) fn deploy_for_project(
     json: bool,
 ) -> DynResult<Vec<DeployResult>> {
     let wallet = load_wallet_runtime(project)?;
-    let spel_bin =
-        resolve_repo_path(project, &project.config.spel, "spel")?.join(SPEL_BIN_REL_PATH);
-
     let sequencer_addr = wallet
         .sequencer_addr
         .clone()
         .unwrap_or_else(|| default_sequencer_http_url_for_project(project));
+    let payer = read_default_wallet_address(&project.root)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "deploy needs a funded default wallet to pay the deployment fees.\n\
+             Next step: run `logos-scaffold setup` (seeds the default wallet), then \
+             `logos-scaffold wallet topup`."
+        )
+    })?;
 
     // --program-path: deploy a single custom ELF directly, skip auto-discovery
     if let Some(custom_path) = program_path {
@@ -130,14 +103,25 @@ pub(crate) fn deploy_for_project(
             .and_then(|s| s.to_str())
             .unwrap_or("unknown")
             .to_string();
-        let result = deploy_single_program(
+        preflight_sequencer_reachability(&sequencer_addr)?;
+        let _echo_guard = json.then(EchoGuard::suppress);
+        let result = deploy_one(
             &wallet,
+            &payer,
             &program_name,
             &custom_path,
             &sequencer_addr,
-            &spel_bin,
-            json,
-        )?;
+            &|addr| probe_sequencer_reachable(addr),
+        );
+        record_successes(project, std::slice::from_ref(&result))?;
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string(&render_deploy_result_json(&result))?
+            );
+        } else {
+            print_result_block(&result, Some(&custom_path));
+        }
         return Ok(vec![result]);
     }
 
@@ -159,19 +143,10 @@ pub(crate) fn deploy_for_project(
     // state on scope exit even if a `?` or panic interrupts the loop.
     let _echo_guard = json.then(EchoGuard::suppress);
 
-    // One program per block (see DEPLOY_PACING_* docs). Single-program
-    // deploys never pace; the head read after each successful submission is
-    // what the next iteration waits on. Both pacing failure modes abort the
-    // remaining submissions (fail-closed) rather than continue unpaced.
-    let pace_deploys = selected_programs.len() > 1;
-    let mut prev_submission_head: Option<u64> = None;
-
     // The reachability probe asks a network-level question whose answer is the
     // same for every program in this run, so cache it: if the sequencer dies
     // mid-deploy and several programs fail in a row, they issue at most one
-    // probe between them and cannot disagree with each other. The per-program
-    // text classification still runs per program; only the socket probe is
-    // memoized here.
+    // probe between them and cannot disagree with each other.
     let cached_reachable: std::cell::Cell<Option<bool>> = std::cell::Cell::new(None);
     let probe_once = |addr: &str| match cached_reachable.get() {
         Some(reachable) => reachable,
@@ -183,35 +158,7 @@ pub(crate) fn deploy_for_project(
     };
 
     let mut results = Vec::new();
-    let mut remaining = selected_programs.into_iter();
-    while let Some(program) = remaining.next() {
-        if let Some(prev_head) = prev_submission_head.take() {
-            if !json {
-                println!(
-                    "Waiting for a new block past {prev_head} before the next deployment \
-                     (one program per block; bedrock inscription size cap)..."
-                );
-            }
-            if !wait_for_block_past(
-                &sequencer_addr,
-                prev_head,
-                deploy_pacing_timeout(),
-                DEPLOY_PACING_POLL_INTERVAL,
-            ) {
-                let detail = format!(
-                    "deploy pacing aborted: sequencer head did not advance past block \
-                     {prev_head} within {}s; refusing to submit further program ELFs into \
-                     the same block (the pinned sequencer crashes on oversized bedrock \
-                     inscriptions). Raise LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS if this \
-                     project's block interval exceeds the ceiling, then re-run \
-                     `logos-scaffold deploy` for the remaining programs.",
-                    deploy_pacing_timeout().as_secs()
-                );
-                abort_remaining_programs(program, &mut remaining, &detail, json, &mut results);
-                break;
-            }
-        }
-
+    for program in selected_programs {
         let Some(binary_path) = discovered.get(&program).cloned() else {
             if !json {
                 let searched = GUEST_BIN_SEARCH_ROOTS
@@ -223,138 +170,35 @@ pub(crate) fn deploy_for_project(
                 println!("  Error: missing binary `{program}.bin` (searched: {searched})");
                 println!("  Hint: run `logos-scaffold build` first.");
             }
-            results.push(DeployResult {
+            results.push(DeployResult::failed(
                 program,
-                status: DeployStatus::Failed,
-                detail: "missing program binary".to_string(),
-                tx: None,
-                program_id: None,
-            });
+                "missing program binary".to_string(),
+            ));
             continue;
         };
-
-        let mut command = Command::new(&wallet.wallet_binary);
-        set_wallet_home_env(&mut command, &wallet.wallet_home);
-        command.arg("deploy-program").arg(&binary_path);
-
-        let output = match run_with_stdin(command, format!("{}\n", wallet_password())) {
-            Ok(output) => output,
-            Err(err) => {
-                if !json {
-                    println!("FAIL {program} deployment failed");
-                    println!("  Error: failed to execute wallet command: {err}");
-                }
-                results.push(DeployResult {
-                    program,
-                    status: DeployStatus::Failed,
-                    detail: format!("wallet command invocation failed: {err}"),
-                    tx: None,
-                    program_id: None,
-                });
-                continue;
-            }
-        };
-
-        let tx = extract_tx_identifier(&output.stdout, &output.stderr);
-
-        if !output.status.success() {
-            let summary = summarize_command_failure(&output.stdout, &output.stderr);
-            let combined = format!("{}\n{}", output.stdout, output.stderr);
-            // `preflight_sequencer_reachability` already bails on a
-            // Connectivity error before this loop starts, so by the time we
-            // get here the sequencer answered RPC moments ago. This call
-            // mainly earns its keep if the sequencer dies mid-deploy. The probe
-            // is memoized via `probe_once`, so a mid-deploy death costs one
-            // probe for the whole run rather than one per remaining program.
-            let connectivity_failure =
-                sequencer_connectivity_failure_with_probe(&combined, &sequencer_addr, &probe_once);
-            if !json {
-                println!("FAIL {program} deployment failed");
-                println!("  Error: {summary}");
-                if connectivity_failure {
-                    println!("  Hint: {}", sequencer_unreachable_hint(&sequencer_addr));
-                } else {
-                    println!("  Hint: inspect sequencer logs and retry.");
-                }
-            }
-            let detail = if connectivity_failure {
-                format!("{summary}; sequencer connectivity failure")
-            } else {
-                summary
-            };
-            results.push(DeployResult {
-                program,
-                status: DeployStatus::Failed,
-                detail,
-                tx,
-                program_id: None,
-            });
-            continue;
-        }
-
-        let program_id = extract_program_id(&spel_bin, &binary_path);
 
         if !json {
-            println!("OK  {program} submitted");
-            if let Some(tx) = &tx {
-                println!("  tx: {tx}");
-            }
-            print_program_id_line(&program_id);
+            println!("Deploying {program} ...");
         }
-        results.push(DeployResult {
-            program,
-            status: DeployStatus::Submitted,
-            detail: "wallet submission command exited successfully".to_string(),
-            tx,
-            program_id,
-        });
-
-        if pace_deploys {
-            // Head is read AFTER the wallet reported mempool admission: the
-            // next iteration then waits for a strictly newer block, which is
-            // guaranteed to have drained this submission from the mempool.
-            // (Racing a just-sealed block costs one extra wait interval, never
-            // a lost pacing guarantee.) Transient RPC errors are retried up to
-            // the pacing deadline; if no baseline can be established the
-            // remaining programs are aborted — submitting the next ELF without
-            // a baseline would skip the pacing wait entirely and can recreate
-            // the oversized-block crash.
-            match read_head_with_retry(
-                &sequencer_addr,
-                deploy_pacing_timeout(),
-                DEPLOY_PACING_POLL_INTERVAL,
-            ) {
-                Some(head) => prev_submission_head = Some(head),
-                None => {
-                    let detail = format!(
-                        "deploy pacing aborted: could not read the sequencer head after \
-                         submitting the previous program (retried for {}s); refusing to \
-                         submit further program ELFs without a pacing baseline (the pinned \
-                         sequencer crashes on oversized bedrock inscriptions). Check \
-                         `logos-scaffold localnet status`, then re-run `logos-scaffold \
-                         deploy` for the remaining programs.",
-                        deploy_pacing_timeout().as_secs()
-                    );
-                    // When this was the last program there is nothing left to
-                    // guard — the submission above already succeeded.
-                    if let Some(next_program) = remaining.next() {
-                        abort_remaining_programs(
-                            next_program,
-                            &mut remaining,
-                            &detail,
-                            json,
-                            &mut results,
-                        );
-                    }
-                    break;
-                }
-            }
+        let result = deploy_one(
+            &wallet,
+            &payer,
+            &program,
+            &binary_path,
+            &sequencer_addr,
+            &probe_once,
+        );
+        if !json {
+            print_result_block(&result, None);
         }
+        results.push(result);
     }
+
+    record_successes(project, &results)?;
 
     let success_count = results
         .iter()
-        .filter(|result| matches!(result.status, DeployStatus::Submitted))
+        .filter(|result| matches!(result.status, DeployStatus::Deployed))
         .count();
     let failed_count = results
         .iter()
@@ -363,29 +207,70 @@ pub(crate) fn deploy_for_project(
 
     if json {
         // Single-line JSON object on stdout. One entry per attempted
-        // program; absent fields (tx, program_id) are omitted, not nulled,
-        // matching the single-program --program-path contract. Failed
-        // entries carry `error` instead of `program_id`.
+        // program; absent fields are omitted, not nulled, matching the
+        // single-program --program-path contract. Failed entries carry
+        // `error` instead of `program_id`.
         let entries: Vec<serde_json::Value> =
             results.iter().map(render_deploy_result_json).collect();
         let value = serde_json::json!({ "deploys": entries });
         println!("{}", serde_json::to_string(&value)?);
     } else {
-        println!("Note: Submission confirmed by wallet exit status; deploy inclusion receipt is not currently exposed by LEZ wallet/RPC for scaffold. Program ID is computed locally from the submitted ELF.");
         println!("Summary:");
-        println!("  Succeeded: {success_count}");
+        println!("  Deployed: {success_count}");
         println!("  Failed: {failed_count}");
         println!("  Results:");
         for result in &results {
-            // Per-program details (program_id, tx) are printed once in the OK
-            // block above. Summary only carries the status label + detail to
-            // stay terse and avoid grep ambiguity ("which line is canonical?").
             println!("    {}: {}", result.program, result.status.label());
             println!("      {}", result.detail);
+        }
+        if success_count > 0 {
+            println!(
+                "Program ids are recorded in {}",
+                super::deployments::deployments_path(&project.root).display()
+            );
         }
     }
 
     Ok(results)
+}
+
+fn record_successes(project: &crate::model::Project, results: &[DeployResult]) -> DynResult<()> {
+    let records: Vec<DeploymentRecord> = results
+        .iter()
+        .filter_map(|result| {
+            Some(DeploymentRecord {
+                program: result.program.clone(),
+                program_id: result.program_id.clone()?,
+                elf_sha256: result.elf_sha256.clone(),
+                payer: result.payer.clone(),
+            })
+        })
+        .collect();
+    if records.is_empty() {
+        return Ok(());
+    }
+    record_deployments(&project.root, &records)
+}
+
+fn print_result_block(result: &DeployResult, binary_path: Option<&Path>) {
+    match result.status {
+        DeployStatus::Deployed => {
+            println!("OK  {} deployed", result.program);
+            if let Some(path) = binary_path {
+                println!("  Binary: {}", path.display());
+            }
+            if let Some(id) = &result.program_id {
+                println!("  program_id: {id}");
+            }
+            if let Some(tx) = &result.tx {
+                println!("  tx: {tx}");
+            }
+        }
+        DeployStatus::Failed => {
+            println!("FAIL {} deployment failed", result.program);
+            println!("  Error: {}", result.detail);
+        }
+    }
 }
 
 pub(crate) fn render_deploy_result_json(result: &DeployResult) -> serde_json::Value {
@@ -405,8 +290,14 @@ pub(crate) fn render_deploy_result_json(result: &DeployResult) -> serde_json::Va
     if let Some(tx) = &result.tx {
         obj.insert("tx".to_string(), serde_json::Value::String(tx.clone()));
     }
+    if let Some(sha) = &result.elf_sha256 {
+        obj.insert(
+            "elf_sha256".to_string(),
+            serde_json::Value::String(sha.clone()),
+        );
+    }
     match result.status {
-        DeployStatus::Submitted => {
+        DeployStatus::Deployed => {
             if let Some(id) = &result.program_id {
                 obj.insert(
                     "program_id".to_string(),
@@ -424,77 +315,212 @@ pub(crate) fn render_deploy_result_json(result: &DeployResult) -> serde_json::Va
     serde_json::Value::Object(obj)
 }
 
-/// Poll the sequencer until its last block id exceeds `submitted_at_head`,
-/// i.e. at least one block was produced after the caller's submission was
-/// admitted. Returns `true` when the head advanced and `false` on timeout —
-/// the caller decides the consequence (deploy aborts fail-closed). RPC
-/// hiccups are retried until the deadline rather than treated as fatal.
-fn wait_for_block_past(
+/// Deploy one guest binary through `wallet program-loader deploy`. Never
+/// returns `Err`: every failure becomes a `Failed` result so a multi-program
+/// deploy reports each program.
+fn deploy_one(
+    wallet: &WalletRuntimeContext,
+    payer: &str,
+    program: &str,
+    binary_path: &Path,
     sequencer_addr: &str,
-    submitted_at_head: u64,
-    timeout: Duration,
-    poll_interval: Duration,
-) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Ok(head) = rpc_get_last_block_id(sequencer_addr) {
-            if head > submitted_at_head {
-                return true;
+    probe: &dyn Fn(&str) -> bool,
+) -> DeployResult {
+    let bytes = match fs::read(binary_path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return DeployResult::failed(
+                program.to_string(),
+                format!("failed to read {}: {err}", binary_path.display()),
+            )
+        }
+    };
+    let elf_sha256 = Some(sha256_hex(&bytes));
+    let segment_count = match program_segment_count(&bytes) {
+        Ok(count) => count,
+        Err(err) => {
+            let mut result = DeployResult::failed(
+                program.to_string(),
+                format!(
+                    "{} is not a risc0 program binary: {err}",
+                    binary_path.display()
+                ),
+            );
+            result.elf_sha256 = elf_sha256;
+            return result;
+        }
+    };
+
+    // One header plus one account per segment, all fresh: the loader only
+    // writes into accounts whose `program_loader` shard is still empty.
+    let mut accounts = Vec::with_capacity(segment_count + 1);
+    for _ in 0..=segment_count {
+        match new_public_account(wallet) {
+            Ok(account) => accounts.push(account),
+            Err(err) => {
+                let mut result = DeployResult::failed(
+                    program.to_string(),
+                    format!("failed to create program accounts: {err}"),
+                );
+                result.elf_sha256 = elf_sha256;
+                return result;
             }
         }
-        if Instant::now() >= deadline {
-            return false;
+    }
+    let header = accounts.remove(0);
+
+    let mut command = Command::new(&wallet.wallet_binary);
+    set_wallet_home_env(&mut command, &wallet.wallet_home);
+    command
+        .arg("program-loader")
+        .arg("deploy")
+        .arg("--elf")
+        .arg(binary_path)
+        .arg("--header")
+        .arg(&header)
+        .arg("--segments")
+        .args(&accounts)
+        .arg("--payer")
+        .arg(payer);
+
+    let output = match run_with_stdin(command, format!("{}\n", wallet_password())) {
+        Ok(output) => output,
+        Err(err) => {
+            let mut result = DeployResult::failed(
+                program.to_string(),
+                format!("wallet command invocation failed: {err}"),
+            );
+            result.elf_sha256 = elf_sha256;
+            return result;
         }
-        std::thread::sleep(poll_interval);
+    };
+    let tx = extract_last_tx_identifier(&output.stdout, &output.stderr);
+
+    if !output.status.success() {
+        let summary = summarize_command_failure(&output.stdout, &output.stderr);
+        let combined = format!("{}\n{}", output.stdout, output.stderr);
+        let detail = if sequencer_connectivity_failure_with_probe(&combined, sequencer_addr, probe)
+        {
+            format!(
+                "{summary}; sequencer connectivity failure. {}",
+                sequencer_unreachable_hint(sequencer_addr)
+            )
+        } else if combined.contains("Incorrect fee") {
+            format!(
+                "{summary}. The payer {payer} cannot cover the deployment fees; run \
+                 `logos-scaffold wallet topup` and retry."
+            )
+        } else {
+            summary
+        };
+        let mut result = DeployResult::failed(program.to_string(), detail);
+        result.tx = tx;
+        result.elf_sha256 = elf_sha256;
+        return result;
+    }
+
+    let program_id = parse_deployed_header(&output.stdout)
+        .or_else(|| header.strip_prefix("Public/").map(ToString::to_string));
+    DeployResult {
+        program: program.to_string(),
+        status: DeployStatus::Deployed,
+        detail: format!(
+            "deployed through program_loader ({segment_count} segment{}), paid by {payer}",
+            if segment_count == 1 { "" } else { "s" }
+        ),
+        tx,
+        program_id,
+        elf_sha256,
+        payer: Some(payer.to_string()),
     }
 }
 
-/// Read the sequencer head, retrying transient RPC failures until `timeout`.
-/// Used for the post-submission pacing baseline: a single blip must not
-/// silently disable pacing for the next program (fail-open), so the read is
-/// retried and `None` — returned only after the full deadline of consecutive
-/// failures — makes the caller abort the remaining submissions instead.
-fn read_head_with_retry(
-    sequencer_addr: &str,
-    timeout: Duration,
-    poll_interval: Duration,
-) -> Option<u64> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Ok(head) = rpc_get_last_block_id(sequencer_addr) {
-            return Some(head);
-        }
-        if Instant::now() >= deadline {
-            return None;
-        }
-        std::thread::sleep(poll_interval);
+/// Number of `program_loader` segments `wallet program-loader deploy` will
+/// split `binary` into. Parses the risc0 `ProgramBinary` container (`R0BF`
+/// magic, format version 1, length-prefixed header, then the length-prefixed
+/// user ELF) — only the user ELF is uploaded, the kernel is the protocol's.
+pub(crate) fn program_segment_count(binary: &[u8]) -> DynResult<usize> {
+    fn read_u32(bytes: &[u8], at: usize) -> DynResult<u32> {
+        let slice = bytes
+            .get(at..at + 4)
+            .ok_or_else(|| anyhow::anyhow!("truncated at byte {at}"))?;
+        Ok(u32::from_le_bytes(slice.try_into().expect("4 bytes")))
     }
+    if binary.get(..4) != Some(b"R0BF".as_slice()) {
+        bail!("missing R0BF magic");
+    }
+    let version = read_u32(binary, 4)?;
+    if version != 1 {
+        bail!("unsupported ProgramBinary format version {version}");
+    }
+    let header_len = read_u32(binary, 8)? as usize;
+    let user_len_at = 12usize
+        .checked_add(header_len)
+        .ok_or_else(|| anyhow::anyhow!("header length overflows"))?;
+    let user_len = read_u32(binary, user_len_at)? as usize;
+    if user_len == 0 || binary.len() < user_len_at + 4 + user_len {
+        bail!("user ELF length {user_len} does not fit the file");
+    }
+    Ok(user_len.div_ceil(MAX_SEGMENT_DATA_LEN))
 }
 
-/// Fail-closed tail of a paced deploy: mark `first_unsubmitted` and every
-/// program still queued behind it as failed with `detail`, printing the
-/// per-program FAIL lines unless in `--json` mode. Submitting them without a
-/// confirmed pacing boundary is what this refuses to do.
-fn abort_remaining_programs(
-    first_unsubmitted: String,
-    remaining: &mut std::vec::IntoIter<String>,
-    detail: &str,
-    json: bool,
-    results: &mut Vec<DeployResult>,
-) {
-    for program in std::iter::once(first_unsubmitted).chain(remaining) {
-        if !json {
-            println!("FAIL {program} not submitted");
-            println!("  Error: {detail}");
-        }
-        results.push(DeployResult {
-            program,
-            status: DeployStatus::Failed,
-            detail: detail.to_string(),
-            tx: None,
-            program_id: None,
-        });
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// `wallet account new public` → the new `Public/<id>`.
+fn new_public_account(wallet: &WalletRuntimeContext) -> DynResult<String> {
+    let mut command = Command::new(&wallet.wallet_binary);
+    set_wallet_home_env(&mut command, &wallet.wallet_home);
+    command.arg("account").arg("new").arg("public");
+    let _quiet = EchoGuard::suppress();
+    let output = run_with_stdin(command, format!("{}\n", wallet_password()))?;
+    if !output.status.success() {
+        bail!(
+            "{}",
+            summarize_command_failure(&output.stdout, &output.stderr)
+        );
     }
+    parse_generated_public_account(&output.stdout).ok_or_else(|| {
+        anyhow::anyhow!(
+            "could not find the new account id in wallet output: {}",
+            summarize_command_failure(&output.stdout, &output.stderr)
+        )
+    })
+}
+
+/// Parse `Generated new account with account_id Public/<id> at path …`.
+pub(crate) fn parse_generated_public_account(stdout: &str) -> Option<String> {
+    stdout.lines().find_map(|line| {
+        let rest = line.split("account_id ").nth(1)?;
+        let token = rest.split_whitespace().next()?;
+        token.starts_with("Public/").then(|| token.to_string())
+    })
+}
+
+/// Parse `Program deployed. Header account id: <id>`.
+pub(crate) fn parse_deployed_header(stdout: &str) -> Option<String> {
+    stdout.lines().find_map(|line| {
+        let rest = line.split("Header account id:").nth(1)?;
+        let id = rest.trim();
+        (!id.is_empty()).then(|| id.to_string())
+    })
+}
+
+/// A deploy is several transactions (segments, then the header); report the
+/// last one — the header, whose inclusion completes the deployment.
+fn extract_last_tx_identifier(stdout: &str, stderr: &str) -> Option<String> {
+    let mut last = None;
+    for line in stdout.lines().chain(stderr.lines()) {
+        if let Some(rest) = line.trim().strip_prefix("Transaction hash is ") {
+            last = Some(rest.trim().to_string());
+        }
+    }
+    last.or_else(|| extract_tx_identifier(stdout, stderr))
 }
 
 fn preflight_sequencer_reachability(sequencer_addr: &str) -> DynResult<()> {
@@ -507,11 +533,8 @@ fn preflight_sequencer_reachability(sequencer_addr: &str) -> DynResult<()> {
             )
         }
         Err(err) => {
-            // stderr, not stdout: this runs before the `--json` echo guard is
-            // installed at both call sites, so a `println!` here interleaves a
-            // non-JSON warning into a `--json` stdout stream and breaks `jq`.
-            // The warning is diagnostic, so stderr is the right sink regardless
-            // of `--json`.
+            // stderr, not stdout: a `println!` here would interleave a
+            // non-JSON warning into a `--json` stdout stream and break `jq`.
             eprintln!(
                 "warning: sequencer reachability probe failed ({err}); continuing with wallet submission mode"
             );
@@ -575,206 +598,55 @@ fn resolve_selected_programs(
     )
 }
 
-fn deploy_single_program(
-    wallet: &super::wallet_support::WalletRuntimeContext,
-    program_name: &str,
-    binary_path: &Path,
-    sequencer_addr: &str,
-    spel_bin: &Path,
-    json: bool,
-) -> DynResult<DeployResult> {
-    preflight_sequencer_reachability(sequencer_addr)?;
-
-    let mut command = std::process::Command::new(&wallet.wallet_binary);
-    set_wallet_home_env(&mut command, &wallet.wallet_home);
-    command.arg("deploy-program").arg(binary_path);
-
-    // Suppress the `$ <cmd>` echo on stdout for --json so the output is a
-    // pure JSON object that pipes cleanly into `jq`. RAII guard restores echo
-    // state on scope exit so `?` propagation below is safe.
-    let _echo_guard = json.then(EchoGuard::suppress);
-    let output = run_with_stdin(command, format!("{}\n", wallet_password()))
-        .context("failed to execute wallet deploy-program command")?;
-
-    let tx = extract_tx_identifier(&output.stdout, &output.stderr);
-
-    if !output.status.success() {
-        let summary = summarize_command_failure(&output.stdout, &output.stderr);
-        if json {
-            let value = serde_json::json!({
-                "status": "failed",
-                "program": program_name,
-                "error": summary,
-            });
-            eprintln!("{}", serde_json::to_string(&value)?);
-        } else {
-            println!("FAIL {program_name} deployment failed");
-            println!("  Error: {summary}");
-        }
-        return Ok(DeployResult {
-            program: program_name.to_string(),
-            status: DeployStatus::Failed,
-            detail: summary,
-            tx,
-            program_id: None,
-        });
-    }
-
-    let program_id = extract_program_id(spel_bin, binary_path);
-
-    if json {
-        // Omit absent fields entirely rather than emitting `null`. Presence
-        // implies a real value; consumers test `has("tx")` / `has("program_id")`
-        // instead of branching on null. (LEZ doesn't surface tx receipts yet,
-        // so today `tx` is always absent — keeping a guaranteed-null key would
-        // train scripts to depend on it.)
-        let mut obj = serde_json::Map::new();
-        obj.insert(
-            "status".to_string(),
-            serde_json::Value::String("submitted".to_string()),
-        );
-        obj.insert(
-            "program".to_string(),
-            serde_json::Value::String(program_name.to_string()),
-        );
-        if let Some(tx) = &tx {
-            obj.insert("tx".to_string(), serde_json::Value::String(tx.clone()));
-        }
-        if let Some(id) = &program_id {
-            obj.insert(
-                "program_id".to_string(),
-                serde_json::Value::String(id.clone()),
-            );
-        }
-        let value = serde_json::Value::Object(obj);
-        println!("{}", serde_json::to_string(&value)?);
-    } else {
-        println!("OK  {program_name} submitted");
-        println!("  Binary: {}", binary_path.display());
-        if let Some(tx) = &tx {
-            println!("  tx: {tx}");
-        }
-        print_program_id_line(&program_id);
-        println!(
-            "  Note: Program ID is computed locally; on-chain inclusion is not yet verifiable."
-        );
-    }
-
-    Ok(DeployResult {
-        program: program_name.to_string(),
-        status: DeployStatus::Submitted,
-        detail: "wallet submission command exited successfully".to_string(),
-        tx,
-        program_id,
-    })
-}
-
-/// Wall-clock cap for `spel program-id`. The CLI typically returns in
-/// milliseconds; a hung binary should not block the deploy summary.
-/// Override with `LOGOS_SCAFFOLD_SPEL_INSPECT_TIMEOUT_MS` if needed (name
-/// kept from the pre-v0.5.0 `spel inspect` era for compatibility).
-const SPEL_INSPECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-
-/// Run the project-vendored `spel program-id <binary>` and return the risc0
-/// image ID parsed from its output. (spel v0.5.0 renamed ELF image-ID
-/// extraction from `inspect <file>` to `program-id <file>`; `inspect` now
-/// decodes account data and requires `--idl`, so the old invocation fails
-/// against the pinned spel and every deploy reported
-/// `program_id: unavailable`.) Returns `None` on any failure (binary
-/// missing, non-zero exit, output unparseable, timeout). Callers print an
-/// "unavailable" hint instead of failing the deploy — the deploy itself has
-/// already succeeded by the time this runs.
-pub(crate) fn extract_program_id(spel_bin: &Path, binary_path: &Path) -> Option<String> {
-    use std::io::Read;
-    use std::process::Stdio;
-    use std::time::Instant;
-
-    let timeout = std::env::var("LOGOS_SCAFFOLD_SPEL_INSPECT_TIMEOUT_MS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .map(std::time::Duration::from_millis)
-        .unwrap_or(SPEL_INSPECT_TIMEOUT);
-
-    let mut child = Command::new(spel_bin)
-        .arg("program-id")
-        .arg(binary_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .ok()?;
-
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if !status.success() {
-                    return None;
-                }
-                let mut stdout = String::new();
-                if let Some(mut s) = child.stdout.take() {
-                    let _ = s.read_to_string(&mut stdout);
-                }
-                for line in stdout.lines() {
-                    if let Some((_, after)) = line.split_once(SPEL_IMAGE_ID_PREFIX) {
-                        let hex = after.trim();
-                        if !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit()) {
-                            return Some(hex.to_string());
-                        }
-                    }
-                }
-                return None;
-            }
-            Ok(None) => {
-                if started.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(25));
-            }
-            Err(_) => return None,
-        }
-    }
-}
-
-fn print_program_id_line(program_id: &Option<String>) {
-    // Lowercase, snake_case key with 2-space indent so the same awk/grep
-    // pattern matches in single-program and multi-program plain output and
-    // mirrors the JSON key. Single canonical line per deployed program.
-    match program_id {
-        Some(id) => println!("  program_id: {id}"),
-        None => println!(
-            "  program_id: unavailable (run `logos-scaffold setup` to build the vendored spel)"
-        ),
-    }
-}
-
 /// Outcome of one program deployment attempt.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct DeployResult {
     pub program: String,
     pub status: DeployStatus,
     pub detail: String,
-    /// Transaction identifier extracted from the wallet output, when present.
+    /// Hash of the last transaction the wallet reported (the header write
+    /// for a successful deploy).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tx: Option<String>,
-    /// Locally computed risc0 image ID (the on-chain program ID), when the
-    /// vendored `spel` binary was available to compute it.
+    /// The program's on-chain id: the `program_loader` header account (base58)
+    /// that transactions name as their program.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub program_id: Option<String>,
+    /// SHA-256 of the deployed `.bin`, for reproducibility checks: the header
+    /// account is fresh on every deploy, the binary hash is not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elf_sha256: Option<String>,
+    /// Account that paid the deployment fees.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payer: Option<String>,
+}
+
+impl DeployResult {
+    fn failed(program: String, detail: String) -> Self {
+        Self {
+            program,
+            status: DeployStatus::Failed,
+            detail,
+            tx: None,
+            program_id: None,
+            elf_sha256: None,
+            payer: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DeployStatus {
-    Submitted,
+    /// Every segment and the header transaction were included in a block.
+    Deployed,
     Failed,
 }
 
 impl DeployStatus {
     pub(crate) fn label(&self) -> &'static str {
         match self {
-            DeployStatus::Submitted => "submitted",
+            DeployStatus::Deployed => "deployed",
             DeployStatus::Failed => "failed",
         }
     }
@@ -896,7 +768,6 @@ pub(crate) fn discover_program_binaries(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::test_support::drain_http_request;
     use std::fs;
     use tempfile::TempDir;
 
@@ -904,93 +775,70 @@ mod tests {
         discover_program_binaries(root, &[program.to_string()]).remove(program)
     }
 
-    /// Serve one scripted `getLastBlockId` response per incoming connection,
-    /// then stop accepting. `Some(id)` answers with a valid JSON-RPC result;
-    /// `None` answers with a 500 and no body (a transient RPC failure).
-    /// Uses the same complete-request drain as the wallet-support stub, but
-    /// extends it to a response sequence so pacing can observe heads that
-    /// advance — or reads that fail and then recover — between polls.
-    fn spawn_scripted_block_id_server(
-        responses: Vec<Option<u64>>,
-    ) -> (String, std::thread::JoinHandle<()>) {
-        use std::io::Write;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub server");
-        let url = format!("http://{}", listener.local_addr().expect("local addr"));
-        let handle = std::thread::spawn(move || {
-            for response in responses {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    return;
-                };
-                drain_http_request(&mut stream);
-                let payload = match response {
-                    Some(block_id) => {
-                        let body = format!(r#"{{"jsonrpc":"2.0","result":{block_id},"id":1}}"#);
-                        format!(
-                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
-                            body.len(),
-                            body
-                        )
-                    }
-                    None => "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n"
-                        .to_string(),
-                };
-                let _ = stream.write_all(payload.as_bytes());
-                let _ = stream.flush();
-            }
-        });
-        (url, handle)
+    /// A minimal risc0 `ProgramBinary`: magic, version, a header, the user
+    /// ELF of `user_len` bytes, then a kernel blob.
+    fn fake_program_binary(user_len: usize) -> Vec<u8> {
+        let mut bytes = b"R0BF".to_vec();
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        let header = [9_u8; 5];
+        bytes.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&header);
+        bytes.extend_from_slice(&(user_len as u32).to_le_bytes());
+        bytes.extend(std::iter::repeat_n(0x7f_u8, user_len));
+        bytes.extend_from_slice(b"kernel");
+        bytes
     }
 
     #[test]
-    fn wait_for_block_past_returns_true_once_head_advances() {
-        let (url, handle) = spawn_scripted_block_id_server(vec![Some(5), Some(5), Some(6)]);
-        let advanced =
-            wait_for_block_past(&url, 5, Duration::from_secs(10), Duration::from_millis(10));
-        assert!(advanced, "head reached 6 > 5, pacing wait must succeed");
-        handle.join().expect("server thread");
-    }
-
-    #[test]
-    fn wait_for_block_past_times_out_when_head_stalls() {
-        let (url, handle) = spawn_scripted_block_id_server(vec![Some(5); 64]);
-        let advanced = wait_for_block_past(
-            &url,
-            5,
-            Duration::from_millis(200),
-            Duration::from_millis(10),
-        );
-        assert!(
-            !advanced,
-            "stalled head must report timeout, not spin forever"
-        );
-        drop(handle); // server thread parks in accept(); do not join.
-    }
-
-    #[test]
-    fn read_head_with_retry_recovers_after_transient_failure() {
-        // Reviewer scenario (PR #241): the post-submission baseline read
-        // fails once and then recovers — pacing must keep its baseline
-        // instead of failing open (pre-fix) or aborting prematurely.
-        let (url, handle) = spawn_scripted_block_id_server(vec![None, Some(7)]);
-        let head = read_head_with_retry(&url, Duration::from_secs(10), Duration::from_millis(10));
+    fn segment_count_follows_the_user_elf_in_96_kib_chunks() {
+        assert_eq!(program_segment_count(&fake_program_binary(1)).unwrap(), 1);
         assert_eq!(
-            head,
-            Some(7),
-            "one transient 500 must not lose the baseline"
+            program_segment_count(&fake_program_binary(MAX_SEGMENT_DATA_LEN)).unwrap(),
+            1
         );
-        handle.join().expect("server thread");
+        assert_eq!(
+            program_segment_count(&fake_program_binary(MAX_SEGMENT_DATA_LEN + 1)).unwrap(),
+            2
+        );
+        assert_eq!(
+            program_segment_count(&fake_program_binary(3 * MAX_SEGMENT_DATA_LEN)).unwrap(),
+            3
+        );
     }
 
     #[test]
-    fn read_head_with_retry_gives_up_after_deadline_of_failures() {
-        let (url, handle) = spawn_scripted_block_id_server(vec![None; 64]);
-        let head =
-            read_head_with_retry(&url, Duration::from_millis(200), Duration::from_millis(10));
+    fn segment_count_rejects_non_program_binaries() {
+        assert!(program_segment_count(b"\x7fELF plain elf").is_err());
+        let mut truncated = fake_program_binary(100);
+        truncated.truncate(30);
+        assert!(program_segment_count(&truncated).is_err());
+        let mut wrong_version = fake_program_binary(10);
+        wrong_version[4] = 2;
+        assert!(program_segment_count(&wrong_version).is_err());
+    }
+
+    #[test]
+    fn parses_wallet_account_and_deploy_output() {
+        let generated = "Generated new account with account_id \
+                         Public/BzdBoL4JRa5M873cuWb9rbYgASr1pXyaAZ1YW9ertWH9 at path /3\n\
+                         With pk abcd\n";
         assert_eq!(
-            head, None,
-            "persistent RPC failure must surface as no-baseline so the deploy aborts fail-closed"
+            parse_generated_public_account(generated).as_deref(),
+            Some("Public/BzdBoL4JRa5M873cuWb9rbYgASr1pXyaAZ1YW9ertWH9")
         );
-        drop(handle); // server thread parks in accept(); do not join.
+        assert_eq!(parse_generated_public_account("nothing here"), None);
+
+        let deployed = "Transaction hash is aa11\nTransaction is included in block 4\n\
+                        Transaction hash is bb22\nTransaction is included in block 5\n\
+                        Program deployed. Header account id: 6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV\n";
+        assert_eq!(
+            parse_deployed_header(deployed).as_deref(),
+            Some("6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV")
+        );
+        assert_eq!(
+            extract_last_tx_identifier(deployed, "").as_deref(),
+            Some("bb22")
+        );
     }
 
     #[test]
@@ -1217,6 +1065,8 @@ mod tests {
             detail: nasty.clone(),
             tx: None,
             program_id: None,
+            elf_sha256: None,
+            payer: None,
         };
         let value = render_deploy_result_json(&result);
         let serialized = serde_json::to_string(&value).expect("serialize");

@@ -1,6 +1,6 @@
 ---
 name: lgs-cli
-description: Use for the `lgs` / `logos-scaffold` CLI as a whole — bootstrap a project, run setup/build/deploy/localnet/wallet/doctor/report, diagnose CLI errors, or adopt scaffold in an existing project. Covers the full CLI surface, the `.scaffold/` state layout, and error → recovery patterns. Entry point that routes into `lez-template`, `lez-framework-template`, or `basecamp` once project context is identified.
+description: Use for the `lgs` / `logos-scaffold` CLI as a whole — bootstrap a project, run setup/build/deploy/localnet/wallet/doctor/report, diagnose CLI errors, or adopt scaffold in an existing project. Covers the full CLI surface, the `.scaffold/` state layout, and error → recovery patterns. Entry point that routes into `lez-template` or `basecamp` once project context is identified.
 ---
 
 # Using `logos-scaffold`
@@ -10,14 +10,15 @@ description: Use for the `lgs` / `logos-scaffold` CLI as a whole — bootstrap a
 ## When to Use
 
 - The user wants to create a new LEZ project (`lgs new`, `lgs create`).
-- The user wants to run any `lgs` / `logos-scaffold` subcommand against an existing project (setup, build, deploy, localnet, wallet, spel, basecamp, doctor, report).
+- The user wants to run any `lgs` / `logos-scaffold` subcommand against an existing project (setup, build, deploy, localnet, wallet, basecamp, doctor, report).
 - A scaffold command failed and needs diagnosis (use the playbook + error table below).
 - The user wants to adopt scaffold in an existing Rust/LEZ project (`lgs init`) or migrate an older `scaffold.toml`.
 
 Once a project exists on disk, also pull in the matching template / integration skill:
 
-- `lez-template` — bare LEZ standalone (Rust + risc0). Identify by absence of `framework = "lez-framework"` in `scaffold.toml` and presence of `methods/guest/src/bin/*.rs`.
-- `lez-framework-template` — declarative macros (Anchor parallel). Identify by `framework = "lez-framework"` in `scaffold.toml` plus `crates/lez-client-gen/` and `idl/`.
+- `lez-template` — the default LEZ 0.3 template (Rust + risc0 guest programs, LEZ's `examples/program_deployment`). Identify by `methods/guest/src/bin/*.rs` and runners in `src/bin/run_*.rs`.
+
+Scaffold supports **LEZ 0.3 only** (pinned `v0.3.1`). There is no spel / `lez-framework` template: spel has no LEZ 0.3 release, and scaffold refuses `lez-framework` projects with an explanation.
 - `basecamp` — `lgs basecamp …` lifecycle for Logos module projects (capture / develop / build / run / install / launch with profile-isolated state). Activates additionally on any `lgs basecamp` invocation, presence of `[modules]` in `scaffold.toml`, or `.scaffold/basecamp/profiles/`. Independent of the template skills — can layer onto either template or stand alone in an external module project.
 
 ## Command Map
@@ -26,21 +27,20 @@ Once a project exists on disk, also pull in the matching template / integration 
 
 | Group | Command | Purpose |
 |---|---|---|
-| Project | `new <name>` / `create <name>` | Scaffold a new project. Flags: `--template {default,lez-framework}`, `--vendor-deps`, `--lez-path`, `--cache-root`. |
+| Project | `new <name>` / `create <name>` | Scaffold a new project. Flags: `--template default`, `--vendor-deps`, `--lez-path`, `--cache-root`. |
 | Project | `init` | Adopt scaffold in an existing project (writes `scaffold.toml`, creates `.scaffold/`, appends to `.gitignore`). Re-run to migrate older schemas or refresh shipped AI skills in place. |
-| Project | `setup` | Sync LEZ + spel to pinned commits, build `sequencer_service` / `wallet` / `spel` locally, seed default wallet. Project-local; no PATH installs. |
-| Project | `build [project-path] [--guest {local,docker}]` | Runs `setup` then `cargo build --workspace`; auto-compiles `methods/Cargo.toml` if present. Guest programs build in the pinned risc0 container by default (reproducible `program_id`; needs Docker + `cargo-risczero`); `--guest local` / `[build].guest = "local"` uses the host toolchain instead (fast, no Docker, non-reproducible `program_id`). |
-| Project | `deploy [program-name]` | Deploys one or all guest programs discovered in `methods/guest/src/bin/*.rs`. Prints `program_id` (risc0 image ID) on success. `--json` is structured on both paths, with a different shape each — see JSON Outputs. |
-| Project | `run [--profile NAME] [--reset \| --no-reset] [--post-deploy <cmd>…] [--no-post-deploy] [--watch] [--localnet-timeout N]` | Inner loop: build (chains setup) → IDL → localnet → topup → deploy → optional post-deploy hooks. Prefer over manual setup/build/deploy/topup for daily work. Works with zero config; deploy is skipped when inputs + sequencer are unchanged. Does **not** run `check-health` or any `basecamp` command. |
+| Project | `setup` | Sync LEZ to its pinned commit, build the standalone `sequencer_service` and `wallet` locally, point the project wallet at the localnet, seed the default wallet, import the localnet dev funder. Project-local; no PATH installs. |
+| Project | `build [project-path] [--guest {local,docker}]` | Runs `setup` then `cargo build --workspace`; auto-compiles `methods/Cargo.toml` if present. Guest programs build in the pinned risc0 container by default (byte-reproducible guest binaries; needs Docker + `cargo-risczero`); `--guest local` / `[build].guest = "local"` uses the host toolchain instead (fast, no Docker, not reproducible). |
+| Project | `deploy [program-name]` | Deploys one or all guest programs discovered in `methods/guest/src/bin/*.rs` through LEZ 0.3's `program_loader` (fresh header + segment accounts, fees paid by the default wallet — top up first). Prints `program_id` (the base58 header account) and records it in `.scaffold/state/deployments.json`. `--json` is structured on both paths, with a different shape each — see JSON Outputs. |
+| Project | `run [--profile NAME] [--reset \| --no-reset] [--post-deploy <cmd>…] [--no-post-deploy] [--watch] [--localnet-timeout N]` | Inner loop: build (chains setup) → localnet → topup → deploy → optional post-deploy hooks. Prefer over manual setup/build/deploy/topup for daily work. Works with zero config; deploy is skipped when inputs + sequencer are unchanged. Does **not** run `check-health` or any `basecamp` command. |
 | Runtime | `localnet start [--timeout-sec N]` | Spawn sequencer; waits for pid alive + 127.0.0.1:3040 reachable. |
 | Runtime | `localnet stop` | Stop tracked sequencer. |
 | Runtime | `localnet status [--json]` | Distinguishes managed / stale / foreign listener. |
 | Runtime | `localnet logs [--tail N]` | Tail `.scaffold/logs/sequencer.log`. |
 | Runtime | `wallet list [--long]` | List known wallet accounts. |
-| Runtime | `wallet topup [<address>] [--dry-run]` | Auth-transfer init (if needed) + Piñata claim. Uses project default if address omitted. |
+| Runtime | `wallet topup [<address>] [--dry-run]` | Transfers 1,000,000,000 from the localnet's dev funder (`auth-transfer send`; LEZ 0.3 has no faucet). Uses project default if address omitted. |
 | Runtime | `wallet default set <address-ref>` | Persist project default wallet to `.scaffold/state/wallet.state`. |
 | Runtime | `wallet -- <args>` | Raw passthrough to project-local wallet binary; preserves project wallet env. |
-| Runtime | `spel -- <args>` | Raw passthrough to project-vendored `spel` binary. |
 | Modules | `basecamp setup` | One-time: pin basecamp + lgpm, build, seed `alice` / `bob` profiles. |
 | Modules | `basecamp modules [--show] [--flake REF]… [--path PATH]…` | Sole writer of `[modules.<name>]` in `scaffold.toml`. |
 | Modules | `basecamp install [--print-output]` | Build captured sources and install via `lgpm` into both profiles. |
@@ -68,7 +68,7 @@ lgs run
 lgs wallet -- check-health
 ```
 
-`lgs run` chains setup → build → IDL → localnet → topup → deploy. The
+`lgs run` chains setup → build → localnet → topup → deploy. The
 step-by-step path (`setup` / `localnet start` / `build` / `deploy` / `topup`)
 lives in the repo README under "Step-by-step (optional)" — reach for it to
 debug or learn a single phase.
@@ -88,7 +88,7 @@ lgs init      # writes scaffold.toml, creates .scaffold/, appends .gitignore
 lgs setup
 ```
 
-`init` does not touch `Cargo.toml` or `src/`. Re-run `init` to migrate older `scaffold.toml` schemas (legacy `[basecamp]` keys move to `[repos.basecamp]` / `[modules.*]`; legacy `url` on `[repos.{lez,spel}]` is dropped) or to refresh the shipped AI skills. Already-current configs succeed and leave `scaffold.toml` unchanged.
+`init` does not touch `Cargo.toml` or `src/`. Re-run `init` to migrate older `scaffold.toml` schemas (legacy `[basecamp]` keys move to `[repos.basecamp]` / `[modules.*]`; schema 0.2.0 files drop `[repos.spel]` / `[circuits]` / `[framework.idl]` and re-pin LEZ to v0.3.1) or to refresh the shipped AI skills. Already-current configs succeed and leave `scaffold.toml` unchanged.
 
 ## `.scaffold/` Layout
 
@@ -102,10 +102,12 @@ Everything scaffold writes lives under `.scaffold/` inside the project. Treat th
 | `.scaffold/logs/sequencer.log` | Sequencer stdout/stderr. Tail with `lgs localnet logs --tail N`. |
 | `.scaffold/logs/<ts>-install.log` | `basecamp install` per-source nix build logs. |
 | `.scaffold/logs/<ts>-setup-*.log` | `basecamp setup` build logs. |
-| `.scaffold/wallet/` | Project wallet home (`NSSA_WALLET_HOME_DIR` / `LEE_WALLET_HOME_DIR`). **Never** included in `report` archives — contains keys. |
+| `.scaffold/wallet/` | Project wallet home (`LEE_WALLET_HOME_DIR`). **Never** included in `report` archives — contains keys. |
+| `.scaffold/localnet/` | Localnet chain home (sequencer `--home`: RocksDB + keys). Wiped by `localnet reset`. |
+| `.scaffold/state/deployments.json` | Program ids recorded by `deploy` (header accounts). Cleared by `localnet reset`. |
 | `.scaffold/basecamp/profiles/{alice,bob}/` | Per-profile XDG roots for basecamp. |
 | `.scaffold/basecamp/portable/<NN>-<name>.lgx` | Symlinks to `.#lgx-portable` builds for AppImage hand-loading. Wiped by each portable build. |
-| `.scaffold/repos/{lez,spel}/` | Vendored repo checkouts (only when project was created with `--vendor-deps`). |
+| `.scaffold/repos/lez/` | Vendored LEZ checkout (only when project was created with `--vendor-deps`). |
 | `.scaffold/reports/report-<unix-ts>.tar.gz` | Output of `lgs report`. |
 | `.scaffold/commands.md` | Canned reference scaffold ships into projects (sequencer command, status / doctor JSON commands, etc.). |
 
@@ -115,7 +117,7 @@ Non-vendored projects share a cache root: `<cache_root>/repos/<name>/<pin>/...` 
 
 Apply in order. Stop as soon as the issue is identified.
 
-1. **`lgs doctor`** — prints actionable checks and next steps. Use `--json` for parsing. Doctor inspects: required binaries (git/rustc/cargo/lsof/ps/kill, docker or podman), LEZ + spel repo presence and pin alignment, sequencer + wallet + spel binaries, port 3040 reachability, runtime state file, wallet network config, wallet `--version` and `check-health`.
+1. **`lgs doctor`** — prints actionable checks and next steps. Use `--json` for parsing. Doctor inspects: required binaries (git/rustc/cargo/lsof/ps/kill, docker or podman), LEZ repo presence and pin (LEZ 0.3 standalone feature), sequencer + wallet binaries, localnet port reachability, runtime state file, wallet network config, wallet `--version` and `check-health`, dev funder imported.
 2. **`lgs localnet status [--json]`** — distinguishes `managed`, `stale_state`, `foreign` listener, and missing.
 3. **`lgs localnet logs --tail 200`** — tail recent sequencer output.
 4. **`cat .scaffold/logs/sequencer.log`** — full log if `--tail` isn't enough.
@@ -131,24 +133,23 @@ Apply in order. Stop as soon as the issue is identified.
 | `localnet start timed out after <N>s` | Slow startup (e.g. risc0 dev mode). | Increase `--timeout-sec`; check logs. |
 | `missing sequencer binary at <path>; run \`logos-scaffold setup\`` | Setup never ran or binaries got cleaned. | `lgs setup`. |
 | `Not a logos-scaffold project ... Run logos-scaffold create <name>` | Project-scoped command run outside a project. | `cd` into the project root, or run `lgs init` to adopt the current dir. |
-| `scaffold.toml` schema mismatch (e.g. missing `[repos.spel]`) | Project predates current schema. | `lgs init` (idempotent migration); then `lgs setup`. |
+| `scaffold.toml` schema mismatch (version `0.2.0`, LEZ 0.1/0.2 era) | Project predates LEZ 0.3. | `lgs init` (migration); then `lgs setup`; then port program code to the LEZ 0.3 model. |
+| `deploy` fails with `Incorrect fee` | The default wallet cannot cover LEZ 0.3 fees. | `lgs wallet topup`, then retry. |
 | Doctor warns LEZ pin drift | `[repos.lez].pin` differs from scaffold default. | Either update `scaffold.toml` to the default and `lgs setup`, or accept the divergence. |
-| Doctor warns spel/LEZ protocol mismatch | `spel-cli/Cargo.toml` vendors a different LEZ than scaffold. | Bump `[repos.spel].pin` to a commit whose spel-cli pins matching LEZ. |
-| `wallet -- check-health` fails | Sequencer down, or the wallet home not exported for direct `cargo run`. | `lgs localnet start`; for direct runners: `export NSSA_WALLET_HOME_DIR=$(pwd)/.scaffold/wallet LEE_WALLET_HOME_DIR=$(pwd)/.scaffold/wallet`. |
-| Wallet commands succeed but the wallet looks empty | A v0.2.0 wallet saw only `NSSA_WALLET_HOME_DIR` (the pre-v0.2.0 name), ignored it, and fell back to `~/.lee/wallet` without an error. The mirror-image mistake — only `LEE_WALLET_HOME_DIR` on a pin that reads `NSSA_WALLET_HOME_DIR` — leaves that pin with no wallet home set at all, which surfaces as a loud failure rather than an empty wallet. | Export both names as above, then re-run `lgs doctor`. |
+| `wallet -- check-health` fails | Sequencer down, or the wallet home not exported for direct `cargo run`. | `lgs localnet start`; for direct runners: `export LEE_WALLET_HOME_DIR=$(pwd)/.scaffold/wallet`. |
+| Wallet commands succeed but the wallet looks empty | `LEE_WALLET_HOME_DIR` was not exported for a direct `cargo run`; the wallet silently fell back to `~/.lee/wallet`. | `export LEE_WALLET_HOME_DIR=$(pwd)/.scaffold/wallet`, then re-run. |
 | `basecamp not set up yet` hint | `lgs basecamp setup` never ran in this project. | `lgs basecamp setup` (one-time per project). |
 | `basecamp install` fails with `no \`main\` field in metadata.json` | Sub-flake transitively pulls a second `logos-module-builder`. | Add `inputs.<dep>.inputs.logos-module-builder.follows = "logos-module-builder";` in the offending sub-flake; `nix flake update`. See `docs/basecamp-module-requirements.md`. |
 | `basecamp install` fails with `Missing content hashes in manifest` | The `.lgx` predates the content hashes the pinned `lgpm` validates. | Rebuild the module with `logos-module-builder` 0.3.0 / `nix-bundle-lgx`, or bump that `[modules.<name>].flake` rev. Downgrading `[repos.lgpm].pin` does not help — basecamp embeds the same validating library. |
 | `basecamp build-portable` fails: `.#lgx-portable` not exposed | Flake only exposes `.#lgx`. | Add the `lgx-portable` output, or pass `--flake <ref>#lgx-portable` to opt in explicitly. |
-| Working tree dirty in vendored repo (lez / spel) | Manual edits in cached checkout. | Commit, stash, or reset the change in `.scaffold/repos/<name>/`. |
+| Working tree dirty in vendored LEZ repo | Manual edits in cached checkout. | Commit, stash, or reset the change in `.scaffold/repos/<name>/`. |
 
 ## Environment Overrides
 
 | Variable | Purpose |
 |---|---|
 | `LOGOS_SCAFFOLD_WALLET_PASSWORD` | Override the default wallet password. Forwarded through `wallet --` passthrough. |
-| `NSSA_WALLET_HOME_DIR` | Wallet home dir read by LEZ up to v0.1.2; required for direct `cargo run --bin run_*`. Scaffold wallet commands set it automatically. |
-| `LEE_WALLET_HOME_DIR` | Same wallet home dir under the name LEZ v0.2.0 reads. Export both for direct `cargo run --bin run_*`; scaffold sets both on every wallet subprocess that touches the wallet home. A v0.2.0 wallet that sees only `NSSA_WALLET_HOME_DIR` silently uses `~/.lee/wallet` instead; a pre-v0.2.0 wallet that sees only this name has no wallet home set at all. |
+| `LEE_WALLET_HOME_DIR` | Wallet home dir the LEZ 0.3 wallet reads; required for direct `cargo run --bin run_*`. Scaffold sets it on every wallet subprocess. Without it the wallet silently uses `~/.lee/wallet`. |
 | `LOGOS_SCAFFOLD_PRINT_OUTPUT` | Equivalent to `--print-output`; streams nix output instead of writing to `.scaffold/logs/`. |
 | `EXAMPLE_PROGRAMS_BUILD_DIR` | Override the default risc0 guest build dir for explicit `--program-path` invocations. |
 
@@ -159,19 +160,18 @@ Use `--json` whenever piping to other tools:
 ```bash
 lgs localnet status --json    # { tracked_pid, listener_present, ownership, ready }
 lgs doctor --json             # { status, summary, checks, next_steps }
-lgs deploy --program-path "<path>" --json   # { status, program, tx?, program_id? }
-lgs deploy --json                           # { deploys: [ { status, program, tx?, program_id? | error }, ... ] }
+lgs deploy --program-path "<path>" --json   # { status, program, tx?, program_id?, elf_sha256? }
+lgs deploy --json                           # { deploys: [ { status, program, tx?, elf_sha256?, program_id? | error }, ... ] }
 lgs basecamp doctor --json
 ```
 
-`lgs deploy --json` is structured on both paths, with a different shape each: `--program-path` emits the bare object, the discovery path (`deploy` / `deploy <name>`) wraps one object per attempted program in `{"deploys":[…]}`. Absent values are omitted rather than emitted as `null`, so test presence with `has("tx")` / `has("program_id")` instead of branching on null — `tx` is always absent at the current LEZ pin, which exposes no deploy receipt. Discovery-path exit code is non-zero if any entry failed, and the object is still emitted so partial results stay inspectable.
+`lgs deploy --json` is structured on both paths, with a different shape each: `--program-path` emits the bare object, the discovery path (`deploy` / `deploy <name>`) wraps one object per attempted program in `{"deploys":[…]}`. Absent values are omitted rather than emitted as `null`, so test presence with `has("tx")` / `has("program_id")` instead of branching on null. `status` is `deployed` only after every segment and header transaction was included in a block. Discovery-path exit code is non-zero if any entry failed, and the object is still emitted so partial results stay inspectable.
 
 ## DOGFOODING Cross-Reference
 
 The canonical scenarios in `DOGFOODING.md`:
 
 - **D1–D6** — default template (bootstrap, localnet/doctor, deploy variants, wallet, report, runner interaction).
-- **L1–L4** — lez-framework template (bootstrap, IDL regen, client regen, deploy + counter).
 - **E1–E2** — CLI surface (help/version/error quality, advanced `new` flags).
 - **B1–B6** — basecamp (setup, modules+install+paths+launch, p2p, clean-slate, variant builds, standalone run).
 
@@ -183,6 +183,6 @@ When reproducing a failure, name the matching scenario in the bug report.
 - **Never** edit `[modules]` while `lgs basecamp modules` is running. Otherwise hand-edits in that section are preserved across re-runs.
 - **Always** `lgs localnet stop` before any destructive reset; otherwise scaffold may leave a stale PID.
 - **Always** inspect `.scaffold/reports/*.tar.gz` (`tar -tzf <path>`) before sharing publicly. Sanitisation is best-effort, not absolute.
-- **Prefer** project-local binaries via `lgs wallet -- ...` and `lgs spel -- ...` over global installs. Nothing scaffold builds is added to PATH on purpose.
+- **Prefer** project-local binaries via `lgs wallet -- ...` over global installs. Nothing scaffold builds is added to PATH on purpose.
 - **Don't** assume `--json` is structured for every command; it's structured only where the table above says so (status, doctor, deploy, basecamp doctor) — and for `deploy`, read the shape off the code path you invoked.
 - Project-scoped commands run outside a project root produce a clear `Not a logos-scaffold project ...` error — don't try to work around it; `cd` into the project or `lgs init`.

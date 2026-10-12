@@ -7,27 +7,29 @@
 //! mandatory clock transaction) and read the clock accounts at a stable
 //! boundary.
 //!
-//! Wire facts this module is built on (pinned LEZ sequencer):
+//! Wire facts this module is built on (LEZ 0.3 sequencer):
 //!
 //! - A block is borsh: header (`block_id: u64`, two 32-byte hashes,
-//!   `timestamp: u64`, 64-byte signature — 144 bytes total), then
-//!   `Vec<NSSATransaction>` (u32 count + transactions), then a 1-byte
-//!   bedrock status and a 32-byte parent id.
-//! - `NSSATransaction` is a borsh enum: tag 0 = `Public`, 1 =
-//!   `PrivacyPreserving`, 2 = `ProgramDeployment`. The `Public` and
-//!   `ProgramDeployment` variants have fully fixed-shape layouts
-//!   (length-prefixed vectors of fixed-size elements), so their byte spans
-//!   — and therefore their hashes (`sha256` of the variant bytes) — can be
-//!   recovered without the upstream types. `PrivacyPreserving` transactions
-//!   carry nested proof structures; the walker stops there and reports the
-//!   block as partially parsed rather than guessing.
-//! - The genesis block is constructed with **zero** transactions; every
-//!   later block carries the mandatory sequencer clock transaction plus any
-//!   user transactions. The clock transaction is a `Public` transaction
-//!   whose account set is exactly the three `/LEZ/ClockProgramAccount/…`
-//!   accounts.
-//! - Each clock account's `data` is borsh `ClockAccountData { block_id:
-//!   u64, timestamp: u64 }`.
+//!   `timestamp: u64` — 80 bytes total), then `Vec<LeeTransaction>` (u32
+//!   count + transactions), then a 1-byte bedrock status.
+//! - `LeeTransaction` is a borsh enum: tag 0 = `Public`, 1 =
+//!   `PrivacyPreserving`. A `Public` transaction is a message
+//!   (`program_account_id`, `Vec<ProgramShardSelector>` of 64-byte
+//!   `(account_id, program_account_id)` pairs, `Vec<Nonce>` of u128,
+//!   `Vec<u8>` instruction data, `Option<FeeDeclaration>` of 64 bytes) and a
+//!   witness set (`Vec<(Signature{64}, PublicKey{32})>`), so its byte span —
+//!   and therefore its hash (`sha256` of the variant bytes) — can be recovered
+//!   without the upstream types. `PrivacyPreserving` transactions carry
+//!   nested proof structures; the walker stops there and reports the block
+//!   as partially parsed rather than guessing.
+//! - Every block, genesis (block id 1) included, ends with two fee-exempt
+//!   system transactions: the fee distribution and the clock tick, whose
+//!   shard selectors are exactly the three `/LEZ/ClockProgramAccount/…`
+//!   accounts. Wallet-submitted transactions always declare a fee, which is
+//!   how user transactions are told apart from system ones. Genesis also
+//!   carries the chain's setup transactions (channel params, supplies).
+//! - Each clock account holds `ClockAccountData { block_id: u64, timestamp:
+//!   u64 }` (borsh) in the clock program's shard.
 
 use std::time::{Duration, Instant};
 
@@ -37,9 +39,10 @@ use sha2::{Digest as _, Sha256};
 
 use super::client::{parse_block_prefix, BlockContext, RpcError, TestNodeClient};
 
-/// Borsh size of the block header (`u64` + 32 + 32 + `u64` + 64-byte
-/// signature).
-const BLOCK_HEADER_LEN: usize = 8 + 32 + 32 + 8 + 64;
+/// Borsh size of the block header (`u64` + 32 + 32 + `u64`).
+const BLOCK_HEADER_LEN: usize = 8 + 32 + 32 + 8;
+/// Block id LEZ gives the genesis block (`lee_core::GENESIS_BLOCK_ID`).
+const GENESIS_BLOCK_ID: u64 = 1;
 
 /// The three clock program account ids (raw 32-byte values; base58 on the
 /// RPC wire).
@@ -63,7 +66,6 @@ pub fn clock_account_ids() -> Vec<String> {
 pub enum TxKind {
     Public,
     PrivacyPreserving,
-    ProgramDeployment,
 }
 
 /// One parsed transaction inside a block.
@@ -76,6 +78,9 @@ pub struct TxSummary {
     /// `true` when this is the sequencer's mandatory clock transaction
     /// (a `Public` transaction over exactly the three clock accounts).
     pub is_clock: bool,
+    /// `true` for a fee-exempt sequencer transaction (clock tick, fee
+    /// distribution, genesis setup) — anything a wallet did not submit.
+    pub is_system: bool,
 }
 
 /// Observable facts about one block.
@@ -85,16 +90,15 @@ pub struct BlockInfo {
     pub timestamp: u64,
     /// Total number of transactions in the block body.
     pub transaction_count: u32,
-    /// `true` for the genesis block — the only block constructed with zero
-    /// transactions (no clock tick happens at genesis; tests must not
-    /// replay one).
+    /// `true` for the genesis block (block id 1), which carries the chain's
+    /// setup transactions rather than user transactions.
     pub is_genesis: bool,
     /// `true` when the block carries the mandatory sequencer clock
-    /// transaction (every post-genesis block; empty blocks still advance
-    /// clock state through it).
+    /// transaction (every block; empty blocks still advance clock state
+    /// through it).
     pub has_clock_transaction: bool,
-    /// `true` when the block carries at least one user transaction beyond
-    /// the clock transaction.
+    /// `true` when the block carries at least one user (fee-paying or
+    /// privacy-preserving) transaction.
     pub has_user_transactions: bool,
     /// Per-transaction summaries, in block order. May be shorter than
     /// `transaction_count` when `fully_parsed` is `false`.
@@ -117,9 +121,8 @@ pub struct BlockRange {
 pub struct ClockAccount {
     /// Base58 account id.
     pub account_id: String,
-    pub balance: u128,
     pub nonce: u128,
-    /// `ClockAccountData.block_id` parsed from the account data — the block
+    /// `ClockAccountData.block_id` parsed from the clock shard — the block
     /// the clock last ticked at (granularity depends on the account).
     pub block_id: Option<u64>,
     /// `ClockAccountData.timestamp` parsed from the account data.
@@ -308,26 +311,31 @@ impl TestNodeClient {
 }
 
 fn parse_clock_account(account_id: &str, value: &Value) -> Result<ClockAccount, String> {
-    let balance = read_u128(value.get("balance")).ok_or("missing numeric `balance`")?;
     let nonce = read_u128(value.get("nonce")).ok_or("missing numeric `nonce`")?;
-    let data: Vec<u8> = value
+    // LEZ 0.3: `{"nonce", "data": {"shards": {<program>: [bytes]}}}`. A clock
+    // account carries a single shard, the clock program's; an unticked one
+    // carries none.
+    let shards = value
         .get("data")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .map(|item| item.as_u64().map(|byte| byte as u8))
-                .collect::<Option<Vec<u8>>>()
-        })
-        .unwrap_or(Some(Vec::new()))
-        .ok_or("`data` is not a byte array")?;
+        .and_then(|data| data.get("shards"))
+        .and_then(Value::as_object);
+    let clock_data = match shards {
+        Some(shards) => shards
+            .values()
+            .map(shard_bytes)
+            .collect::<Option<Vec<Vec<u8>>>>()
+            .ok_or("a shard is not a byte array")?
+            .into_iter()
+            .find(|bytes| bytes.len() >= 16)
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
 
     // ClockAccountData { block_id: u64, timestamp: u64 } — borsh, 16 bytes.
-    // An unticked clock account has empty data.
-    let (block_id, timestamp) = if data.len() >= 16 {
+    let (block_id, timestamp) = if clock_data.len() >= 16 {
         (
-            Some(u64::from_le_bytes(data[0..8].try_into().unwrap())),
-            Some(u64::from_le_bytes(data[8..16].try_into().unwrap())),
+            Some(u64::from_le_bytes(clock_data[0..8].try_into().unwrap())),
+            Some(u64::from_le_bytes(clock_data[8..16].try_into().unwrap())),
         )
     } else {
         (None, None)
@@ -335,11 +343,19 @@ fn parse_clock_account(account_id: &str, value: &Value) -> Result<ClockAccount, 
 
     Ok(ClockAccount {
         account_id: account_id.to_string(),
-        balance,
         nonce,
         block_id,
         timestamp,
     })
+}
+
+/// A shard as served over JSON: an array of byte values.
+pub(crate) fn shard_bytes(value: &Value) -> Option<Vec<u8>> {
+    value
+        .as_array()?
+        .iter()
+        .map(|item| item.as_u64().and_then(|byte| u8::try_from(byte).ok()))
+        .collect()
 }
 
 fn read_u128(value: Option<&Value>) -> Option<u128> {
@@ -382,9 +398,10 @@ pub(crate) fn parse_block_info(block_bytes: &[u8]) -> Result<BlockInfo, String> 
         }
     }
 
-    let is_genesis = transaction_count == 0;
-    let has_clock_transaction = !is_genesis;
-    let has_user_transactions = transaction_count >= 2;
+    let is_genesis = block_id == GENESIS_BLOCK_ID;
+    let has_clock_transaction = transactions.iter().any(|tx| tx.is_clock);
+    // An unparsed (privacy-preserving) transaction is always a user one.
+    let has_user_transactions = !fully_parsed || transactions.iter().any(|tx| !tx.is_system);
 
     Ok(BlockInfo {
         block_id,
@@ -398,7 +415,7 @@ pub(crate) fn parse_block_info(block_bytes: &[u8]) -> Result<BlockInfo, String> 
     })
 }
 
-/// Parse one `NSSATransaction` starting at `offset`. Returns the summary and
+/// Parse one `LeeTransaction` starting at `offset`. Returns the summary and
 /// the offset right after the transaction, or `None` for a
 /// privacy-preserving transaction (unparsed by design).
 fn parse_transaction_span(
@@ -411,54 +428,56 @@ fn parse_transaction_span(
     let body_start = offset + 1;
 
     match tag {
-        // Public: program_id [u32;8], Vec<AccountId{32}>, Vec<Nonce{16}>,
-        // Vec<u32> instruction data, Vec<(Signature{64}, PublicKey{32})>.
         0 => {
             let mut cursor = body_start;
-            cursor = skip_fixed(bytes, cursor, 32, "program_id")?;
-            let (account_ids_start, account_count) =
-                (cursor + 4, read_vec_len(bytes, cursor, "account_ids")?);
-            cursor = skip_vec(bytes, cursor, 32, "account_ids")?;
+            cursor = skip_fixed(bytes, cursor, 32, "program_account_id")?;
+            let (selectors_start, selector_count) =
+                (cursor + 4, read_vec_len(bytes, cursor, "shard_selectors")?);
+            cursor = skip_vec(bytes, cursor, 64, "shard_selectors")?;
             cursor = skip_vec(bytes, cursor, 16, "nonces")?;
-            cursor = skip_vec(bytes, cursor, 4, "instruction_data")?;
+            cursor = skip_vec(bytes, cursor, 1, "instruction_data")?;
+            let fee_tag = *bytes
+                .get(cursor)
+                .ok_or("payload too short for the fee declaration tag")?;
+            cursor += 1;
+            let is_system = match fee_tag {
+                0 => true,
+                1 => {
+                    // payer 32 + gas_limit u64 + tip u64 + max_fee u128.
+                    cursor = skip_fixed(bytes, cursor, 32 + 8 + 8 + 16, "fee")?;
+                    false
+                }
+                other => return Err(format!("invalid fee declaration tag {other}")),
+            };
             cursor = skip_vec(bytes, cursor, 96, "witness_set")?;
 
-            let is_clock = is_clock_account_set(bytes, account_ids_start, account_count);
+            let is_clock = is_clock_selector_set(bytes, selectors_start, selector_count);
             Ok(Some((
                 TxSummary {
                     hash: sha256_hex(&bytes[body_start..cursor]),
                     kind: TxKind::Public,
                     is_clock,
+                    is_system,
                 },
                 cursor,
             )))
         }
         1 => Ok(None),
-        // ProgramDeployment: Vec<u8> bytecode.
-        2 => {
-            let cursor = skip_vec(bytes, body_start, 1, "bytecode")?;
-            Ok(Some((
-                TxSummary {
-                    hash: sha256_hex(&bytes[body_start..cursor]),
-                    kind: TxKind::ProgramDeployment,
-                    is_clock: false,
-                },
-                cursor,
-            )))
-        }
         other => Err(format!("unknown transaction tag {other}")),
     }
 }
 
-/// `true` when the account id vector is exactly the three clock accounts in
-/// canonical order — the shape of the sequencer's clock transaction.
-fn is_clock_account_set(bytes: &[u8], start: usize, count: u32) -> bool {
+/// `true` when the shard selectors address exactly the three clock accounts
+/// in canonical order — the shape of the sequencer's clock transaction. Each
+/// selector is `(account_id, program_account_id)`; only the account half is
+/// compared.
+fn is_clock_selector_set(bytes: &[u8], start: usize, count: u32) -> bool {
     if count != 3 {
         return false;
     }
     CLOCK_ACCOUNT_RAW_IDS.iter().enumerate().all(|(i, raw)| {
         bytes
-            .get(start + i * 32..start + (i + 1) * 32)
+            .get(start + i * 64..start + i * 64 + 32)
             .map(|span| span == *raw)
             .unwrap_or(false)
     })
@@ -513,19 +532,28 @@ mod tests {
     use super::*;
     use crate::testnode::test_support::FakeNode;
 
-    /// Borsh-encode a synthetic Public transaction with the given account
-    /// ids; returns the full enum encoding (tag + body).
-    fn fake_public_tx(account_ids: &[[u8; 32]]) -> Vec<u8> {
+    /// Borsh-encode a synthetic LEZ 0.3 Public transaction whose shard
+    /// selectors address `account_ids`; `fee_paying` adds a fee declaration
+    /// (what every wallet-submitted transaction carries). Returns the full
+    /// enum encoding (tag + body).
+    fn fake_public_tx(account_ids: &[[u8; 32]], fee_paying: bool) -> Vec<u8> {
         let mut tx = vec![0_u8]; // tag: Public
-        tx.extend_from_slice(&[0x11; 32]); // program_id
+        tx.extend_from_slice(&[0x11; 32]); // program_account_id
         tx.extend_from_slice(&(account_ids.len() as u32).to_le_bytes());
         for id in account_ids {
-            tx.extend_from_slice(id);
+            tx.extend_from_slice(id); // selector account
+            tx.extend_from_slice(&[0x33; 32]); // selector program
         }
         tx.extend_from_slice(&1_u32.to_le_bytes()); // one nonce
         tx.extend_from_slice(&[0; 16]);
-        tx.extend_from_slice(&2_u32.to_le_bytes()); // two instruction words
-        tx.extend_from_slice(&[0; 8]);
+        tx.extend_from_slice(&3_u32.to_le_bytes()); // three instruction bytes
+        tx.extend_from_slice(&[7, 8, 9]);
+        if fee_paying {
+            tx.push(1);
+            tx.extend_from_slice(&[0x44; 64]);
+        } else {
+            tx.push(0);
+        }
         tx.extend_from_slice(&1_u32.to_le_bytes()); // one (sig, pk) pair
         tx.extend_from_slice(&[0x22; 96]);
         tx
@@ -533,14 +561,11 @@ mod tests {
 
     fn fake_clock_tx() -> Vec<u8> {
         let ids: Vec<[u8; 32]> = CLOCK_ACCOUNT_RAW_IDS.iter().map(|raw| **raw).collect();
-        fake_public_tx(&ids)
+        fake_public_tx(&ids, false)
     }
 
-    fn fake_deploy_tx(bytecode: &[u8]) -> Vec<u8> {
-        let mut tx = vec![2_u8];
-        tx.extend_from_slice(&(bytecode.len() as u32).to_le_bytes());
-        tx.extend_from_slice(bytecode);
-        tx
+    fn fake_fee_tx() -> Vec<u8> {
+        fake_public_tx(&[[0x01; 32], [0x02; 32], [0x03; 32], [0x04; 32]], false)
     }
 
     fn fake_block(block_id: u64, timestamp: u64, txs: &[Vec<u8>]) -> Vec<u8> {
@@ -549,65 +574,73 @@ mod tests {
         bytes.extend_from_slice(&[0xAA; 32]);
         bytes.extend_from_slice(&[0xBB; 32]);
         bytes.extend_from_slice(&timestamp.to_le_bytes());
-        bytes.extend_from_slice(&[0xCC; 64]); // signature
         bytes.extend_from_slice(&(txs.len() as u32).to_le_bytes());
         for tx in txs {
             bytes.extend_from_slice(tx);
         }
         bytes.push(0); // bedrock status
-        bytes.extend_from_slice(&[0; 32]); // bedrock parent id
         bytes
     }
 
     #[test]
     fn genesis_block_is_explicit() {
-        let info = parse_block_info(&fake_block(1, 1_700_000_000_000, &[])).unwrap();
+        let info = parse_block_info(&fake_block(
+            1,
+            0,
+            &[fake_fee_tx(), fake_fee_tx(), fake_clock_tx()],
+        ))
+        .unwrap();
         assert!(info.is_genesis);
-        assert!(!info.has_clock_transaction);
+        assert!(info.has_clock_transaction);
         assert!(!info.has_user_transactions);
-        assert_eq!(info.transaction_count, 0);
+        assert_eq!(info.transaction_count, 3);
         assert!(info.fully_parsed);
     }
 
     #[test]
-    fn empty_post_genesis_block_reports_clock_only() {
-        let info = parse_block_info(&fake_block(5, 1_700_000_000_500, &[fake_clock_tx()])).unwrap();
+    fn empty_post_genesis_block_reports_system_transactions_only() {
+        let info = parse_block_info(&fake_block(
+            5,
+            1_700_000_000_500,
+            &[fake_fee_tx(), fake_clock_tx()],
+        ))
+        .unwrap();
         assert!(!info.is_genesis);
         assert!(info.has_clock_transaction);
         assert!(!info.has_user_transactions);
-        assert_eq!(info.transactions.len(), 1);
-        assert!(info.transactions[0].is_clock);
-        assert_eq!(info.transactions[0].kind, TxKind::Public);
+        assert_eq!(info.transactions.len(), 2);
+        assert!(info.transactions[1].is_clock);
+        assert!(info.transactions.iter().all(|tx| tx.is_system));
+        assert_eq!(info.transactions[1].kind, TxKind::Public);
         assert!(info.fully_parsed);
     }
 
     #[test]
-    fn user_transactions_are_distinguished_from_clock() {
-        let user_tx = fake_public_tx(&[[0x55; 32], [0x66; 32]]);
-        let deploy_tx = fake_deploy_tx(&[1, 2, 3, 4, 5]);
+    fn user_transactions_are_distinguished_from_system_ones() {
+        let user_tx = fake_public_tx(&[[0x55; 32], [0x66; 32]], true);
         let info = parse_block_info(&fake_block(
             7,
             1_700_000_001_000,
-            &[fake_clock_tx(), user_tx.clone(), deploy_tx.clone()],
+            &[user_tx.clone(), fake_fee_tx(), fake_clock_tx()],
         ))
         .unwrap();
 
         assert!(info.has_user_transactions);
         assert_eq!(info.transactions.len(), 3);
-        assert!(info.transactions[0].is_clock);
-        assert!(!info.transactions[1].is_clock);
-        assert_eq!(info.transactions[2].kind, TxKind::ProgramDeployment);
+        assert!(!info.transactions[0].is_system);
+        assert!(!info.transactions[0].is_clock);
+        assert!(info.transactions[1].is_system);
+        assert!(info.transactions[2].is_clock);
 
         // Hashes are sha256 over the variant bytes (without the enum tag).
-        assert_eq!(info.transactions[1].hash, sha256_hex(&user_tx[1..]));
-        assert_eq!(info.transactions[2].hash, sha256_hex(&deploy_tx[1..]));
+        assert_eq!(info.transactions[0].hash, sha256_hex(&user_tx[1..]));
     }
 
     #[test]
     fn privacy_preserving_tx_marks_block_partially_parsed() {
         let pp_tx = vec![1_u8, 0xDE, 0xAD]; // tag 1 + opaque bytes
         let info =
-            parse_block_info(&fake_block(9, 1_700_000_002_000, &[fake_clock_tx(), pp_tx])).unwrap();
+            parse_block_info(&fake_block(9, 1_700_000_002_000, &[fake_fee_tx(), pp_tx])).unwrap();
         assert!(!info.fully_parsed);
         assert_eq!(info.transaction_count, 2);
         assert_eq!(info.transactions.len(), 1);
@@ -691,10 +724,8 @@ mod tests {
                 data.extend_from_slice(&11_u64.to_le_bytes());
                 data.extend_from_slice(&999_u64.to_le_bytes());
                 json!({
-                    "program_owner": [0,0,0,0,0,0,0,0],
-                    "balance": 0,
-                    "data": data,
                     "nonce": 4,
+                    "data": { "shards": { "ClockProgram1111111111111111111111111111111": data } },
                 })
             }
             other => panic!("unexpected method {other}"),
@@ -721,12 +752,7 @@ mod tests {
         let node = FakeNode::start(move |method, _| match method {
             // Head changes on every read — never stable.
             "getLastBlockId" => json!(counter_for_node.fetch_add(1, Ordering::Relaxed)),
-            "getAccount" => json!({
-                "program_owner": [0,0,0,0,0,0,0,0],
-                "balance": 0,
-                "data": [],
-                "nonce": 0,
-            }),
+            "getAccount" => json!({ "nonce": 0, "data": { "shards": {} } }),
             other => panic!("unexpected method {other}"),
         });
 

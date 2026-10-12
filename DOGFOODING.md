@@ -11,13 +11,13 @@ Earlier one-off dogfood notes are historical context only; future runs should st
 If you are an automated agent running this runbook, treat the following as binding. They exist because a previous run stopped at "this environment can't run a real sequencer" when, in fact, it could — the toolchain just had to be installed by hand.
 
 1. **Do the real thing.** End-to-end dogfooding means a real, running LEZ sequencer executing real transactions — not a stub, a mock, or a "validated by composition" shortcut. A stub (e.g. a scripted JSON-RPC server) is acceptable only as an *addition* to a real run, never a substitute. If you catch yourself writing "this environment can't…", stop and apply directive 3 before you believe it.
-2. **Install every dependency yourself.** The real path needs the risc0 toolchain (`r0vm`), the `logos-blockchain-circuits` release, and the LEZ-built `sequencer_service` (plus `wallet` for transactions). None ship in a fresh container. Provision them per "Provisioning the Real LEZ Sequencer Toolchain" below. The container has `curl`, network access to GitHub, and (usually) a `GH_TOKEN` env var — that is enough.
+2. **Install every dependency yourself.** The real path needs the risc0 toolchain (`r0vm`, plus the risc0 Rust guest toolchain for `build --guest local`), the LEZ build's system libraries, and the LEZ-built `sequencer_service` and `wallet`. None ship in a fresh container. Provision them per "Provisioning the Real LEZ Sequencer Toolchain" below. The container has `curl`, network access to GitHub, and (usually) a `GH_TOKEN` env var — that is enough.
 3. **Push through difficulties; a failed first attempt is a routing problem, not a verdict.** Expect the obvious installers to fail and route around them:
    - `rzup` downloads over rustls and fails with `InvalidCertificate(UnknownIssuer)` behind a TLS-intercepting proxy. Fall back to `curl`, which trusts the system CA, to fetch the release tarball directly.
    - Unauthenticated GitHub API calls hit rate limits; add `-H "Authorization: Bearer $GH_TOKEN"`.
    - `git push` and PR creation via the default proxy/MCP may `403`; push and open PRs with `https://x-access-token:$GH_TOKEN@github.com/<owner>/<repo>.git` and the GitHub REST API.
    Do not report "impossible" until you have exhausted the curl + token fallbacks.
-4. **Builds are long; background them so they survive turns.** The sequencer build is ~6 min, `setup` (wallet + spel) ~3 min. Launch them with a mechanism that outlives a single shell — the harness's background-run, or a Monitor with an `until` loop — because `nohup … &` from a one-shot shell gets killed when the shell tears down. Wait on a sentinel (the built binary path, or an `EXIT=` marker you append), not a fixed sleep.
+4. **Builds are long; background them so they survive turns.** On a 4-core box the LEZ 0.3 `sequencer_service` + `wallet` release build takes ~30 min (it also downloads the `logos-blockchain-circuits` release on first build), and a template project's first `cargo build --workspace` another ~15–20. Launch them with a mechanism that outlives a single shell — the harness's background-run, or a Monitor with an `until` loop — because `nohup … &` from a one-shot shell gets killed when the shell tears down. Wait on a sentinel (the built binary path, or an `EXIT=` marker you append), not a fixed sleep. On memory-constrained hosts cap parallelism (`CARGO_BUILD_JOBS=2`).
 5. **Leave the box provisioned.** Once installed, the toolchain persists in the container cache and the `~/.risc0` extensions dir, so later runs are fast. Reuse it rather than reinstalling.
 
 ## Purpose and Audience
@@ -73,9 +73,10 @@ Scaffold is also consumable as a Rust library (`logos_scaffold::api`): the same 
 ## Shared Preconditions
 
 - Unix-like environment with `git`, `rustc`, `cargo`, `lsof`, `ps`, and `kill`.
-- Docker or Podman available for guest builds.
-- `logos-blockchain-circuits` release on disk when validating older projects without `[circuits]`: set `LOGOS_BLOCKCHAIN_CIRCUITS=<path>` (scaffold no longer consults `~/.logos-blockchain-circuits/`). New projects should carry a `[circuits]` table in `scaffold.toml`; `setup`, `build`, `build idl`, `localnet`, and test-node startup resolve and materialize the configured release instead of relying on ambient shell state.
-- No conflicting listener on the scaffold localnet port before `localnet start`.
+- The LEZ build's system libraries: `clang`/`libclang-dev`, `libssl-dev`, `pkg-config`, and `libpcsclite-dev` (the LEZ 0.3 wallet links PC/SC for keycard support; without it the wallet build fails in `pcsc-sys`).
+- Docker or Podman available for the default (deterministic) guest builds; otherwise use `--guest local` / `[build].guest = "local"` and the risc0 Rust toolchain (see D8 for what that changes).
+- No `logos-blockchain-circuits` provisioning: LEZ 0.3's build downloads its release (`v0.5.7`) into `~/.cache/logos/blockchain` itself. `LOGOS_BLOCKCHAIN_CIRCUITS` and `[circuits]` no longer exist.
+- No conflicting listener on the scaffold localnet port before `localnet start`. On a shared host, set a non-default `[localnet].port` (it is honoured end to end in LEZ 0.3: the sequencer gets `--port`, and `setup` writes the port into the wallet config).
 - Network access available for setup/build flows that fetch dependencies.
 - No preinstalled `wallet` binary is required. If one exists on `PATH`, do not treat it as the runtime under test for scaffold wallet scenarios.
 - Optional but supported: `LOGOS_SCAFFOLD_WALLET_PASSWORD` when validating password override behavior.
@@ -85,16 +86,18 @@ The `lgs` binary is a short alias for `logos-scaffold` produced by the same crat
 
 ## Provisioning the Real LEZ Sequencer Toolchain
 
-The `T`-series (and any real `localnet` / `deploy` / `run` validation) needs a real LEZ sequencer. A fresh container has none of the pieces; provision them once — they then live in the scaffold cache and `~/.risc0`, and persist for later runs. This whole section was reverse-engineered from a real run; follow it rather than re-deriving it.
+The `T`-series (and any real `localnet` / `deploy` / `run` validation) needs a real LEZ 0.3 sequencer. A fresh container has none of the pieces; provision them once — they then live in the scaffold cache and `~/.risc0`, and persist for later runs. This whole section was reverse-engineered from a real run; follow it rather than re-deriving it.
 
-Assume `"$P"` is a generated project root (e.g. `$SCRATCH_ROOT/dogfood-default`) and `GH_TOKEN` is set.
+Assume `"$P"` is a generated project root (e.g. `$SCRATCH_ROOT/dogfood-default`) and `GH_TOKEN` is set. On a host shared with other runs, export a private cache root first (`export LOGOS_SCAFFOLD_CACHE_ROOT=$SCRATCH_ROOT/cache`) so nobody else's cleanup deletes your LEZ build mid-run.
 
 **1. Discover the risc0 version the pinned LEZ needs.** scaffold's r0vm auto-detect requires an *exact* version match, read from the LEZ `Cargo.lock`:
 
 ```bash
 LEZ=$("$SCAFFOLD_BIN" test-node pins --project "$P" --json | jq -r .lez_checkout)
-grep -A1 'name = "risc0-zkvm"' "$LEZ/Cargo.lock"   # e.g. version = "3.0.5"
+grep -A1 'name = "risc0-zkvm"' "$LEZ/Cargo.lock"   # LEZ v0.3.1: version = "3.0.5"
 ```
+
+(The checkout exists after `new`; if it does not yet, `test-node prepare` in step 3 creates it.)
 
 **2. Install r0vm at that version.** Try `rzup install r0vm <ver>` first (`curl -sSL https://risczero.com/install | bash` installs rzup). In a TLS-intercepting environment rzup fails with `InvalidCertificate(UnknownIssuer)`; fall back to `curl` for the release tarball (which bundles `r0vm` and `cargo-risczero`):
 
@@ -103,80 +106,67 @@ VER=3.0.5; TRIPLE=x86_64-unknown-linux-gnu       # aarch64-apple-darwin on macOS
 curl -sSL -H "Authorization: Bearer $GH_TOKEN" -o /tmp/cr.tgz \
   "https://github.com/risc0/risc0/releases/download/v$VER/cargo-risczero-$TRIPLE.tgz"
 mkdir -p /tmp/cr && tar xzf /tmp/cr.tgz -C /tmp/cr
-EXT="$HOME/.risc0/extensions/v$VER-cargo-risczero-$TRIPLE"   # scaffold's expected path
+EXT="${RISC0_HOME:-$HOME/.risc0}/extensions/v$VER-cargo-risczero-$TRIPLE"   # scaffold's expected path
 mkdir -p "$EXT" && cp /tmp/cr/r0vm "$EXT/r0vm" && chmod +x "$EXT/r0vm"
 "$EXT/r0vm" --version                              # → risc0-r0vm 3.0.5
 ```
 
-`find_r0vm_path_for_lez` looks at `~/.risc0/extensions/v<risc0-zkvm-version>-cargo-risczero-<arch>-<os>/r0vm`; placing r0vm there is what wires it into a spawned sequencer (scaffold sets `RISC0_SERVER_PATH` from it). The sequencer runs with `RISC0_DEV_MODE=1` (the test-node default), so r0vm executes guests without real proving — which is why no GPU/prover is needed.
+`find_r0vm_path_for_lez` looks at `<risc0 home>/extensions/v<risc0-zkvm-version>-cargo-risczero-<arch>-<os>/r0vm`, where the risc0 home is `$RISC0_HOME` when set (system-wide rzup installs, e.g. `/usr/local/risc0`) and `~/.risc0` otherwise; placing r0vm there is what wires it into a spawned sequencer (scaffold sets `RISC0_SERVER_PATH` from it). The sequencer runs with `RISC0_DEV_MODE=1` (`[localnet].risc0_dev_mode`, the default), so r0vm executes guests without real proving — which is why no GPU/prover is needed.
 
-**2b. (Only for guest compilation — `build`, D-series/L-series.) Install the risc0 Rust toolchain.** `risc0-build` resolves the guest toolchain through rzup's directory layout; without one installed, `build` fails with `Risc Zero Rust toolchain not found. Try running rzup install rust`. When rzup itself is unusable (same TLS issue as above), install it from the `risc0/rust` release assets — the directory name must follow the `v<version>-rust-<triple>` pattern for discovery, and no `settings.toml` is needed (the highest installed version wins). Pick the newest available tag: guest dependency floats (e.g. `ruint`) carry MSRVs that outrun older toolchains — 1.88.0 already fails with `rustc 1.88.0-dev is not supported by the following packages` on a fresh default-template project.
+**2b. (Only for guest compilation with `--guest local` — D-series.) Install the risc0 Rust toolchain.** `risc0-build` resolves the guest toolchain through rzup's directory layout; without one installed, `build` fails with `Risc Zero Rust toolchain not found. Try running rzup install rust`. When rzup itself is unusable (same TLS issue as above), install it from the `risc0/rust` release assets — the directory name must follow the `v<version>-rust-<triple>` pattern for discovery, and no `settings.toml` is needed (the highest installed version wins). Pick the newest available tag: guest dependency floats carry MSRVs that outrun older toolchains.
 
 ```bash
-TCVER=1.91.1   # tag r0.1.91.1 — newest published as of 2026-07
+TCVER=1.97.0   # tag r0.1.97.0 — the same compiler the pinned docker builder ships
 curl -sSL -H "Authorization: Bearer $GH_TOKEN" -o /tmp/rust-tc.tar.gz \
   "https://github.com/risc0/rust/releases/download/r0.$TCVER/rust-toolchain-$TRIPLE.tar.gz"
 DEST="$HOME/.risc0/toolchains/v$TCVER-rust-$TRIPLE"
 mkdir -p "$DEST" && tar xzf /tmp/rust-tc.tar.gz -C "$DEST"
-"$DEST/bin/rustc" --version                        # → rustc 1.91.1-dev
+"$DEST/bin/rustc" --version                        # → rustc 1.97.0-dev
+rustup toolchain link risc0 "$DEST"                # rzup normally does this
 ```
 
-The `lez-framework` template's guest additionally compiles C (the default template's guests do not), so the L-series `build` also needs the risc0 **C++** toolchain; without it the guest build dies in cc-rs with `failed to find tool "/no_risc0_cpp_toolchain_installed_run_rzup_install_cpp"`. Same rzup layout, date-based version (dir uses the semver form of the tag, e.g. tag `2024.01.05` → dir `v2024.1.5`). The release asset (and the directory inside the tarball) is platform-specific and does **not** follow `$TRIPLE`: pick `riscv32im-linux-x86_64` on Linux x86_64 and `riscv32im-osx-arm64` on macOS arm64:
-
-```bash
-CPPASSET=riscv32im-linux-x86_64                    # riscv32im-osx-arm64 on macOS arm64
-curl -sSL -H "Authorization: Bearer $GH_TOKEN" -o /tmp/cpp-tc.tar.xz \
-  "https://github.com/risc0/toolchain/releases/download/2024.01.05/$CPPASSET.tar.xz"
-CPPDEST="$HOME/.risc0/toolchains/v2024.1.5-cpp-$TRIPLE"
-mkdir -p /tmp/cpp-tc && tar xJf /tmp/cpp-tc.tar.xz -C /tmp/cpp-tc
-mkdir -p "$CPPDEST" && mv /tmp/cpp-tc/"$CPPASSET"/* "$CPPDEST/"
-ln -sfn "$CPPDEST" "$HOME/.risc0/cpp"
-"$CPPDEST/bin/riscv32-unknown-elf-gcc" --version   # → gcc 13.2.0
-```
-
-**3. Build the real sequencer.** `test-node prepare` downloads the circuits release (via `curl`, automatically) and builds `sequencer_service`. It is long (~6 min); run it, then confirm doctor is green:
+**3. Build the real sequencer.** `test-node prepare` syncs the LEZ checkout and builds `sequencer_service --features standalone` (a mock Bedrock, so no Logos blockchain node is needed). The first build downloads the circuits release automatically. Run it, then confirm doctor is green:
 
 ```bash
 "$SCAFFOLD_BIN" test-node prepare --project "$P"            # → "test-node prerequisites ready"
 "$SCAFFOLD_BIN" test-node doctor  --project "$P" --json | jq .ok   # → true (all checks pass)
 ```
 
-**4. (Only for real transactions — T4) build the wallet via `setup`.** One gotcha distinguishes `setup` from `test-node prepare`: it uses cwd discovery, so it must run **inside** the project (no `--project` flag). Circuits need no manual provisioning here — projects with a `[circuits]` table (every freshly generated one) materialize the pinned release into `.scaffold/circuits` during `setup` automatically; set `LOGOS_BLOCKCHAIN_CIRCUITS` only to override with a local checkout (the env var wins when set):
+**4. (For anything that transacts — D1, D3–D7, T4) build the wallet via `setup`.** It uses cwd discovery, so it must run **inside** the project (no `--project` flag):
 
 ```bash
-( cd "$P" && "$SCAFFOLD_BIN" setup )   # builds wallet + spel, seeds the default wallet (~3 min) → "setup complete"
+( cd "$P" && "$SCAFFOLD_BIN" setup )   # builds sequencer (cached) + wallet, seeds the default wallet, imports the dev funder → "setup complete"
 ```
 
-Sanity-check the provisioned toolchain before running the T-series:
+Sanity-check the provisioned toolchain before running the scenarios:
 
 ```bash
 "$EXT/r0vm" --version
 ls "$LEZ/target/release/sequencer_service"          # real sequencer (T1–T3)
-ls "$LEZ/target/release/wallet"                     # real wallet (T4)
-ls "$P"/.scaffold/circuits/pol/verification_key.json   # project-local [circuits] install
+ls "$LEZ/target/release/wallet"                     # real wallet (T4, D-series)
+ls ~/.cache/logos/blockchain                        # logos-blockchain-circuits-v0.5.7-<os>-<arch>
+grep default_address "$P/.scaffold/state/wallet.state"
 ```
 
 If any of these is missing, do not "skip the real run" — go back and fix the step that produced it.
+
+What does **not** run on a small container: real proving (`RISC0_DEV_MODE=0`, or the `_private` runners without dev mode) needs several GB of RAM for `r0vm`; and the default docker guest build needs a Docker daemon that can run `docker build`. Report those as partial coverage with the reason, and run the `--guest local` path instead.
 
 ## Scenario Index
 
 | ID | Template | Level | Goal | Command surface |
 | --- | --- | --- | --- | --- |
-| D1 | `default` | Core | Fresh project creation and first-success bootstrap | `new`, `create`, `setup`, `localnet start`, `build`, `deploy`, `wallet topup`, `wallet -- check-health` |
+| D1 | `default` | Core | Fresh project creation and first-success bootstrap | `new`, `create`, `setup`, `localnet start`, `build`, `wallet topup`, `deploy`, `wallet -- check-health` |
 | D2 | `default` | Core | Localnet lifecycle visibility and doctor checks | `localnet status`, `localnet logs`, `localnet stop`, `doctor`, JSON variants |
-| D3 | `default` | Advanced | Deploy path variations and machine-readable single-program submission | `deploy [program-name]`, `deploy --program-path`, `deploy --program-path --json` |
+| D3 | `default` | Advanced | Deploy path variations (program-loader) and machine-readable output | `deploy [program-name]`, `deploy --program-path`, `deploy --program-path --json`, `deployments.json` |
 | D4 | `default` | Core | Wallet management, default-address behavior, and passthrough UX | `wallet list`, `wallet default set`, `wallet topup --dry-run`, `wallet topup`, `wallet -- ...` |
 | D5 | `default` | Advanced | Diagnostics bundle and support artifact hygiene | `report`, `report --out`, `report --tail` |
 | D6 | `default` | Core | Example runner interaction and account state verification | `cargo run --bin run_hello_world`, `cargo run --bin run_hello_world_with_move_function`, `wallet -- account get` |
 | D7 | `default` | Core | One-step `run` pipeline and post-deploy hooks | `run`, `run --post-deploy`, `run --no-post-deploy`, `[run]` config |
-| D8 | `default` | Advanced | Reproducible guest builds and the `program_id` they produce | `build`, `build --guest docker`, `[build]` config, `doctor`, `deploy --json` |
-| L1 | `lez-framework` | Core | Fresh LEZ project bootstrap to ready state | `new --template lez-framework`, `setup`, `localnet start`, `doctor`, `build` |
-| L2 | `lez-framework` | Core | LEZ IDL regeneration | `build idl` |
-| L3 | `lez-framework` | Advanced | LEZ client generation from current IDL | `build client` |
-| L4 | `lez-framework` | Core | LEZ deploy and counter interaction | `deploy`, `cargo run --bin run_lez_counter` |
+| D8 | `default` | Advanced | Reproducible guest builds and the binaries `deploy` ships | `build`, `build --guest docker`, `[build]` config, `doctor`, `deploy --json` (`elf_sha256`) |
 | E1 | N/A | Core | CLI discoverability and error quality | `--help`, `help`, `--version`, unknown commands, out-of-project errors |
-| E2 | N/A | Advanced | Project creation with advanced flags and invalid inputs | `new --template`, `new --vendor-deps`, `new --cache-root` |
-| E3 | N/A | Core | AI skills materialized into generated and adopted projects | `new`, `new --template lez-framework`, `init`, `init` re-run |
+| E2 | N/A | Advanced | Project creation with advanced flags, invalid inputs, and LEZ 0.1/0.2-era migration | `new --template`, `new --vendor-deps`, `new --cache-root`, `init` on a schema-0.2.0 project |
+| E3 | N/A | Core | AI skills materialized into generated and adopted projects | `new`, `init`, `init` re-run |
 | B1 | external module project | Core | Basecamp + lgpm setup and idempotent re-run | `init`, `basecamp setup`, `basecamp doctor`, `basecamp docs` |
 | B2 | external module project | Core | Module capture, install, paths, and single-instance launch | `basecamp modules`, `basecamp modules --show`, `basecamp install`, `basecamp paths`, `basecamp launch <profile>` |
 | B3 | external module project | Core | Two-instance p2p dogfooding | `basecamp launch <profile>` (parallel) |
@@ -188,7 +178,9 @@ If any of these is missing, do not "skip the real run" — go back and fix the s
 | T1 | `default` | Advanced | Isolated test-node lifecycle and caller-project pins | `test-node pins`, `test-node prepare`, `test-node doctor`, `test-node start`, `test-node status`, `test-node stop`, `test-node run` |
 | T2 | `default` | Advanced | Typed RPC reads against a running test node | `test-node tx submit-and-wait`, `test-node blocks head/range/wait`, `test-node clock read/wait-stable`, `test-node account get/batch-get`, `test-node proof get`, `test-node snapshot accounts` |
 | T3 | `default` | Advanced | Caller-provided state seeding | `test-node state schema`, `test-node state export`, `test-node state seed`, `test-node start --state` |
-| T4 | `default` | Advanced | Real committed user transaction (test-node + wallet) | `test-node start --port`, `wallet topup`, `test-node blocks wait`, `test-node tx wait` |
+| T4 | `default` | Advanced | Real committed user transaction (test-node + wallet) | `test-node start --port`, `wallet topup` (dev funder), `test-node blocks wait`, `test-node tx wait` |
+
+There is no `L`-series any more: the `lez-framework` (spel) template was removed with the move to LEZ 0.3, because spel has no LEZ 0.3 release. E2 checks that it is refused.
 
 ## Standing Validation Notes
 
@@ -223,22 +215,24 @@ cd dogfood-default
 "$SCAFFOLD_BIN" setup
 "$SCAFFOLD_BIN" localnet start
 "$SCAFFOLD_BIN" build
-"$SCAFFOLD_BIN" deploy
 "$SCAFFOLD_BIN" wallet topup
+"$SCAFFOLD_BIN" deploy
 "$SCAFFOLD_BIN" wallet -- check-health
 ```
+
+`wallet topup` comes before `deploy`: LEZ 0.3 charges fees on public transactions, and `deploy` pays them from the default wallet.
 
 Use `new` for the main runnable project and `create` as the lightweight alias-parity check in a separate directory. Both commands also accept `--template`, `--vendor-deps`, `--lez-path`, and `--cache-root`, but this scenario uses defaults only. See E2 for advanced flag coverage.
 
 ### Expected Success Signals
 
-- Project creation succeeds and prints the destination path, pinned LEZ commit, and cache root.
-- Generated `scaffold.toml` includes a `[circuits]` table. The default install dir is project-local (`.scaffold/circuits`), and the configured version/download template/install dir become the single source of truth for commands that need `logos-blockchain-circuits`.
-- `setup` completes after syncing LEZ to the configured pin, building both `sequencer_service` and `wallet` inside the project's LEZ tree, and either seeding the default wallet or reporting that a default wallet is already configured. Both seeding paths are a PASS: `default wallet seeded from preconfigured account` when the pinned LEZ debug config ships an `initial_accounts` entry, and `default wallet seeded by initializing wallet storage (config ships no preconfigured account)` on LEZ v0.2.0, whose debug config ships none — there `setup` runs the freshly built `wallet` to create its persistent storage and adopts the first `Public/` account on a `/ `-prefixed listing line, ignoring `Public/` addresses on lines that are not `/ `-prefixed — notably the wallet's own `Preconfigured …` entries, which it prints above the stored accounts even when the config ships no `initial_accounts`, and which a first-token scan would adopt instead of the account the wallet just created. Only if no `/ `-prefixed line yields a usable `Public/` address does it fall back to the first `Public/` token anywhere in the output; if the wallet ever stops `/ `-prefixing stored accounts, that fallback starts adopting a preconfigured address, so a seeded address matching a `Preconfigured` line rather than a `/ ` one is worth reporting. Either line is followed by `  Address:` and `  State file:`. Only `warning: could not seed default wallet automatically` is a failure. With `--prebuilt`: `sequencer_service` is downloaded instead of built from source (falls back to source build if no artifact is published); `wallet` is always built from source regardless of `--prebuilt`.
-- `localnet start` reports a ready localnet rather than only a spawned PID.
-- `build` exits successfully after preparing the project workspace, resolving the configured circuits release, and — when the project has a `methods/Cargo.toml` (Risc0 guest crate excluded from the main workspace) — also prints `Building guest methods...` and produces guest `.bin` files under `target/riscv-guest/<methods-crate>/<guest-crate>/riscv32im-risc0-zkvm-elf/release/`, the same paths `deploy` submits from. The default template uses the workspace `target/` tree, not `methods/target/`. This describes the `--guest local` / `[build].guest = "local"` path; the default is the deterministic container build, whose artefacts land under `target/riscv-guest-docker/` instead (see D8).
-- `deploy` prints a submission summary with zero failures when built binaries are present. Multi-program deploys are paced one program per sequencer block (`Waiting for a new block past N before the next deployment ...` between submissions): the pinned LEZ settles each block as a single bedrock inscription with a ~896 KiB payload cap and panics fatally when a block exceeds it, so batching several ~370 KiB deployment ELFs into one block kills the sequencer. Expect roughly one `block_create_timeout` (15s) of wait per additional program. Pacing fails closed: a stalled head or an unreadable post-submission baseline aborts the remaining submissions with `deploy pacing aborted ...` and a non-zero exit rather than batching unpaced (re-run `deploy` for the rest once the sequencer recovers, or raise `LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS` for slow block intervals). A deploy that continues unpaced and crashes localnet mid-flow is a regression; equally, record it if the upstream cap is lifted and pacing becomes dead weight.
-- `wallet topup` succeeds without an explicit address because the project default wallet was seeded during setup.
+- Project creation succeeds and prints the template source, destination path, pinned LEZ commit, and template variant. The project contains LEZ v0.3.1's `examples/program_deployment` (five guests under `methods/guest/src/bin`, seven runners under `src/bin`), scaffold's overlay (`Cargo.toml` with `[lib] name = "program_deployment"`, `README.md`, `rust-toolchain.toml` = 1.98.1, `.scaffold/commands.md`), and a `Cargo.lock` copied from the pinned LEZ checkout.
+- Generated `scaffold.toml` is schema `version = "0.3.0"` with `[repos.lez]` pinned to `1a003bfbfb89fcf987f62975cd08a401169e1b8c` (`v0.3.1`) and no `[repos.spel]`, `[circuits]` or `[framework.idl]` sections.
+- `setup` completes after syncing LEZ to the configured pin, building `sequencer_service` (`--features standalone`) and `wallet` inside the project's LEZ tree (the LEZ build downloads `logos-blockchain-circuits-v0.5.7` into `~/.cache/logos/blockchain` by itself), and then: `default wallet seeded from the wallet's first derived account` with `  Address: Public/<id>` and `  State file: …`, followed by `dev funder Public/CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r available in the project wallet (source of \`wallet topup\`)`. `.scaffold/wallet/wallet_config.json` has `sequencer.sequencer_addr = "http://127.0.0.1:<[localnet].port>"`, `seq_poll_timeout = "1s"` and `seq_tx_poll_max_blocks = 120`. A second `setup` reports `default wallet already configured: …` and does not import the funder twice. Only `warning: could not seed default wallet automatically` or a funder-import error is a failure. With `--prebuilt`: scaffold publishes no LEZ 0.3 prebuilt today, so it falls back to the source build.
+- `localnet start` reports a ready localnet rather than only a spawned PID. The sequencer runs with `--port <[localnet].port> --listen-address 127.0.0.1 --home <project>/.scaffold/localnet --metrics-address 127.0.0.1:0` (check with `ps`), its chain (`rocksdb-<channel>`, `bedrock_signing_key`, `sequencer_stake_signing_key`) appears under `.scaffold/localnet/`, and nothing is written into the LEZ checkout (`git -C "$LEZ" status --porcelain` stays empty). The patched config in `.scaffold/state/sequencer_config.json` has `block_create_timeout = "5s"`, keeps `max_block_size = "1 MiB"`, and has a `supply_account` genesis entry for `CbgR6…`.
+- `build` exits successfully after preparing the project workspace and — because the project has a `methods/Cargo.toml` — also prints `Building guest methods...` and produces guest `.bin` files. With the default `[build].guest = "docker"` they land under `target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/`; with `--guest local` / `[build].guest = "local"` under `target/riscv-guest/example_program_deployment_methods/example_program_deployment_programs/riscv32im-risc0-zkvm-elf/release/` (see D8). Those are the paths `deploy` submits from.
+- `deploy` prints, per program, `Deploying <name> ...`, the echoed `wallet program-loader deploy --elf <bin> --header Public/<h> --segments Public/<s1> … --payer <default>` command, then `OK  <name> deployed` with `  program_id: <base58>` and `  tx: <hex>`; the summary has `Deployed: 5`, `Failed: 0`, a `deployed through program_loader (<n> segments), paid by Public/…` detail per program, and `Program ids are recorded in <project>/.scaffold/state/deployments.json`. Each program costs one transaction per 96 KiB segment plus the header, each confirmed before the next (5-second localnet blocks, 1-second wallet polling), so the five template programs (4 segments each) take about two minutes — roughly 25 transactions at one per 5-second block. `deployments.json` lists all five with `program_id`, `elf_sha256` and `payer`.
+- `wallet topup` succeeds without an explicit address because the project default wallet was seeded during setup: `wallet topup complete`, `Method: dev funder transfer (1000000000)`, and a `Tx:` hex hash. `wallet -- account get --account-id <default>` then shows `Balance 1000000000, nonce 0` (more after repeated topups).
 - `wallet -- check-health` succeeds against the running localnet without requiring a global `wallet` install or manual `PATH` changes.
 - Generated `scaffold.toml` stores `[wallet].home_dir` but does not carry a wallet binary override; wallet location is derived from the pinned LEZ checkout.
 
@@ -246,7 +240,9 @@ Use `new` for the main runnable project and `create` as the lightweight alias-pa
 
 - Running `setup`, `build`, `deploy`, or wallet commands outside the generated project root should fail with a project-scoped message.
 - A foreign listener or stale state on the localnet port is a real dogfooding finding; capture `localnet status`, not just the final error.
-- If `wallet topup` without an address says no destination is configured, record that as a regression in default-wallet seeding or persistence. On a v0.2.0 pin this is what a broken storage-initialization fallback looks like: `setup` prints `warning: could not seed default wallet automatically`, `.scaffold/state/wallet.state` never gains a `default_address=` line, and `run`'s topup step fails.
+- If `wallet topup` without an address says no destination is configured, record that as a regression in default-wallet seeding or persistence: `setup` printed `warning: could not seed default wallet automatically`, and `.scaffold/state/wallet.state` never gained a `default_address=` line.
+- The seeded default must be a wallet-derived account (listed as `/ Public/<id>`), never the dev funder (listed bare as `Public/CbgR6…`, first in the listing once imported). A default equal to the funder is a regression: topup refuses it.
+- `deploy` before any topup fails each program with `Incorrect fee` plus the hint to run `wallet topup`; that is the expected LEZ 0.3 behaviour, not a scaffold bug.
 - If `setup` or wallet commands depend on `wallet` being installed globally or on `PATH`, record that as a regression in the self-contained project model.
 - If `deploy` fails due to missing binaries after a successful `build`, capture the exact missing path.
 
@@ -255,7 +251,7 @@ Use `new` for the main runnable project and `create` as the lightweight alias-pa
 - Scaffold creation output for both `new` and `create`.
 - `setup`, `localnet start`, `build`, `deploy`, and wallet command excerpts.
 - The generated project path and the exact binary path used for the run.
-- `scaffold.toml` excerpt showing `[circuits]`, plus `ls .scaffold/circuits` or the configured install dir after `setup`/`build`.
+- `scaffold.toml` (schema 0.3.0, LEZ pin), `.scaffold/wallet/wallet_config.json`, `.scaffold/state/deployments.json`, and `ls .scaffold/localnet`.
 
 ### Execution Notes
 
@@ -294,10 +290,12 @@ If the scenario begins with localnet stopped, run `"$SCAFFOLD_BIN" localnet star
 - Human-readable `localnet status` clearly reports tracked PID, listener state, ownership, and readiness.
 - `localnet status --json` returns parseable JSON with at least `tracked_pid`, `listener_present`, `ownership`, and `ready`.
 - `doctor` returns actionable next steps rather than only raw failures.
-- `doctor` validates the configured circuits install path, checks the top-level `VERSION` file against `[circuits].version`, and warns when project config drifts from the LEZ pin's expected circuits release.
+- `doctor` checks that the LEZ checkout declares the `standalone` feature at `lez/sequencer/service/Cargo.toml` (`standalone support marker`), that the pin matches `v0.3.1` (`lez pin matches scaffold default`), that the wallet config points at the project localnet (`wallet network config`), that `wallet check-health` passes (`wallet usability`, with localnet running), and that the project wallet holds the dev funder (`dev funder in wallet`). There are no spel or circuits rows.
 - `doctor --json` returns parseable JSON with at least `status`, `summary`, `checks`, and `next_steps`.
+- With the localnet stopped, `doctor` reports `WARN | wallet usability | wallet cannot reach local sequencer at http://127.0.0.1:<port>` (next step: `localnet start`) and zero FAIL. The LEZ 0.3 wallet's own message for this (`Error fetching program ids: client error (Connect)`) does not name the address; a `FAIL` row carrying that panic is a regression.
 - `localnet logs --tail 200` returns useful recent log lines when logs exist.
 - `localnet stop` succeeds cleanly and subsequent status reflects the stopped state.
+- A `localnet start` after a stop keeps the chain (`.scaffold/localnet` survives; `getLastBlockId` continues from where it was) but first replays every stored block: LEZ 0.3's standalone mode never finalizes, so expect roughly a quarter second per block before `localnet ready` (with 5-second blocks, about a minute per hour the localnet has run). Within the default 120 s timeout that is a PASS; a timeout must name the replay and suggest `--timeout-sec` or `localnet reset --yes`.
 - The sequencer survives shell/tmux closure: after `localnet start`, detaching the terminal or tmux session should not kill the sequencer. Verify with `localnet status` from a new shell — `running=true` confirms daemon behavior.
 
 ### Failure Signals / Common Pitfalls
@@ -309,7 +307,6 @@ If the scenario begins with localnet stopped, run `"$SCAFFOLD_BIN" localnet star
 ### Evidence to Capture
 
 - Human-readable and JSON output for both `localnet status` and `doctor`.
-- If `[circuits]` is edited for the run, capture the matching `doctor` warning/error and the configured install dir.
 - A short `localnet logs` excerpt.
 - Stop behavior and the post-stop status output.
 
@@ -335,7 +332,9 @@ Validate targeted deployment flows, including the machine-readable single-progra
 From the generated project root:
 
 ```bash
-export EXAMPLE_PROGRAMS_BUILD_DIR="$PWD/target/riscv-guest/example_program_deployment_methods/example_program_deployment_programs/riscv32im-risc0-zkvm-elf/release"
+# default (docker) build; for a --guest local build use
+# target/riscv-guest/example_program_deployment_methods/example_program_deployment_programs/riscv32im-risc0-zkvm-elf/release
+export EXAMPLE_PROGRAMS_BUILD_DIR="$PWD/target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker"
 "$SCAFFOLD_BIN" deploy hello_world
 "$SCAFFOLD_BIN" deploy --program-path "$EXAMPLE_PROGRAMS_BUILD_DIR/hello_world.bin"
 "$SCAFFOLD_BIN" deploy --program-path "$EXAMPLE_PROGRAMS_BUILD_DIR/hello_world.bin" --json
@@ -344,22 +343,23 @@ export EXAMPLE_PROGRAMS_BUILD_DIR="$PWD/target/riscv-guest/example_program_deplo
 
 Use a known default-template program name such as `hello_world`. If the generated project exposes a different set of programs in `methods/guest/src/bin`, record the discovered list.
 
-Both deploy paths honor `--json`, with a different shape each. `--program-path --json` prints one flat object for the single submitted program; the discovery-based path (`deploy` or `deploy <name>`) wraps one such object per attempted program in `{"deploys":[…]}`. Either way `--json` is pure JSON on stdout — no command echoes, no summary block. This scenario validates that distinction. (Both shapes omit absent fields rather than emitting `null`: today the pinned LEZ exposes no transaction receipt for a deploy, so `tx` is always absent and consumers test `has("tx")` rather than branching on a guaranteed-null key. `program_id` is present whenever the vendored `spel` binary resolved it, and a failed entry carries `error` in its place.)
+Both deploy paths honor `--json`, with a different shape each. `--program-path --json` prints one flat object for the single submitted program; the discovery-based path (`deploy` or `deploy <name>`) wraps one such object per attempted program in `{"deploys":[…]}`. Either way `--json` is pure JSON on stdout — no command echoes, no summary block. This scenario validates that distinction. (Both shapes omit absent fields rather than emitting `null`. A deployed entry carries `status: "deployed"`, `program`, `program_id` (the base58 `program_loader` header account), `tx` (the header transaction's hash) and `elf_sha256`; a failed entry carries `error` in place of `program_id`.)
 
 ### Expected Success Signals
 
-- `deploy hello_world` reports `OK  hello_world submitted` and ends with a human-readable success summary.
-- `deploy --program-path ... --json` prints a parseable JSON object with at least `status` and `program` (plus `program_id` once `setup` has built `spel`).
+- `deploy hello_world` reports `OK  hello_world deployed` with a `program_id:` line and ends with a human-readable summary. Every deploy creates a new header, so repeating it prints a different `program_id`, and `deployments.json` keeps the latest one.
+- `deploy --program-path ... --json` prints one parseable JSON object with `status: "deployed"`, `program`, `program_id`, `tx` and `elf_sha256`, and `elf_sha256` equals `sha256sum` of the file.
 - `deploy <name> --json` and bare `deploy --json` print a parseable `{"deploys":[…]}` object whose entries carry the same fields.
 - `deploy --program-path ...` without `--json` prints a human-readable `OK` line with the binary path.
 - `deploy nonexistent_program` fails with an error listing the available discovered programs.
-- The echoed `wallet deploy-program <path>` names which artefact was shipped. With only a `local` build on disk that is the `target/riscv-guest/.../release/` one; a `target/riscv-guest-docker/.../docker/` artefact, when present, outranks it. With the guest artefacts removed (and localnet up — the missing-binary report comes after the sequencer preflight), `deploy` names the searched roots, which must list all three in ranking order: `target/riscv-guest-docker`, `target/riscv-guest`, `methods/target`. A missing root is why a built program looks undeployable. See `D8` for the ranking itself.
+- The echoed `wallet program-loader deploy --elf <path> …` names which artefact was shipped. With only a `local` build on disk that is the `target/riscv-guest/.../release/` one; a `target/riscv-guest-docker/.../docker/` artefact, when present, outranks it. With the guest artefacts removed (and localnet up — the missing-binary report comes after the sequencer preflight), `deploy` names the searched roots, which must list all three in ranking order: `target/riscv-guest-docker`, `target/riscv-guest`, `methods/target`. A missing root is why a built program looks undeployable. See `D8` for the ranking itself.
 
 ### Failure Signals / Common Pitfalls
 
-- If either `--json` path starts emitting a guaranteed-null `tx` key, or mixes command echoes and the human-readable summary into the JSON stream, record that as a machine-readability regression.
+- `deploy --program-path <file that is not a risc0 binary>` must fail that program with `… is not a risc0 program binary: missing R0BF magic` before any account is created.
+- If either `--json` path starts emitting `null` values, or mixes command echoes and the human-readable summary into the JSON stream, record that as a machine-readability regression.
 - If localnet is unreachable, deploy should fail with a sequencer-unavailable hint instead of a vague wallet error.
-- That hint is corroborated by an RPC call (`getLastBlockId`) against the resolved `sequencer_addr` rather than by wallet output alone. The probe separates "refused/unreachable" from "something answered" — it does not verify the responder is our sequencer, so a foreign process squatting on the configured port will still suppress the hint.
+- That hint is corroborated by an RPC call (`getLastBlockId`) against the resolved `sequencer.sequencer_addr` rather than by wallet output alone. The probe separates "refused/unreachable" from "something answered" — it does not verify the responder is our sequencer, so a foreign process squatting on the configured port will still suppress the hint.
 - Two unreachable shapes are worth distinguishing, and only the first is covered by stopping localnet. **Refused** (`localnet stop`, nothing listening) fails fast. **Blackholed** (SYN dropped — firewalled host, wrong host, host down) is reproduced by pointing the project's sequencer at an unrouted address, e.g. `10.255.255.1:3040`, and re-running `deploy`. Both must fail with the sequencer-unavailable hint (bounded by the ~1s connect timeout, so it is fast, not a 30s hang). If the blackholed one instead prints `warning: sequencer reachability probe failed (...); continuing` and then a vague wallet error, that is the regression this signal protects — the preflight classified a connect *timeout* as "something else" and burned a wallet submission against a dead address.
 - Unknown program names should report the available discovered programs.
 - Missing binaries should point back to `logos-scaffold build`.
@@ -408,9 +408,9 @@ Use a real address from `wallet list` when explicitly validating `wallet default
 
 - `wallet list` and `wallet list --long` proxy wallet account enumeration from the project-scoped wallet home using the LEZ-local wallet binary.
 - `wallet default set` accepts either positional address or `--address` and persists the normalized project default.
-- `wallet topup --dry-run` renders the underlying faucet claim command instead of mutating state.
-- `wallet topup` without an explicit address uses the saved default wallet. On a LEZ v0.2.0 pin that default came from `setup`'s `default wallet seeded by initializing wallet storage (config ships no preconfigured account)` path rather than from a preconfigured account — both are a PASS; check that the address in `.scaffold/state/wallet.state` is one `wallet list` reports.
-- `wallet -- ...` preserves the project wallet environment while forwarding the raw wallet command to `<lez>/target/release/wallet`. That environment names the wallet home under **both** `NSSA_WALLET_HOME_DIR` (LEZ up to v0.1.2) and `LEE_WALLET_HOME_DIR` (LEZ v0.2.0); verify with `"$SCAFFOLD_BIN" wallet -- account list` listing the project's accounts and not an unrelated `~/.lee/wallet` set.
+- `wallet topup --dry-run` prints `LEE_WALLET_HOME_DIR=<home>`, the planned funder-import preflight, and the underlying `wallet auth-transfer send --from Public/CbgR6… --to <default> --amount 1000000000` command instead of mutating state.
+- `wallet topup` without an explicit address uses the saved default wallet (the first wallet-derived public account `setup` adopted; check that the address in `.scaffold/state/wallet.state` is one `wallet list` reports with a `/` path prefix). `wallet topup Public/CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r` is refused (`is the dev funder itself`). Deleting the funder from the wallet storage is not possible from the CLI, but a wallet home recreated by hand self-heals: topup re-imports the funder before sending.
+- `wallet -- ...` preserves the project wallet environment while forwarding the raw wallet command to `<lez>/target/release/wallet`. That environment names the wallet home as `LEE_WALLET_HOME_DIR` (the only name the LEZ 0.3 wallet reads); verify with `"$SCAFFOLD_BIN" wallet -- account list` listing the project's accounts (the bare `Public/CbgR6…` funder plus the `/ Public/…` and `/ Private/…` derived pair) and not an unrelated `~/.lee/wallet` set.
 
 Optional: validate `LOGOS_SCAFFOLD_WALLET_PASSWORD` override behavior by setting the env var to a non-default value and observing whether wallet commands honor it.
 
@@ -499,70 +499,71 @@ tar -tzf "$PWD/artifacts/support-report.tar.gz" | sort
 
 ### Goal
 
-Validate that deployed programs can actually be invoked via the generated example runner binaries and that account state changes are observable.
+Validate that programs can actually be invoked via the generated example runner binaries and that account state changes are observable.
 
 D1 validates the scaffold pipeline up to deploy and wallet health. This scenario validates the final step: running programs against the localnet and confirming observable state mutations.
 
 ### Preconditions
 
-- Default-template project exists with D1 completed (setup, build, deploy done).
+- Default-template project exists with D1 completed (setup, build, topup, deploy done).
 - Localnet is running and `wallet -- check-health` succeeds.
-- Create **two** fresh public accounts for this scenario — one per runner. The first program to write an account becomes its `program_owner`, and the pinned LEZ rejects any later write to it by a different program with `UnauthorizedDataModification` (execution-check rejection visible only in the sequencer log; the runner still exits 0 because submission succeeded).
+- The default account is funded (`wallet topup`): the runners use it as the fee payer.
+- Create **two** fresh public accounts for this scenario — one per runner, so each program writes its own shard on its own account:
 
 ```bash
 "$SCAFFOLD_BIN" wallet -- account new public   # <account-id-a> for run_hello_world
 "$SCAFFOLD_BIN" wallet -- account new public   # <account-id-b> for run_hello_world_with_move_function
 ```
 
-Capture each account ID from the output (format: `Public/<base58>`). The runners take the bare base58 portion; `wallet account get` requires the full `Public/<base58>` form (the bare id fails with `Unsupported privacy kind`).
+Each prints `Generated new account with account_id Public/<base58> at path /<n>`. The runners take the bare base58 portion; `wallet account get` takes the full `Public/<base58>` form.
 
 ### Commands / Actions
 
 From the generated project root:
 
 ```bash
-export NSSA_WALLET_HOME_DIR="$PWD/.scaffold/wallet" LEE_WALLET_HOME_DIR="$PWD/.scaffold/wallet"
-cargo run --bin run_hello_world -- <account-id-a>
-"$SCAFFOLD_BIN" wallet -- account get --account-id Public/<account-id-a>
-cargo run --bin run_hello_world_with_move_function -- write-public <account-id-b> "dogfood-test-message"
-"$SCAFFOLD_BIN" wallet -- account get --account-id Public/<account-id-b>
+export LEE_WALLET_HOME_DIR="$PWD/.scaffold/wallet"
+export BIN_DIR="$PWD/target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker"   # or the local-build release dir (D3)
+export PAYER=$(sed -n 's/^default_address=Public\///p' .scaffold/state/wallet.state)
+cargo run --bin run_hello_world -- "$BIN_DIR/hello_world.bin" <account-id-a> "$PAYER"
+"$SCAFFOLD_BIN" wallet -- account get --scope all --account-id Public/<account-id-a>
+cargo run --bin run_hello_world_with_move_function -- "$BIN_DIR/hello_world_with_move_function.bin" "$PAYER" write-public <account-id-b> dogfood-test-message
+"$SCAFFOLD_BIN" wallet -- account get --raw --scope all --account-id Public/<account-id-b>
 ```
 
-The first runner (`run_hello_world`) submits a basic public transaction; once committed, account A's data decodes to `Hola mundo!` and its `program_owner` is the hello_world program. The second (`run_hello_world_with_move_function write-public`) writes a custom greeting string to account B, producing an observable `data` field change. Reads are eventually consistent with block production (default localnet block interval 15s) — poll `account get` until the write lands.
+These are LEZ's own `examples/program_deployment` runners: each one first deploys a fresh copy of its program through `program_loader` (paid by `$PAYER`), then sends one transaction to it. The five public runners are scaffold's patched copies: upstream v0.3.1 builds their transactions fee-exempt, which the sequencer rejects with `Incorrect fee`; scaffold's versions submit through `send_paid_public_transaction` (generated `src/lib.rs`), which declares the fee, has `$PAYER` co-sign, and waits for inclusion (printing `Transaction <hash> is included in block <n>`). The first writes `Hola mundo!` into the hello_world program's shard on account A; the second writes the given greeting into the move-function program's shard on account B.
 
 ### Expected Success Signals
 
-- Both runners print `submitted transaction: tx_hash=...` on success.
-- Both runners print a `verification hint:` line pointing to `wallet account get`.
-- After `run_hello_world`, account A shows `data` = hex(`Hola mundo!`) and a non-null `program_owner`.
-- After `run_hello_world_with_move_function write-public`, account B's `data` contains the hex-encoded greeting string.
-- Runner exit code is 0.
+- Both runners exit 0, printing the wallet's `Transaction hash is …` / `Transaction is included in block …` lines for the deployment transactions and, last, `Transaction <hash> is included in block <n>` for the call itself.
+- `wallet -- account get --scope all --account-id Public/<account-id-a>` shows `Record of program <runner's program id>` with `486f6c61206d756e646f21` (`Hola mundo!`). Without `--scope all` only the native balance is shown, which looks like an empty account.
+- Account B's shard contains the hex-encoded `dogfood-test-message`.
+- The payer's balance (`wallet -- account get --account-id Public/$PAYER`) decreased by the deployment and transaction fees.
 
 ### Failure Signals / Common Pitfalls
 
-- If a runner exits 0 but the account remains `Uninitialized`, the transaction may have been submitted without effect. Record both the runner output and the account state — and check the sequencer log for `failed execution check` lines: submission-level success does not imply execution-level success.
-- Pointing both runners at the same account is the known execution-rejection case (`UnauthorizedDataModification` — see Preconditions), not a scaffold regression.
-- Panic output from a runner (e.g., `unwrap()` on wallet/sequencer errors) instead of a structured error is worth recording.
-- Invalid account ID format (not base58) should produce a clear parse error from the runner, not a panic.
-- If localnet is down, runners should fail with a connection-refused error. Capture the exact error text.
+- A runner that exits 0 while the account stays `Uninitialized` means the transaction was submitted without effect. Record both the runner output and the account state, and check the sequencer log (`localnet logs --tail 200`) for an execution failure.
+- `Incorrect fee` from a runner means the payer cannot cover the reserve plus fees (run `wallet topup` and retry) — or, if it comes from the call rather than a deployment, that the runner is upstream's fee-exempt version rather than scaffold's patched copy: a regression in the template overlay.
+- `Nonce mismatch` in the sequencer log after back-to-back runner invocations means a runner returned before its transaction was included; scaffold's helper waits for inclusion, so this is a regression.
+- Panic output from a runner (the upstream runners `unwrap()` liberally) instead of a structured error is worth recording as upstream feedback, not a scaffold regression.
+- If localnet is down, runners fail with a connection error. Capture the exact error text.
 
 ### Evidence to Capture
 
-- Runner output including `status` and `tx_hash` for at least one successful run.
-- `wallet account get` output showing account state after interaction.
-- The exact account ID used (for traceability across repeated runs).
+- Runner output for at least one successful run.
+- `wallet -- account get` output showing the shard after interaction (both `--raw` and the default view).
+- The exact account IDs used (for traceability across repeated runs).
 
 ### Execution Notes
 
-- The wallet home must be exported for runners that initialize `WalletCore::from_env()`. The scaffold wallet commands set it automatically, but direct `cargo run` does not. Export **both** names: LEZ reads `NSSA_WALLET_HOME_DIR` up to v0.1.2 and `LEE_WALLET_HOME_DIR` from v0.2.0. The two half-exports fail differently: a v0.2.0 pin given only `NSSA_WALLET_HOME_DIR` falls back to `~/.lee/wallet` with no error, so the runner reports an unknown or empty account instead of failing loudly; a pre-v0.2.0 pin given only `LEE_WALLET_HOME_DIR` has no wallet home at all and fails in `WalletCore::from_env()`. Only the first shape is silent — treat an empty-looking wallet as the signal to check.
-- Use the fresh public account created in the preconditions rather than reusing accounts from other scenarios. This avoids confusion about pre-existing state.
-- If additional runners are available (e.g., `run_hello_world_private`, `run_hello_world_through_tail_call`), exercising them is valuable but not required for this scenario.
+- The wallet home must be exported for runners, which call `WalletCore::from_env()`. The scaffold wallet commands set it automatically, but direct `cargo run` does not. LEZ 0.3 reads only `LEE_WALLET_HOME_DIR`; without it the runner silently opens `~/.lee/wallet` and fails on an unknown payer.
+- The private runners (`run_hello_world_private`, `run_hello_world_through_tail_call_private`) need a private account (`wallet -- account new private`) and run the prover; keep `RISC0_DEV_MODE=1` (the generated `.env.local`) on machines that cannot prove. Exercising them is valuable but not required for this scenario.
 
 ## D7. `run` Pipeline and Post-Deploy Hooks
 
 ### Goal
 
-Validate that `lgs run` collapses the build → IDL → localnet → topup → deploy chain into a single command, fires `[run].post_deploy` hooks with the documented environment, and that `--post-deploy` / `--no-post-deploy` flags override the configured hooks correctly.
+Validate that `lgs run` collapses the build → localnet → topup → deploy chain into a single command, fires `[run].post_deploy` hooks with the documented environment, and that `--post-deploy` / `--no-post-deploy` flags override the configured hooks correctly.
 
 ### Preconditions
 
@@ -584,10 +585,10 @@ Then add a `[run]` section to `scaffold.toml` and re-run with hooks:
 [run]
 post_deploy = [
   "echo 'sequencer:' $SEQUENCER_URL",
-  "echo 'idl:' $SCAFFOLD_IDL_DIR",
   "echo 'project root:' $SCAFFOLD_PROJECT_ROOT",
-  "echo 'wallet home:' $NSSA_WALLET_HOME_DIR",
-  "echo 'wallet home (lez v0.2.0 name):' $LEE_WALLET_HOME_DIR",
+  "echo 'wallet home:' $LEE_WALLET_HOME_DIR",
+  "echo 'programs:' $SCAFFOLD_PROGRAMS",
+  "echo 'hello_world id:' ${SCAFFOLD_PROGRAM_ID_hello_world:-unavailable}",
   "echo 'program id:' ${SCAFFOLD_PROGRAM_ID:-unavailable}",
   "echo 'guest bin:' ${SCAFFOLD_GUEST_BIN:-unavailable}",
 ]
@@ -609,7 +610,7 @@ post_deploy = ["echo 'deploy skipped:' $SCAFFOLD_DEPLOY_SKIPPED"]
 ```
 
 ```bash
-"$SCAFFOLD_BIN" run --profile self-deploy   # skips step 5, still fires hooks
+"$SCAFFOLD_BIN" run --profile self-deploy   # skips step 4, still fires hooks
 ```
 
 Then add a profile that funds its own accounts (`topup = false`) and run it:
@@ -621,28 +622,28 @@ post_deploy = ["echo 'topup skipped:' $SCAFFOLD_TOPUP_SKIPPED"]
 ```
 
 ```bash
-"$SCAFFOLD_BIN" run --profile self-fund   # skips step 4, still deploys + fires hooks
+"$SCAFFOLD_BIN" run --profile self-fund   # skips step 3, still deploys + fires hooks
 # same hook without the profile: topup runs, so the variable reports 0
 "$SCAFFOLD_BIN" run --post-deploy 'echo "topup skipped:" $SCAFFOLD_TOPUP_SKIPPED'
 ```
 
 ### Expected Success Signals
 
-- The first `run` (no hooks configured) prints a numbered step header for each phase (`[1/5] Building...` through `[5/5] Deploying...`) and ends with a deployed-programs summary.
-- A second `run` reuses the running localnet (`localnet already running (sequencer pid=...)`) instead of starting a new sequencer, and — when guest binaries, IDL, config, and sequencer are all unchanged — replaces `[5/N] Deploying...` with `[5/N] Deploy skipped (guest binaries + IDL + config + sequencer unchanged; pass --reset ...)`. Post-deploy hooks still fire after a dedup-skipped deploy. Use `--reset` (or delete `.scaffold/state/run_deploy.json`) when the scenario needs to force a real re-deploy.
-- After adding the `[run]` block, `run` reports `[6/6] Running N post-deploy hook(s)` and each hook prints a non-empty value for its env var. `cwd` for each hook is the project root (verifiable with a `pwd` hook). For a single-program project, `$SCAFFOLD_PROGRAM_ID` is the deployed program's risc0 image ID and `$SCAFFOLD_GUEST_BIN` is the absolute path to the guest binary.
+- The first `run` (no hooks configured) prints a numbered step header for each phase (`[1/4] Building...`, `[2/4] Ensuring localnet...`, `[3/4] Topping up wallet...`, `[4/4] Deploying programs...`) and ends with a deployed-programs summary listing each program's `program_id` (from `deployments.json`) and binary.
+- A second `run` reuses the running localnet (`localnet already running (sequencer pid=...)`) instead of starting a new sequencer, and — when guest binaries, config, and sequencer are all unchanged and every program has a recorded deployment — replaces `[4/N] Deploying...` with `[4/N] Deploy skipped (guest binaries + config + sequencer unchanged; pass --reset ...)`. Post-deploy hooks still fire after a dedup-skipped deploy. Use `--reset` (or delete `.scaffold/state/run_deploy.json`) when the scenario needs to force a real re-deploy.
+- After adding the `[run]` block, `run` reports `[5/5] Running N post-deploy hook(s)` and each hook prints a non-empty value for its env var. `cwd` for each hook is the project root (verifiable with a `pwd` hook). The template has five programs, so `SCAFFOLD_PROGRAMS` lists them, `SCAFFOLD_PROGRAM_ID_hello_world` is the base58 program id recorded in `deployments.json` (also after a cache-skipped deploy), and the single-program shortcuts `SCAFFOLD_PROGRAM_ID` / `SCAFFOLD_GUEST_BIN` print `unavailable` (set only for single-program projects).
 - `--post-deploy "echo override"` ignores `[run].post_deploy` and runs only the override.
 - `--no-post-deploy` skips the post-deploy step entirely; the run prints the deployed-programs summary instead.
 - `--post-deploy` with `--no-post-deploy` errors at clap parse time with a `cannot be used with` message; exit code is non-zero.
 - A non-zero hook exit aborts the run with a clear `post-deploy hook exited with status N` message.
-- With `deploy = false` in the selected profile, `run --profile self-deploy` prints ``[5/6] Deploy skipped (`deploy = false` in the run profile; ...)`` instead of `[5/6] Deploying...`, skips the program-hash/deploy work entirely, and still runs the `post_deploy` hooks. Each hook sees `SCAFFOLD_DEPLOY_SKIPPED=1` (here `echo 'deploy skipped:' $SCAFFOLD_DEPLOY_SKIPPED` prints `deploy skipped: 1`).
-- With `topup = false` in the selected profile, `run --profile self-fund` prints ``[4/6] Topup skipped (`topup = false` in the run profile; ...)`` instead of `[4/6] Topping up wallet...`, skips the wallet-topup call entirely (no destination-address requirement), and still runs deploy and the `post_deploy` hooks. Each hook sees `SCAFFOLD_TOPUP_SKIPPED=1` (here `echo 'topup skipped:' $SCAFFOLD_TOPUP_SKIPPED` prints `topup skipped: 1`). The same hook run without `--profile self-fund` prints `topup skipped: 0` — the variable is always set, never absent.
+- With `deploy = false` in the selected profile, `run --profile self-deploy` prints ``[4/5] Deploy skipped (`deploy = false` in the run profile; ...)`` instead of `[4/5] Deploying...`, skips the program-hash/deploy work entirely, and still runs the `post_deploy` hooks. Each hook sees `SCAFFOLD_DEPLOY_SKIPPED=1` (here `echo 'deploy skipped:' $SCAFFOLD_DEPLOY_SKIPPED` prints `deploy skipped: 1`).
+- With `topup = false` in the selected profile, `run --profile self-fund` prints ``[3/5] Topup skipped (`topup = false` in the run profile; ...)`` instead of `[3/5] Topping up wallet...`, skips the wallet-topup call entirely (no destination-address requirement), and still runs deploy and the `post_deploy` hooks. Each hook sees `SCAFFOLD_TOPUP_SKIPPED=1` (here `echo 'topup skipped:' $SCAFFOLD_TOPUP_SKIPPED` prints `topup skipped: 1`). The same hook run without `--profile self-fund` prints `topup skipped: 0` — the variable is always set, never absent.
 
 ### Failure Signals / Common Pitfalls
 
 - A `run` invocation that restarts the sequencer when one is already running healthy is a regression in the localnet-reuse path.
-- Hooks running with `cwd` somewhere other than the project root, or missing any of `SEQUENCER_URL` / `NSSA_WALLET_HOME_DIR` / `LEE_WALLET_HOME_DIR` / `SCAFFOLD_PROJECT_ROOT` / `SCAFFOLD_IDL_DIR` / `SCAFFOLD_TOPUP_SKIPPED` / `SCAFFOLD_DEPLOY_SKIPPED`, is a regression in the env contract. The last two are `1`/`0` and are **always set, never absent** — an unset one is itself the regression, since a hook cannot tell "scaffold did the step" from "this scaffold cannot report"; a value that disagrees with the step header printed in the same run (e.g. `[4/6] Topup skipped …` with `SCAFFOLD_TOPUP_SKIPPED=0`) is a worse one. `NSSA_WALLET_HOME_DIR` and `LEE_WALLET_HOME_DIR` must both be set and must print the same path; one of them empty means hooks that exec the wallet binary silently target `~/.lee/wallet` on one of the two LEZ pins.
-- `$SCAFFOLD_PROGRAM_ID` unset after a successful deploy on a single-program project with a vendored `spel` binary is a regression. Hint: `lgs setup` builds the spel binary; if it's missing, `program_id: unavailable` will also appear in the deploy summary.
+- Hooks running with `cwd` somewhere other than the project root, or missing any of `SEQUENCER_URL` / `LEE_WALLET_HOME_DIR` / `SCAFFOLD_PROJECT_ROOT` / `SCAFFOLD_TOPUP_SKIPPED` / `SCAFFOLD_DEPLOY_SKIPPED`, is a regression in the env contract. The last two are `1`/`0` and are **always set, never absent** — an unset one is itself the regression, since a hook cannot tell "scaffold did the step" from "this scaffold cannot report"; a value that disagrees with the step header printed in the same run (e.g. `[3/5] Topup skipped …` with `SCAFFOLD_TOPUP_SKIPPED=0`) is a worse one. An empty `LEE_WALLET_HOME_DIR` means hooks that exec the wallet binary silently target `~/.lee/wallet`.
+- `SCAFFOLD_PROGRAM_ID_<name>` unset after a successful deploy is a regression; scaffold prints `warning: no recorded deployment for …` when `deployments.json` lacks a program.
 
 ### Evidence to Capture
 
@@ -650,14 +651,14 @@ post_deploy = ["echo 'topup skipped:' $SCAFFOLD_TOPUP_SKIPPED"]
 - Output of `run` after the `[run]` block is added, showing the `===> post_deploy[i/n]:` markers and the resolved env values.
 - Output of `run --post-deploy "echo override"` showing only the override hook fires.
 - Output of `run --no-post-deploy` showing the deployed-programs summary instead of hooks.
-- Output of `run --profile self-deploy` showing the ``[5/6] Deploy skipped (`deploy = false` ...)`` header and the `post_deploy` hook reporting `deploy skipped: 1`.
-- Output of `run --profile self-fund` showing the ``[4/6] Topup skipped (`topup = false` ...)`` header followed by the deploy step and the `post_deploy` hook reporting `topup skipped: 1`, plus the profile-less run of the same hook reporting `topup skipped: 0`.
+- Output of `run --profile self-deploy` showing the ``[4/5] Deploy skipped (`deploy = false` ...)`` header and the `post_deploy` hook reporting `deploy skipped: 1`.
+- Output of `run --profile self-fund` showing the ``[3/5] Topup skipped (`topup = false` ...)`` header followed by the deploy step and the `post_deploy` hook reporting `topup skipped: 1`, plus the profile-less run of the same hook reporting `topup skipped: 0`.
 
-## D8. Reproducible Guest Builds and `program_id` Stability
+## D8. Reproducible Guest Builds
 
 ### Goal
 
-Validate that `program_id` is a stable identifier when the project asks for it: that the default (`docker`) build produces the same guest ELF on any machine, that opting into `local` is reported as non-reproducible, and that `deploy` ships whichever artefact the last `build` produced.
+Validate that the guest binary — and therefore its risc0 image ID, which private executions prove against — is reproducible when the project asks for it: that the default (`docker`) build produces the same guest ELF on any machine, that opting into `local` is reported as non-reproducible, and that `deploy` ships whichever artefact the last `build` produced.
 
 ### Preconditions
 
@@ -672,7 +673,7 @@ From the generated project root:
 # sha256sum is coreutils; on macOS use `shasum -a 256` throughout.
 DOCKER_BINS=target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker
 
-# 1. Local mode (opt-out): baseline program_id.
+# 1. Local mode (opt-out): baseline elf_sha256.
 "$SCAFFOLD_BIN" build --guest local
 "$SCAFFOLD_BIN" deploy --json | tee /tmp/d8-local.json
 
@@ -715,8 +716,8 @@ when a host disagrees with CI; otherwise CI is the standing check.
 Only steps 3 and 4 run a container. On a host that cannot build containers
 at all, run 1, 2, and 6 and additionally check the discovery ranking by
 hand: copy the `release/` `.bin` into `$DOCKER_BINS/` and confirm the next
-`deploy` echoes `wallet deploy-program <…/docker/…>` rather than the
-`release/` path. That covers everything except reproducibility itself.
+`deploy` echoes `wallet program-loader deploy --elf <…/docker/…>` rather than
+the `release/` path. That covers everything except reproducibility itself.
 
 ### Expected Success Signals
 
@@ -724,13 +725,13 @@ hand: copy the `release/` `.bin` into `$DOCKER_BINS/` and confirm the next
 - Step 2 fails *before* `setup` compiles anything or Docker pulls anything, with a message naming the missing piece (`cargo-risczero`, `docker`, or a daemon that is not running) and offering `[build].guest = "local"` as the alternative. A raw `docker build` error or a hung pull is a regression.
 - Step 3 prints `Building guest methods (deterministic, risc0-guest-builder:<tag>)...`, then risc0's own `ELFs ready at: ImageID: <hex> - <path>` lines, and leaves one `<program>.bin` per program under `target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/`.
 - Step 4's `sha256sum -c` passes. This is the whole point of the scenario: a differing hash between two builds of unchanged source means the deterministic path is not deterministic, and is the single most important thing to report from D8.
-- Comparing against **another machine** only proves anything if both used the same `Cargo.lock`. The container builds `--locked`, and cargo's MSRV-aware resolver picks dependency versions from the host toolchain, so two machines that each generated their own lockfile legitimately produce different `program_id`s. Copy the lockfile across, or compare within one commit that has it committed. A mismatch with differing lockfiles is not a D8 failure — record the two lockfiles before concluding anything.
-- Step 5's `doctor` row names the mode and the pin either way, with no `[build]` section needed: `PASS | guest build | docker — reproducible via risczero/risc0-guest-builder:<tag>` when the toolchain is installed, `FAIL | guest build | docker (risczero/risc0-guest-builder:<tag>) — … not found on PATH` when it is not. A `docker` row that does not mention the tag at all is a regression — the tag is what makes the ID reproducible. The `program_id` in `/tmp/d8-docker.json` matches the `ImageID` risc0 printed in step 3 and is **different** from the one in `/tmp/d8-local.json` (different toolchains, different bytes) — record both values.
+- Comparing against **another machine** only proves anything if both used the same `Cargo.lock`. The container builds `--locked`, and cargo's MSRV-aware resolver picks dependency versions from the host toolchain, so two machines that each generated their own lockfile legitimately produce different binaries. (`new` seeds the lockfile from the pinned LEZ release, so two fresh projects from the same scaffold commit start identical.) Copy the lockfile across, or compare within one commit that has it committed. A mismatch with differing lockfiles is not a D8 failure — record the two lockfiles before concluding anything.
+- Step 5's `doctor` row names the mode and the pin either way, with no `[build]` section needed: `PASS | guest build | docker — reproducible via risczero/risc0-guest-builder:<tag>` when the toolchain is installed, `FAIL | guest build | docker (risczero/risc0-guest-builder:<tag>) — … not found on PATH` when it is not. A `docker` row that does not mention the tag at all is a regression — the tag is what makes the binary reproducible. Each entry's `elf_sha256` in `/tmp/d8-docker.json` equals `sha256sum` of the matching file from step 4 and is **different** from the one in `/tmp/d8-local.json` (different toolchains, different bytes) — record both values. The `program_id`s differ between the two files regardless: every deploy creates a new `program_loader` header.
 - Step 6's `doctor` row reads `PASS | guest build | local — host risc0 toolchain ... not reproducible ...`. It also prints `Clearing deterministic guest artefacts in ...` and `target/riscv-guest-docker` no longer exists, so a later `deploy` cannot ship a stale deterministic ELF.
 
 ### Failure Signals / Common Pitfalls
 
-- The same `program_id` from steps 1 and 5 usually means `deploy` picked the same artefact twice — check which path `deploy` reported as the binary, not just the ID.
+- The same `elf_sha256` from steps 1 and 5 usually means `deploy` picked the same artefact twice — check which path `deploy` reported as the binary, not just the hash.
 - `deploy` reporting a `release/` binary while the effective mode is `docker` (the default) is a discovery-ranking regression.
 - A deterministic build that succeeds but produces no `.bin` (only extension-less ELFs) means risc0's output layout moved; capture `ls -R target/riscv-guest-docker`.
 - Very slow builds are expected on the first run (~1.7 GB image pull, no cargo cache reuse inside the container). Slowness is worth recording as a DX finding, but it is not a correctness failure.
@@ -740,7 +741,7 @@ hand: copy the `release/` `.bin` into `$DOCKER_BINS/` and confirm the next
 
 ### Evidence to Capture
 
-- Both `deploy --json` outputs and the `program_id` from each. `--json` does not carry the binary path; for that, run one `deploy <program>` without `--json` in each mode and capture the echoed `$ … wallet deploy-program <path>` line. That line is the only direct evidence of which artefact was shipped.
+- Both `deploy --json` outputs and the `elf_sha256` from each. `--json` does not carry the binary path; for that, run one `deploy <program>` without `--json` in each mode and capture the echoed `$ … wallet program-loader deploy --elf <path> …` line. That line is the only direct evidence of which artefact was shipped.
 - The `sha256sum -c` result from step 4 and the `ImageID` lines from step 3.
 - The `doctor` `guest build` row in both modes.
 - The exact failure text from step 2.
@@ -749,195 +750,6 @@ hand: copy the `release/` `.bin` into `$DOCKER_BINS/` and confirm the next
 
 - Steps 4 and 5 are the load-bearing ones. If time is short, run 1, 3, 4, and 5.
 - A second machine (or a CI runner) building the same commit and comparing hashes is stronger evidence than two builds on one host; do that when it is available.
-
-## L1. LEZ Template Bootstrap
-
-### Goal
-
-Validate that the LEZ template scaffolds and reaches a ready-to-build state.
-
-### Preconditions
-
-- Latest scaffold binary has been built from the repo root.
-- Scratch workspace exists.
-
-### Commands / Actions
-
-From the scratch workspace:
-
-```bash
-cd "$SCRATCH_ROOT"
-"$SCAFFOLD_BIN" new dogfood-lez --template lez-framework
-cd dogfood-lez
-ls -d idl crates/lez-client-gen methods/guest/src/bin src/bin
-"$SCAFFOLD_BIN" setup
-"$SCAFFOLD_BIN" localnet start
-"$SCAFFOLD_BIN" doctor
-"$SCAFFOLD_BIN" build
-```
-
-The `ls` step verifies that LEZ-specific directories were scaffolded before proceeding with the build pipeline.
-
-### Expected Success Signals
-
-- Project creation succeeds with the LEZ template.
-- The generated project contains `idl/`, `crates/lez-client-gen/`, `methods/guest/src/bin/lez_counter.rs`, and `src/bin/run_lez_counter.rs`.
-- `setup`, `localnet start`, and `doctor` behave the same way they do for the default template.
-- `build` succeeds for the LEZ project workspace and also runs IDL generation and client generation automatically.
-
-### Failure Signals / Common Pitfalls
-
-- If the generated project is missing LEZ-specific paths such as `idl/`, `crates/lez-client-gen/`, or `methods/guest/src/bin/lez_counter.rs`, record that immediately.
-- If LEZ bootstrap behavior diverges from the default template in setup/localnet/doctor flows, capture the difference explicitly.
-- If `build` does not automatically trigger IDL + client generation for the LEZ template, record that as a regression.
-
-### Evidence to Capture
-
-- LEZ project creation output.
-- Directory listing showing LEZ-specific scaffolded paths.
-- `setup`, `localnet start`, `doctor`, and `build` excerpts.
-
-### Execution Notes
-
-- Keep LEZ runs separate from default-template runs. The template-specific directories and follow-up commands are part of the validation.
-
-## L2. LEZ IDL Regeneration
-
-### Goal
-
-Validate that LEZ projects can regenerate IDL from the current project source.
-
-### Preconditions
-
-- LEZ project exists.
-- The LEZ project build environment is working.
-
-### Commands / Actions
-
-From the LEZ project root:
-
-```bash
-"$SCAFFOLD_BIN" build idl
-find idl -maxdepth 1 -type f -name '*.json' | sort
-```
-
-### Expected Success Signals
-
-- `build idl` writes one or more JSON files under `idl/`.
-- Command output includes explicit `Wrote IDL ...` lines.
-- The regenerated files are valid JSON and match the current program surface.
-
-### Failure Signals / Common Pitfalls
-
-- If the command prints that IDL build is being skipped due to framework kind, the scenario is running in the wrong project.
-- Missing IDL marker output or empty IDL generation is a real regression for the LEZ template.
-
-### Evidence to Capture
-
-- `build idl` output.
-- Listing of generated files under `idl/`.
-- If relevant, a diff between pre-existing and regenerated IDL.
-
-### Execution Notes
-
-- Preserve the raw `Wrote IDL ...` lines. They make it much easier to diagnose partial-generation failures.
-
-## L3. LEZ Client Generation
-
-### Goal
-
-Validate that LEZ client bindings can be regenerated from the current IDL set.
-
-### Preconditions
-
-- LEZ project exists.
-- `build idl` has been run successfully, either directly or via `build client`.
-
-### Commands / Actions
-
-From the LEZ project root:
-
-```bash
-"$SCAFFOLD_BIN" build client
-find src/generated -type f | sort
-```
-
-### Expected Success Signals
-
-- `build client` reports that it is regenerating IDL before generating client code.
-- Client artifacts are written under `src/generated`.
-- The generated files reflect the current contents of `idl/`.
-
-### Failure Signals / Common Pitfalls
-
-- If `build client` does not refresh IDL first, record that behavior change.
-- Missing `src/generated` output or missing generator crate paths are LEZ-specific regressions.
-
-### Evidence to Capture
-
-- `build client` output.
-- Listing of files under `src/generated`.
-- Any diff in generated client code when the scenario is rerun after a program change.
-
-### Execution Notes
-
-- Treat generated client output as part of the scenario evidence, not as disposable noise.
-- When the generator fails, capture the exact manifest path and working directory that were used.
-
-## L4. LEZ Template Deploy and Counter Interaction
-
-### Goal
-
-Validate that the LEZ counter program can be deployed and that the generated runner binary can invoke `init` and `increment` subcommands against the running localnet.
-
-### Preconditions
-
-- LEZ project exists with L1 completed (setup, build, localnet running).
-- `wallet -- check-health` succeeds.
-- At least one public account exists. If not:
-
-```bash
-"$SCAFFOLD_BIN" wallet -- account new public
-```
-
-### Commands / Actions
-
-From the LEZ project root:
-
-```bash
-"$SCAFFOLD_BIN" deploy
-export NSSA_WALLET_HOME_DIR="$PWD/.scaffold/wallet" LEE_WALLET_HOME_DIR="$PWD/.scaffold/wallet"
-export HOST_CC=cc HOST_CXX=c++
-cargo run --bin run_lez_counter -- init --to <account-id>
-cargo run --bin run_lez_counter -- increment --counter <account-id> --authority <account-id> --amount 5
-```
-
-`HOST_CC`/`HOST_CXX` matter for direct `cargo run` in lez-framework projects when the risc0 C++ toolchain is installed: the guest embed refingerprints under your shell env, risc0-build exports plain `CC` = riscv gcc, and the guest graph's host-side proc-macro deps (`spel-framework-macros` → … → `ring`) then compile host C with the riscv compiler and die on `-m64`. Scaffold's own `build`/IDL/client commands pin these automatically; direct cargo invocations need the export (CI's template-e2e does the same at the job level).
-
-### Expected Success Signals
-
-- `deploy` submits the `lez_counter` program and prints a success summary.
-- `run_lez_counter init` prints confirmation that the counter was initialized at the target account.
-- `run_lez_counter increment` prints confirmation of the increment operation.
-
-Note: as of this writing, the LEZ counter runner contains `TODO` placeholders for actual transaction submission. If the runner only prints diagnostic messages without submitting transactions, record that as the current state. When transaction submission is implemented, update this scenario with account-state verification steps matching D6.
-
-### Failure Signals / Common Pitfalls
-
-- If `deploy` cannot find `lez_counter` in the discovered program list, record the actual discovered list.
-- If the runner panics on wallet initialization, the name this pin reads is unset: either neither name was exported, or only `LEE_WALLET_HOME_DIR` was exported against a pre-v0.2.0 pin. If it instead starts against an empty wallet, the pin is v0.2.0 and only `NSSA_WALLET_HOME_DIR` was exported — that wallet ignores the old name and falls back to `~/.lee/wallet` without an error.
-- If the runner accepts the subcommand but does nothing (due to TODO stubs), record the output and note the gap.
-
-### Evidence to Capture
-
-- `deploy` output for the LEZ project.
-- `run_lez_counter init` and `increment` output.
-- Whether the runner actually submitted transactions or only printed placeholder messages.
-
-### Execution Notes
-
-- Both `NSSA_WALLET_HOME_DIR` (LEZ up to v0.1.2) and `LEE_WALLET_HOME_DIR` (LEZ v0.2.0) must be exported for the runner. Scaffold wallet commands set both automatically, but direct `cargo run` does not.
-- Keep LEZ interaction evidence separate from default-template interaction evidence.
 
 ## E1. CLI Discoverability and Error Quality
 
@@ -1029,20 +841,66 @@ From the scratch workspace:
 cd "$SCRATCH_ROOT"
 "$SCAFFOLD_BIN" new dogfood-invalid-template --template nonexistent-template
 "$SCAFFOLD_BIN" new dogfood-lez-explicit --template lez-framework
-ls -d dogfood-lez-explicit/idl dogfood-lez-explicit/crates/lez-client-gen
+ls -d dogfood-lez-explicit 2>&1
 "$SCAFFOLD_BIN" new dogfood-vendor --vendor-deps
 "$SCAFFOLD_BIN" new dogfood-cache --cache-root "$SCRATCH_ROOT/custom-cache"
 find "$SCRATCH_ROOT/custom-cache/repos/lez" -maxdepth 2 -mindepth 1 -type d | sort
 grep -n "^\[wallet\]\|^home_dir\|^binary" dogfood-cache/scaffold.toml
 ```
 
+Then migrate a LEZ 0.1/0.2-era project (the `scaffold.toml` an earlier scaffold wrote):
+
+```bash
+mkdir -p dogfood-migrate && cd dogfood-migrate
+cat > scaffold.toml <<'EOF'
+# kept comment
+[scaffold]
+version = "0.2.0"
+
+[repos.lez]
+source = "https://github.com/logos-blockchain/logos-execution-zone.git"
+pin = "cf3639d8252040d13b3d4e933feb19b42c76e14a"
+
+[repos.spel]
+source = "https://github.com/logos-co/spel.git"
+pin = "73fc462eb8f0a4d00f1a846437c627ec2e523f83"
+
+[wallet]
+home_dir = ".scaffold/wallet"
+
+[framework]
+kind = "default"
+version = "0.1.0"
+
+[framework.idl]
+spec = "lssa-idl/0.1.0"
+path = "idl"
+
+[localnet]
+port = 3055
+risc0_dev_mode = true
+
+[circuits]
+version = "0.4.1"
+EOF
+"$SCAFFOLD_BIN" doctor; echo "exit=$?"
+"$SCAFFOLD_BIN" init --dry-run
+"$SCAFFOLD_BIN" init
+cat scaffold.toml
+sed -i 's/kind = "default"/kind = "lez-framework"/' scaffold.toml.bak && cp scaffold.toml.bak scaffold.toml
+"$SCAFFOLD_BIN" init; echo "exit=$?"
+cd ..
+```
+
 ### Expected Success Signals
 
-- Invalid `--template` name fails with a clear error listing the available templates (`default`, `lez-framework`).
-- `--template lez-framework` creates a project with LEZ-specific structure (same as L1).
+- Invalid `--template` name fails with a clear error naming the available template (`default`).
+- `--template lez-framework` fails with the explanation that the spel template is not supported because spel has no LEZ 0.3 release, and leaves no `dogfood-lez-explicit` directory behind.
 - `--vendor-deps` is accepted without error and creates a project that vendors the pinned LEZ repo under `.scaffold/repos/lez`.
 - `--cache-root` is honored and scaffold uses the specified directory for cache operations, with non-vendored LEZ clones isolated by pin under `<cache-root>/repos/lez/<pin>/`.
 - Generated `scaffold.toml` includes `[wallet].home_dir` and does not include a deprecated `wallet.binary` field.
+- On the schema-0.2.0 file, `doctor` fails fast with `scaffold.toml uses an old schema. Run \`logos-scaffold init\` to migrate to v0.3.0`. `init --dry-run` lists the planned changes without writing; `init` writes `scaffold.toml.bak`, bumps the version to `0.3.0`, removes `[repos.spel]`, `[circuits]` and `[framework.idl]`, re-pins `[repos.lez]` to `1a003bfb…` (`v0.3.1`) with a `run \`logos-scaffold setup\` to rebuild` note, and keeps `# kept comment` and `port = 3055`.
+- With `kind = "lez-framework"`, `init` refuses (non-zero exit, a message naming spel and LEZ 0.3) and leaves `scaffold.toml` untouched.
 
 ### Failure Signals / Common Pitfalls
 
@@ -1054,7 +912,7 @@ grep -n "^\[wallet\]\|^home_dir\|^binary" dogfood-cache/scaffold.toml
 ### Evidence to Capture
 
 - Error output for invalid `--template`.
-- Creation output for `--template lez-framework` with directory listing.
+- The refusal output for `--template lez-framework`.
 - Creation output for `--vendor-deps` and `--cache-root` if tested.
 - Directory listing proving the pin-isolated cache path.
 - `scaffold.toml` excerpt showing wallet home config without a wallet binary field.
@@ -1085,7 +943,6 @@ From the scratch workspace:
 ```bash
 cd "$SCRATCH_ROOT"
 "$SCAFFOLD_BIN" new dogfood-skills-default
-"$SCAFFOLD_BIN" new dogfood-skills-lez --template lez-framework
 
 mkdir dogfood-skills-init && cd dogfood-skills-init
 "$SCAFFOLD_BIN" init
@@ -1098,15 +955,14 @@ Inspect the generated layout in each of the three projects:
 
 ```bash
 find dogfood-skills-default/.claude/skills dogfood-skills-default/.cursor/rules -type f | sort
-find dogfood-skills-lez/.claude/skills dogfood-skills-lez/.cursor/rules -type f | sort
-ls dogfood-skills-default/AGENTS.md dogfood-skills-lez/AGENTS.md dogfood-skills-init/AGENTS.md
+ls dogfood-skills-default/AGENTS.md dogfood-skills-init/AGENTS.md
 ```
 
 ### Expected Success Signals
 
-- Every generated project (default template, lez-framework template, and `init`-adopted bare directory) contains exactly four `.claude/skills/<name>/SKILL.md` files: `lgs-cli`, `lez-template`, `lez-framework-template`, `basecamp`.
-- The same four skills appear under `.cursor/rules/<name>.mdc`.
-- `AGENTS.md` exists at every project root, lists all four skills with their descriptions, and links to `.claude/skills/<name>/SKILL.md`.
+- Every generated project (default template and `init`-adopted bare directory) contains exactly three `.claude/skills/<name>/SKILL.md` files: `lgs-cli`, `lez-template`, `basecamp`.
+- The same three skills appear under `.cursor/rules/<name>.mdc`.
+- `AGENTS.md` exists at every project root, lists all three skills with their descriptions, and links to `.claude/skills/<name>/SKILL.md`.
 - Re-running `init` on an already-migrated project succeeds (no longer bails) and prints `AI skills refreshed under .claude/skills/, .cursor/rules/, AGENTS.md.` The `shasum` output before and after a re-init is byte-identical for all three skill files.
 - `.claude/skills/<name>/SKILL.md` is byte-identical to the canonical source under `<scaffold-repo>/skills/<name>/SKILL.md` (run `diff` if validating against a built-from-source binary).
 - `.cursor/rules/<name>.mdc` frontmatter contains `description:` and `alwaysApply: false`, and does **not** contain a `name:` field. The body after the closing `---` is identical to the SKILL.md body.
@@ -1114,18 +970,18 @@ ls dogfood-skills-default/AGENTS.md dogfood-skills-lez/AGENTS.md dogfood-skills-
 
 ### Failure Signals / Common Pitfalls
 
-- A skill missing from one of the three locations in any generated project is a regression — every project gets the same four-skill set per the v0.1 contract.
+- A skill missing from one of the three locations in any generated project is a regression — every project gets the same three-skill set.
 - A `.cursor/rules/<name>.mdc` that still carries the `name:` line from the source SKILL.md is a regression in the frontmatter rewrite.
 - A re-`init` that errors with "already at schema" is a stale build — that bail was removed when skill refresh became part of init's contract.
 - A re-`init` that mutates skill content without a corresponding canonical-source change is a regression in idempotency.
 - Skills appearing in `.gitignore` is a regression — they are version-controlled by design.
-- Hand-edited team skills under `.claude/skills/<other>/` that get clobbered by `init` are a regression — `apply_skills` only owns the four shipped names.
+- Hand-edited team skills under `.claude/skills/<other>/` that get clobbered by `init` are a regression — `apply_skills` only owns the shipped names.
 
 ### Evidence to Capture
 
-- File listings under `.claude/skills/`, `.cursor/rules/`, and the existence of `AGENTS.md` for each of the three project flavors.
+- File listings under `.claude/skills/`, `.cursor/rules/`, and the existence of `AGENTS.md` for both project flavors.
 - One `.cursor/rules/<name>.mdc` head excerpt showing the rewritten frontmatter.
-- `AGENTS.md` excerpt showing the four-row table.
+- `AGENTS.md` excerpt showing the three-row table.
 - `shasum` pairs from the re-`init` idempotency check.
 
 ### Execution Notes
@@ -1637,7 +1493,7 @@ fn main() -> logos_scaffold::api::Result<()> {
 
 - `cargo doc --no-deps` builds rustdoc for the `api` module, and `cargo test --doc` passes the `api` doctests (setup / localnet lifecycle / wallet topup / deploy / doctor / report / test-node examples).
 - `Project::open(root)` loads a project from an explicit root with no dependency on the process working directory; `Project::discover(dir)` walks upward to find `scaffold.toml`.
-- `Project::paths()` reports the resolved cache root (and which layer supplied it), pinned repo checkouts, vendored binary paths, wallet home, localnet state/log, and circuits dir — whether or not they exist yet.
+- `Project::paths()` reports the resolved cache root (and which layer supplied it), the pinned LEZ checkout, its binary paths, wallet home, localnet state/log, the localnet chain home (`.scaffold/localnet`) and `deployments.json` — whether or not they exist yet.
 - `Project::localnet_status()` returns the same typed model the CLI prints under `localnet status --json`.
 - Errors are categorized (`api::Error::{Config, MissingTool, RepoState, Process, Timeout, Transport, Command, Other}`); a missing/unreadable `scaffold.toml` is a `Config` error, and external-command failures carry a structured `CommandFailed` (rendered command, exit code, captured output).
 
@@ -1660,11 +1516,11 @@ fn main() -> logos_scaffold::api::Result<()> {
 
 ### Goal
 
-Validate that `test-node` spins up isolated, short-lived sequencer instances (own port, config, database, logs, runtime dir) for integration tests, that the prerequisite/pin commands resolve the caller project's LEZ and circuits pins, and that lifecycle commands (`start`/`status`/`stop`/`run`) are clean and machine-readable.
+Validate that `test-node` spins up isolated, short-lived sequencer instances (own port, config, database, logs, runtime dir) for integration tests, that the prerequisite/pin commands resolve the caller project's LEZ pin, and that lifecycle commands (`start`/`status`/`stop`/`run`) are clean and machine-readable.
 
 ### Preconditions
 
-- The real sequencer toolchain is provisioned (r0vm + circuits + built `sequencer_service`) per "Provisioning the Real LEZ Sequencer Toolchain". `test-node prepare` builds/fetches the sequencer and circuits on demand; `setup` is not required for T1–T3 (it is only needed for T4's wallet).
+- The real sequencer toolchain is provisioned (r0vm + built `sequencer_service`) per "Provisioning the Real LEZ Sequencer Toolchain". `test-node prepare` builds the sequencer on demand (its build fetches the circuits release); `setup` is not required for T1–T3 (it is only needed for T4's wallet).
 - No requirement that the developer `localnet` is running — test nodes are independent of it.
 - **Run this against a real node.** On a provisioned box, `test-node doctor --json` returns `"ok": true` with every check `pass`, `test-node prepare` ends with `test-node prerequisites ready`, and `test-node start` yields a real `pid`/`rpc_url` whose `block_id` rises within seconds as the sequencer produces clock blocks. Do not substitute a stub for the node here.
 
@@ -1688,10 +1544,10 @@ The pin/prepare/doctor commands also accept `--project <root>` so they can be dr
 
 ### Expected Success Signals
 
-- `test-node pins` reports the LEZ source/ref, resolved commit, checkout path and ownership (`managed_cache` vs `caller_provided`), sequencer binary path, and circuits version/path — each annotated with its origin (`cli_override` -> `project_config` -> `scaffold_default`). For projects with `[circuits]`, the reported circuits version matches the project config; startup should still materialize the configured circuits install before launching the node.
-- `test-node doctor` reports pin drift, checkout presence/commit/cleanliness, sequencer binary, circuits release, and platform support as separate categorized checks; exits non-zero only when a real prerequisite is missing.
-- `test-node prepare` resolves the project's pins, ensures the checkout + circuits, builds the standalone sequencer, and (with `--json`) reports the checkout, resolved commit, binary path, and circuits path.
-- `test-node start --json` prints at least `rpc_url`, `pid`, `state_dir`, `config_path`, `log_path`, `genesis_block_id`, and current `block_height`; the node runs on its own port under `.scaffold/test-nodes/<id>/` and does not touch the vendored LEZ checkout or the developer localnet.
+- `test-node pins` reports the LEZ source/ref, resolved commit, checkout path and ownership (`managed_cache` vs `caller_provided`), and sequencer binary path — each annotated with its origin (`cli_override` -> `project_config` -> `scaffold_default`).
+- `test-node doctor` reports pin drift, checkout presence/commit/cleanliness, sequencer binary, and whether the checkout is LEZ 0.3 (`unsupported_lez`: the standalone feature marker) as separate categorized checks; exits non-zero only when a real prerequisite is missing.
+- `test-node prepare` resolves the project's pins, ensures the checkout, builds the standalone sequencer, and (with `--json`) reports the checkout, resolved commit, and binary path.
+- `test-node start --json` prints at least `rpc_url`, `pid`, `state_dir`, `config_path`, `log_path`, `genesis_block_id`, and current `block_height`; `genesis_block_id` is `1`. The node runs with `--port <p> --listen-address 127.0.0.1 --home <work dir> --metrics-address 127.0.0.1:0` under `.scaffold/test-nodes/<id>/` (its database is `rocksdb-<channel id>/` there) and does not touch the vendored LEZ checkout or the developer localnet — two nodes and a localnet run side by side because no fixed metrics port is bound.
 - `test-node start --port 0` (the default) selects an unused localhost port; `test-node status --node <id> --json` reports `healthy` and the served `rpc_url`, exiting non-zero when unhealthy.
 - `test-node start` / `test-node run` with `--block-create-timeout-ms` and `--retry-pending-blocks-timeout-ms` patch those sequencer config values as millisecond strings (for example, `500ms` for faster local tests) in the runtime `sequencer_config.json`; accepted values are 1 to 3,600,000 ms, and omitting them preserves the pinned debug config values. Values near or below the stable-read sample cadence can keep `clock wait-stable` and account-boundary reads from converging.
 - `test-node stop --node <id>` terminates only that node and removes its runtime state (unless `--preserve-work-dir`).
@@ -1703,12 +1559,11 @@ The pin/prepare/doctor commands also accept `--project <root>` so they can be dr
 - `test-node start` with an explicit `--port` already in use must fail fast with a port-conflict error, not hang.
 - If a caller-provided LEZ checkout (`[repos.lez].path`, or a local dir via `--lez-source`) is reset/force-checked-out by `prepare`, that is a severe regression — caller checkouts are validated, never mutated.
 - A `run` that leaks the node (does not stop it) after the child exits, or does not forward the child's non-zero exit, is a regression.
-- Missing sequencer binary or circuits must produce a clear scaffold-side error pointing at `test-node prepare`, not a raw panic.
+- A missing sequencer binary must produce a clear scaffold-side error pointing at `test-node prepare`, not a raw panic.
 
 ### Evidence to Capture
 
 - `test-node pins --json` and `test-node doctor` output.
-- The circuits version from `test-node pins --json`, and the configured install dir after `test-node start` or another command that materializes project circuits.
 - `test-node start --json` output (the full connection record) and the `.scaffold/test-nodes/<id>/` listing.
 - `test-node status --json` for the running and stopped states.
 - `test-node run` output showing the exported `LGS_TEST_NODE_*` env reaching the child.
@@ -1757,26 +1612,26 @@ Against the running node URL:
 
 - `tx submit-and-wait --json` emits exactly one terminal outcome object: `committed` (with the actual sequencer `block_id` and `timestamp`), `rejected` (`phase` = `stateless` | `stateful`, with `reason` or `observed_after_block_id`), `timeout` (`last_observed_block_id`), `transport_error`, or `wire_mismatch`; it exits non-zero for anything but `committed`. Transport failures are never reported as business rejections, and a stateful rejection follows an explicit multi-block observation rule (not a single sleep).
 - `tx submit` returns the node-assigned tx hash or a structured stateless rejection; `tx wait` observes a previously submitted hash, honoring `--after-block` when supplied.
-- `blocks head` / `blocks range` report each block's id and timestamp and classify it explicitly: genesis (the only zero-transaction block — no clock tick to replay), clock-only (empty post-genesis blocks still advance clock state via the mandatory clock transaction), and blocks carrying user transactions, with per-tx hashes for public/deployment transactions.
+- `blocks head` / `blocks range` report each block's id and timestamp and classify it explicitly: genesis (block id 1, carrying the chain's setup transactions — all fee-exempt system transactions — and a clock tick), empty blocks (only the two fee-exempt system transactions every block ends with: fee distribution, then the clock tick), and blocks carrying user transactions (any transaction that declares a fee, or a privacy-preserving one), with per-tx hashes and `is_clock` / `is_system` flags for public transactions.
 - `blocks wait` returns the requested number of blocks after the boundary.
 - `clock read` returns all three `/LEZ/ClockProgramAccount/...` accounts with decoded `block_id`/`timestamp`; `clock wait-stable` returns a snapshot only after consecutive identical samples (head + clock state), or a retryable timeout error.
 - `account get` distinguishes `present` (with lossless base64 account bytes plus decoded balance/nonce/owner/data), `missing` (never written), and `decode_error`; every read reports the `block_id` it was scoped to. `batch-get` reads all accounts at one consistent block boundary.
 - `proof get` distinguishes a missing commitment (`proof: null`), an invalid commitment (local error before any RPC), and transport failures.
 - `snapshot accounts` writes a block-consistent JSON snapshot to the `--output` path.
 
-**Against a real node specifically** (this is the highest-value check — the client's hand-rolled borsh parsers must match genuine sequencer output, not just the unit-test fixtures): a freshly started node produces clock-only blocks where `blocks head --json` shows `transaction_count: 1`, the single tx has `is_clock: true` and `kind: "public"`, and `fully_parsed: true`; `clock read --json` decodes real `ClockAccountData` where the `/0000001` account's `block_id` tracks the head while `/0000010` and `/0000050` lag at their slower cadence; `account get` on a seeded account returns the exact seeded balance (see T3). Any mismatch here is a wire-format regression that the in-process stub would not catch.
+**Against a real node specifically** (this is the highest-value check — the client's hand-rolled borsh parsers must match genuine sequencer output, not just the unit-test fixtures): a freshly started node produces empty blocks where `blocks head --json` shows `transaction_count: 2`, `has_user_transactions: false`, both txs `is_system: true` with the second `is_clock: true` and `kind: "public"`, and `fully_parsed: true`; `blocks range --from 1 --to 1` shows `is_genesis: true` with several system transactions; `clock read --json` decodes real `ClockAccountData` where the `/0000001` account's `block_id` tracks the head while `/0000010` and `/0000050` lag at their slower cadence; `account get` on a seeded account returns the exact seeded balance (see T3). Any mismatch here is a wire-format regression that the in-process stub would not catch.
 
 ### Failure Signals / Common Pitfalls
 
 - A `tx submit-and-wait` that collapses transport errors or timeouts into "rejected" (or that exits zero for a non-committed outcome) is a regression in the divergence-detection contract.
-- A block classification that marks genesis as having a clock transaction, or hides empty post-genesis (clock-only) blocks, breaks clock-sensitive replay.
+- A block classification that reports an empty block as carrying user transactions (e.g. the fee-distribution transaction counted as a user tx), or hides empty blocks, breaks clock-sensitive replay.
 - An account read that does not report its block boundary, or that races a clock block and returns inconsistent data instead of a stable result / structured retryable error, is a parity regression.
 - A `proof get` that conflates "missing commitment" with "invalid commitment" or with a transport failure is a regression.
 
 ### Evidence to Capture
 
 - One `tx submit-and-wait --json` committed object and (if probed) one non-committed outcome.
-- `blocks range --json` output showing the genesis / clock-only / user-tx classification.
+- `blocks range --json` output showing the genesis / empty / user-tx classification.
 - `clock read --json` and a `clock wait-stable` result.
 - `account get --json` for present and missing accounts, and a `proof get --json` for present and missing commitments.
 
@@ -1793,7 +1648,7 @@ Validate that a test node can start from a caller-provided state snapshot — no
 
 ### Preconditions
 
-- T1 prerequisites met (sequencer binary + circuits available for the project).
+- T1 prerequisites met (sequencer binary available for the project).
 - A running node (T1) if you intend to `state export` from it; otherwise a hand-written snapshot file suffices.
 
 ### Commands / Actions
@@ -1822,16 +1677,16 @@ echo '{"format":"bogus/1"}' > ./bad.json
 
 ### Expected Success Signals
 
-- `state schema` identifies the exact snapshot formats the project's pins accept (`lgs-state-snapshot/1`, the `lgs-account-snapshot/1` output of `snapshot accounts`, or a rocksdb state directory), the state format version (`nssa-v03`), the LEZ ref/commit, and the seedable account fields.
-- `state seed` validates the snapshot before producing a state directory and reports the seed kind (`config` vs `database`), the LEZ commit, the state format version, and the public/private account counts. Validation errors are distinguished: format mismatch, storage-schema mismatch (e.g. public-account data, which the genesis config cannot seed), LEZ pin mismatch, and account decode errors.
-- `test-node start --state ./seeded-state` starts from exactly the snapshot's accounts — the sequencer builds genesis state from `initial_public_accounts` / `initial_private_accounts` with no implicit wallets, sample programs, or default testnet accounts. A database-seeded directory (a node's preserved `rocksdb/`) resumes from it verbatim.
+- `state schema` identifies the exact snapshot formats the project's pins accept (`lgs-state-snapshot/1`, the `lgs-account-snapshot/1` output of `snapshot accounts`, or a rocksdb state directory), the state format version (`lee-v03`), the LEZ ref/commit, and the seedable account fields (`account_id`, `balance (u64)`; no private-account fields; applied through `genesis[].supply_account`).
+- `state seed` validates the snapshot before producing a state directory and reports the seed kind (`config` vs `database`), the LEZ commit, the state format version, and the public/private account counts. Validation errors are distinguished: format mismatch, storage-schema mismatch (program data, nonces, private accounts, or balances above u64 — none of which LEZ 0.3 genesis can seed), LEZ pin mismatch, and account decode errors.
+- `test-node start --state ./seeded-state` replaces the debug genesis with the snapshot's `supply_account` entries (plus the dev funder, so `wallet topup` keeps working), so the LEZ debug accounts (`2RHZhw9h…`, `5T7EJX45…`, `2ByFEVzf…`) do not exist on the node. A database-seeded directory (a preserved node work dir with `rocksdb-<channel id>/`, or scaffold's portable `rocksdb/` layout) resumes from it verbatim.
 - `state export` writes named public-account balances from a running node into an `lgs-state-snapshot/1` file (the pinned RPC exposes public balances only; full-fidelity state comes from a stopped node's database directory, which the command output notes).
-- **Confirmed against a real node:** seed an account at a distinctive balance (e.g. 4242), `start --state`, then `test-node account get --account-id <id>` returns `state: present` with `balance: 4242` and the account exists at genesis — proving the sequencer built genesis from exactly the snapshot (no testnet defaults). This is the end-to-end proof that exact-state seeding works, not just that the file validated.
+- **Confirmed against a real node:** seed an account at a distinctive balance (e.g. 4242), `start --state`, then `test-node account get --account-id <id>` returns `state: present` with `balance: 4242` (its only shard is the native token program's, `11111111111111111111111111111111`) and the account exists at genesis — while `test-node account get --account-id 2RHZhw9h534Zr3eq2RGhQete2Hh667foECzXPmSkGni2` reports `missing`, proving the debug genesis was replaced. This is the end-to-end proof that exact-state seeding works, not just that the file validated.
 
 ### Failure Signals / Common Pitfalls
 
 - A node started with `--state` that injects extra accounts (default testnet wallets, sample programs) beyond the snapshot is a regression — seeded startup must be exact.
-- A snapshot needing unsupported state (e.g. public-account data/nonce via the genesis config) that fails late inside the node instead of up front during `state seed` validation is a regression.
+- A snapshot needing unsupported state (program data, a nonce, or a private account) that fails late inside the node instead of up front during `state seed` validation is a regression.
 - A pin mismatch (snapshot's `lez_commit` differs from the project's resolved pin) that is silently accepted is a regression.
 - An unknown snapshot format accepted instead of rejected with a `format mismatch` error is a regression.
 
@@ -1844,7 +1699,7 @@ echo '{"format":"bogus/1"}' > ./bad.json
 ### Execution Notes
 
 - Pair this scenario with T2: after seeding and starting, use `account get` / `account batch-get` to assert the seeded accounts match the snapshot exactly.
-- Database seeding (`--state <dir with rocksdb/>`) is the full-fidelity path; the JSON snapshot path is balance-and-commitment level by design at the pinned revision.
+- Database seeding (`--state <dir with rocksdb/ or rocksdb-<channel>/>`) is the full-fidelity path; the JSON snapshot path is public-balance level by design, because that is all LEZ 0.3 genesis can supply.
 
 ## T4. Real Committed User Transaction (Test-Node + Wallet)
 
@@ -1854,62 +1709,68 @@ The capstone end-to-end proof: a real wallet transaction, executed by a real tes
 
 ### Preconditions
 
-- Full toolchain provisioned **including the wallet**: r0vm + circuits + real `sequencer_service` (T1) **and** `setup` complete so the LEZ-local `wallet` is built and the default wallet is seeded (see "Provisioning the Real LEZ Sequencer Toolchain", step 4).
-- The wallet targets the `sequencer_addr` in the wallet config (`wallet_config.json` under the wallet home named by `$NSSA_WALLET_HOME_DIR` / `$LEE_WALLET_HOME_DIR`) when set; otherwise it defaults to `http://127.0.0.1:<localnet.port>` (default 3040). Start the test-node on that port (or update `sequencer_addr`) so the wallet talks to it.
+- Full toolchain provisioned **including the wallet**: r0vm + real `sequencer_service` (T1) **and** `setup` complete so the LEZ-local `wallet` is built, the default wallet is seeded, and the dev funder is imported (see "Provisioning the Real LEZ Sequencer Toolchain", step 4).
+- The wallet targets `sequencer.sequencer_addr` in `.scaffold/wallet/wallet_config.json`, which `setup` sets to `http://127.0.0.1:<[localnet].port>`. Start the test-node on that port (stop the localnet first if it holds it) so the wallet talks to it. The test node's genesis funds the dev funder exactly like the localnet's, which is what makes `wallet topup` work against it.
 
 ### Commands / Actions
 
 From the project root:
 
 ```bash
-SJ=$("$SCAFFOLD_BIN" test-node start --project "$P" --port 3040 --json)
+# The localnet holds the wallet's port; stop it for this scenario. Test nodes
+# keep LEZ's 15s debug block interval unless told otherwise.
+"$SCAFFOLD_BIN" localnet stop
+SJ=$("$SCAFFOLD_BIN" test-node start --project "$P" --port <[localnet].port> --block-create-timeout-ms 2000 --json)
 URL=$(echo "$SJ" | jq -r .rpc_url); NODE=$(echo "$SJ" | jq -r .state_dir | xargs basename)
 HEAD0=$("$SCAFFOLD_BIN" test-node blocks head --url "$URL" --json | jq -r .block_id)
 
-# Submit a REAL faucet transaction against the test-node:
-"$SCAFFOLD_BIN" wallet topup        # account-get → (auth-transfer init if uninitialized) → pinata claim
+# Submit a REAL user transaction against the test-node:
+TX=$("$SCAFFOLD_BIN" wallet topup --json | jq -r .tx)   # auth-transfer send from the dev funder
 
 # Observe the committed USER transaction(s) through the test-node client:
 "$SCAFFOLD_BIN" test-node blocks wait --url "$URL" --after "$HEAD0" --count 6 --timeout-sec 90 --json \
-  | jq -c '.blocks[] | select(.has_user_transactions) | {block_id, transaction_count, user:[.transactions[]|select(.is_clock|not)|{hash:.hash[0:12],kind}]}'
+  | jq -c '.blocks[] | select(.has_user_transactions) | {block_id, transaction_count, user:[.transactions[]|select(.is_system|not)|{hash,kind}]}'
+"$SCAFFOLD_BIN" test-node tx wait --url "$URL" --hash "$TX" --json
 
 "$SCAFFOLD_BIN" test-node stop --node "$NODE" --project "$P"
+"$SCAFFOLD_BIN" localnet start
 ```
 
 ### Expected Success Signals
 
-- `wallet topup` exits 0 against the test-node: the real sequencer executes the `auth-transfer init` and `pinata claim` transactions (via r0vm in dev mode).
-- `blocks wait` surfaces one or more blocks with `has_user_transactions: true`, each with `transaction_count: 2` (the mandatory clock tx plus the user tx) and a non-clock `kind: "public"` user tx carrying a real sha256 hash — parsed by the same client/borsh path the unit tests exercise, now against genuine block bytes.
-- Equivalently, a wallet-reported tx hash (when one is printed) resolves to `committed` via `test-node tx wait --url "$URL" --hash <hash> --json`.
+- `wallet topup` exits 0 against the test-node with a `Tx:` hash: the real sequencer executes the native transfer.
+- `blocks wait` surfaces one block with `has_user_transactions: true` and `transaction_count: 3` (the user transfer, then the fee-distribution and clock system txs); the user tx is `kind: "public"`, `is_system: false`, `is_clock: false`, and its `hash` equals the `Tx:` hash `wallet topup` printed — parsed by the same client/borsh path the unit tests exercise, now against genuine block bytes.
+- The same hash resolves to `committed` via `test-node tx wait --url "$URL" --hash <hash> --json`, and `test-node account get --url "$URL" --account-id <default id>` shows the topped-up balance.
 
 ### Failure Signals / Common Pitfalls
 
 - `wallet topup` failing with a sequencer-unreachable hint means the test-node is not on the wallet's expected port — start it with `--port <localnet.port>`. The hint keys off the configured `[localnet] port` (not a hardcoded `:3040`), so it is trustworthy on a custom port; if it fires while the sequencer *is* up on that port, treat it as a real connectivity fault, not a port mismatch.
-- A block parser that mis-classifies the user-tx block as clock-only, or reports `fully_parsed: false` on a plain public/deploy tx, against real bytes is a wire-format regression — the highest-value signal this scenario protects.
-- A real sequencer that boots but never executes the tx (block count rises with clock-only blocks but no user tx ever lands) usually means r0vm is missing or version-mismatched — recheck the exact version match in provisioning step 2.
+- A block parser that mis-classifies the user-tx block as empty, or reports `fully_parsed: false` on a plain public tx, against real bytes is a wire-format regression — the highest-value signal this scenario protects.
+- A real sequencer that boots but never executes the tx (block count rises with empty blocks but no user tx ever lands) usually means r0vm is missing or version-mismatched — recheck the exact version match in provisioning step 2.
 
 ### Evidence to Capture
 
-- `wallet topup` output (the account-get → init → claim sequence) and its exit code.
+- `wallet topup` output (the funder transfer and its `Tx:` hash) and its exit code.
 - The `blocks wait` JSON showing the real committed user transaction(s).
 - The node id and confirmation it was stopped and its runtime dir cleaned up.
 
 ### Execution Notes
 
 - This is the only scenario that requires both the sequencer and the wallet built; it is the capstone real-e2e check. The block parsing it exercises is shared with T2, so a green T4 is strong evidence the entire `blocks` / `tx` client surface is correct against real output.
-- A previous agent run validated this exact flow: `wallet topup` produced `auth-transfer init` and `pinata claim` txs that landed in real blocks (`transaction_count: 2`, a `public` user tx distinct from the clock tx), observed through `blocks wait`. Reproduce it; do not downgrade to a stub.
+- Reproduce this against a real node; do not downgrade to a stub.
 
 ## Minimum Rerun Guidance for Future Changes
 
 - Changes to onboarding, project creation, setup, localnet, or build flows: rerun `D1`, `D2`, and `D6`.
 - Changes to deploy behavior or deploy output formatting: rerun `D3` and `D6`.
 - Changes to wallet flows or wallet-related defaults: rerun `D4`.
-- Changes to the wallet-home env contract (`WALLET_HOME_ENV_VARS`, `set_wallet_home_env`, or any new upstream rename), to default-wallet seeding (`ensure_default_wallet_seeded` and its storage-initialization fallback), or to the LEZ pin across the v0.2.0 boundary: rerun `D1`, `D4`, `D6`, and `D7` — `D1`/`D4` cover seeding, `D6` covers the direct-`cargo run` export, `D7` covers the hook env contract.
+- Changes to the wallet-home env contract (`WALLET_HOME_ENV_VAR`, `set_wallet_home_env`), to default-wallet seeding (`ensure_default_wallet_seeded`), to the dev funder (`DEV_FUNDER_*`, `ensure_dev_funder_imported`, genesis supply), or to the LEZ pin: rerun `D1`, `D4`, `D6`, `D7` and `T4` — `D1`/`D4` cover seeding and topup, `D6` covers the direct-`cargo run` export, `D7` covers the hook env contract, `T4` covers funding a test node.
 - Changes to diagnostics, report contents, or redaction logic: rerun `D5`.
 - Changes to example runner binaries or template `src/bin/*` code: rerun `D6`.
 - Changes to `run` step ordering, the `deploy = false` deploy-skip branch, the `topup = false` topup-skip branch, post-deploy env vars, post-deploy CLI override flag handling, or `[run]` config parsing: rerun `D7`.
-- Changes to guest build strategy (`[build]` config, `--guest`, `build_methods_guests`, `DEFAULT_RISC0_DOCKER_TAG`, `GUEST_DOCKER_TARGET_DIR`) or to deploy-side binary discovery/ranking (`GUEST_BIN_SEARCH_ROOTS`, `discover_program_binaries`): rerun `D8` (its container steps also run in CI — see the Guest Build Reproducibility workflow), plus `D1` and `D3` — `D1` covers the default build, `D3` covers the artefact `deploy` actually submits. Bumping `DEFAULT_RISC0_DOCKER_TAG` changes every `program_id`, so record the before/after values.
-- Changes to LEZ template scaffolding or generated outputs: rerun `L1`, `L2`, `L3`, and `L4`.
+- Changes to guest build strategy (`[build]` config, `--guest`, `build_methods_guests`, `DEFAULT_RISC0_DOCKER_TAG`, `GUEST_DOCKER_TARGET_DIR`) or to deploy-side binary discovery/ranking (`GUEST_BIN_SEARCH_ROOTS`, `discover_program_binaries`): rerun `D8` (its container steps also run in CI — see the Guest Build Reproducibility workflow), plus `D1` and `D3` — `D1` covers the default build, `D3` covers the artefact `deploy` actually submits. Bumping `DEFAULT_RISC0_DOCKER_TAG` changes every guest binary, so record the before/after `elf_sha256` values.
+- Changes to the template overlay or `new` (`templates/default`, `Cargo.lock` seeding): rerun `D1` and `D6` (the runners must still build and run).
+- Changes to deploy (`program_segment_count`, account creation, `program-loader deploy` parsing, `deployments.json`): rerun `D1`, `D3`, `D6` and `D7`.
 - Changes to CLI argument parsing, help text, or error messages: rerun `E1`.
 - Changes to `create`/`new` flags or template selection logic: rerun `E2`.
 - Changes to AI skill materialization (`apply_skills`, the canonical `skills/` source, frontmatter rewrite, `AGENTS.md` template, or `init` re-run semantics): rerun `E3`.
@@ -1926,8 +1787,8 @@ HEAD0=$("$SCAFFOLD_BIN" test-node blocks head --url "$URL" --json | jq -r .block
 - Changes to `test-node` lifecycle, pin resolution, prepare/doctor, run-slot concurrency, or caller-checkout validation: rerun `T1` (and `A1` if the `api::testnode` lifecycle types changed).
 - Changes to the `test-node` RPC client (transaction outcomes, block/clock parsing, account/proof reads, or their JSON shapes): rerun `T2`.
 - Changes to `test-node` state seeding (snapshot formats, validation classes, genesis-config injection, or database seeding): rerun `T3`.
-- Changes to the transaction-bearing block path (`sendTransaction`/`getBlock` handling, the committed-block scan, user-vs-clock classification, or the r0vm/sequencer spawn env): rerun `T4` (the only check that proves the path against a real executed transaction).
-- Changes to `[circuits]` config parsing/serialization, circuits install-dir resolution, circuits materialization/export, or `doctor` circuits checks: rerun `D1`, `D2`, `D6`, `T1`, `T4`, and `A1`.
-- Changes to circuits/r0vm provisioning, the LEZ/circuits pins, or the sequencer/wallet build invocation (`SEQUENCER_BUILD_ARGS`, `setup`): re-verify "Provisioning the Real LEZ Sequencer Toolchain", then rerun `T1` and `T4`.
+- Changes to the transaction-bearing block path (`sendTransaction`/`getBlock` handling, the committed-block scan, user-vs-system classification, or the r0vm/sequencer spawn env): rerun `T4` (the only check that proves the path against a real executed transaction).
+- Changes to `scaffold.toml` schema handling or `init` migration (`migrate_to_current`): rerun `E2` (its LEZ 0.1/0.2-era migration check).
+- Changes to r0vm provisioning, the LEZ pin, the localnet/test-node sequencer arguments or config overrides (`apply_common_runtime_overrides`, `LOCALNET_BLOCK_CREATE_TIMEOUT`), or the sequencer/wallet build invocation (`SEQUENCER_BUILD_ARGS`, `setup`): re-verify "Provisioning the Real LEZ Sequencer Toolchain", then rerun `D1`, `T1` and `T4`.
 
 The `T`-series must be run against a real sequencer (see the Agent Execution Directives and the provisioning section). When in doubt, rerun more scenarios rather than fewer — and never substitute a stub for the real node in a `T` scenario.

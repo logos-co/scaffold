@@ -5,8 +5,8 @@ use std::path::Path;
 use anyhow::{anyhow, bail};
 
 use crate::commands::wallet_support::WALLET_CONFIG_PRIMARY;
-use crate::constants::WALLET_CONFIG_REL_PATHS;
-use crate::lez_layout::first_existing_lez_path;
+use crate::constants::WALLET_CONFIG_REL_PATH;
+use crate::lez_layout::lez_file;
 use crate::model::{BasecampState, LocalnetState};
 use crate::DynResult;
 
@@ -127,14 +127,62 @@ pub(crate) fn read_basecamp_state(path: &Path) -> DynResult<BasecampState> {
     Ok(state)
 }
 
-pub(crate) fn prepare_wallet_home(lez_repo: &Path, wallet_home: &Path) -> DynResult<()> {
+/// Create the project wallet home and point its config at the project's
+/// localnet. The config is seeded from the pinned LEZ debug wallet config on
+/// first use; on every call `sequencer.sequencer_addr` is rewritten to
+/// `http://127.0.0.1:<port>` so a changed `[localnet].port` reaches the
+/// wallet the next time `setup` (or `localnet reset`) runs, and the
+/// confirmation polling is tuned for a local chain: the wallet sleeps
+/// `seq_poll_timeout` between inclusion checks (30s in LEZ's debug config,
+/// i.e. ~30s per transaction), so scaffold polls every second for up to two
+/// minutes instead. Other keys the user or the wallet added are preserved.
+/// Wallet confirmation polling for scaffold-managed wallets (see
+/// [`prepare_wallet_home`]).
+const WALLET_POLL_INTERVAL: &str = "1s";
+const WALLET_POLL_ATTEMPTS: u64 = 120;
+
+pub(crate) fn prepare_wallet_home(lez_repo: &Path, wallet_home: &Path, port: u16) -> DynResult<()> {
     fs::create_dir_all(wallet_home)?;
     let cfg_dst = wallet_home.join(WALLET_CONFIG_PRIMARY);
     if !cfg_dst.exists() {
-        let cfg_src =
-            first_existing_lez_path(lez_repo, WALLET_CONFIG_REL_PATHS, "wallet debug config")?;
-        fs::copy(cfg_src, cfg_dst)?;
+        let cfg_src = lez_file(lez_repo, WALLET_CONFIG_REL_PATH, "wallet debug config")?;
+        fs::copy(cfg_src, &cfg_dst)?;
     }
+    let text = fs::read_to_string(&cfg_dst)?;
+    let mut config: serde_json::Value = serde_json::from_str(&text).map_err(|err| {
+        anyhow::anyhow!(
+            "failed to parse wallet config at {}: {err}",
+            cfg_dst.display()
+        )
+    })?;
+    let root = config.as_object_mut().ok_or_else(|| {
+        anyhow::anyhow!(
+            "wallet config at {} is not a JSON object",
+            cfg_dst.display()
+        )
+    })?;
+    let sequencer = root
+        .entry("sequencer")
+        .or_insert_with(|| serde_json::json!({}));
+    let sequencer = sequencer.as_object_mut().ok_or_else(|| {
+        anyhow::anyhow!(
+            "wallet config at {}: `sequencer` is not a JSON object",
+            cfg_dst.display()
+        )
+    })?;
+    sequencer.insert(
+        "sequencer_addr".to_string(),
+        serde_json::Value::String(format!("http://127.0.0.1:{port}")),
+    );
+    root.insert(
+        "seq_poll_timeout".to_string(),
+        serde_json::Value::String(WALLET_POLL_INTERVAL.to_string()),
+    );
+    root.insert(
+        "seq_tx_poll_max_blocks".to_string(),
+        serde_json::Value::from(WALLET_POLL_ATTEMPTS),
+    );
+    write_text(&cfg_dst, &(serde_json::to_string_pretty(&config)? + "\n"))?;
     Ok(())
 }
 
@@ -199,22 +247,52 @@ mod tests {
     }
 
     #[test]
-    fn prepare_wallet_home_accepts_nested_lez_layout() {
+    fn prepare_wallet_home_seeds_config_and_points_it_at_the_localnet_port() {
         let tmp = tempdir().expect("tempdir");
         let lez = tmp.path().join("lez");
         let wallet_home = tmp.path().join("wallet-home");
 
-        // Newer LEZ pins moved the repository payload under a `lez/` prefix.
-        // Setup/reset reseeding should copy the wallet debug config from that
-        // layout when the old flat path is absent.
         let cfg_src = lez.join("lez/wallet/configs/debug/wallet_config.json");
-        fs::create_dir_all(cfg_src.parent().unwrap()).expect("create nested wallet config dir");
-        fs::write(&cfg_src, "{ \"network\": \"debug\" }\n").expect("write wallet config");
+        fs::create_dir_all(cfg_src.parent().unwrap()).expect("create wallet config dir");
+        fs::write(
+            &cfg_src,
+            "{ \"sequencer\": { \"sequencer_addr\": \"http://127.0.0.1:3040\" }, \"seq_poll_timeout\": \"30s\" }\n",
+        )
+        .expect("write wallet config");
 
-        prepare_wallet_home(&lez, &wallet_home).expect("prepare wallet home");
+        prepare_wallet_home(&lez, &wallet_home, 3055).expect("prepare wallet home");
+        let copied: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(wallet_home.join(WALLET_CONFIG_PRIMARY)).expect("read"),
+        )
+        .expect("json");
+        assert_eq!(
+            copied["sequencer"]["sequencer_addr"],
+            "http://127.0.0.1:3055"
+        );
+        assert_eq!(copied["seq_poll_timeout"], "1s");
+        assert_eq!(copied["seq_tx_poll_max_blocks"], 120);
 
-        let copied = fs::read_to_string(wallet_home.join(WALLET_CONFIG_PRIMARY))
-            .expect("read copied wallet config");
-        assert_eq!(copied, "{ \"network\": \"debug\" }\n");
+        // A later port change is applied to the existing config.
+        prepare_wallet_home(&lez, &wallet_home, 3077).expect("prepare again");
+        let updated: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(wallet_home.join(WALLET_CONFIG_PRIMARY)).expect("read"),
+        )
+        .expect("json");
+        assert_eq!(
+            updated["sequencer"]["sequencer_addr"],
+            "http://127.0.0.1:3077"
+        );
+    }
+
+    #[test]
+    fn prepare_wallet_home_names_the_pin_when_the_checkout_is_not_lez_0_3() {
+        let tmp = tempdir().expect("tempdir");
+        let lez = tmp.path().join("lez");
+        // Pre-0.2 flat layout only.
+        let flat = lez.join("wallet/configs/debug/wallet_config.json");
+        fs::create_dir_all(flat.parent().unwrap()).expect("mkdir");
+        fs::write(&flat, "{}\n").expect("write");
+        let err = prepare_wallet_home(&lez, &tmp.path().join("w"), 3040).unwrap_err();
+        assert!(err.to_string().contains("LEZ 0.3"), "{err}");
     }
 }

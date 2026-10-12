@@ -9,11 +9,11 @@
 3. Support native token topup for wallet operations on local and DevNet environments.
 4. Deploy command auto-discovers program binaries from the canonical workspace `target/riscv-guest/` layout and the supported sub-crate `methods/target/` compatibility layout by matching program names, so non-template projects deploy without `--program-path`.
 5. Build command auto-compiles `methods/Cargo.toml` when present, so projects whose parent workspace excludes the Risc0 guest crate produce guest binaries via `lgs build` without a separate `cargo build --manifest-path methods/Cargo.toml`.
-6. Deploy outputs the deployed program's on-chain ID (the risc0 image ID) for every successful submission, in both the human-readable output and the `--json` output, so users can hand the value to a client without rerunning a separate inspection tool. The value is computed locally from the submitted ELF; on-chain inclusion verification is future work and depends on LEZ exposing deploy receipts.
-7. Scaffold vendors the `spel` CLI per project — clones `logos-co/spel` to a project-local path, pinned via `[repos.spel]` in `scaffold.toml`, and builds it during `setup` — mirroring the LEZ vendoring pattern. `deploy` invokes the project-local binary; no global `spel` install is required. The default spel pin is selected so spel itself vendors the same LEZ commit scaffold pins; `doctor` enforces this alignment at runtime by inspecting `spel-cli/Cargo.toml` and warning if spel's vendored LEZ diverges from `DEFAULT_LEZ_PIN`.
-8. `logos-scaffold spel -- <args...>` (and the `lgs spel -- <args...>` alias) proxies trailing arguments to the project-vendored `spel` binary, so any spel command (`inspect`, `pda`, `generate-idl`, etc.) runs against the project's pinned version without a global install. Exit codes are forwarded.
-9. `logos-scaffold deploy --json` output is a pure JSON object on stdout — no command-echo, no informational text — and absent values are omitted from the object rather than emitted as `null`. Consumers can pipe directly to `jq` and test field presence with `has(...)`. Subprocess command-echoes and progress messages stay off the JSON channel. Two shapes by code path: `--program-path … --json` emits a bare object `{"status":"submitted","program":...,"tx"?:...,"program_id"?:...}`; auto-discovery `--json` emits `{"deploys":[<entry>,...]}` with one entry per attempted program. Failed entries replace `program_id` with `error`. Auto-discovery exit code is non-zero when any entry failed; the JSON object is still emitted so consumers can inspect partial results.
-10. Guest programs can be built reproducibly. `[build].guest = "docker"` (the default; also `lgs build --guest docker`) compiles `methods/` guests with `cargo risczero build` inside the pinned `risczero/risc0-guest-builder:<tag>` container, so the same source produces the same ELF — and therefore the same `program_id` — on any machine or CI runner. This is the default. `[build].guest = "local"` (or `--guest local`) opts into the host-toolchain `embed_methods()` path, which is faster and needs no container runtime but is not bit-reproducible; `lgs doctor` reports the active strategy. `lgs deploy` prefers the deterministic artefact, and each `lgs build` clears the other mode's output, so the last build is always what deploy ships.
+6. Deploy outputs the deployed program's on-chain ID for every successful deployment, in both the human-readable output and the `--json` output, and records it in `.scaffold/state/deployments.json`. In LEZ 0.3 the program id is the `program_loader` header account the deployment created (base58), not a value derivable from the ELF. A deployment is reported only after the wallet confirmed every segment and header transaction in a block.
+7. Scaffold targets exactly one LEZ release line, 0.3 (pinned `v0.3.1`), and carries no compatibility code for older LEZ. Projects on the LEZ 0.1/0.2-era schema are migrated by `init` (re-pin, drop `[repos.spel]` / `[circuits]` / `[framework.idl]`); `lez-framework` (spel) projects are refused with an explanation until spel ships a LEZ 0.3 release.
+8. `wallet topup` funds an account on any scaffold-started chain without a faucet: localnet and test nodes give the well-known LEZ dev funder a genesis supply, `setup` imports its key into the project wallet, and topup is an `auth-transfer send` from it.
+9. `logos-scaffold deploy --json` output is a pure JSON object on stdout — no command-echo, no informational text — and absent values are omitted from the object rather than emitted as `null`. Consumers can pipe directly to `jq` and test field presence with `has(...)`. Subprocess command-echoes and progress messages stay off the JSON channel. Two shapes by code path: `--program-path … --json` emits a bare object `{"status":"deployed","program":...,"tx"?:...,"elf_sha256"?:...,"program_id"?:...}`; auto-discovery `--json` emits `{"deploys":[<entry>,...]}` with one entry per attempted program. Failed entries replace `program_id` with `error`. Auto-discovery exit code is non-zero when any entry failed; the JSON object is still emitted so consumers can inspect partial results.
+10. Guest programs can be built reproducibly. `[build].guest = "docker"` (the default; also `lgs build --guest docker`) compiles `methods/` guests with `cargo risczero build` inside the pinned `risczero/risc0-guest-builder:<tag>` container, so the same source produces the same ELF — and therefore the same risc0 image ID — on any machine or CI runner. This is the default. `[build].guest = "local"` (or `--guest local`) opts into the host-toolchain `embed_methods()` path, which is faster and needs no container runtime but is not bit-reproducible; `lgs doctor` reports the active strategy. `lgs deploy` prefers the deterministic artefact, and each `lgs build` clears the other mode's output, so the last build is always what deploy ships.
 
 ### Usability
 
@@ -37,8 +37,8 @@
 1. Scaffold version and toolchain versions are explicit in generated output so projects remain buildable over time.
 2. Network configuration for local and DevNet deployment is .env based config.
 3. The scaffolded project includes command references for build, deploy, and interaction steps.
-4. `logos-scaffold doctor` reports the `spel` repo presence and pin status, mirroring the existing LEZ checks, so drift from `DEFAULT_SPEL` is surfaced before it bites at deploy time.
-5. `scaffold.toml` files predating the `[repos.spel]` section produce a targeted error from the config loader pointing at `logos-scaffold init` as the fix; `init` is safe to re-run and back-fills the missing section without overwriting customized fields.
+4. `logos-scaffold doctor` reports whether the pinned LEZ checkout is a 0.3 release with the standalone sequencer feature, the LEZ pin against the scaffold default, and whether the project wallet holds the dev funder key.
+5. `scaffold.toml` files on an older schema (including the LEZ 0.1/0.2-era `0.2.0`) produce a targeted error from the config loader pointing at `logos-scaffold init` as the fix; `init` migrates in place without overwriting customized fields.
 
 ### + (Privacy, Anonymity, Censorship-Resistance)
 
@@ -54,7 +54,7 @@
 - Logos Core DevEx for overall developer journey alignment and terminology.
 - Logos Blockchain and Logos Execution Environment for functionality.
 - Wallet Module for interactions with Logos Execution Environment.
-- `logos-co/spel` CLI — vendored per project at a pinned commit (`DEFAULT_SPEL`, currently tag `v0.2.0-rc.5`); supplies the `spel program-id` output that `deploy` parses for the program ID.
+- LEZ 0.3 (`logos-execution-zone`, pinned `v0.3.1`): standalone `sequencer_service` and `wallet`, built per project from the pinned checkout; the LEZ build downloads its own `logos-blockchain-circuits` release.
 
 #### Runtime Dependencies
 
@@ -71,9 +71,9 @@
 
 ### Functionality
 
-1. `lgs run` collapses the inner-loop sequence — build → IDL build → ensure-localnet → wallet topup → deploy → optional post-deploy hooks — into one command. Every step's failure aborts the pipeline with a numbered step header (`[3/N] …`) so the failing phase is unambiguous in console output. Step ordering is fixed, but a run profile may opt out of the two steps a project can own itself: `topup = false` skips wallet topup and `deploy = false` skips deploy. A skipped step keeps its slot and prints a header saying it was skipped, so the pipeline shape stays visible and step numbers do not shift.
-2. Source edits drive fresh on-chain program identity automatically: when the guest ELF changes, its risc0 image ID changes, and the new program's storage starts empty. Scaffold relies on this for the default cycle and adds no per-run reset.
-3. Post-deploy hooks: `[run].post_deploy` is a list of shell commands executed in order via `sh -c` with `cwd` set to the project root. Hooks see a documented env contract: `SEQUENCER_URL`, `NSSA_WALLET_HOME_DIR` and `LEE_WALLET_HOME_DIR` (the same wallet home under both the pre-v0.2.0 and v0.2.0 LEZ names), `SCAFFOLD_PROJECT_ROOT`, `SCAFFOLD_IDL_DIR`, `SCAFFOLD_TOPUP_SKIPPED` and `SCAFFOLD_DEPLOY_SKIPPED` (`1`/`0`, always set, reporting whether each step ran on this invocation *for any reason* — a config knob such as `topup = false` / `deploy = false`, or deploy's own unchanged-inputs dedup — not whether a knob was set), plus single-program shortcuts `SCAFFOLD_PROGRAM_ID` / `SCAFFOLD_GUEST_BIN` (set only when exactly one program is deployable).
+1. `lgs run` collapses the inner-loop sequence — build → ensure-localnet → wallet topup → deploy → optional post-deploy hooks — into one command. Every step's failure aborts the pipeline with a numbered step header (`[3/N] …`) so the failing phase is unambiguous in console output. Step ordering is fixed, but a run profile may opt out of the two steps a project can own itself: `topup = false` skips wallet topup and `deploy = false` skips deploy. A skipped step keeps its slot and prints a header saying it was skipped, so the pipeline shape stays visible and step numbers do not shift.
+2. Every deploy creates a fresh on-chain program (a new `program_loader` header account), so a re-deploy after a source edit starts with empty program shards. Scaffold relies on this for the default cycle and adds no per-run reset; the deploy cache only skips a deploy when binaries, config and sequencer are unchanged and every program already has a recorded deployment.
+3. Post-deploy hooks: `[run].post_deploy` is a list of shell commands executed in order via `sh -c` with `cwd` set to the project root. Hooks see a documented env contract: `SEQUENCER_URL`, `LEE_WALLET_HOME_DIR` (the wallet home the LEZ 0.3 wallet reads), `SCAFFOLD_PROJECT_ROOT`, `SCAFFOLD_TOPUP_SKIPPED` and `SCAFFOLD_DEPLOY_SKIPPED` (`1`/`0`, always set, reporting whether each step ran on this invocation *for any reason* — a config knob such as `topup = false` / `deploy = false`, or deploy's own unchanged-inputs dedup — not whether a knob was set), plus single-program shortcuts `SCAFFOLD_PROGRAM_ID` / `SCAFFOLD_GUEST_BIN` (set only when exactly one program is deployable).
 4. CLI overrides: `--post-deploy <cmd>` (repeatable) replaces `[run].post_deploy` for one invocation. `--no-post-deploy` skips hooks entirely. The two flags conflict and are rejected at clap parse time.
 5. Localnet reuse: if a managed sequencer is already running, the run reuses it. If the configured port is held by an unrelated process, the run aborts with a diagnostic naming the foreign PID.
 6. Topup safety: a wallet-topup confirmation timeout aborts before deploy so the developer is never left wondering whether deploy used a half-funded wallet.
@@ -91,8 +91,8 @@
 
 ### Performance
 
-1. The run is bounded by the underlying tools (cargo build, IDL test harness, sequencer startup, wallet topup, wallet deploy-program); scaffold adds no waiting steps beyond what each underlying command already imposes.
-2. Single-program metadata (program ID, guest binary path) is resolved once per invocation and reused across every post-deploy hook, so multiple hooks don't multiply `spel program-id` cost.
+1. The run is bounded by the underlying tools (cargo build, sequencer startup, wallet topup, `wallet program-loader deploy`); scaffold adds no waiting steps beyond what each underlying command already imposes, and it configures the localnet (5-second blocks) and the project wallet (1-second confirmation polling) so a confirmed transaction costs seconds, not LEZ's debug-config 15–30.
+2. Single-program metadata (program ID, guest binary path) is resolved once per invocation from `deployments.json` and reused across every post-deploy hook.
 
 ### Supportability
 
@@ -103,17 +103,16 @@
 ### + (Privacy, Anonymity, Censorship-Resistance)
 
 - Hooks run locally with the developer's own wallet; no network egress beyond what the deploy step already needs.
-- Post-deploy hooks have direct access to the deployer's wallet home via `NSSA_WALLET_HOME_DIR` and `LEE_WALLET_HOME_DIR`. Hooks are user-authored and trusted — same threat model as `scaffold.toml` itself.
+- Post-deploy hooks have direct access to the deployer's wallet home via `LEE_WALLET_HOME_DIR`. Hooks are user-authored and trusted — same threat model as `scaffold.toml` itself.
 
 ### Dependencies
 
 #### Internal Dependencies
 
 - `cmd_build_shortcut` for the build phase.
-- `build_idl_for_current_project` for IDL generation (no-op for non-lez-framework projects).
 - `cmd_localnet` (start) for localnet lifecycle when no managed sequencer is already running.
 - `cmd_wallet_topup_inner` for the topup phase.
-- `cmd_deploy` for deploy submission and `extract_program_id` for image-ID extraction.
+- `cmd_deploy` for program-loader deployment and `deployments.json` for program ids.
 
 ## FURPS+ — Basecamp
 

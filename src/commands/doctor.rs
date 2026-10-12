@@ -3,14 +3,14 @@ use std::process::{Command, Stdio};
 
 use anyhow::bail;
 
-use super::wallet_support::{set_wallet_home_env, wallet_password};
+use super::wallet_support::{probe_sequencer_reachable, set_wallet_home_env, wallet_password};
 use crate::commands::wallet_support::WALLET_CONFIG_PRIMARY;
 use crate::constants::{
-    DEFAULT_LEZ, DEFAULT_SPEL, SEQUENCER_BIN_REL_PATH, SPEL_BIN_REL_PATH, WALLET_BIN_REL_PATH,
+    DEFAULT_LEZ, DEV_FUNDER_ACCOUNT_ID, SEQUENCER_BIN_REL_PATH, WALLET_BIN_REL_PATH,
 };
 use crate::doctor_checks::{
-    check_binary, check_container_runtime, check_guest_build, check_logos_blockchain_circuits,
-    check_path, check_port_warn, check_repo, check_standalone_support, one_line, print_rows,
+    check_binary, check_container_runtime, check_guest_build, check_path, check_port_warn,
+    check_repo, check_standalone_support, one_line, print_rows,
 };
 use crate::model::{CheckRow, CheckStatus, DoctorReport, DoctorSummary, Project};
 use crate::process::{pid_running, run_capture, run_with_stdin, set_command_echo};
@@ -20,10 +20,8 @@ use crate::DynResult;
 
 const STEP_SETUP: &str = "logos-scaffold setup";
 const STEP_LOCALNET_START: &str = "logos-scaffold localnet start";
-// Both wallet home names in one export: older wallet binaries read NSSA_*,
-// LEZ v0.2.0 reads LEE_* (see `WALLET_HOME_ENV_VARS`).
-const STEP_EXPORT_WALLET_HOME: &str =
-    "export NSSA_WALLET_HOME_DIR=$(pwd)/.scaffold/wallet LEE_WALLET_HOME_DIR=$(pwd)/.scaffold/wallet";
+// The LEZ 0.3 wallet reads its home from `LEE_WALLET_HOME_DIR` only.
+const STEP_EXPORT_WALLET_HOME: &str = "export LEE_WALLET_HOME_DIR=$(pwd)/.scaffold/wallet";
 const STEP_DOCTOR: &str = "logos-scaffold doctor";
 
 pub(crate) fn cmd_doctor(as_json: bool) -> DynResult<()> {
@@ -75,7 +73,6 @@ fn cmd_doctor_inner(as_json: bool) -> DynResult<()> {
 
 pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> {
     let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
-    let spel = resolve_repo_path(&project, &project.config.spel, "spel")?;
     let wallet_home = project.root.join(&project.config.wallet_home_dir);
     let localnet_state_path = project.root.join(".scaffold/state/localnet.state");
 
@@ -90,10 +87,6 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
     rows.push(check_container_runtime());
     rows.push(check_binary("nix", false));
     rows.push(check_guest_build(&project.config.build));
-    rows.push(check_logos_blockchain_circuits(
-        &project.root,
-        &project.config.circuits,
-    ));
 
     rows.push(check_repo("lez", &lez, &project.config.lez.pin));
 
@@ -108,51 +101,21 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
         },
         name: "lez pin matches scaffold default".to_string(),
         detail: format!(
-            "configured pin={} expected={}",
-            project.config.lez.pin, DEFAULT_LEZ.sha
+            "configured pin={} expected={} ({})",
+            project.config.lez.pin, DEFAULT_LEZ.sha, DEFAULT_LEZ.tag
         ),
         remediation: if project.config.lez.pin == DEFAULT_LEZ.sha {
             None
         } else {
             Some(format!(
-                "Set repos.lez.pin in scaffold.toml to {} and run `{}`",
-                DEFAULT_LEZ.sha, STEP_SETUP
+                "Set repos.lez.pin in scaffold.toml to {} ({}; scaffold supports LEZ 0.3 only) \
+                 and run `{}`",
+                DEFAULT_LEZ.sha, DEFAULT_LEZ.tag, STEP_SETUP
             ))
         },
     });
 
     rows.push(check_standalone_support(&lez));
-
-    rows.push(check_repo("spel", &spel, &project.config.spel.pin));
-
-    rows.push(CheckRow {
-        status: if project.config.spel.pin == DEFAULT_SPEL.sha {
-            CheckStatus::Pass
-        } else {
-            CheckStatus::Warn
-        },
-        name: "spel pin matches scaffold default".to_string(),
-        detail: format!(
-            "configured pin={} expected={} ({})",
-            project.config.spel.pin, DEFAULT_SPEL.sha, DEFAULT_SPEL.tag
-        ),
-        remediation: if project.config.spel.pin == DEFAULT_SPEL.sha {
-            None
-        } else {
-            Some(format!(
-                "Set repos.spel.pin in scaffold.toml to {} ({}) and run `{}`",
-                DEFAULT_SPEL.sha, DEFAULT_SPEL.tag, STEP_SETUP
-            ))
-        },
-    });
-
-    rows.push(check_path(
-        "spel binary",
-        &spel.join(SPEL_BIN_REL_PATH),
-        "Run `logos-scaffold setup`",
-    ));
-
-    rows.push(check_spel_lez_alignment(&spel));
 
     let (resolved_cache_root, cache_root_source) = resolve_cache_root(&project)?;
     rows.push(CheckRow {
@@ -247,8 +210,12 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
     let wallet_cfg = wallet_home.join(WALLET_CONFIG_PRIMARY);
     if wallet_cfg.exists() {
         let cfg_text = fs::read_to_string(&wallet_cfg)?;
-        let points_local = cfg_text.contains(&format!("127.0.0.1:{localnet_port}"))
-            || cfg_text.contains(&format!("localhost:{localnet_port}"));
+        let sequencer_addr = serde_json::from_str::<serde_json::Value>(&cfg_text)
+            .ok()
+            .and_then(|cfg| super::wallet_support::wallet_config_sequencer_addr(&cfg))
+            .unwrap_or_default();
+        let points_local = sequencer_addr.contains(&format!("127.0.0.1:{localnet_port}"))
+            || sequencer_addr.contains(&format!("localhost:{localnet_port}"));
         if points_local {
             rows.push(CheckRow {
                 status: CheckStatus::Pass,
@@ -260,9 +227,12 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
             rows.push(CheckRow {
                 status: CheckStatus::Warn,
                 name: "wallet network config".to_string(),
-                detail: "wallet may point to non-local sequencer".to_string(),
+                detail: format!(
+                    "wallet sequencer.sequencer_addr is {:?}, not the project localnet",
+                    sequencer_addr
+                ),
                 remediation: Some(format!(
-                    "Set .scaffold/wallet/wallet_config.json sequencer_addr=http://127.0.0.1:{localnet_port}"
+                    "Run `{STEP_SETUP}` to point .scaffold/wallet/wallet_config.json at http://127.0.0.1:{localnet_port}"
                 )),
             });
         }
@@ -311,6 +281,10 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
                         remediation: None,
                     });
                 } else if is_localnet_connectivity_failure(&out.stdout, &out.stderr, localnet_port)
+                    || (has_transport_error_token(&out.stdout, &out.stderr)
+                        && !probe_sequencer_reachable(&format!(
+                            "http://127.0.0.1:{localnet_port}"
+                        )))
                 {
                     rows.push(CheckRow {
                         status: CheckStatus::Warn,
@@ -343,9 +317,59 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
                 ),
             }),
         }
+
+        rows.push(check_dev_funder(&wallet_binary_path, &wallet_home));
     }
 
     Ok(finalize_report(rows))
+}
+
+/// `wallet topup` transfers from the dev funder, so the project wallet must
+/// hold its key (imported by `setup`). Listing accounts is local — it does
+/// not need a running sequencer.
+fn check_dev_funder(wallet_binary: &std::path::Path, wallet_home: &std::path::Path) -> CheckRow {
+    let name = "dev funder in wallet".to_string();
+    // `account list` creates the wallet storage when it does not exist yet;
+    // doctor must not initialize key material as a side effect.
+    if !wallet_home.join("storage.json").is_file() {
+        return CheckRow {
+            status: CheckStatus::Warn,
+            name,
+            detail: "wallet storage not initialized yet".to_string(),
+            remediation: Some(format!("Run `{STEP_SETUP}`")),
+        };
+    }
+    let mut list_cmd = Command::new(wallet_binary);
+    set_wallet_home_env(&mut list_cmd, wallet_home);
+    list_cmd.arg("account").arg("list");
+    match run_with_stdin(list_cmd, format!("{}\n", wallet_password())) {
+        Ok(out) if out.status.success() && out.stdout.contains(DEV_FUNDER_ACCOUNT_ID) => CheckRow {
+            status: CheckStatus::Pass,
+            name,
+            detail: format!("Public/{DEV_FUNDER_ACCOUNT_ID} imported (source of `wallet topup`)"),
+            remediation: None,
+        },
+        Ok(out) if out.status.success() => CheckRow {
+            status: CheckStatus::Warn,
+            name,
+            detail:
+                "the project wallet does not hold the dev funder key; `wallet topup` will import it"
+                    .to_string(),
+            remediation: Some(format!("Run `{STEP_SETUP}`")),
+        },
+        Ok(out) => CheckRow {
+            status: CheckStatus::Warn,
+            name,
+            detail: one_line(&format!("{}{}", out.stderr, out.stdout)),
+            remediation: Some(format!("Run `{STEP_SETUP}`")),
+        },
+        Err(err) => CheckRow {
+            status: CheckStatus::Warn,
+            name,
+            detail: err.to_string(),
+            remediation: Some(format!("Run `{STEP_SETUP}`")),
+        },
+    }
 }
 
 /// Roll up rows into a `DoctorReport` with summary, status, and next-steps.
@@ -402,73 +426,6 @@ pub(crate) fn print_report(report: &DoctorReport) {
     }
 }
 
-/// Verify that the spel pin scaffold builds also pins LEZ at the same
-/// commit/tag scaffold itself uses (`DEFAULT_LEZ.sha` /
-/// `DEFAULT_LEZ.tag`). When the two diverge, spel's sequencer-RPC client
-/// speaks a different LEZ protocol than the sequencer scaffold builds,
-/// which can break `lgs spel -- ...` subcommands that hit the sequencer
-/// (image-ID computation via `spel program-id` is unaffected — it only
-/// touches the guest ELF).
-///
-/// Reads `<spel_path>/spel-cli/Cargo.toml` and looks for either the SHA
-/// or the tag form of scaffold's pinned LEZ. Skipped (Pass) when the
-/// file isn't present yet — that means spel hasn't been cloned/built;
-/// the `spel binary` row already covers that case.
-fn check_spel_lez_alignment(spel_path: &std::path::Path) -> CheckRow {
-    let manifest = spel_path.join("spel-cli/Cargo.toml");
-    if !manifest.exists() {
-        return CheckRow {
-            status: CheckStatus::Pass,
-            name: "spel vendors matching LEZ".to_string(),
-            detail: "skipped: spel not cloned yet (run `logos-scaffold setup`)".to_string(),
-            remediation: None,
-        };
-    }
-    let text = match fs::read_to_string(&manifest) {
-        Ok(t) => t,
-        Err(err) => {
-            return CheckRow {
-                status: CheckStatus::Warn,
-                name: "spel vendors matching LEZ".to_string(),
-                detail: format!("could not read {}: {err}", manifest.display()),
-                remediation: Some(
-                    "Re-run `logos-scaffold setup` to refresh the vendored spel checkout"
-                        .to_string(),
-                ),
-            };
-        }
-    };
-    // spel's spel-cli/Cargo.toml references LEZ on every dep line, e.g.
-    //   nssa = { git = "https://github.com/.../logos-execution-zone.git", tag = "v0.2.0-rc1" }
-    //   wallet = { git = "...", rev = "ffcbc15972adbf557939bf3e2852af276422631b" }
-    // Match either form against scaffold's pin.
-    let aligned = text.contains(DEFAULT_LEZ.tag) || text.contains(DEFAULT_LEZ.sha);
-    if aligned {
-        CheckRow {
-            status: CheckStatus::Pass,
-            name: "spel vendors matching LEZ".to_string(),
-            detail: format!(
-                "spel pins LEZ at {} ({}) — matches scaffold",
-                DEFAULT_LEZ.tag, DEFAULT_LEZ.sha
-            ),
-            remediation: None,
-        }
-    } else {
-        CheckRow {
-            status: CheckStatus::Warn,
-            name: "spel vendors matching LEZ".to_string(),
-            detail: format!(
-                "spel-cli/Cargo.toml does not reference LEZ {} or {}; spel may speak a different sequencer-RPC protocol than scaffold's wallet/sequencer build",
-                DEFAULT_LEZ.tag, DEFAULT_LEZ.sha
-            ),
-            remediation: Some(format!(
-                "Bump repos.spel.pin to a spel commit whose spel-cli/Cargo.toml pins LEZ at {}, then run `{}`",
-                DEFAULT_LEZ.tag, STEP_SETUP
-            )),
-        }
-    }
-}
-
 // Decide whether a wallet-check failure should be downgraded from Fail to
 // Warn because the local sequencer is simply unreachable. Conservative on
 // purpose: doctor's job is to surface failures, so a misclassification in
@@ -486,7 +443,15 @@ fn is_localnet_connectivity_failure(stdout: &str, stderr: &str, localnet_port: u
     let mentions_localnet_address = text.contains(&format!("127.0.0.1:{localnet_port}"))
         || text.contains(&format!("localhost:{localnet_port}"));
 
-    let has_transport_error_token = text.contains("connection refused")
+    mentions_localnet_address && has_transport_error_token(stdout, stderr)
+}
+
+/// LEZ 0.3's wallet reports a refused connection without naming the address
+/// (`Error fetching program ids: client error (Connect) … tcp connect
+/// error`), so doctor pairs this with a reachability probe of the localnet.
+fn has_transport_error_token(stdout: &str, stderr: &str) -> bool {
+    let text = format!("{stdout}\n{stderr}").to_lowercase();
+    text.contains("connection refused")
         || text.contains("econnrefused")
         || text.contains("tcp connect error")
         || text.contains("network is unreachable")
@@ -494,9 +459,7 @@ fn is_localnet_connectivity_failure(stdout: &str, stderr: &str, localnet_port: u
         || text.contains("failed to connect")
         || text.contains("couldn't connect")
         || text.contains("connecterror")
-        || text.contains("dns error");
-
-    mentions_localnet_address && has_transport_error_token
+        || text.contains("dns error")
 }
 
 fn derive_next_steps(rows: &[CheckRow]) -> Vec<String> {
@@ -530,9 +493,7 @@ fn derive_next_steps(rows: &[CheckRow]) -> Vec<String> {
             include_localnet_start = true;
             mapped = true;
         }
-        if remediation.contains(STEP_EXPORT_WALLET_HOME)
-            || remediation.contains("NSSA_WALLET_HOME_DIR")
-        {
+        if remediation.contains(STEP_EXPORT_WALLET_HOME) {
             include_wallet_home = true;
             mapped = true;
         }
@@ -563,7 +524,6 @@ fn derive_next_steps(rows: &[CheckRow]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
 
     fn warn_row(name: &str, remediation: Option<&str>) -> CheckRow {
         CheckRow {
@@ -636,69 +596,6 @@ mod tests {
         );
     }
 
-    fn write_spel_cargo(spel_root: &std::path::Path, contents: &str) {
-        let dir = spel_root.join("spel-cli");
-        fs::create_dir_all(&dir).expect("mkdir spel-cli");
-        fs::write(dir.join("Cargo.toml"), contents).expect("write Cargo.toml");
-    }
-
-    #[test]
-    fn spel_lez_alignment_passes_when_spel_pins_default_lez_tag() {
-        let tmp = tempdir().expect("tempdir");
-        write_spel_cargo(
-            tmp.path(),
-            &format!(
-                "[package]\nname = \"spel\"\n\n[dependencies]\n\
-                 nssa = {{ git = \"https://github.com/x/lez.git\", tag = \"{}\" }}\n",
-                DEFAULT_LEZ.tag,
-            ),
-        );
-        let row = check_spel_lez_alignment(tmp.path());
-        assert_eq!(row.status, CheckStatus::Pass, "got: {row:?}");
-    }
-
-    #[test]
-    fn spel_lez_alignment_passes_when_spel_pins_default_lez_sha() {
-        let tmp = tempdir().expect("tempdir");
-        write_spel_cargo(
-            tmp.path(),
-            &format!(
-                "[dependencies]\n\
-                 wallet = {{ git = \"https://github.com/x/lez.git\", rev = \"{}\" }}\n",
-                DEFAULT_LEZ.sha,
-            ),
-        );
-        let row = check_spel_lez_alignment(tmp.path());
-        assert_eq!(row.status, CheckStatus::Pass, "got: {row:?}");
-    }
-
-    #[test]
-    fn spel_lez_alignment_warns_when_spel_pins_other_lez() {
-        let tmp = tempdir().expect("tempdir");
-        write_spel_cargo(
-            tmp.path(),
-            "[dependencies]\n\
-             wallet = { git = \"https://github.com/x/lez.git\", rev = \"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\" }\n",
-        );
-        let row = check_spel_lez_alignment(tmp.path());
-        assert_eq!(row.status, CheckStatus::Warn);
-        assert!(
-            row.detail.contains(DEFAULT_LEZ.tag) && row.detail.contains(DEFAULT_LEZ.sha),
-            "warn detail must name both expected forms: {row:?}"
-        );
-        assert!(row.remediation.is_some(), "must include remediation");
-    }
-
-    #[test]
-    fn spel_lez_alignment_passes_silently_when_spel_not_built() {
-        // No spel-cli/Cargo.toml on disk → spel hasn't been cloned;
-        // the `spel binary` row covers that case, this row stays Pass.
-        let tmp = tempdir().expect("tempdir");
-        let row = check_spel_lez_alignment(tmp.path());
-        assert_eq!(row.status, CheckStatus::Pass);
-        assert!(row.detail.contains("skipped"));
-    }
-
     #[test]
     fn connectivity_heuristic_triggers_on_refused_connection_with_address() {
         let stderr = "Error: reqwest::Error { kind: Request, url: \"http://127.0.0.1:3040/\", \
@@ -765,5 +662,18 @@ mod tests {
         // ...but the same error must NOT be mistaken for a localnet failure
         // when doctor is checking the default port 3040 — different endpoint.
         assert!(!is_localnet_connectivity_failure("", stderr, 3040));
+    }
+
+    /// LEZ 0.3's wallet panics on a refused connection without naming the
+    /// address; the token alone must be recognised so doctor can pair it with
+    /// a reachability probe instead of reporting FAIL for a stopped localnet.
+    #[test]
+    fn lez03_wallet_connect_panic_has_a_transport_token() {
+        let stderr = "thread 'main' panicked at lez/wallet/src/cli/mod.rs:219:18:\n\
+                      Error fetching program ids: client error (Connect)\n\nCaused by:\n    \
+                      0: tcp connect error\n    1: Connection refused (os error 111)";
+        assert!(has_transport_error_token("", stderr));
+        assert!(!is_localnet_connectivity_failure("", stderr, 3040));
+        assert!(!has_transport_error_token("", "Incorrect fee"));
     }
 }

@@ -83,7 +83,9 @@ pub(crate) enum LocalnetError {
         "localnet start timed out after {timeout_sec}s (pid={pid})\nlast logs:\n{log_tail}\n\
          Next: run `logos-scaffold localnet status` to check for a foreign listener or stale \
          state on the port, then `logos-scaffold localnet logs --tail 200` for startup errors. \
-         Raise `--timeout-sec` if the sequencer is merely slow to bind."
+         A restart replays the whole stored chain before the RPC opens (LEZ 0.3 standalone \
+         mode never finalizes blocks), so an old localnet can take minutes: raise \
+         `--timeout-sec`, or `logos-scaffold localnet reset --yes` to start from genesis."
     )]
     StartTimeout {
         timeout_sec: u64,

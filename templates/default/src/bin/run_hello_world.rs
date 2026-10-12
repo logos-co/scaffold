@@ -1,65 +1,77 @@
-use anyhow::{Context, anyhow};
-use clap::Parser;
-use example_program_deployment_methods::HELLO_WORLD_ELF;
-use nssa::{
-    PublicTransaction,
-    public_transaction::{Message, WitnessSet},
-};
-use sequencer_service_rpc::RpcClient as _;
+// logos-scaffold: identical to LEZ v0.3.1's examples/program_deployment runner
+// except that the public transaction is submitted through
+// `program_deployment::send_paid_public_transaction`, which adds the fee
+// declaration (paid by the payer argument) a LEZ 0.3 sequencer requires.
+use lee::{AccountId, ProgramShardSelector, public_transaction::Message};
+use program_deployment::{deploy_program, send_paid_public_transaction};
 use wallet::WalletCore;
 
-#[path = "../lib.rs"]
-mod scaffold_lib;
-use scaffold_lib::runner_support::{load_program, parse_account_id};
-
-#[derive(Parser, Debug)]
-struct Cli {
-    #[arg(long)]
-    program_path: Option<String>,
-    account_id: String,
-}
+// Before running this example, compile the `hello_world.rs` guest program with:
+//
+//   cargo risczero build --manifest-path examples/program_deployment/methods/guest/Cargo.toml
+//
+// Note: you must run the above command from the root of the `logos-execution-zone` repository.
+// Note: The compiled binary file is stored in
+// methods/guest/target/riscv32im-risc0-zkvm-elf/docker/hello_world.bin
+//
+//
+// Usage:
+//   cargo run --bin run_hello_world /path/to/guest/binary <account_id> <payer_account_id>
+//
+// Example:
+//   cargo run --bin run_hello_world \
+//     methods/guest/target/riscv32im-risc0-zkvm-elf/docker/hello_world.bin \
+//     Ds8q5PjLcKwwV97Zi7duhRVF9uwA2PuYMoLL7FwCzsXE \
+//     <funded payer account_id>
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    let wallet_core = WalletCore::from_env().context("failed to initialize wallet from environment")?;
+async fn main() {
+    // Initialize wallet
+    let mut wallet_core = WalletCore::from_env().unwrap();
 
-    let program = load_program(cli.program_path.as_deref(), HELLO_WORLD_ELF, "hello_world")?;
-    let account_id = parse_account_id(&cli.account_id)?;
+    // Parse arguments
+    // First argument is the path to the program binary
+    let program_path = std::env::args_os().nth(1).unwrap().into_string().unwrap();
+    // Second argument is the account_id to write the greeting into
+    let account_id: AccountId = std::env::args_os()
+        .nth(2)
+        .unwrap()
+        .into_string()
+        .unwrap()
+        .parse()
+        .unwrap();
+    // Third argument is an existing, funded account to pay the deployment fee
+    let payer: AccountId = std::env::args_os()
+        .nth(3)
+        .unwrap()
+        .into_string()
+        .unwrap()
+        .parse()
+        .unwrap();
 
-    // The hello_world program claims an uninitialized input account with
-    // `Claim::Authorized`, so the first transaction against a fresh account
-    // must be authorized by that account's key. Submitting it unsigned (empty
-    // witness set / nonces) makes the sequencer reject the claim with
-    // `InvalidProgramBehaviour`. Sign with the account's own signing key and
-    // its current nonce, the same way the authorized example does.
-    let signing_key = wallet_core
-        .storage()
-        .user_data
-        .get_pub_account_signing_key(account_id)
-        .ok_or_else(|| anyhow!("input account must be a self-owned public account"))?;
+    // Deploy the program through `program_loader`; future calls dispatch to the returned header.
+    let bytecode: Vec<u8> = std::fs::read(program_path).unwrap();
+    let program_account_id = deploy_program(&mut wallet_core, bytecode, payer)
+        .await
+        .unwrap();
 
+    // Define the desired greeting in ASCII
     let greeting: Vec<u8> = vec![72, 111, 108, 97, 32, 109, 117, 110, 100, 111, 33];
-    let nonces = wallet_core
-        .get_accounts_nonces(vec![account_id])
+
+    // Construct the public transaction
+    // No nonces nor signing keys are needed for this example. Check out the
+    // `run_hello_world_with_authorization` on how to use them.
+    let nonces = vec![];
+    let signing_keys = [];
+    let message = Message::try_new(
+        program_account_id,
+        vec![ProgramShardSelector::new(account_id, program_account_id)],
+        nonces,
+        greeting,
+    )
+    .unwrap();
+    // Submit the transaction, paying its fee from `payer`.
+    let _response = send_paid_public_transaction(&wallet_core, message, &signing_keys, payer)
         .await
-        .context("failed to query account nonce from sequencer")?;
-    let message = Message::try_new(program.id(), vec![account_id], nonces, greeting)
-        .context("failed to build hello_world transaction message")?;
-    let witness_set = WitnessSet::for_message(&message, &[signing_key]);
-    let tx = PublicTransaction::new(message, witness_set);
-
-    let response = wallet_core
-        .sequencer_client
-        .send_transaction(tx.into())
-        .await
-        .context("failed to submit public transaction to localnet")?;
-
-    println!(
-        "submitted transaction: tx_hash={}",
-        hex::encode(response.0)
-    );
-    println!("verification hint: wallet account get --account-id Public/{account_id}");
-
-    Ok(())
+        .unwrap();
 }

@@ -5,19 +5,51 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context};
 use serde_json::{Map, Value};
 
-use crate::constants::SEQUENCER_CONFIG_REL_PATHS;
-use crate::lez_layout::first_existing_lez_path;
+use crate::constants::{
+    DEV_FUNDER_ACCOUNT_ID, DEV_FUNDER_GENESIS_BALANCE, SEQUENCER_CONFIG_REL_PATH,
+};
+use crate::lez_layout::lez_file;
 use crate::DynResult;
 
 pub(crate) const RUNTIME_SEQUENCER_CONFIG_FILE: &str = "sequencer_config.json";
-pub(crate) const WIDENED_MAX_BLOCK_SIZE: &str = "8 MiB";
 
-pub(crate) fn apply_common_runtime_overrides(obj: &mut Map<String, Value>, port: u16) {
-    obj.insert("port".to_string(), Value::Number(port.into()));
-    obj.insert(
-        "max_block_size".to_string(),
-        Value::String(WIDENED_MAX_BLOCK_SIZE.to_string()),
-    );
+/// Override every scaffold-started sequencer (localnet and test-node)
+/// applies to LEZ's debug config: the dev funder ([`DEV_FUNDER_ACCOUNT_ID`])
+/// is guaranteed a genesis `supply_account`. LEZ's debug config already funds
+/// it today; enforcing it here keeps `wallet topup` working if upstream
+/// reshuffles its debug accounts.
+///
+/// `max_block_size` is deliberately left at the upstream value: LEZ 0.3
+/// refuses to start above Bedrock's inscription limit (1,835,008 bytes), and
+/// `program_loader` deployments upload one 96 KiB segment per transaction, so
+/// the old "fit every guest ELF in one block" widening is neither possible
+/// nor needed.
+pub(crate) fn apply_common_runtime_overrides(obj: &mut Map<String, Value>) {
+    ensure_genesis_supply(obj, DEV_FUNDER_ACCOUNT_ID, DEV_FUNDER_GENESIS_BALANCE);
+}
+
+/// Add a `{"supply_account": {account_id, balance}}` genesis action for
+/// `account_id` unless the config already supplies it.
+pub(crate) fn ensure_genesis_supply(obj: &mut Map<String, Value>, account_id: &str, balance: u64) {
+    let genesis = obj
+        .entry("genesis")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !genesis.is_array() {
+        *genesis = Value::Array(Vec::new());
+    }
+    let actions = genesis.as_array_mut().expect("genesis is an array");
+    let already_supplied = actions.iter().any(|action| {
+        action
+            .get("supply_account")
+            .and_then(|supply| supply.get("account_id"))
+            .and_then(Value::as_str)
+            == Some(account_id)
+    });
+    if !already_supplied {
+        actions.push(serde_json::json!({
+            "supply_account": { "account_id": account_id, "balance": balance }
+        }));
+    }
 }
 
 pub(crate) fn patch_runtime_sequencer_config<F, R>(
@@ -28,8 +60,7 @@ pub(crate) fn patch_runtime_sequencer_config<F, R>(
 where
     F: FnOnce(&mut Map<String, Value>) -> DynResult<R>,
 {
-    let src_path =
-        first_existing_lez_path(lez, SEQUENCER_CONFIG_REL_PATHS, "sequencer debug config")?;
+    let src_path = lez_file(lez, SEQUENCER_CONFIG_REL_PATH, "sequencer debug config")?;
     let text = fs::read_to_string(&src_path)
         .with_context(|| format!("failed to read {}", src_path.display()))?;
     let mut doc: Value =
@@ -70,8 +101,6 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
-    use crate::constants::{SEQUENCER_CONFIG_NESTED_REL_PATH, SEQUENCER_CONFIG_REL_PATH};
-
     use super::*;
     use tempfile::tempdir;
 
@@ -79,22 +108,26 @@ mod tests {
         let lez = root.join("lez");
         let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
         fs::create_dir_all(config_path.parent().expect("parent")).expect("create config dir");
-        fs::write(&config_path, r#"{"home": ".", "genesis_id": 1}"#).expect("write source config");
+        fs::write(&config_path, r#"{"home": ".", "max_num_tx_in_block": 1}"#)
+            .expect("write source config");
         lez
     }
 
     #[test]
-    fn patch_runtime_sequencer_config_accepts_nested_lez_layout() {
+    fn patch_runtime_sequencer_config_reads_lez_0_3_layout() {
         let temp = tempdir().expect("tempdir");
         let lez = temp.path().join("lez");
-        let config_path = lez.join(SEQUENCER_CONFIG_NESTED_REL_PATH);
+        let config_path = lez.join(SEQUENCER_CONFIG_REL_PATH);
         let dest_dir = temp.path().join("runtime");
         fs::create_dir_all(config_path.parent().expect("parent")).expect("create config dir");
-        fs::write(&config_path, r#"{"home": ".", "genesis_id": 7}"#).expect("write source config");
+        fs::write(&config_path, r#"{"home": ".", "max_num_tx_in_block": 7}"#)
+            .expect("write source config");
 
         let (dest_path, genesis_id) = patch_runtime_sequencer_config(&lez, &dest_dir, |obj| {
             obj.insert("port".to_string(), Value::Number(30_400.into()));
-            Ok(obj["genesis_id"].as_u64().expect("genesis_id"))
+            Ok(obj["max_num_tx_in_block"]
+                .as_u64()
+                .expect("max_num_tx_in_block"))
         })
         .expect("patch config");
 
@@ -138,7 +171,7 @@ mod tests {
         let final_config =
             fs::read_to_string(dest_dir.join(RUNTIME_SEQUENCER_CONFIG_FILE)).expect("read config");
         let final_config: Value = serde_json::from_str(&final_config).expect("parse config");
-        assert_eq!(final_config["genesis_id"], serde_json::json!(1));
+        assert_eq!(final_config["max_num_tx_in_block"], serde_json::json!(1));
         assert!(final_config["port"].as_u64().is_some());
     }
 
@@ -170,5 +203,24 @@ mod tests {
             .expect("tmp symlink metadata")
             .file_type()
             .is_symlink());
+    }
+
+    #[test]
+    fn common_overrides_fund_the_dev_funder_once_and_keep_block_size() {
+        let mut obj: Map<String, Value> = serde_json::from_str(
+            r#"{"max_block_size": "1 MiB", "genesis": [
+                {"supply_account": {"account_id": "other", "balance": 5}}
+            ]}"#,
+        )
+        .expect("json");
+        apply_common_runtime_overrides(&mut obj);
+        apply_common_runtime_overrides(&mut obj);
+        assert_eq!(obj["max_block_size"], "1 MiB");
+        let genesis = obj["genesis"].as_array().expect("genesis");
+        assert_eq!(genesis.len(), 2, "{genesis:?}");
+        assert_eq!(
+            genesis[1]["supply_account"]["account_id"],
+            DEV_FUNDER_ACCOUNT_ID
+        );
     }
 }

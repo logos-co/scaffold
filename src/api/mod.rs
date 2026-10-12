@@ -103,10 +103,8 @@ pub use crate::model::{
 
 use crate::commands::basecamp::{basecamp_for_project, BasecampAction};
 use crate::commands::build::cmd_build_shortcut;
-use crate::commands::client::generate_clients_from_current_idl;
 use crate::commands::deploy::deploy_for_project;
 use crate::commands::doctor::build_doctor_report;
-use crate::commands::idl::build_idl_for_current_project;
 use crate::commands::init::cmd_init_at;
 pub use crate::commands::localnet::LocalnetStopOutcome;
 
@@ -118,14 +116,12 @@ use crate::commands::new::{create_project_in, NewCommand};
 use crate::commands::report::report_for_project;
 use crate::commands::run::{run_for_project, RunInvocation};
 use crate::commands::setup::setup_for_project;
-use crate::commands::spel::spel_passthrough_for_project;
 use crate::commands::wallet::{
     cmd_wallet_proxy, cmd_wallet_topup_inner, wallet_default_set_for_project,
     wallet_list_for_project,
 };
 use crate::constants::{
-    DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, SEQUENCER_BIN_REL_PATH, SPEL_BIN_REL_PATH,
-    WALLET_BIN_REL_PATH,
+    DEFAULT_RUN_LOCALNET_TIMEOUT_SEC, SEQUENCER_BIN_REL_PATH, WALLET_BIN_REL_PATH,
 };
 use crate::project::{find_project_root, load_project_at, resolve_cache_root, resolve_repo_path};
 
@@ -174,16 +170,13 @@ impl Project {
     }
 
     /// Resolve every path scaffold derives for this project: cache root,
-    /// pinned repo checkouts, vendored binaries, wallet home, localnet state
-    /// and log files, and the circuits directory. Nothing is created or
+    /// pinned LEZ checkout, its binaries, wallet home, localnet state, chain
+    /// and log files, and the deployments record. Nothing is created or
     /// downloaded; paths are reported whether or not they exist yet.
     pub fn paths(&self) -> Result<ProjectPaths> {
         let (cache_root, source) = resolve_cache_root(&self.inner).map_err(error::classify)?;
         let lez_repo = resolve_repo_path(&self.inner, &self.inner.config.lez, "lez")
             .map_err(error::classify)?;
-        let spel_repo = resolve_repo_path(&self.inner, &self.inner.config.spel, "spel")
-            .map_err(error::classify)?;
-        let circuits_dir = crate::circuits::circuits_dir_for_project(&self.inner);
         Ok(ProjectPaths {
             root: self.inner.root.clone(),
             scaffold_toml: self.inner.root.join("scaffold.toml"),
@@ -191,20 +184,19 @@ impl Project {
             cache_root_source: source.label().to_string(),
             sequencer_binary: lez_repo.join(SEQUENCER_BIN_REL_PATH),
             wallet_binary: lez_repo.join(WALLET_BIN_REL_PATH),
-            spel_binary: spel_repo.join(SPEL_BIN_REL_PATH),
             lez_repo,
-            spel_repo,
             wallet_home: self.inner.root.join(&self.inner.config.wallet_home_dir),
             localnet_state: self.inner.root.join(".scaffold/state/localnet.state"),
+            localnet_home: self.inner.root.join(".scaffold/localnet"),
             sequencer_log: self.inner.root.join(".scaffold/logs/sequencer.log"),
-            circuits_dir,
+            deployments: crate::commands::deployments::deployments_path(&self.inner.root),
         })
     }
 
     // ── setup / build / deploy / run ───────────────────────────────────────
 
-    /// Sync pinned repos and build the project-local binaries (sequencer,
-    /// wallet, spel). Streams build progress to stdout; external-command
+    /// Sync the pinned LEZ checkout and build the project-local binaries
+    /// (sequencer, wallet), then seed the project wallet. Streams build progress to stdout; external-command
     /// failures surface as [`Error::Command`].
     pub fn setup(&self, options: &SetupOptions) -> Result<()> {
         setup_for_project(&self.inner, options.prebuilt).map_err(error::classify)
@@ -219,25 +211,6 @@ impl Project {
             options.prebuilt,
             options.guest.map(Into::into),
         )
-        .map_err(error::classify)
-    }
-
-    /// Build IDL files for the current project (framework projects only).
-    /// Temporarily changes the process working directory to the project root.
-    pub fn build_idl(&self) -> Result<()> {
-        crate::project::run_in_project_dir(Some(&self.inner.root), || {
-            build_idl_for_current_project()
-        })
-        .map_err(error::classify)
-    }
-
-    /// Generate client code from the current IDL files (framework projects
-    /// only). Temporarily changes the process working directory to the
-    /// project root.
-    pub fn build_client(&self) -> Result<()> {
-        crate::project::run_in_project_dir(Some(&self.inner.root), || {
-            generate_clients_from_current_idl()
-        })
         .map_err(error::classify)
     }
 
@@ -333,13 +306,19 @@ impl Project {
         wallet_list_for_project(&self.inner, long).map_err(error::classify)
     }
 
-    /// Top up a wallet from the localnet faucet. With `address: None`, the
+    /// Top up a wallet with a transfer from the localnet dev funder. With `address: None`, the
     /// project's default wallet is used. A [`TopupOutcome::ConfirmationTimeout`]
     /// means the submission reached the sequencer but confirmation timed out —
     /// funding is uncertain, not failed.
     pub fn wallet_topup(&self, options: &TopupOptions) -> Result<TopupOutcome> {
-        cmd_wallet_topup_inner(&self.inner, options.address.clone(), false, false)
-            .map_err(error::classify)
+        cmd_wallet_topup_inner(
+            &self.inner,
+            options.address.clone(),
+            options.amount,
+            false,
+            false,
+        )
+        .map_err(error::classify)
     }
 
     /// Set the project's default wallet address; returns the normalized form
@@ -357,12 +336,6 @@ impl Project {
     }
 
     // ── passthrough / basecamp / diagnostics ──────────────────────────────
-
-    /// Forward arguments to the project-vendored `spel` binary, streaming its
-    /// output, and return its exit status (the API never exits the process).
-    pub fn spel(&self, args: &[String]) -> Result<std::process::ExitStatus> {
-        spel_passthrough_for_project(&self.inner, args).map_err(error::classify)
-    }
 
     /// Execute a basecamp flow (setup, modules, install, launch, develop,
     /// build-portable, doctor). Streams progress to stdout like the CLI.
@@ -479,8 +452,8 @@ impl LocalnetHandle {
 }
 
 /// Every path scaffold derives for a project. Reported as configured/derived;
-/// existence is not guaranteed (run [`Project::setup`] to materialise
-/// binaries, repos, and circuits).
+/// existence is not guaranteed (run [`Project::setup`] to materialise the
+/// LEZ checkout and its binaries).
 #[derive(Clone, Debug)]
 pub struct ProjectPaths {
     pub root: PathBuf,
@@ -492,22 +465,20 @@ pub struct ProjectPaths {
     pub cache_root_source: String,
     /// Pinned LEZ checkout directory.
     pub lez_repo: PathBuf,
-    /// Pinned spel checkout directory.
-    pub spel_repo: PathBuf,
     /// Standalone sequencer binary built by `setup`.
     pub sequencer_binary: PathBuf,
     /// Wallet binary built by `setup`.
     pub wallet_binary: PathBuf,
-    /// Vendored spel binary built by `setup`.
-    pub spel_binary: PathBuf,
     /// Project wallet home directory.
     pub wallet_home: PathBuf,
     /// Localnet state file tracking the sequencer pid.
     pub localnet_state: PathBuf,
+    /// Localnet chain home (`--home` of the sequencer: RocksDB and keys).
+    pub localnet_home: PathBuf,
     /// Sequencer log file.
     pub sequencer_log: PathBuf,
-    /// Circuits release directory (env override or cache location).
-    pub circuits_dir: PathBuf,
+    /// `deployments.json`: program ids recorded by `deploy`.
+    pub deployments: PathBuf,
 }
 
 /// Options for [`Project::setup`].
@@ -540,7 +511,7 @@ pub struct BuildOptions {
 /// same `program_id` everywhere.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GuestBuild {
-    /// Host toolchain. Non-reproducible `program_id`.
+    /// Host toolchain. Non-reproducible guest image ID.
     Local,
     /// Pinned Docker container. Reproducible `program_id`.
     Docker,
@@ -587,7 +558,9 @@ pub struct LocalnetStartOptions {
 
 impl Default for LocalnetStartOptions {
     fn default() -> Self {
-        Self { timeout_sec: 20 }
+        Self {
+            timeout_sec: DEFAULT_RUN_LOCALNET_TIMEOUT_SEC,
+        }
     }
 }
 
@@ -614,6 +587,9 @@ impl Default for LocalnetResetOptions {
 pub struct TopupOptions {
     /// Destination address; `None` uses the project default wallet.
     pub address: Option<String>,
+    /// Native units to transfer from the dev funder; `None` uses the
+    /// default (1,000,000,000).
+    pub amount: Option<u64>,
 }
 
 /// Options for [`Project::report`].
@@ -761,21 +737,16 @@ mod tests {
     use super::*;
 
     /// Minimal valid scaffold.toml for fixture projects, mirroring what
-    /// `lgs new` writes (schema 0.2.0).
+    /// `lgs new` writes (schema 0.3.0).
     fn write_fixture_config(root: &Path) {
         fs::write(
             root.join("scaffold.toml"),
             r#"[scaffold]
-version = "0.2.0"
+version = "0.3.0"
 
 [repos.lez]
 source = "https://github.com/logos-blockchain/logos-execution-zone.git"
-pin = "cf3639d8252040d13b3d4e933feb19b42c76e14a"
-build = "cargo"
-
-[repos.spel]
-source = "https://github.com/logos-co/spel.git"
-pin = "73fc462eb8f0a4d00f1a846437c627ec2e523f83"
+pin = "1a003bfbfb89fcf987f62975cd08a401169e1b8c"
 build = "cargo"
 
 [wallet]
@@ -848,7 +819,11 @@ port = 3040
             .sequencer_binary
             .ends_with("target/release/sequencer_service"));
         assert!(paths.wallet_binary.ends_with("target/release/wallet"));
-        assert!(paths.spel_binary.ends_with("target/release/spel"));
+        assert_eq!(paths.localnet_home, temp.path().join(".scaffold/localnet"));
+        assert_eq!(
+            paths.deployments,
+            temp.path().join(".scaffold/state/deployments.json")
+        );
     }
 
     #[test]

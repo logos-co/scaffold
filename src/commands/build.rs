@@ -5,14 +5,8 @@ use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, bail, Context};
 
-use crate::circuits::ensure_circuits_for_project;
-use crate::commands::client::generate_clients_from_current_idl;
-use crate::commands::idl::build_idl_for_current_project;
 use crate::commands::setup::cmd_setup;
-use crate::constants::{
-    DEFAULT_RISC0_METHODS_ENTRY, FRAMEWORK_KIND_DEFAULT, FRAMEWORK_KIND_LEZ_FRAMEWORK,
-    GUEST_DOCKER_TARGET_DIR, METHODS_DIR,
-};
+use crate::constants::{DEFAULT_RISC0_METHODS_ENTRY, GUEST_DOCKER_TARGET_DIR, METHODS_DIR};
 use crate::model::GuestBuildMode;
 use crate::process::{apply_host_cc_overrides, run_checked, which};
 use crate::project::{load_project, run_in_project_dir};
@@ -38,24 +32,9 @@ pub(crate) fn cmd_build_shortcut(
 
         // Re-read after `setup`, which is allowed to touch project state.
         let project = load_project()?;
-        ensure_circuits_for_project(&project)?;
         build_workspace_for_current_project(&cwd)?;
-        match project.config.framework.kind.as_str() {
-            FRAMEWORK_KIND_DEFAULT => {}
-            FRAMEWORK_KIND_LEZ_FRAMEWORK => {
-                build_idl_for_current_project()?;
-                generate_clients_from_current_idl()?;
-            }
-            other => {
-                println!(
-                    "Skipping IDL/client generation for framework kind `{}`",
-                    other
-                );
-            }
-        }
-        // Guest building is intentionally framework-agnostic: any project with
-        // a `methods/Cargo.toml` (Risc0 guest crate excluded from the parent
-        // workspace) gets it compiled, regardless of `framework.kind`.
+        // Any project with a `methods/Cargo.toml` (the Risc0 guest crate) gets
+        // its guests compiled with the strategy `[build].guest` selects.
         let mode = guest_override.unwrap_or(project.config.build.guest);
         build_methods_guests(&cwd, mode, &project.config.build.risc0_docker_tag)?;
 
@@ -297,14 +276,14 @@ fn preflight_deterministic_toolchain() -> DynResult<()> {
              Install it with `rzup install cargo-risczero` (a separate component from \
              `rzup install rust`), or `cargo install cargo-risczero`. Or set \
              [build].guest = \"local\" in scaffold.toml to build guests with the host \
-             toolchain (non-reproducible `program_id`)."
+             toolchain (non-reproducible guest image ID)."
         );
     }
     if which("docker").is_none() {
         bail!(
             "[build].guest = \"docker\" needs `docker` on PATH, which was not found.\n\
              Install Docker, or set [build].guest = \"local\" in scaffold.toml to build guests \
-             with the host toolchain (non-reproducible `program_id`)."
+             with the host toolchain (non-reproducible guest image ID)."
         );
     }
     let daemon_ok = Command::new("docker")
@@ -319,7 +298,7 @@ fn preflight_deterministic_toolchain() -> DynResult<()> {
         bail!(
             "[build].guest = \"docker\" needs a running Docker daemon; `docker info` failed.\n\
              Start Docker and retry, or set [build].guest = \"local\" in scaffold.toml to build \
-             guests with the host toolchain (non-reproducible `program_id`)."
+             guests with the host toolchain (non-reproducible guest image ID)."
         );
     }
     Ok(())

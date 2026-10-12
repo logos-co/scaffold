@@ -1,7 +1,8 @@
-//! Caller-project LEZ and circuits pin resolution for test nodes.
+//! Caller-project LEZ pin resolution for test nodes.
 //!
-//! Integration tests must run against the same LEZ revision and circuits
-//! release as the program workspace. The scaffold default pin is a
+//! Integration tests must run against the same LEZ revision as the program
+//! workspace. (LEZ 0.3 builds fetch their own circuits release, so the LEZ
+//! pin is the only one.) The scaffold default pin is a
 //! convenience for generated projects, not a correctness boundary: an
 //! existing repository that pins `logos-execution-zone` itself (via
 //! `[repos.lez]` in `scaffold.toml`, including a caller-provided `path`
@@ -24,14 +25,8 @@ use std::process::Command;
 use anyhow::{bail, Context};
 use serde::Serialize;
 
-use crate::circuits::{
-    circuits_dir_for_project, ensure_circuits_for_project, release_triple, version_eq,
-};
 use crate::commands::setup::SEQUENCER_BUILD_ARGS;
-use crate::constants::{
-    DEFAULT_CIRCUITS_VERSION, DEFAULT_LEZ, LEZ_SOURCE, LOGOS_BLOCKCHAIN_CIRCUITS_ENV,
-    SEQUENCER_BIN_REL_PATH,
-};
+use crate::constants::{DEFAULT_LEZ, LEZ_SOURCE, SEQUENCER_BIN_REL_PATH};
 use crate::model::{CheckStatus, Project};
 use crate::process::run_checked;
 use crate::project::resolve_cache_root;
@@ -54,7 +49,7 @@ pub struct PinOverrides {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PinOrigin {
-    /// Explicit `--lez-source` / `--lez-ref` / `--circuits-version` override.
+    /// Explicit `--lez-source` / `--lez-ref` override.
     CliOverride,
     /// The caller project's `scaffold.toml`.
     ProjectConfig,
@@ -73,7 +68,7 @@ pub enum CheckoutOwnership {
     CallerProvided,
 }
 
-/// The LEZ and circuits pins every test-node command will use, with the
+/// The LEZ pin every test-node command will use, with the
 /// origin of each value and the resolved on-disk locations.
 #[derive(Clone, Debug, Serialize)]
 pub struct TestNodePins {
@@ -90,10 +85,6 @@ pub struct TestNodePins {
     pub checkout_ownership: CheckoutOwnership,
     /// Standalone sequencer binary inside the checkout.
     pub sequencer_binary: PathBuf,
-    pub circuits_version: String,
-    pub circuits_version_origin: PinOrigin,
-    /// Circuits release directory for the selected version.
-    pub circuits_path: PathBuf,
 }
 
 /// Result of `test-node prepare`: pin-resolved, built, and verified
@@ -107,22 +98,19 @@ pub struct PreparedTestNode {
     pub lez_commit: String,
     /// Standalone sequencer binary.
     pub sequencer_binary: PathBuf,
-    pub circuits_version: String,
-    /// Circuits release directory exported to spawned nodes.
-    pub circuits_path: PathBuf,
 }
 
 /// Failure categories the test-node doctor distinguishes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TestNodeCheckCategory {
-    UnsupportedPlatform,
+    /// The checkout is not a LEZ 0.3 release with the standalone sequencer.
+    UnsupportedLez,
     PinDrift,
     CheckoutMissing,
     MismatchedCommit,
     DirtyCheckout,
     MissingBinary,
-    MissingCircuits,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -143,7 +131,7 @@ pub struct TestNodeDoctorReport {
     pub checks: Vec<TestNodeCheck>,
 }
 
-/// Resolve the LEZ and circuits pins test-node commands will use for
+/// Resolve the LEZ pin test-node commands will use for
 /// `project`, applying `overrides` first, then the project's
 /// `scaffold.toml`, then scaffold defaults. Read-only: nothing is cloned,
 /// fetched, built, or downloaded.
@@ -174,23 +162,6 @@ fn resolve_pins_with_cache_root(
         }
         None => (DEFAULT_LEZ.sha.to_string(), PinOrigin::ScaffoldDefault),
     };
-
-    // Circuits are a project-level dependency (`[circuits].version`), so the
-    // configured value is the single source of truth: `pins`, `prepare`, and
-    // `start` all resolve and provision it the same way. There is deliberately
-    // no CLI override — that would reintroduce prepare/start divergence.
-    let (circuits_version, circuits_version_origin) =
-        if !version_eq(&project.config.circuits.version, DEFAULT_CIRCUITS_VERSION) {
-            (
-                project.config.circuits.version.clone(),
-                PinOrigin::ProjectConfig,
-            )
-        } else {
-            (
-                DEFAULT_CIRCUITS_VERSION.to_string(),
-                PinOrigin::ScaffoldDefault,
-            )
-        };
 
     let cache_root = match cache_root_override {
         Some(root) => root.to_path_buf(),
@@ -232,8 +203,6 @@ fn resolve_pins_with_cache_root(
         None
     };
 
-    let circuits_path = circuits_dir_for_project(project);
-
     Ok(TestNodePins {
         sequencer_binary: lez_checkout.join(SEQUENCER_BIN_REL_PATH),
         lez_source,
@@ -243,9 +212,6 @@ fn resolve_pins_with_cache_root(
         lez_resolved_commit,
         lez_checkout,
         checkout_ownership,
-        circuits_version,
-        circuits_version_origin,
-        circuits_path,
     })
 }
 
@@ -270,8 +236,8 @@ fn local_checkout_from_source(project: &Project, source: &str) -> Option<PathBuf
     }
 }
 
-/// Resolve pins, materialise the LEZ checkout and circuits release, and
-/// build the standalone sequencer for those pins.
+/// Resolve pins, materialise the LEZ checkout, and build the standalone
+/// sequencer for those pins.
 ///
 /// Managed cache checkouts are cloned/fetched/checked out as needed.
 /// Caller-provided checkouts are only validated: they must be clean
@@ -301,13 +267,6 @@ pub fn prepare_test_node(
         }
     };
 
-    // Provision circuits into the project's configured install dir and export
-    // `LOGOS_BLOCKCHAIN_CIRCUITS` — exactly what `start` does, so `prepare`
-    // warms the same tree `start` will use (not a separate cache-root copy).
-    // Needed for the sequencer build below and any node spawned in this process.
-    ensure_circuits_for_project(project)?;
-    let circuits_path = circuits_dir_for_project(project);
-
     let mut build_cmd = Command::new("cargo");
     build_cmd
         .current_dir(&pins.lez_checkout)
@@ -326,8 +285,6 @@ pub fn prepare_test_node(
         checkout_ownership: pins.checkout_ownership,
         lez_commit,
         sequencer_binary: pins.sequencer_binary.clone(),
-        circuits_version: pins.circuits_version.clone(),
-        circuits_path,
     })
 }
 
@@ -375,36 +332,12 @@ fn validate_caller_checkout(checkout: &Path, requested_ref: &str) -> DynResult<S
 
 /// Run the test-node health checks for `project` and report each failure
 /// class separately: unsupported platform, pin drift, missing/dirty/
-/// mismatched checkouts, missing sequencer binary, missing circuits.
+/// mismatched checkouts, missing sequencer binary, a checkout that is not
+/// LEZ 0.3.
 /// Read-only: nothing is mutated, built, or downloaded.
 pub fn doctor_test_node(project: &Project) -> DynResult<TestNodeDoctorReport> {
     let pins = resolve_test_node_pins(project, &PinOverrides::default())?;
     let mut checks = Vec::new();
-
-    // Platform support: a circuits release must exist for this OS/arch — unless
-    // the user supplies their own circuits via `LOGOS_BLOCKCHAIN_CIRCUITS`,
-    // the documented escape hatch on otherwise-unsupported platforms.
-    let circuits_env_override =
-        std::env::var_os(LOGOS_BLOCKCHAIN_CIRCUITS_ENV).is_some_and(|v| !v.is_empty());
-    if release_triple().is_ok() || circuits_env_override {
-        checks.push(TestNodeCheck {
-            category: TestNodeCheckCategory::UnsupportedPlatform,
-            status: CheckStatus::Pass,
-            name: "platform supported".to_string(),
-            detail: format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
-            remediation: None,
-        });
-    } else {
-        checks.push(TestNodeCheck {
-            category: TestNodeCheckCategory::UnsupportedPlatform,
-            status: CheckStatus::Fail,
-            name: "platform supported".to_string(),
-            detail: format!("{:#}", release_triple().unwrap_err()),
-            remediation: Some(format!(
-                "Set {LOGOS_BLOCKCHAIN_CIRCUITS_ENV} to a populated circuits checkout"
-            )),
-        });
-    }
 
     // Pin drift vs the scaffold default — informational, not an error: the
     // caller project's pin is authoritative for test nodes.
@@ -546,26 +479,18 @@ pub fn doctor_test_node(project: &Project) -> DynResult<TestNodeDoctorReport> {
         },
     });
 
-    // Circuits release.
-    let circuits_present = pins
-        .circuits_path
-        .join("pol/verification_key.json")
-        .is_file();
-    checks.push(TestNodeCheck {
-        category: TestNodeCheckCategory::MissingCircuits,
-        status: if circuits_present {
-            CheckStatus::Pass
-        } else {
-            CheckStatus::Fail
-        },
-        name: format!("circuits release v{}", pins.circuits_version),
-        detail: pins.circuits_path.display().to_string(),
-        remediation: if circuits_present {
-            None
-        } else {
-            Some("Run `lgs test-node prepare` to download it".to_string())
-        },
-    });
+    // LEZ 0.3 layout with the standalone sequencer feature (only checkable
+    // once the checkout exists; `CheckoutMissing` covers the other case).
+    if pins.lez_checkout.exists() {
+        let row = crate::doctor_checks::check_standalone_support(&pins.lez_checkout);
+        checks.push(TestNodeCheck {
+            category: TestNodeCheckCategory::UnsupportedLez,
+            status: row.status,
+            name: row.name,
+            detail: row.detail,
+            remediation: row.remediation,
+        });
+    }
 
     let ok = !checks.iter().any(|check| check.status == CheckStatus::Fail);
     Ok(TestNodeDoctorReport { ok, pins, checks })
@@ -579,29 +504,21 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::model::{
-        Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RepoRef, RunConfig,
-    };
+    use crate::model::{Config, FrameworkConfig, LocalnetConfig, RepoRef, RunConfig};
 
     fn fixture_project(root: &Path, lez: RepoRef) -> Project {
         Project {
             root: root.to_path_buf(),
             config: Config {
-                version: "0.2.0".into(),
+                version: crate::constants::SCAFFOLD_TOML_SCHEMA_VERSION.into(),
                 cache_root: ".scaffold/cache".into(),
                 lez,
-                spel: RepoRef::default(),
                 basecamp_repo: None,
                 lgpm_repo: None,
                 wallet_home_dir: ".scaffold/wallet".into(),
-                circuits: crate::model::CircuitsConfig::default(),
                 framework: FrameworkConfig {
                     kind: "default".into(),
                     version: "0.1.0".into(),
-                    idl: FrameworkIdlConfig {
-                        spec: String::new(),
-                        path: String::new(),
-                    },
                 },
                 build: crate::model::BuildConfig::default(),
                 localnet: LocalnetConfig::default(),
@@ -666,7 +583,6 @@ mod tests {
         assert_eq!(pins.lez_source_origin, PinOrigin::ProjectConfig);
         assert_eq!(pins.lez_ref, "abc123");
         assert_eq!(pins.lez_ref_origin, PinOrigin::ProjectConfig);
-        assert_eq!(pins.circuits_version_origin, PinOrigin::ScaffoldDefault);
         assert_eq!(pins.checkout_ownership, CheckoutOwnership::ManagedCache);
         assert!(pins
             .lez_checkout
@@ -683,20 +599,6 @@ mod tests {
         .unwrap();
         assert_eq!(pins.lez_ref, "v9.9.9");
         assert_eq!(pins.lez_ref_origin, PinOrigin::CliOverride);
-    }
-
-    #[test]
-    fn circuits_version_uses_project_config_as_source_of_truth() {
-        let temp = tempdir().unwrap();
-        let mut project = fixture_project(temp.path(), RepoRef::default());
-        // Circuits version is project config (there is no CLI override): a
-        // non-default `[circuits].version` is the single pin that `pins`,
-        // `prepare`, and `start` all resolve and provision.
-        project.config.circuits.version = "0.9.9".into();
-
-        let pins = resolve_test_node_pins(&project, &PinOverrides::default()).unwrap();
-        assert_eq!(pins.circuits_version, "0.9.9");
-        assert_eq!(pins.circuits_version_origin, PinOrigin::ProjectConfig);
     }
 
     #[test]
@@ -822,7 +724,6 @@ mod tests {
             .collect();
         assert!(categories.contains(&TestNodeCheckCategory::CheckoutMissing));
         assert!(categories.contains(&TestNodeCheckCategory::MissingBinary));
-        assert!(categories.contains(&TestNodeCheckCategory::MissingCircuits));
     }
 
     #[test]

@@ -1,22 +1,49 @@
-use anyhow::{Context, anyhow};
+// logos-scaffold: identical to LEZ v0.3.1's examples/program_deployment runner
+// except that the public transaction is submitted through
+// `program_deployment::send_paid_public_transaction`, which adds the fee
+// declaration (paid by the payer argument) a LEZ 0.3 sequencer requires.
+use std::collections::HashMap;
+
 use clap::{Parser, Subcommand};
-use example_program_deployment_methods::HELLO_WORLD_WITH_MOVE_FUNCTION_ELF;
-use nssa::{PublicTransaction, program::Program, public_transaction};
-use sequencer_service_rpc::RpcClient as _;
-use wallet::{PrivacyPreservingAccount, WalletCore};
+use lee::{
+    AccountId, ProgramShardSelector,
+    privacy_preserving_transaction::circuit::ProgramWithDependencies, program::Program,
+    public_transaction,
+};
+use program_deployment::{deploy_program, send_paid_public_transaction};
+use wallet::{AccountIdentity, WalletCore};
 
-#[path = "../lib.rs"]
-mod scaffold_lib;
-use scaffold_lib::runner_support::{load_program, parse_account_id};
+// Before running this example, compile the `hello_world_with_move_function.rs` guest program with:
+//
+//   cargo risczero build --manifest-path examples/program_deployment/methods/guest/Cargo.toml
+//
+// Note: you must run the above command from the root of the `logos-execution-zone` repository.
+// Note: The compiled binary file is stored in
+// methods/guest/target/riscv32im-risc0-zkvm-elf/docker/hello_world_with_move_function.bin
+//
+//
+// Usage:
+//   cargo run --bin run_hello_world_with_move_function \
+//     /path/to/guest/binary <payer_account_id> <function> <params>
+//
+// Example:
+//   cargo run --bin run_hello_world_with_move_function \
+//     methods/guest/target/riscv32im-risc0-zkvm-elf/docker/hello_world_with_move_function.bin \
+//     <funded payer account_id> \
+//     write-public Ds8q5PjLcKwwV97Zi7duhRVF9uwA2PuYMoLL7FwCzsXE Hola
 
-type Instruction = (u8, Vec<u8>);
 const WRITE_FUNCTION_ID: u8 = 0;
 const MOVE_DATA_FUNCTION_ID: u8 = 1;
 
+type Instruction = (u8, Vec<u8>);
+
 #[derive(Parser, Debug)]
 struct Cli {
-    #[arg(long)]
-    program_path: Option<String>,
+    /// Path to program binary.
+    program_path: String,
+
+    /// An existing, funded account to pay the deployment fee.
+    payer: AccountId,
 
     #[command(subcommand)]
     command: Command,
@@ -24,6 +51,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Write instruction into one account.
     WritePublic {
         account_id: String,
         greeting: String,
@@ -32,6 +60,7 @@ enum Command {
         account_id: String,
         greeting: String,
     },
+    /// Move data between two accounts.
     MoveDataPublicToPublic {
         from: String,
         to: String,
@@ -42,15 +71,37 @@ enum Command {
     },
 }
 
+async fn shard_bytes(
+    wallet_core: &WalletCore,
+    account_id: AccountId,
+    program_account_id: AccountId,
+) -> Vec<u8> {
+    wallet_core
+        .get_account_view(ProgramShardSelector::new(account_id, program_account_id))
+        .await
+        .unwrap()
+        .data
+        .shard(program_account_id)
+        .as_ref()
+        .to_vec()
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() {
     let cli = Cli::parse();
-    let program = load_program(
-        cli.program_path.as_deref(),
-        HELLO_WORLD_WITH_MOVE_FUNCTION_ELF,
-        "hello_world_with_move_function",
-    )?;
-    let wallet_core = WalletCore::from_env().context("failed to initialize wallet from environment")?;
+
+    // Initialize wallet
+    let mut wallet_core = WalletCore::from_env().unwrap();
+
+    // Deploy the program through `program_loader`; `program` is also needed directly below, as
+    // the local proving bundle for the private-tx arms.
+    let bytecode: Vec<u8> = std::fs::read(cli.program_path).unwrap();
+    let program = Program::new(bytecode.clone().into()).unwrap();
+    let program_account_id = deploy_program(&mut wallet_core, bytecode, cli.payer)
+        .await
+        .unwrap();
+    let program_with_dependencies =
+        ProgramWithDependencies::new(program, program_account_id, HashMap::new());
 
     match cli.command {
         Command::WritePublic {
@@ -58,135 +109,79 @@ async fn main() -> anyhow::Result<()> {
             greeting,
         } => {
             let instruction: Instruction = (WRITE_FUNCTION_ID, greeting.into_bytes());
-            let account_id = parse_account_id(&account_id)?;
-            // Same auth model as run_hello_world: the program claims the
-            // input account with `Claim::Authorized`, so the write must carry
-            // the account's signature and current nonce. An empty witness set
-            // is rejected by the sequencer with `InvalidProgramBehavior
-            // (ClaimedUnauthorizedAccount)`.
-            let signing_key = wallet_core
-                .storage()
-                .user_data
-                .get_pub_account_signing_key(account_id)
-                .ok_or_else(|| anyhow!("input account must be a self-owned public account"))?;
-            let nonces = wallet_core
-                .get_accounts_nonces(vec![account_id])
-                .await
-                .context("failed to query account nonce from sequencer")?;
+            let account_id = account_id.parse().unwrap();
+            let nonces = vec![];
             let message = public_transaction::Message::try_new(
-                program.id(),
-                vec![account_id],
+                program_account_id,
+                vec![ProgramShardSelector::new(account_id, program_account_id)],
                 nonces,
                 instruction,
             )
-            .context("failed to build write-public message")?;
-            let witness_set = public_transaction::WitnessSet::for_message(&message, &[signing_key]);
-            let tx = PublicTransaction::new(message, witness_set);
-            let response = wallet_core
-                .sequencer_client
-                .send_transaction(tx.into())
+            .unwrap();
+            // Submit the transaction, paying its fee from `cli.payer`.
+            let _response = send_paid_public_transaction(&wallet_core, message, &[], cli.payer)
                 .await
-                .context("failed to submit public transaction to localnet")?;
-            println!(
-                "submitted transaction: tx_hash={}",
-                hex::encode(response.0)
-            );
-            println!("verification hint: wallet account get --account-id Public/{account_id}");
+                .unwrap();
         }
         Command::WritePrivate {
             account_id,
             greeting,
         } => {
             let instruction: Instruction = (WRITE_FUNCTION_ID, greeting.into_bytes());
-            let account_id = parse_account_id(&account_id)?;
-            let accounts = vec![PrivacyPreservingAccount::PrivateOwned(account_id)];
-            let (response, _) = wallet_core
+            let account_id = account_id.parse().unwrap();
+            let accounts = vec![
+                AccountIdentity::PrivateOwned(account_id).select_program_shard(program_account_id),
+            ];
+
+            wallet_core
                 .send_privacy_preserving_tx(
                     accounts,
-                    Program::serialize_instruction(instruction)
-                        .context("failed to serialize private instruction payload")?,
-                    &program.into(),
+                    Program::serialize_instruction(instruction).unwrap(),
+                    &program_with_dependencies,
                 )
                 .await
-                .map_err(|err| anyhow::anyhow!("failed to submit private transaction: {err}"))?;
-            println!(
-                "submitted transaction: tx_hash={}",
-                hex::encode(response.0)
-            );
-            println!("verification hint: wallet account sync-private");
+                .unwrap();
         }
         Command::MoveDataPublicToPublic { from, to } => {
-            let instruction: Instruction = (MOVE_DATA_FUNCTION_ID, vec![]);
-            let from = parse_account_id(&from)?;
-            let to = parse_account_id(&to)?;
-            // Both claimed accounts sign. This runner requires both `from`
-            // and `to` to be self-owned public accounts (it errors below when
-            // either key is missing from the local wallet): the sequencer's
-            // execution check demands a witness for any `Claim::Authorized`
-            // account the program does not already own — always true for a
-            // fresh `to`, and true for `from` until this program has claimed
-            // it. Signing with both keys covers every combination this
-            // example is meant to demonstrate.
-            let from_key = wallet_core
-                .storage()
-                .user_data
-                .get_pub_account_signing_key(from)
-                .ok_or_else(|| anyhow!("`from` account must be a self-owned public account"))?;
-            let to_key = wallet_core
-                .storage()
-                .user_data
-                .get_pub_account_signing_key(to)
-                .ok_or_else(|| anyhow!("`to` account must be a self-owned public account"))?;
-            let nonces = wallet_core
-                .get_accounts_nonces(vec![from, to])
-                .await
-                .context("failed to query account nonces from sequencer")?;
+            let from = from.parse().unwrap();
+            let to = to.parse().unwrap();
+            let moved = shard_bytes(&wallet_core, from, program_account_id).await;
+            let instruction: Instruction = (MOVE_DATA_FUNCTION_ID, moved);
+            let nonces = vec![];
             let message = public_transaction::Message::try_new(
-                program.id(),
-                vec![from, to],
+                program_account_id,
+                vec![
+                    ProgramShardSelector::new(from, program_account_id),
+                    ProgramShardSelector::new(to, program_account_id),
+                ],
                 nonces,
                 instruction,
             )
-            .context("failed to build move-data-public-to-public message")?;
-            let witness_set =
-                public_transaction::WitnessSet::for_message(&message, &[from_key, to_key]);
-            let tx = PublicTransaction::new(message, witness_set);
-            let response = wallet_core
-                .sequencer_client
-                .send_transaction(tx.into())
+            .unwrap();
+            // Submit the transaction, paying its fee from `cli.payer`.
+            let _response = send_paid_public_transaction(&wallet_core, message, &[], cli.payer)
                 .await
-                .context("failed to submit public transaction to localnet")?;
-            println!(
-                "submitted transaction: tx_hash={}",
-                hex::encode(response.0)
-            );
-            println!("verification hint: wallet account get --account-id Public/{from}");
-            println!("verification hint: wallet account get --account-id Public/{to}");
+                .unwrap();
         }
         Command::MoveDataPublicToPrivate { from, to } => {
-            let instruction: Instruction = (MOVE_DATA_FUNCTION_ID, vec![]);
-            let from = parse_account_id(&from)?;
-            let to = parse_account_id(&to)?;
+            let from = from.parse().unwrap();
+            let to = to.parse().unwrap();
+            let moved = shard_bytes(&wallet_core, from, program_account_id).await;
+            let instruction: Instruction = (MOVE_DATA_FUNCTION_ID, moved);
+
             let accounts = vec![
-                PrivacyPreservingAccount::Public(from),
-                PrivacyPreservingAccount::PrivateOwned(to),
+                AccountIdentity::Public(from).select_program_shard(program_account_id),
+                AccountIdentity::PrivateOwned(to).select_program_shard(program_account_id),
             ];
-            let (response, _) = wallet_core
+
+            wallet_core
                 .send_privacy_preserving_tx(
                     accounts,
-                    Program::serialize_instruction(instruction)
-                        .context("failed to serialize private instruction payload")?,
-                    &program.into(),
+                    Program::serialize_instruction(instruction).unwrap(),
+                    &program_with_dependencies,
                 )
                 .await
-                .map_err(|err| anyhow::anyhow!("failed to submit private transaction: {err}"))?;
-            println!(
-                "submitted transaction: tx_hash={}",
-                hex::encode(response.0)
-            );
-            println!("verification hint: wallet account sync-private");
+                .unwrap();
         }
-    };
-
-    Ok(())
+    }
 }
