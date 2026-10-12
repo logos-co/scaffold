@@ -3,7 +3,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::bail;
 
-use super::wallet_support::{set_wallet_home_env, wallet_password};
+use super::wallet_support::{probe_sequencer_reachable, set_wallet_home_env, wallet_password};
 use crate::commands::wallet_support::WALLET_CONFIG_PRIMARY;
 use crate::constants::{
     DEFAULT_LEZ, DEV_FUNDER_ACCOUNT_ID, SEQUENCER_BIN_REL_PATH, WALLET_BIN_REL_PATH,
@@ -281,6 +281,10 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
                         remediation: None,
                     });
                 } else if is_localnet_connectivity_failure(&out.stdout, &out.stderr, localnet_port)
+                    || (has_transport_error_token(&out.stdout, &out.stderr)
+                        && !probe_sequencer_reachable(&format!(
+                            "http://127.0.0.1:{localnet_port}"
+                        )))
                 {
                     rows.push(CheckRow {
                         status: CheckStatus::Warn,
@@ -439,7 +443,15 @@ fn is_localnet_connectivity_failure(stdout: &str, stderr: &str, localnet_port: u
     let mentions_localnet_address = text.contains(&format!("127.0.0.1:{localnet_port}"))
         || text.contains(&format!("localhost:{localnet_port}"));
 
-    let has_transport_error_token = text.contains("connection refused")
+    mentions_localnet_address && has_transport_error_token(stdout, stderr)
+}
+
+/// LEZ 0.3's wallet reports a refused connection without naming the address
+/// (`Error fetching program ids: client error (Connect) … tcp connect
+/// error`), so doctor pairs this with a reachability probe of the localnet.
+fn has_transport_error_token(stdout: &str, stderr: &str) -> bool {
+    let text = format!("{stdout}\n{stderr}").to_lowercase();
+    text.contains("connection refused")
         || text.contains("econnrefused")
         || text.contains("tcp connect error")
         || text.contains("network is unreachable")
@@ -447,9 +459,7 @@ fn is_localnet_connectivity_failure(stdout: &str, stderr: &str, localnet_port: u
         || text.contains("failed to connect")
         || text.contains("couldn't connect")
         || text.contains("connecterror")
-        || text.contains("dns error");
-
-    mentions_localnet_address && has_transport_error_token
+        || text.contains("dns error")
 }
 
 fn derive_next_steps(rows: &[CheckRow]) -> Vec<String> {
@@ -652,5 +662,18 @@ mod tests {
         // ...but the same error must NOT be mistaken for a localnet failure
         // when doctor is checking the default port 3040 — different endpoint.
         assert!(!is_localnet_connectivity_failure("", stderr, 3040));
+    }
+
+    /// LEZ 0.3's wallet panics on a refused connection without naming the
+    /// address; the token alone must be recognised so doctor can pair it with
+    /// a reachability probe instead of reporting FAIL for a stopped localnet.
+    #[test]
+    fn lez03_wallet_connect_panic_has_a_transport_token() {
+        let stderr = "thread 'main' panicked at lez/wallet/src/cli/mod.rs:219:18:\n\
+                      Error fetching program ids: client error (Connect)\n\nCaused by:\n    \
+                      0: tcp connect error\n    1: Connection refused (os error 111)";
+        assert!(has_transport_error_token("", stderr));
+        assert!(!is_localnet_connectivity_failure("", stderr, 3040));
+        assert!(!has_transport_error_token("", "Incorrect fee"));
     }
 }
