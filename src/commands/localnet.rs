@@ -364,7 +364,10 @@ fn start_localnet(
             sequencer_cmd.env("RISC0_SERVER_PATH", &r0vm_path);
         } else {
             eprintln!(
-                "warning: RISC0_SERVER_PATH is not set and r0vm was not found in the                  rzup extensions directory for the LEZ-pinned risc0 version.                  If transaction execution fails, set RISC0_SERVER_PATH to the r0vm                  binary installed by rzup."
+                "warning: RISC0_SERVER_PATH is not set and r0vm was not found in the \
+                 rzup extensions directory for the LEZ-pinned risc0 version. \
+                 If transaction execution fails, set RISC0_SERVER_PATH to the r0vm \
+                 binary installed by rzup."
             );
         }
     }
@@ -1032,7 +1035,9 @@ fn verify_block_production(localnet_addr: &str, timeout_sec: u64) -> DynResult<(
 /// Resolve the r0vm binary path from the rzup installation that matches the LEZ risc0 version.
 ///
 /// Reads the risc0-zkvm version from the LEZ Cargo.lock, then looks for an exact-version
-/// rzup-managed extension dir: ~/.risc0/extensions/v<version>-cargo-risczero-<arch>-<os>/r0vm.
+/// rzup-managed extension dir: <rzup home>/extensions/v<version>-cargo-risczero-<arch>-<os>/r0vm,
+/// where the rzup home is `$RISC0_HOME` when set (as rzup itself resolves it) and `~/.risc0`
+/// otherwise.
 /// Returns None (without guessing) if the version cannot be determined or the exact path
 /// does not exist. The caller should error with a clear diagnostic if None is returned.
 pub(crate) fn find_r0vm_path_for_lez(lez: &std::path::Path) -> Option<std::path::PathBuf> {
@@ -1054,17 +1059,29 @@ pub(crate) fn find_r0vm_path_for_lez(lez: &std::path::Path) -> Option<std::path:
     };
     let ext_name = format!("v{risc0_version}-cargo-risczero-{arch}-{os}");
 
-    let home = std::env::var("HOME").ok()?;
-    let r0vm = std::path::Path::new(&home)
-        .join(".risc0")
-        .join("extensions")
-        .join(&ext_name)
-        .join("r0vm");
+    let rzup_home = rzup_home(
+        std::env::var_os("RISC0_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )?;
+    let r0vm = rzup_home.join("extensions").join(&ext_name).join("r0vm");
 
     if r0vm.exists() {
         Some(r0vm)
     } else {
         None
+    }
+}
+
+/// rzup's home directory: `RISC0_HOME` when set and non-empty, else `$HOME/.risc0`.
+fn rzup_home(
+    risc0_home: Option<&std::ffi::OsStr>,
+    home: Option<&std::ffi::OsStr>,
+) -> Option<std::path::PathBuf> {
+    match risc0_home.filter(|v| !v.is_empty()) {
+        Some(dir) => Some(std::path::PathBuf::from(dir)),
+        None => home
+            .filter(|v| !v.is_empty())
+            .map(|h| std::path::Path::new(h).join(".risc0")),
     }
 }
 
@@ -1103,8 +1120,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        prepare_sequencer_config, reset_cleanup, verify_block_production, wait_for_pid_exit,
-        wait_for_port_free,
+        prepare_sequencer_config, reset_cleanup, rzup_home, verify_block_production,
+        wait_for_pid_exit, wait_for_port_free,
     };
     use crate::commands::wallet_support::wallet_state_path;
     use crate::constants::SEQUENCER_CONFIG_REL_PATH;
@@ -1401,5 +1418,23 @@ mod tests {
             ResetError::BlocksNotProduced { timeout_sec } => assert_eq!(*timeout_sec, 1),
             other => panic!("expected BlocksNotProduced, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rzup_home_prefers_risc0_home_like_rzup() {
+        use std::ffi::OsStr;
+        assert_eq!(
+            rzup_home(Some(OsStr::new("/opt/risc0")), Some(OsStr::new("/home/u"))),
+            Some(PathBuf::from("/opt/risc0"))
+        );
+        assert_eq!(
+            rzup_home(None, Some(OsStr::new("/home/u"))),
+            Some(PathBuf::from("/home/u/.risc0"))
+        );
+        assert_eq!(
+            rzup_home(Some(OsStr::new("")), Some(OsStr::new("/home/u"))),
+            Some(PathBuf::from("/home/u/.risc0"))
+        );
+        assert_eq!(rzup_home(None, None), None);
     }
 }
