@@ -21,7 +21,7 @@
 //! corresponding rewrite lives in `crate::migrate`.
 
 use anyhow::{anyhow, bail, Context};
-use toml_edit::{value, DocumentMut, Item, Table};
+use toml_edit::{value, DocumentMut, Item, Table, TableLike};
 
 use crate::constants::{
     BASECAMP_ATTR, BASECAMP_SOURCE, DEFAULT_FRAMEWORK_IDL_PATH, DEFAULT_FRAMEWORK_IDL_SPEC,
@@ -513,13 +513,15 @@ fn parse_basecamp_runtime(doc: &DocumentMut) -> DynResult<Option<BasecampConfig>
         any_field = true;
     }
 
-    // [basecamp.env] — plain string map.
-    if let Some(env_table) = table.get("env").and_then(Item::as_table) {
+    // [basecamp.env] — plain string map. `as_table_like` accepts the inline
+    // form (`env = { KEY = "v" }`) as well as a `[basecamp.env]` header;
+    // `as_table` alone silently dropped the inline one.
+    if let Some(env_table) = table.get("env").and_then(Item::as_table_like) {
         cfg.env = parse_string_map(env_table, "basecamp.env")?;
         any_field = any_field || !cfg.env.is_empty();
     }
     // [basecamp.env_append] — map of string -> array<string>.
-    if let Some(append_table) = table.get("env_append").and_then(Item::as_table) {
+    if let Some(append_table) = table.get("env_append").and_then(Item::as_table_like) {
         for (key, item) in append_table.iter() {
             validate_env_var_name(key, "basecamp.env_append")?;
             let arr = item.as_array().ok_or_else(|| {
@@ -555,7 +557,7 @@ fn parse_basecamp_runtime(doc: &DocumentMut) -> DynResult<Option<BasecampConfig>
                 anyhow!("invalid scaffold.toml: [basecamp.profiles.{name}] is not a table")
             })?;
             let mut profile = BasecampProfile::default();
-            if let Some(env_table) = ptable.get("env").and_then(Item::as_table) {
+            if let Some(env_table) = ptable.get("env").and_then(Item::as_table_like) {
                 profile.env =
                     parse_string_map(env_table, &format!("basecamp.profiles.{name}.env"))?;
             }
@@ -584,7 +586,7 @@ fn parse_basecamp_runtime(doc: &DocumentMut) -> DynResult<Option<BasecampConfig>
 }
 
 fn parse_string_map(
-    table: &Table,
+    table: &dyn TableLike,
     key: &str,
 ) -> DynResult<std::collections::BTreeMap<String, String>> {
     let mut out = std::collections::BTreeMap::new();
@@ -1634,6 +1636,45 @@ LOGOS_STORAGE_API_PORT = "8082"
                 .map(String::as_str),
             Some("8082")
         );
+    }
+
+    #[test]
+    fn parses_basecamp_launch_env_inline_tables() {
+        // Inline tables are the same TOML data as `[basecamp.env]` headers and
+        // used to be dropped without a word, so a launch silently lacked them.
+        let toml = minimal_v0_2_0()
+            + r#"
+[basecamp]
+env = { QT_DEBUG_PLUGINS = "1" }
+env_append = { LD_LIBRARY_PATH = ["/nix/store/a/lib"] }
+
+[basecamp.profiles.alice]
+env = { LOGOS_STORAGE_API_PORT = "8081" }
+"#;
+        let cfg = parse_config(&toml).expect("parse");
+        let bc = cfg.basecamp.clone().expect("basecamp config present");
+        assert_eq!(
+            bc.env.get("QT_DEBUG_PLUGINS").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            bc.env_append.get("LD_LIBRARY_PATH").map(Vec::as_slice),
+            Some(&["/nix/store/a/lib".to_string()][..])
+        );
+        assert_eq!(
+            bc.profiles
+                .get("alice")
+                .and_then(|p| p.env.get("LOGOS_STORAGE_API_PORT"))
+                .map(String::as_str),
+            Some("8081")
+        );
+
+        // A later save rewrites them as `[basecamp.env]`-style tables.
+        let reparsed = parse_config(&serialize_config(&cfg).expect("serialize")).expect("reparse");
+        let rbc = reparsed.basecamp.expect("basecamp config survives a save");
+        assert_eq!(rbc.env, bc.env);
+        assert_eq!(rbc.env_append, bc.env_append);
+        assert_eq!(rbc.profiles, bc.profiles);
     }
 
     #[test]
