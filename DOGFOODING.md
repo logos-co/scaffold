@@ -44,7 +44,7 @@ The recommended dogfooding pattern is:
 
 For repo dogfooding, prefer the freshly built local binary over an already-installed global binary.
 
-Scaffold now treats LEZ tooling as project-local state. For non-vendored projects, the shared cache layout is `<cache_root>/repos/lez/<pin>/...`; for vendored projects, LEZ lives under `<project>/.scaffold/repos/lez`. In both cases, the wallet binary under test is the LEZ-local build artifact at `<lez>/target/release/wallet`, invoked through `logos-scaffold wallet ...` rather than a `wallet` binary on `PATH`.
+Scaffold now treats LEZ tooling as project-local state. For non-vendored projects, the shared cache layout is `<cache_root>/repos/lez/<pin>/...` (`<pin>-src-<hash>/...` when the project's LEZ source is not the default, e.g. `new --lez-path`); for vendored projects, LEZ lives under `<project>/.scaffold/repos/lez`. In both cases, the wallet binary under test is the LEZ-local build artifact at `<lez>/target/release/wallet`, invoked through `logos-scaffold wallet ...` rather than a `wallet` binary on `PATH`.
 
 ```bash
 export REPO_ROOT=/absolute/path/to/logos-scaffold
@@ -1050,6 +1050,7 @@ grep -n "^\[wallet\]\|^home_dir\|^binary" dogfood-cache/scaffold.toml
 - If an invalid template name silently falls back to `default`, record that as a regression.
 - If `--vendor-deps` or `--cache-root` are silently ignored or produce an error, record the exact output.
 - If `--lez-path` is tested and the path does not exist, verify the error message points to the bad path.
+- `--lez-path` with a real checkout must clone into its own `<cache-root>/repos/lez/<pin>-src-<hash>/` directory and leave `<cache-root>/repos/lez/<pin>/` (and its built `target/`) untouched — check with another project's `setup` running. A `--lez-path` create that re-clones the default-source checkout is the regression: it deletes the other project's binaries, mid-build if one is running.
 - If non-vendored cache reuse collapses different LEZ pins into a single shared `repos/lez` checkout, record that as a cache-isolation regression.
 
 ### Evidence to Capture
