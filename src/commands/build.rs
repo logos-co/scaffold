@@ -307,15 +307,7 @@ fn preflight_deterministic_toolchain() -> DynResult<()> {
              with the host toolchain (non-reproducible `program_id`)."
         );
     }
-    let daemon_ok = Command::new("docker")
-        .arg("info")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !daemon_ok {
+    if !docker_daemon_running() {
         bail!(
             "[build].guest = \"docker\" needs a running Docker daemon; `docker info` failed.\n\
              Start Docker and retry, or set [build].guest = \"local\" in scaffold.toml to build \
@@ -323,6 +315,19 @@ fn preflight_deterministic_toolchain() -> DynResult<()> {
         );
     }
     Ok(())
+}
+
+/// Whether `docker info` succeeds, i.e. a daemon is up and reachable. Shared
+/// with `doctor` so its `guest build` row and this preflight cannot disagree.
+pub(crate) fn docker_daemon_running() -> bool {
+    Command::new("docker")
+        .arg("info")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// Drop the deterministic artefact tree so a later `lgs deploy` cannot ship

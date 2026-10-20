@@ -72,12 +72,17 @@ pub(crate) fn check_guest_build(build: &BuildConfig) -> CheckRow {
         .into_iter()
         .filter(|tool| which(tool).is_none())
         .collect();
-    guest_build_row(build, &missing)
+    // Same probe `lgs build` runs before its first container step. Only
+    // worth running when the tools are there and the mode needs them.
+    let daemon_running = !build.guest.is_deterministic()
+        || !missing.is_empty()
+        || crate::commands::build::docker_daemon_running();
+    guest_build_row(build, &missing, daemon_running)
 }
 
 /// Split from [`check_guest_build`] so the row shape is testable without
 /// depending on what happens to be installed on the test machine.
-fn guest_build_row(build: &BuildConfig, missing: &[&str]) -> CheckRow {
+fn guest_build_row(build: &BuildConfig, missing: &[&str], daemon_running: bool) -> CheckRow {
     if !build.guest.is_deterministic() {
         return CheckRow {
             status: CheckStatus::Pass,
@@ -93,7 +98,22 @@ fn guest_build_row(build: &BuildConfig, missing: &[&str]) -> CheckRow {
     // The pinned tag is reported on both branches: it is the value that makes
     // `program_id` reproducible, so it belongs in the diagnostic whether or
     // not this machine can currently run the build.
-    if missing.is_empty() {
+    if missing.is_empty() && !daemon_running {
+        CheckRow {
+            status: CheckStatus::Fail,
+            name: "guest build".to_string(),
+            detail: format!(
+                "docker (risczero/risc0-guest-builder:{}) — Docker daemon not running \
+                 (`docker info` failed)",
+                build.risc0_docker_tag
+            ),
+            remediation: Some(
+                "Start Docker, or set [build].guest = \"local\" in scaffold.toml \
+                 (non-reproducible program_id)"
+                    .to_string(),
+            ),
+        }
+    } else if missing.is_empty() {
         CheckRow {
             status: CheckStatus::Pass,
             name: "guest build".to_string(),
@@ -429,6 +449,7 @@ mod tests {
                 ..BuildConfig::default()
             },
             &[],
+            true,
         );
         assert_eq!(row.status, CheckStatus::Pass);
         assert!(row.detail.starts_with("local"), "got: {}", row.detail);
@@ -445,7 +466,7 @@ mod tests {
             guest: GuestBuildMode::Docker,
             risc0_docker_tag: "r0.1.91.1".to_string(),
         };
-        let row = guest_build_row(&build, &[]);
+        let row = guest_build_row(&build, &[], true);
         assert_eq!(row.status, CheckStatus::Pass);
         assert!(
             row.detail.contains("risc0-guest-builder:r0.1.91.1"),
@@ -463,7 +484,7 @@ mod tests {
             guest: GuestBuildMode::Docker,
             ..BuildConfig::default()
         };
-        let row = guest_build_row(&build, &["cargo-risczero", "docker"]);
+        let row = guest_build_row(&build, &["cargo-risczero", "docker"], true);
         assert_eq!(row.status, CheckStatus::Fail);
         assert!(row.detail.contains("cargo-risczero and docker"));
         // The pin is reported even when the build cannot run — see the
@@ -477,6 +498,39 @@ mod tests {
             row.detail
         );
         assert!(row.remediation.is_some());
+    }
+
+    /// Tools on PATH but no daemon: `lgs build` refuses at `docker info`, so
+    /// doctor must not report the default build as ready.
+    #[test]
+    fn guest_build_row_fails_when_docker_daemon_is_down() {
+        let build = BuildConfig {
+            guest: GuestBuildMode::Docker,
+            ..BuildConfig::default()
+        };
+        let row = guest_build_row(&build, &[], false);
+        assert_eq!(row.status, CheckStatus::Fail);
+        assert!(
+            row.detail.contains("daemon not running"),
+            "got: {}",
+            row.detail
+        );
+        assert!(
+            row.detail.contains("risc0-guest-builder:"),
+            "got: {}",
+            row.detail
+        );
+        assert!(row.remediation.is_some());
+
+        let local = BuildConfig {
+            guest: GuestBuildMode::Local,
+            ..BuildConfig::default()
+        };
+        assert_eq!(
+            guest_build_row(&local, &[], false).status,
+            CheckStatus::Pass,
+            "local mode never needs the daemon"
+        );
     }
 
     #[test]
