@@ -195,6 +195,7 @@ impl StateSnapshot {
 
         match format {
             STATE_SNAPSHOT_FORMAT => {
+                reject_unseedable_public_fields(value)?;
                 let snapshot: Self = serde_json::from_value(value.clone())
                     .map_err(|err| SeedError::AccountDecode(err.to_string()))?;
                 snapshot.validate()?;
@@ -554,8 +555,60 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> DynResult<()> {
     Ok(())
 }
 
+/// The genesis config takes `{account_id, balance}` per public account and
+/// nothing else. `PublicSeedAccount` would silently drop any other field, so
+/// a snapshot that sets public data, a nonce or an owner would seed an
+/// account without them; reject it up front as a storage-schema mismatch.
+fn reject_unseedable_public_fields(value: &Value) -> Result<(), SeedError> {
+    let Some(entries) = value.get("public_accounts").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let Some(fields) = entry.as_object() else {
+            continue;
+        };
+        let extra: Vec<&str> = fields
+            .keys()
+            .map(String::as_str)
+            .filter(|key| !matches!(*key, "account_id" | "balance"))
+            .collect();
+        if !extra.is_empty() {
+            let account_id = entry
+                .get("account_id")
+                .and_then(Value::as_str)
+                .unwrap_or("<missing account_id>");
+            return Err(SeedError::StorageSchemaMismatch(format!(
+                "public account {account_id} sets {}; the pinned sequencer's genesis config can \
+                 seed public accounts with `account_id` and `balance` only. Export the node's \
+                 database directory instead for full-fidelity seeding.",
+                extra
+                    .iter()
+                    .map(|key| format!("`{key}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn state_snapshot_public_data_is_a_storage_schema_mismatch() {
+        let snapshot = serde_json::json!({
+            "format": STATE_SNAPSHOT_FORMAT,
+            "public_accounts": [
+                { "account_id": "6qraqzZHjfs75UPVxwpSSmoCU4gpvGB9WQdxMNCwVq4s", "balance": 1, "data": "00", "nonce": 3 }
+            ],
+            "private_accounts": []
+        });
+        let err = StateSnapshot::from_json(&snapshot).unwrap_err();
+        assert!(matches!(err, SeedError::StorageSchemaMismatch(_)), "{err}");
+        let msg = err.to_string();
+        assert!(msg.contains("`data`") && msg.contains("`nonce`"), "{msg}");
+    }
+
     use tempfile::tempdir;
 
     use super::*;
