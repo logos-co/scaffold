@@ -18,7 +18,7 @@ If you are an automated agent running this runbook, treat the following as bindi
    - `git push` and PR creation via the default proxy/MCP may `403`; push and open PRs with `https://x-access-token:$GH_TOKEN@github.com/<owner>/<repo>.git` and the GitHub REST API.
    Do not report "impossible" until you have exhausted the curl + token fallbacks.
 4. **Builds are long; background them so they survive turns.** The sequencer build is ~6 min, `setup` (wallet + spel) ~3 min. Launch them with a mechanism that outlives a single shell — the harness's background-run, or a Monitor with an `until` loop — because `nohup … &` from a one-shot shell gets killed when the shell tears down. Wait on a sentinel (the built binary path, or an `EXIT=` marker you append), not a fixed sleep.
-5. **Leave the box provisioned.** Once installed, the toolchain persists in the container cache and the `~/.risc0` extensions dir, so later runs are fast. Reuse it rather than reinstalling.
+5. **Leave the box provisioned.** Once installed, the toolchain persists in the container cache and rzup's home (`$RISC0_HOME`, default `~/.risc0`), so later runs are fast. Reuse it rather than reinstalling.
 
 ## Purpose and Audience
 
@@ -85,7 +85,7 @@ The `lgs` binary is a short alias for `logos-scaffold` produced by the same crat
 
 ## Provisioning the Real LEZ Sequencer Toolchain
 
-The `T`-series (and any real `localnet` / `deploy` / `run` validation) needs a real LEZ sequencer. A fresh container has none of the pieces; provision them once — they then live in the scaffold cache and `~/.risc0`, and persist for later runs. This whole section was reverse-engineered from a real run; follow it rather than re-deriving it.
+The `T`-series (and any real `localnet` / `deploy` / `run` validation) needs a real LEZ sequencer. A fresh container has none of the pieces; provision them once — they then live in the scaffold cache and rzup's home (`$RISC0_HOME`, default `~/.risc0`), and persist for later runs. This whole section was reverse-engineered from a real run; follow it rather than re-deriving it.
 
 Assume `"$P"` is a generated project root (e.g. `$SCRATCH_ROOT/dogfood-default`) and `GH_TOKEN` is set.
 
@@ -100,15 +100,16 @@ grep -A1 'name = "risc0-zkvm"' "$LEZ/Cargo.lock"   # e.g. version = "3.0.5"
 
 ```bash
 VER=3.0.5; TRIPLE=x86_64-unknown-linux-gnu       # aarch64-apple-darwin on macOS
+RZUP_HOME="${RISC0_HOME:-$HOME/.risc0}"           # rzup's home, as rzup and scaffold resolve it
 curl -sSL -H "Authorization: Bearer $GH_TOKEN" -o /tmp/cr.tgz \
   "https://github.com/risc0/risc0/releases/download/v$VER/cargo-risczero-$TRIPLE.tgz"
 mkdir -p /tmp/cr && tar xzf /tmp/cr.tgz -C /tmp/cr
-EXT="$HOME/.risc0/extensions/v$VER-cargo-risczero-$TRIPLE"   # scaffold's expected path
+EXT="$RZUP_HOME/extensions/v$VER-cargo-risczero-$TRIPLE"   # scaffold's expected path
 mkdir -p "$EXT" && cp /tmp/cr/r0vm "$EXT/r0vm" && chmod +x "$EXT/r0vm"
 "$EXT/r0vm" --version                              # → risc0-r0vm 3.0.5
 ```
 
-`find_r0vm_path_for_lez` looks at `~/.risc0/extensions/v<risc0-zkvm-version>-cargo-risczero-<arch>-<os>/r0vm`; placing r0vm there is what wires it into a spawned sequencer (scaffold sets `RISC0_SERVER_PATH` from it). The sequencer runs with `RISC0_DEV_MODE=1` (the test-node default), so r0vm executes guests without real proving — which is why no GPU/prover is needed.
+`find_r0vm_path_for_lez` looks at `<rzup home>/extensions/v<risc0-zkvm-version>-cargo-risczero-<arch>-<os>/r0vm`, where the rzup home is `$RISC0_HOME` when set (a relative value is taken from the directory you run scaffold in) and `~/.risc0` otherwise; placing r0vm there is what wires it into a spawned sequencer (scaffold sets `RISC0_SERVER_PATH` from it). The sequencer runs with `RISC0_DEV_MODE=1` (the test-node default), so r0vm executes guests without real proving — which is why no GPU/prover is needed.
 
 **2b. (Only for guest compilation — `build`, D-series/L-series.) Install the risc0 Rust toolchain.** `risc0-build` resolves the guest toolchain through rzup's directory layout; without one installed, `build` fails with `Risc Zero Rust toolchain not found. Try running rzup install rust`. When rzup itself is unusable (same TLS issue as above), install it from the `risc0/rust` release assets — the directory name must follow the `v<version>-rust-<triple>` pattern for discovery, and no `settings.toml` is needed (the highest installed version wins). Pick the newest available tag: guest dependency floats (e.g. `ruint`) carry MSRVs that outrun older toolchains — 1.88.0 already fails with `rustc 1.88.0-dev is not supported by the following packages` on a fresh default-template project.
 
@@ -116,7 +117,7 @@ mkdir -p "$EXT" && cp /tmp/cr/r0vm "$EXT/r0vm" && chmod +x "$EXT/r0vm"
 TCVER=1.91.1   # tag r0.1.91.1 — newest published as of 2026-07
 curl -sSL -H "Authorization: Bearer $GH_TOKEN" -o /tmp/rust-tc.tar.gz \
   "https://github.com/risc0/rust/releases/download/r0.$TCVER/rust-toolchain-$TRIPLE.tar.gz"
-DEST="$HOME/.risc0/toolchains/v$TCVER-rust-$TRIPLE"
+DEST="$RZUP_HOME/toolchains/v$TCVER-rust-$TRIPLE"
 mkdir -p "$DEST" && tar xzf /tmp/rust-tc.tar.gz -C "$DEST"
 "$DEST/bin/rustc" --version                        # → rustc 1.91.1-dev
 ```
@@ -127,10 +128,10 @@ The `lez-framework` template's guest additionally compiles C (the default templa
 CPPASSET=riscv32im-linux-x86_64                    # riscv32im-osx-arm64 on macOS arm64
 curl -sSL -H "Authorization: Bearer $GH_TOKEN" -o /tmp/cpp-tc.tar.xz \
   "https://github.com/risc0/toolchain/releases/download/2024.01.05/$CPPASSET.tar.xz"
-CPPDEST="$HOME/.risc0/toolchains/v2024.1.5-cpp-$TRIPLE"
+CPPDEST="$RZUP_HOME/toolchains/v2024.1.5-cpp-$TRIPLE"
 mkdir -p /tmp/cpp-tc && tar xJf /tmp/cpp-tc.tar.xz -C /tmp/cpp-tc
 mkdir -p "$CPPDEST" && mv /tmp/cpp-tc/"$CPPASSET"/* "$CPPDEST/"
-ln -sfn "$CPPDEST" "$HOME/.risc0/cpp"
+ln -sfn "$CPPDEST" "$RZUP_HOME/cpp"
 "$CPPDEST/bin/riscv32-unknown-elf-gcc" --version   # → gcc 13.2.0
 ```
 

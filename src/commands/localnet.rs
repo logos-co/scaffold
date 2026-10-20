@@ -355,20 +355,27 @@ fn start_localnet(
         .env("RISC0_DEV_MODE", if risc0_dev_mode { "1" } else { "0" });
 
     // Auto-detect r0vm path from rzup installation if RISC0_SERVER_PATH is not set.
-    // On macOS, rzup installs r0vm under ~/.risc0/extensions/<version>/r0vm but does
-    // not add it to PATH. The sequencer needs RISC0_SERVER_PATH to locate it.
-    // We derive the exact risc0-zkvm version from the LEZ Cargo.lock so we never
-    // hand the sequencer a mismatched r0vm binary.
+    // rzup installs r0vm under <rzup home>/extensions/<version>/r0vm (see
+    // `rzup_home`) but does not add it to PATH. The sequencer needs
+    // RISC0_SERVER_PATH to locate it. We derive the exact risc0-zkvm version
+    // from the LEZ Cargo.lock so we never hand the sequencer a mismatched r0vm
+    // binary.
     if std::env::var("RISC0_SERVER_PATH").is_err() {
-        if let Some(r0vm_path) = find_r0vm_path_for_lez(lez) {
-            sequencer_cmd.env("RISC0_SERVER_PATH", &r0vm_path);
-        } else {
-            eprintln!(
-                "warning: RISC0_SERVER_PATH is not set and r0vm was not found in the \
-                 rzup extensions directory for the LEZ-pinned risc0 version. \
-                 If transaction execution fails, set RISC0_SERVER_PATH to the r0vm \
-                 binary installed by rzup."
-            );
+        match expected_r0vm_path_for_lez(lez) {
+            Some(r0vm_path) if r0vm_path.exists() => {
+                sequencer_cmd.env("RISC0_SERVER_PATH", &r0vm_path);
+            }
+            Some(r0vm_path) => eprintln!(
+                "warning: RISC0_SERVER_PATH is not set and r0vm for the LEZ-pinned risc0 \
+                 version was not found at {}. If transaction execution fails, install that \
+                 version with rzup or set RISC0_SERVER_PATH to its r0vm binary.",
+                r0vm_path.display()
+            ),
+            None => eprintln!(
+                "warning: RISC0_SERVER_PATH is not set and the r0vm for the LEZ-pinned risc0 \
+                 version could not be located. If transaction execution fails, set \
+                 RISC0_SERVER_PATH to the r0vm binary installed by rzup."
+            ),
         }
     }
 
@@ -1041,6 +1048,14 @@ fn verify_block_production(localnet_addr: &str, timeout_sec: u64) -> DynResult<(
 /// Returns None (without guessing) if the version cannot be determined or the exact path
 /// does not exist. The caller should error with a clear diagnostic if None is returned.
 pub(crate) fn find_r0vm_path_for_lez(lez: &std::path::Path) -> Option<std::path::PathBuf> {
+    expected_r0vm_path_for_lez(lez).filter(|p| p.exists())
+}
+
+/// Where rzup would have installed the r0vm that matches the LEZ risc0 version,
+/// whether or not it is there. Always absolute, because callers hand it to a
+/// child process that runs in a different working directory. `None` when the
+/// version or the rzup home cannot be determined.
+fn expected_r0vm_path_for_lez(lez: &std::path::Path) -> Option<std::path::PathBuf> {
     // Read risc0-zkvm version from LEZ Cargo.lock
     let lockfile = lez.join("Cargo.lock");
     let lock_content = std::fs::read_to_string(&lockfile).ok()?;
@@ -1059,30 +1074,28 @@ pub(crate) fn find_r0vm_path_for_lez(lez: &std::path::Path) -> Option<std::path:
     };
     let ext_name = format!("v{risc0_version}-cargo-risczero-{arch}-{os}");
 
+    let cwd = std::env::current_dir().ok()?;
     let rzup_home = rzup_home(
         std::env::var_os("RISC0_HOME").as_deref(),
         std::env::var_os("HOME").as_deref(),
+        &cwd,
     )?;
-    let r0vm = rzup_home.join("extensions").join(&ext_name).join("r0vm");
-
-    if r0vm.exists() {
-        Some(r0vm)
-    } else {
-        None
-    }
+    Some(rzup_home.join("extensions").join(&ext_name).join("r0vm"))
 }
 
 /// rzup's home directory: `RISC0_HOME` when set and non-empty, else `$HOME/.risc0`.
+/// A relative value is resolved against `cwd`, scaffold's own working directory,
+/// so the result means the same thing in a child with a different one.
 fn rzup_home(
     risc0_home: Option<&std::ffi::OsStr>,
     home: Option<&std::ffi::OsStr>,
+    cwd: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
-    match risc0_home.filter(|v| !v.is_empty()) {
-        Some(dir) => Some(std::path::PathBuf::from(dir)),
-        None => home
-            .filter(|v| !v.is_empty())
-            .map(|h| std::path::Path::new(h).join(".risc0")),
-    }
+    let dir = match risc0_home.filter(|v| !v.is_empty()) {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => std::path::Path::new(home.filter(|v| !v.is_empty())?).join(".risc0"),
+    };
+    Some(cwd.join(dir))
 }
 
 /// Extract risc0-zkvm version from Cargo.lock content.
@@ -1423,18 +1436,38 @@ mod tests {
     #[test]
     fn rzup_home_prefers_risc0_home_like_rzup() {
         use std::ffi::OsStr;
+        let cwd = PathBuf::from("/work");
         assert_eq!(
-            rzup_home(Some(OsStr::new("/opt/risc0")), Some(OsStr::new("/home/u"))),
+            rzup_home(
+                Some(OsStr::new("/opt/risc0")),
+                Some(OsStr::new("/home/u")),
+                &cwd
+            ),
             Some(PathBuf::from("/opt/risc0"))
         );
         assert_eq!(
-            rzup_home(None, Some(OsStr::new("/home/u"))),
+            rzup_home(None, Some(OsStr::new("/home/u")), &cwd),
             Some(PathBuf::from("/home/u/.risc0"))
         );
         assert_eq!(
-            rzup_home(Some(OsStr::new("")), Some(OsStr::new("/home/u"))),
+            rzup_home(Some(OsStr::new("")), Some(OsStr::new("/home/u")), &cwd),
             Some(PathBuf::from("/home/u/.risc0"))
         );
-        assert_eq!(rzup_home(None, None), None);
+        assert_eq!(rzup_home(None, None, &cwd), None);
+    }
+
+    #[test]
+    fn rzup_home_resolves_a_relative_risc0_home_against_cwd() {
+        // The sequencer runs with `current_dir(lez)`, so a relative path would
+        // point it at the wrong place.
+        use std::ffi::OsStr;
+        let home = rzup_home(
+            Some(OsStr::new("rel-risc0")),
+            Some(OsStr::new("/home/u")),
+            std::path::Path::new("/work"),
+        )
+        .expect("home");
+        assert_eq!(home, PathBuf::from("/work/rel-risc0"));
+        assert!(home.is_absolute());
     }
 }
