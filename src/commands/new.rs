@@ -224,6 +224,7 @@ fn cmd_new_inner(cmd: &NewCommand, target: &Path, template_variant: &str) -> Dyn
         target.display()
     );
     println!("Pinned lez: {}", cfg.lez.pin);
+    println!("Cache root: {}", bootstrap_cache.display());
     println!("Template variant: {}", cfg.framework.kind);
     println!("AI skills installed under .claude/skills/, .cursor/rules/, and AGENTS.md.");
 
