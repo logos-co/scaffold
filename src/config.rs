@@ -488,7 +488,10 @@ fn parse_modules(doc: &DocumentMut) -> DynResult<std::collections::BTreeMap<Stri
 }
 
 fn parse_basecamp_runtime(doc: &DocumentMut) -> DynResult<Option<BasecampConfig>> {
-    let Some(table) = doc.get("basecamp").and_then(Item::as_table) else {
+    // Every level below accepts both TOML spellings of a table — a `[header]`
+    // and an inline `{ … }` — through `as_table_like`. `as_table` alone drops
+    // the inline form without a word.
+    let Some(table) = doc.get("basecamp").and_then(Item::as_table_like) else {
         return Ok(None);
     };
     // An empty [basecamp] table (e.g. just defaults inherited) still resolves
@@ -513,9 +516,7 @@ fn parse_basecamp_runtime(doc: &DocumentMut) -> DynResult<Option<BasecampConfig>
         any_field = true;
     }
 
-    // [basecamp.env] — plain string map. `as_table_like` accepts the inline
-    // form (`env = { KEY = "v" }`) as well as a `[basecamp.env]` header;
-    // `as_table` alone silently dropped the inline one.
+    // [basecamp.env] — plain string map.
     if let Some(env_table) = table.get("env").and_then(Item::as_table_like) {
         cfg.env = parse_string_map(env_table, "basecamp.env")?;
         any_field = any_field || !cfg.env.is_empty();
@@ -551,9 +552,9 @@ fn parse_basecamp_runtime(doc: &DocumentMut) -> DynResult<Option<BasecampConfig>
         any_field = any_field || !cfg.env_append.is_empty();
     }
     // [basecamp.profiles.<name>] — per-profile launch config.
-    if let Some(profiles) = table.get("profiles").and_then(Item::as_table) {
+    if let Some(profiles) = table.get("profiles").and_then(Item::as_table_like) {
         for (name, item) in profiles.iter() {
-            let ptable = item.as_table().ok_or_else(|| {
+            let ptable = item.as_table_like().ok_or_else(|| {
                 anyhow!("invalid scaffold.toml: [basecamp.profiles.{name}] is not a table")
             })?;
             let mut profile = BasecampProfile::default();
@@ -771,7 +772,7 @@ fn check_circuits_url_template(template: &str) -> DynResult<()> {
     Ok(())
 }
 
-fn read_string(table: &Table, key: &str) -> Option<String> {
+fn read_string(table: &dyn TableLike, key: &str) -> Option<String> {
     table
         .get(key)
         .and_then(Item::as_str)
@@ -1675,6 +1676,81 @@ env = { LOGOS_STORAGE_API_PORT = "8081" }
         assert_eq!(rbc.env, bc.env);
         assert_eq!(rbc.env_append, bc.env_append);
         assert_eq!(rbc.profiles, bc.profiles);
+    }
+
+    #[test]
+    fn parses_basecamp_profiles_in_every_table_spelling() {
+        // Each spelling below is the same TOML data. Before table-like lookups,
+        // the first and the root-level one dropped the section and the second
+        // failed with "[basecamp.profiles.alice] is not a table".
+        let spellings = [
+            r#"
+[basecamp]
+profiles = { alice = { env = { FOO = "1" }, runtime_dir = "/tmp/lgs-a" } }
+"#,
+            r#"
+[basecamp.profiles]
+alice = { env = { FOO = "1" }, runtime_dir = "/tmp/lgs-a" }
+"#,
+            r#"
+[basecamp.profiles.alice]
+runtime_dir = "/tmp/lgs-a"
+
+[basecamp.profiles.alice.env]
+FOO = "1"
+"#,
+        ];
+        // A root-level key has to come before the first table header.
+        let root_inline = r#"basecamp = { profiles = { alice = { env = { FOO = "1" }, runtime_dir = "/tmp/lgs-a" } } }
+"#;
+        let docs = spellings
+            .iter()
+            .map(|extra| minimal_v0_2_0() + extra)
+            .chain(std::iter::once(root_inline.to_string() + &minimal_v0_2_0()));
+        for extra in docs {
+            let cfg =
+                parse_config(&extra).unwrap_or_else(|e| panic!("parse failed for {extra}: {e}"));
+            let alice = cfg
+                .basecamp
+                .as_ref()
+                .and_then(|bc| bc.profiles.get("alice"))
+                .unwrap_or_else(|| panic!("profile alice missing for {extra}"));
+            assert_eq!(
+                alice.env.get("FOO").map(String::as_str),
+                Some("1"),
+                "{extra}"
+            );
+            assert_eq!(alice.runtime_dir.as_deref(), Some("/tmp/lgs-a"), "{extra}");
+        }
+    }
+
+    #[test]
+    fn parses_fully_inline_basecamp_section() {
+        let toml = r#"basecamp = { port_base = 9000, env = { FOO = "1" } }
+"#
+        .to_string()
+            + &minimal_v0_2_0();
+        let bc = parse_config(&toml)
+            .expect("parse")
+            .basecamp
+            .expect("basecamp config present");
+        assert_eq!(bc.port_base, 9000);
+        assert_eq!(bc.env.get("FOO").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn rejects_a_basecamp_profile_that_is_not_a_table() {
+        let toml = minimal_v0_2_0()
+            + r#"
+[basecamp.profiles]
+alice = "x"
+"#;
+        let err = parse_config(&toml).expect_err("a string profile is invalid");
+        assert!(
+            err.to_string()
+                .contains("[basecamp.profiles.alice] is not a table"),
+            "{err}"
+        );
     }
 
     #[test]
