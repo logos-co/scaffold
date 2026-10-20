@@ -1,7 +1,8 @@
 use anyhow::Context;
 use clap::Parser;
+use common::transaction::LeeTransaction;
 use example_program_deployment_methods::SIMPLE_TAIL_CALL_ELF;
-use nssa::{
+use lee::{
     PublicTransaction,
     public_transaction::{Message, WitnessSet},
 };
@@ -22,7 +23,9 @@ struct Cli {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let wallet_core = WalletCore::from_env().context("failed to initialize wallet from environment")?;
+    let wallet_core = WalletCore::from_env()
+        .await
+        .context("failed to initialize wallet from environment")?;
 
     let program = load_program(
         cli.program_path.as_deref(),
@@ -37,8 +40,8 @@ async fn main() -> anyhow::Result<()> {
     let tx = PublicTransaction::new(message, witness_set);
 
     let response = wallet_core
-        .sequencer_client
-        .send_transaction(tx.into())
+        .helm_owned()
+        .send_transaction(LeeTransaction::Public(tx))
         .await
         .context("failed to submit public transaction to localnet")?;
 

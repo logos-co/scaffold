@@ -8,9 +8,9 @@ use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
 use crate::circuits::ensure_circuits_for_project;
-use crate::constants::FRAMEWORK_KIND_LEZ_FRAMEWORK;
+use crate::constants::{FRAMEWORK_KIND_LEZ_FRAMEWORK, FRAMEWORK_KIND_SPEL};
 use crate::model::Project;
-use crate::process::{apply_host_cc_overrides, run_capture};
+use crate::process::{apply_host_cc_overrides, run_capture, run_checked};
 use crate::project::{load_project, run_in_project_dir};
 use crate::state::write_text;
 use crate::DynResult;
@@ -60,6 +60,22 @@ pub(crate) fn build_idl_for_current_project() -> DynResult<()> {
 
 fn build_idl_inner(force: bool) -> DynResult<()> {
     let project = load_project()?;
+    if project.config.framework.kind == FRAMEWORK_KIND_SPEL {
+        // spel owns IDL generation for its own projects: drive `make idl`
+        // rather than duplicating the pipeline here. NB: it has to be the
+        // Makefile, not `spel generate-idl` directly — generate-idl writes
+        // the IDL to *stdout*, and the `idl:` recipe is what redirects it to
+        // the file `spel.toml` names. Calling the binary here dumped the JSON
+        // into scaffold's own output and left no file on disk, so the very
+        // next step failed with "expected IDL file … is missing".
+        // `force` is irrelevant — the recipe reads the source every time and
+        // has no cache of its own.
+        println!("Generating IDL via `make idl` (spel project)...");
+        let mut cmd = std::process::Command::new("make");
+        cmd.arg("idl").current_dir(&project.root);
+        apply_host_cc_overrides(&mut cmd);
+        return run_checked(&mut cmd, "make idl (spel project)");
+    }
     if project.config.framework.kind != FRAMEWORK_KIND_LEZ_FRAMEWORK {
         // Explicit `build idl` only applies to lez-framework projects. The
         // `lgs build` shortcut already gates on framework kind and won't
@@ -68,9 +84,9 @@ fn build_idl_inner(force: bool) -> DynResult<()> {
         // Fail loudly instead of silently no-op'ing — agents that piped
         // `lgs build idl && next-step` would otherwise carry on with no IDL.
         bail!(
-            "`build idl` is only supported for `lez-framework` projects (current framework.kind = `{}`).\n\
+            "`build idl` is only supported for `spel` and `lez-framework` projects (current framework.kind = `{}`).\n\
              Use `logos-scaffold build` for the framework-agnostic build, \
-             or set `framework.kind = \"lez-framework\"` in scaffold.toml.",
+             or set `framework.kind = \"spel\"` in scaffold.toml.",
             project.config.framework.kind
         );
     }
