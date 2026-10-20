@@ -217,6 +217,16 @@ fn seed_default_wallet_by_initializing(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sha256_hex_is_real_sha256() {
+        // The prebuilt check compares this against a published `.sha256`
+        // file, so it must be SHA-256 hex, not some other digest.
+        assert_eq!(
+            super::sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
     use crate::commands::wallet_support::WALLET_CONFIG_PRIMARY;
     use std::fs;
 
@@ -502,26 +512,12 @@ fn try_download_prebuilt(lez: &Path, pin: &str) -> crate::DynResult<bool> {
 }
 
 fn sha256_hex(data: &[u8]) -> String {
-    // Simple SHA256 using the sha2 crate via workspace dependency
-    // Falls back gracefully if not available
-    #[cfg(feature = "sha2")]
-    {
-        use sha2::{Digest, Sha256};
-        let hash = Sha256::digest(data);
-        let mut s = String::new();
-        for byte in hash {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    Sha256::digest(data)
+        .iter()
+        .fold(String::new(), |mut s, byte| {
             write!(s, "{byte:02x}").unwrap();
-        }
-        s
-    }
-    #[cfg(not(feature = "sha2"))]
-    {
-        // Without sha2, compute a simple checksum for basic integrity
-        let mut h: u64 = 0xcbf29ce484222325;
-        for &b in data {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x100000001b3);
-        }
-        format!("{h:016x}")
-    }
+            s
+        })
 }
