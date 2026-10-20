@@ -89,7 +89,7 @@ Basecamp state is **always project-local** under `<project>/.scaffold/basecamp/`
 
 | Path | Purpose |
 |---|---|
-| `.scaffold/basecamp/profiles/alice/`, `.../bob/` | Per-profile XDG roots. `launch <profile>` sets `XDG_{CONFIG,DATA,CACHE}_HOME` to the profile root. |
+| `.scaffold/basecamp/profiles/alice/`, `.../bob/` | Per-profile XDG roots. `launch <profile>` sets `XDG_{CONFIG,DATA,CACHE}_HOME` and `HOME` (`<profile>/home`) under the profile root. |
 | `.scaffold/basecamp/portable/<NN>-<name>.lgx` | Symlinks to `.#lgx-portable` builds, ordered by dependency topology. Wiped by each portable build. |
 | `.scaffold/state/basecamp.state` | Pinned basecamp + lgpm binary paths; pin-derived metadata. |
 | `.scaffold/logs/<ts>-setup-*.log`, `<ts>-install.log` | Build logs. |

@@ -847,6 +847,8 @@ struct BasecampProfilePaths {
     xdg_config_home: String,
     xdg_data_home: String,
     xdg_cache_home: String,
+    /// `HOME` launch would export, for modules that ignore XDG.
+    home: String,
     /// `TMPDIR` launch would export. Same value as `xdg_runtime_dir`.
     tmpdir: String,
     /// `XDG_RUNTIME_DIR` launch would export. Always resolves; see
@@ -900,6 +902,7 @@ fn cmd_basecamp_paths(project: Project, profile: String, json: bool) -> DynResul
         xdg_config_home: profile_dir.join("xdg-config").display().to_string(),
         xdg_data_home: profile_dir.join("xdg-data").display().to_string(),
         xdg_cache_home: profile_dir.join("xdg-cache").display().to_string(),
+        home: profile_dir.join(PROFILE_HOME_DIR).display().to_string(),
         tmpdir: tmpdir.display().to_string(),
         xdg_runtime_dir: runtime_dir.display().to_string(),
         module_root: module_root.display().to_string(),
@@ -926,6 +929,7 @@ fn cmd_basecamp_paths(project: Project, profile: String, json: bool) -> DynResul
         println!("  xdg_config_home:  {}", paths.xdg_config_home);
         println!("  xdg_data_home:    {}", paths.xdg_data_home);
         println!("  xdg_cache_home:   {}", paths.xdg_cache_home);
+        println!("  home:             {}", paths.home);
         println!("  tmpdir:           {}", paths.tmpdir);
         println!("  xdg_runtime_dir:  {}", paths.xdg_runtime_dir);
         println!("  module_root:      {}", paths.module_root);
@@ -946,6 +950,9 @@ fn cmd_basecamp_paths(project: Project, profile: String, json: bool) -> DynResul
 /// Env map exported to the basecamp child on launch. Scaffold-owned names only;
 /// module port-override vars are not yet registered. `runtime_dir` becomes both
 /// `TMPDIR` and `XDG_RUNTIME_DIR`.
+/// Per-profile `HOME` under the profile dir; see [`launch_env`].
+const PROFILE_HOME_DIR: &str = "home";
+
 fn launch_env(
     profile_dir: &Path,
     profile_name: &str,
@@ -963,6 +970,15 @@ fn launch_env(
     env.insert(
         "XDG_CACHE_HOME".into(),
         profile_dir.join("xdg-cache").into_os_string(),
+    );
+    // Per-profile HOME. Not every module honours XDG: the storage module
+    // keeps its config, data and node key in `$HOME/.logos_storage`, so with
+    // the caller's HOME every profile — and the user's own basecamp — shared
+    // one storage identity and wrote outside the project. Kept across
+    // launches like `xdg-config`.
+    env.insert(
+        "HOME".into(),
+        profile_dir.join(PROFILE_HOME_DIR).into_os_string(),
     );
     // Per-profile TMPDIR (#89): liblogos_core binds each `logos_host`'s
     // QLocalServer socket at a hardcoded `logos_token_<module>` name under
@@ -4311,6 +4327,9 @@ fn seed_profiles(
             fs::create_dir_all(&path)
                 .with_context(|| format!("create profile dir {}", path.display()))?;
         }
+        let home = profile_dir.join(PROFILE_HOME_DIR);
+        fs::create_dir_all(&home)
+            .with_context(|| format!("create profile dir {}", home.display()))?;
         // Per-profile temp root for the launch-time `TMPDIR` export (#89).
         // Flat — no BASECAMP_XDG_APP_SUBPATH suffix: Qt's
         // `QLocalServer::listen("logos_token_…")` writes a socket file
@@ -5484,6 +5503,9 @@ mod tests {
             env.get("XDG_CACHE_HOME").unwrap(),
             &OsString::from("/p/alice/xdg-cache")
         );
+        // Modules that ignore XDG (the storage module uses
+        // `$HOME/.logos_storage`) must not share the caller's HOME.
+        assert_eq!(env.get("HOME").unwrap(), &OsString::from("/p/alice/home"));
         // #89: per-profile TMPDIR prevents the cross-profile QLocalServer
         // socket-name collision that SIGSEGVs Qt RemoteObjects. It is the
         // resolved runtime dir, never a path inside the profile (and so never
