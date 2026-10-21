@@ -3472,9 +3472,41 @@ fn basecamp_launch_bails_when_no_modules_captured() {
 fn basecamp_launch_that_bails_leaves_the_running_instance_alone() {
     // A launch that refuses to start (here: nothing captured in [modules])
     // must not first kill the instance the profile already has running.
+    assert_refused_launch_keeps_running_instance(
+        MINIMAL_SCAFFOLD_TOML,
+        &[],
+        |_| {},
+        "no modules captured",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn basecamp_launch_with_unwritable_log_file_leaves_the_running_instance_alone() {
+    // The log destination is only opened after the kill + scrub + reinstall;
+    // a path that can never be created must be refused before any of that.
+    let toml = format!(
+        "{MINIMAL_SCAFFOLD_TOML}\n[modules.swap_module]\nflake = \"github:logos-co/swap-module#lgx\"\nrole = \"project\"\n"
+    );
+    assert_refused_launch_keeps_running_instance(
+        &toml,
+        &["--log-file=not-a-dir/basecamp.log"],
+        |project| fs::write(project.join("not-a-dir"), "a file, not a dir").expect("write"),
+        "create log dir",
+    );
+}
+
+#[cfg(unix)]
+fn assert_refused_launch_keeps_running_instance(
+    scaffold_toml: &str,
+    extra_args: &[&str],
+    prepare: impl FnOnce(&Path),
+    expected_stderr: &str,
+) {
     let temp = tempdir().expect("tempdir");
     let project = temp.path();
-    fs::write(project.join("scaffold.toml"), MINIMAL_SCAFFOLD_TOML).expect("write scaffold.toml");
+    fs::write(project.join("scaffold.toml"), scaffold_toml).expect("write scaffold.toml");
+    prepare(project);
 
     // A stand-in "basecamp": `sleep` under the launcher's name, so its comm
     // matches what launch would kill.
@@ -3506,9 +3538,10 @@ fn basecamp_launch_that_bails_leaves_the_running_instance_alone() {
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(project)
         .args(["basecamp", "launch", "alice"])
+        .args(extra_args)
         .assert()
         .failure()
-        .stderr(predicate::str::contains("no modules captured"));
+        .stderr(predicate::str::contains(expected_stderr));
 
     let still_running = running.try_wait().expect("try_wait").is_none();
     let _ = running.kill();

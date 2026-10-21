@@ -690,6 +690,13 @@ fn cmd_basecamp_launch(
         None => BTreeMap::new(),
     };
 
+    // And the log destination: `run_with_log_tee` only creates it at the very
+    // end, so an unwritable `--log-file` / `log_file` would otherwise cost the
+    // user their running instance plus a scrub and reinstall.
+    if let Some(dest) = log_dest.as_deref() {
+        ensure_log_destination_writable(dest)?;
+    }
+
     // Stop the profile's running instance only once every fail-fast check
     // above has passed, so a launch that refuses to start leaves the
     // instance the user already had running alone.
@@ -787,6 +794,23 @@ fn cmd_basecamp_launch(
         // terminal + file, recording the child's PID.
         Some(dest) => run_with_log_tee(cmd, &state.basecamp_bin, &launch_state_path, &dest),
     }
+}
+
+/// Check that `log_path` can be opened for writing, creating its parent
+/// directory if needed. Opens in append mode and leaves any existing content
+/// alone: the instance about to be replaced may still be writing to it, and
+/// `run_with_log_tee` truncates it once that instance is gone.
+fn ensure_log_destination_writable(log_path: &Path) -> DynResult<()> {
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create log dir {}", parent.display()))?;
+    }
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("open log file {}", log_path.display()))?;
+    Ok(())
 }
 
 /// Spawn basecamp with stdout/stderr teed to both the terminal and `log_path`,
