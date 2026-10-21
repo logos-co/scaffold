@@ -1403,7 +1403,7 @@ test -e .scaffold/basecamp/profiles/alice/xdg-data/scratch/marker.txt && echo "R
 
 ### Expected Success Signals
 
-- `launch alice` removes any user-introduced files under the alice profile XDG dirs and reinstalls each captured source before `exec`ing basecamp.
+- `launch alice` removes any user-introduced files under the alice profile XDG dirs and reinstalls each captured source before `exec`ing basecamp. `profiles/alice/home/` (the profile's `HOME`) is deliberately exempt, like `xdg-config`: modules keep identities there (e.g. `.logos_storage`), so files surviving under it are correct, not a scrub regression.
 - `rm -rf` on `launch` is bounded to `<project>/.scaffold/basecamp/profiles/<profile>/`. Never any path outside that root.
 - A `launch` that finds no modules in `[modules]` bails before scrubbing (the empty-install + scrubbed profile combination is the regression we're guarding against). Every fail-fast refusal — empty `[modules]`, an unusable `runtime_dir`, a malformed `env_file`, a `--log-file` / `log_file` that cannot be created — also leaves the profile's *running* instance alone: check `kill -0 <pid from launch.state>` after the refused launch. A refused launch that still killed it is the regression.
 - `basecamp paths` rejects the same unsafe profile names as `launch` and remains non-mutating for valid profiles.

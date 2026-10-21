@@ -999,12 +999,12 @@ fn cmd_basecamp_paths(project: Project, profile: String, json: bool) -> DynResul
     Ok(())
 }
 
-/// Env map exported to the basecamp child on launch. Scaffold-owned names only;
-/// module port-override vars are not yet registered. `runtime_dir` becomes both
-/// `TMPDIR` and `XDG_RUNTIME_DIR`.
 /// Per-profile `HOME` under the profile dir; see [`launch_env`].
 const PROFILE_HOME_DIR: &str = "home";
 
+/// Env map exported to the basecamp child on launch. Scaffold-owned names only;
+/// module port-override vars are not yet registered. `runtime_dir` becomes both
+/// `TMPDIR` and `XDG_RUNTIME_DIR`.
 fn launch_env(
     profile_dir: &Path,
     profile_name: &str,
