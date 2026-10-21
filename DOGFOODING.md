@@ -73,7 +73,7 @@ Scaffold is also consumable as a Rust library (`logos_scaffold::api`): the same 
 ## Shared Preconditions
 
 - Unix-like environment with `git`, `rustc`, `cargo`, `lsof`, `ps`, and `kill`.
-- Docker or Podman available for guest builds.
+- Docker or Podman available for guest builds. The default guest build is the container one, so without a reachable Docker daemon a bare `build` — and `run`, which chains it — refuses before compiling anything. On such a host run `D1`/`D7`/`L1` with `build --guest local` or `[build].guest = "local"` in `scaffold.toml`, say so in the evidence, and cover `D8`'s container steps through its CI workflow (`guest-reproducibility.yml`, `workflow_dispatch`).
 - `logos-blockchain-circuits` release on disk when validating older projects without `[circuits]`: set `LOGOS_BLOCKCHAIN_CIRCUITS=<path>` (scaffold no longer consults `~/.logos-blockchain-circuits/`). New projects should carry a `[circuits]` table in `scaffold.toml`; `setup`, `build`, `build idl`, `localnet`, and test-node startup resolve and materialize the configured release instead of relying on ambient shell state.
 - No conflicting listener on the scaffold localnet port before `localnet start`.
 - Network access available for setup/build flows that fetch dependencies.
@@ -1388,10 +1388,10 @@ From the module project root:
 "$SCAFFOLD_BIN" basecamp launch alice    # let it come up, then close it
 "$SCAFFOLD_BIN" basecamp paths alice --json
 ls .scaffold/basecamp/profiles/alice
-mkdir -p .scaffold/basecamp/profiles/alice/.scaffold-xdg-data/scratch
-echo "marker-$(date -u +%s)" > .scaffold/basecamp/profiles/alice/.scaffold-xdg-data/scratch/marker.txt
+mkdir -p .scaffold/basecamp/profiles/alice/xdg-data/scratch
+echo "marker-$(date -u +%s)" > .scaffold/basecamp/profiles/alice/xdg-data/scratch/marker.txt
 "$SCAFFOLD_BIN" basecamp launch alice    # scrub-and-reinstall
-test -e .scaffold/basecamp/profiles/alice/.scaffold-xdg-data/scratch/marker.txt && echo "REGRESSION: marker survived clean launch" || echo "OK: marker scrubbed"
+test -e .scaffold/basecamp/profiles/alice/xdg-data/scratch/marker.txt && echo "REGRESSION: marker survived clean launch" || echo "OK: marker scrubbed"
 "$SCAFFOLD_BIN" basecamp paths ../escape
 ```
 
