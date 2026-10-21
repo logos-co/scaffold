@@ -646,18 +646,6 @@ fn cmd_basecamp_launch(
             .map(|rel| project.root.join(rel)),
     };
 
-    let launch_state_path = profile_dir.join("launch.state");
-    let expected_comm = basecamp_comm_candidates(&state.basecamp_bin);
-    if let Some(pid) = read_launch_pid(&launch_state_path) {
-        // PID reuse means we can't be sure the recorded PID still maps to basecamp.
-        // Only issue signals if the PID's current comm matches; `kill_process_tree`
-        // re-verifies the comm before each signal to reduce the TOCTOU window.
-        if pid_comm_matches(pid, &expected_comm) {
-            kill_process_tree(pid, &expected_comm);
-        }
-        let _ = fs::remove_file(&launch_state_path);
-    }
-
     // Clean-slate launch replays `[modules]` into the freshly-scrubbed
     // profile. An empty capture set would make that replay a silent no-op, so
     // the profile would come up with zero modules. Fail fast with a hint.
@@ -672,6 +660,34 @@ fn cmd_basecamp_launch(
     let runtime_dir =
         resolve_profile_runtime_dir(&project.root, &profile, project.config.basecamp.as_ref());
     ensure_private_runtime_dir(&runtime_dir)?;
+
+    // Read the per-profile env file now too: a malformed one used to surface
+    // only after the profile had been scrubbed and reinstalled.
+    let env_file_vars = match project
+        .config
+        .basecamp
+        .as_ref()
+        .and_then(|bc| bc.profiles.get(&profile))
+        .and_then(|p| p.env_file.as_deref())
+    {
+        Some(rel) => load_env_file(&project.root, rel)?,
+        None => BTreeMap::new(),
+    };
+
+    // Stop the profile's running instance only once every fail-fast check
+    // above has passed, so a launch that refuses to start leaves the
+    // instance the user already had running alone.
+    let launch_state_path = profile_dir.join("launch.state");
+    let expected_comm = basecamp_comm_candidates(&state.basecamp_bin);
+    if let Some(pid) = read_launch_pid(&launch_state_path) {
+        // PID reuse means we can't be sure the recorded PID still maps to basecamp.
+        // Only issue signals if the PID's current comm matches; `kill_process_tree`
+        // re-verifies the comm before each signal to reduce the TOCTOU window.
+        if pid_comm_matches(pid, &expected_comm) {
+            kill_process_tree(pid, &expected_comm);
+        }
+        let _ = fs::remove_file(&launch_state_path);
+    }
 
     // Pre-seed in case a prior crash between scrub and re-seed left the profile
     // without its xdg subdirs; scrub assumes both exist. seed_profiles is
@@ -722,14 +738,6 @@ fn cmd_basecamp_launch(
     // env_file, then [basecamp.env] globals, then
     // [basecamp.profiles.<profile>.env] (profile wins).
     if let Some(bc) = project.config.basecamp.as_ref() {
-        let env_file_vars = match bc
-            .profiles
-            .get(&profile)
-            .and_then(|p| p.env_file.as_deref())
-        {
-            Some(rel) => load_env_file(&project.root, rel)?,
-            None => BTreeMap::new(),
-        };
         apply_launch_env_overrides(&mut env, bc, &profile, &env_file_vars, |k| {
             std::env::var_os(k)
         });
