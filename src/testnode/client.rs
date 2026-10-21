@@ -421,7 +421,24 @@ impl TestNodeClient {
                             if head.saturating_sub(after_block) >= options.rejection_blocks {
                                 // Observation window exhausted: the node
                                 // produced enough blocks to have included a
-                                // valid transaction.
+                                // valid transaction. `getTransaction` is
+                                // served from an in-memory index the
+                                // sequencer does not rebuild on restart, so
+                                // a node resumed from a database (or a
+                                // restarted localnet) answers `null` for
+                                // transactions it did commit. Check the
+                                // blocks themselves before calling it a
+                                // rejection.
+                                match self.find_committed_by_hash(tx_hash, after_block + 1, head) {
+                                    Ok(Some(block)) => {
+                                        return TransactionOutcome::Committed {
+                                            tx_hash: tx_hash.to_string(),
+                                            block,
+                                        }
+                                    }
+                                    Ok(None) => {}
+                                    Err(err) => return err.into_transport_outcome(),
+                                }
                                 return TransactionOutcome::Rejected {
                                     tx_hash: Some(tx_hash.to_string()),
                                     phase: RejectionPhase::Stateful,
@@ -489,6 +506,32 @@ impl TestNodeClient {
             ..options.clone()
         };
         self.wait(&tx_hash, Some(tx), &wait_options)
+    }
+
+    /// The block in `from..=to` whose parsed transactions include `tx_hash`.
+    /// Blocks the node does not serve are skipped.
+    fn find_committed_by_hash(
+        &self,
+        tx_hash: &str,
+        from: u64,
+        to: u64,
+    ) -> Result<Option<BlockContext>, RpcError> {
+        for block_id in from..=to {
+            let Some(info) = self.block_info(block_id)? else {
+                continue;
+            };
+            if info
+                .transactions
+                .iter()
+                .any(|tx| tx.hash.eq_ignore_ascii_case(tx_hash))
+            {
+                return Ok(Some(BlockContext {
+                    block_id: info.block_id,
+                    timestamp: info.timestamp,
+                }));
+            }
+        }
+        Ok(None)
     }
 
     /// The transaction is committed; find its containing block after
@@ -734,6 +777,8 @@ mod tests {
             "getLastBlockId" => json!(head_for_node.fetch_add(1, Ordering::Relaxed)),
             "sendTransaction" => json!(TX_HASH),
             "getTransaction" => Value::Null,
+            // The pre-decision block scan finds nothing.
+            "getBlock" => Value::Null,
             other => panic!("unexpected method {other}"),
         });
 
@@ -752,6 +797,57 @@ mod tests {
                 assert!(observed_after_block_id.unwrap() >= 13);
             }
             other => panic!("expected stateful rejection, got {other:?}"),
+        }
+    }
+
+    /// A node resumed from a database answers `getTransaction` with `null`
+    /// for transactions it committed before the restart; the block scan must
+    /// still report them as committed, not as a stateful rejection.
+    #[test]
+    fn wait_finds_committed_tx_the_node_index_forgot() {
+        // A Public tx: tag, program_id, one account, one nonce, two
+        // instruction words, one (sig, pk) pair.
+        let mut tx = vec![0_u8];
+        tx.extend_from_slice(&[0x11; 32]);
+        tx.extend_from_slice(&1_u32.to_le_bytes());
+        tx.extend_from_slice(&[0x55; 32]);
+        tx.extend_from_slice(&1_u32.to_le_bytes());
+        tx.extend_from_slice(&[0; 16]);
+        tx.extend_from_slice(&2_u32.to_le_bytes());
+        tx.extend_from_slice(&[0; 8]);
+        tx.extend_from_slice(&1_u32.to_le_bytes());
+        tx.extend_from_slice(&[0x22; 96]);
+        let tx_hash = {
+            use sha2::{Digest as _, Sha256};
+            Sha256::digest(&tx[1..])
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        };
+        let mut block = fake_block_bytes(27, 1_710_000_000_027, &tx);
+        block.push(0); // bedrock status
+        block.extend_from_slice(&[0; 32]); // bedrock parent id
+        let block_b64 = b64(&block);
+
+        let node = FakeNode::start(move |method, params| match method {
+            "getLastBlockId" => json!(30),
+            "getTransaction" => Value::Null,
+            "getBlock" if params[0] == json!(27) => json!(block_b64.clone()),
+            "getBlock" => Value::Null,
+            other => panic!("unexpected method {other}"),
+        });
+
+        let client = TestNodeClient::new(&node.url);
+        let options = WaitOptions {
+            after_block: Some(20),
+            ..fast_wait()
+        };
+        match client.wait(&tx_hash, None, &options) {
+            TransactionOutcome::Committed { block, .. } => {
+                assert_eq!(block.block_id, 27);
+                assert_eq!(block.timestamp, 1_710_000_000_027);
+            }
+            other => panic!("expected committed, got {other:?}"),
         }
     }
 
