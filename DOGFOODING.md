@@ -1836,7 +1836,7 @@ echo '{"format":"bogus/1"}' > ./bad.json
 ### Failure Signals / Common Pitfalls
 
 - A node started with `--state` that injects extra accounts (default testnet wallets, sample programs) beyond the snapshot is a regression — seeded startup must be exact.
-- A snapshot needing unsupported state (e.g. public-account data/nonce via the genesis config) that fails late inside the node instead of up front during `state seed` validation is a regression.
+- A snapshot needing unsupported state (e.g. public-account data/nonce via the genesis config) that fails late inside the node instead of up front during `state seed` validation is a regression. So is one that *succeeds*: a `public_accounts` entry with any field besides `account_id`/`balance` (`"data": "00"`, `"nonce": 3`) must fail `state seed` with `storage schema mismatch` naming the field — seeding it anyway silently drops the field.
 - A pin mismatch (snapshot's `lez_commit` differs from the project's resolved pin) that is silently accepted is a regression.
 - An unknown snapshot format accepted instead of rejected with a `format mismatch` error is a regression.
 
