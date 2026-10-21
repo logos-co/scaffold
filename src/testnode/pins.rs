@@ -197,8 +197,15 @@ fn resolve_pins_with_cache_root(
         None => resolve_cache_root(project)?.0,
     };
 
-    // A local directory passed as the source IS the checkout — caller-owned.
-    let source_as_local_checkout = local_checkout_from_source(project, &lez_source);
+    // A local directory passed as `--lez-source` IS the checkout —
+    // caller-owned. A local directory in `[repos.lez].source` (what
+    // `new --lez-path` writes) is only the clone origin: `setup`, `localnet`
+    // and `doctor` build in the managed cache copy, so test-node must too, or
+    // it would build into the user's own tree while they look elsewhere.
+    let source_as_local_checkout = overrides
+        .lez_source
+        .as_deref()
+        .and_then(|source| local_checkout_from_source(project, source));
 
     let (lez_checkout, checkout_ownership) = if let Some(dir) = source_as_local_checkout {
         (dir, CheckoutOwnership::CallerProvided)
@@ -763,6 +770,33 @@ mod tests {
         .unwrap();
         assert_eq!(pins.checkout_ownership, CheckoutOwnership::CallerProvided);
         assert_eq!(pins.lez_checkout, checkout);
+    }
+
+    #[test]
+    fn local_source_directory_in_config_uses_the_managed_cache_copy() {
+        // `new --lez-path DIR` writes DIR to `[repos.lez].source`. `setup`
+        // clones it into the managed cache, so test-node must resolve the
+        // same directory rather than building inside DIR.
+        let temp = tempdir().unwrap();
+        let checkout = temp.path().join("local-lez");
+        let head = init_git_repo(&checkout);
+        let source = checkout.display().to_string();
+        let project = fixture_project(
+            temp.path(),
+            RepoRef {
+                source: source.clone(),
+                pin: head.clone(),
+                ..Default::default()
+            },
+        );
+
+        let pins = resolve_test_node_pins(&project, &PinOverrides::default()).unwrap();
+        assert_eq!(pins.checkout_ownership, CheckoutOwnership::ManagedCache);
+        assert_eq!(
+            pins.lez_checkout,
+            crate::project::resolve_repo_path(&project, &project.config.lez, "lez").unwrap()
+        );
+        assert_ne!(pins.lez_checkout, checkout);
     }
 
     #[test]

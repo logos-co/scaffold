@@ -246,7 +246,7 @@ pub(crate) fn resolve_repo_path(
 /// `source`.
 ///
 /// Checkouts from scaffold's default source live at `repos/<name>/<pin>`.
-/// Any other source (`--lez-path`, a fork URL in `[repos.lez].source`) gets
+/// Any other source (`--lez-path`, a fork URL in `[repos.<name>].source`) gets
 /// its own `repos/<name>/<pin>-src-<hash>` directory. Keying by pin alone let
 /// two projects on the same pin but different sources share one checkout,
 /// and each sync re-cloned it to its own origin — deleting the other
@@ -256,6 +256,8 @@ pub(crate) fn managed_repo_dir(cache_root: &Path, name: &str, source: &str, pin:
     let default_source = match name {
         "lez" => Some(crate::constants::LEZ_SOURCE),
         "spel" => Some(crate::constants::SPEL_SOURCE),
+        "basecamp" => Some(crate::constants::BASECAMP_SOURCE),
+        // No default source known: every non-empty source is keyed apart.
         _ => None,
     };
     let source = source.trim();
@@ -423,6 +425,14 @@ mod tests {
             .starts_with("p1-src-"));
         // Stable across calls: later commands must find the checkout `new` made.
         assert_eq!(local, managed_repo_dir(root, "lez", "/home/me/lez", "p1"));
+        assert_eq!(
+            managed_repo_dir(root, "basecamp", crate::constants::BASECAMP_SOURCE, "p1"),
+            root.join("repos/basecamp/p1")
+        );
+        assert_ne!(
+            managed_repo_dir(root, "basecamp", "https://github.com/me/basecamp.git", "p1"),
+            root.join("repos/basecamp/p1")
+        );
     }
 
     #[test]

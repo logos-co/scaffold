@@ -1054,6 +1054,8 @@ grep -n "^\[wallet\]\|^home_dir\|^binary" dogfood-cache/scaffold.toml
 - If `--vendor-deps` or `--cache-root` are silently ignored or produce an error, record the exact output.
 - If `--lez-path` is tested and the path does not exist, verify the error message points to the bad path.
 - `--lez-path` with a real checkout must clone into its own `<cache-root>/repos/lez/<pin>-src-<hash>/` directory and leave `<cache-root>/repos/lez/<pin>/` (and its built `target/`) untouched — check with another project's `setup` running. A `--lez-path` create that re-clones the default-source checkout is the regression: it deletes the other project's binaries, mid-build if one is running.
+- In that `--lez-path` project, `test-node pins --json` must report `lez_checkout` as the same `<pin>-src-<hash>` directory with `ownership: managed_cache`, not the `--lez-path` source directory: `test-node prepare` builds where `setup` / `localnet` look. (Only a directory passed as `test-node … --lez-source DIR` is a caller-provided checkout.)
+- Expected one-time cost, not a regression: a non-default-source project created before source-keyed checkouts (scaffold ≤ 0.4.0) still has its build under `repos/lez/<pin>/`. Its next `setup` clones and builds into `<pin>-src-<hash>/` from scratch (~10 minutes for LEZ); later runs reuse it.
 - If non-vendored cache reuse collapses different LEZ pins into a single shared `repos/lez` checkout, record that as a cache-isolation regression.
 
 ### Evidence to Capture
@@ -1184,7 +1186,7 @@ ls .scaffold/basecamp/profiles
 
 - `basecamp --help` lists `setup`, `modules`, `install`, `launch`, `develop`, `build`, `build-portable`, `run`, `doctor`, `paths`, and `docs`.
 - `basecamp docs` prints the canonical project-compatibility rules, including per-profile `env_file`, `runtime_dir`, `log_file`, custom profile names, and per-platform `[repos.basecamp.attr]`.
-- First `basecamp setup` clones the pinned basecamp repo into a pin-isolated cache path, builds `basecamp` and `lgpm` via Nix, seeds `.scaffold/basecamp/profiles/alice/` and `.scaffold/basecamp/profiles/bob/`, and reports completion.
+- First `basecamp setup` clones the pinned basecamp repo into a pin-isolated cache path (`<cache_root>/repos/basecamp/<pin>`, or `<pin>-src-<hash>` when `[repos.basecamp].source` is a fork), builds `basecamp` and `lgpm` via Nix, seeds `.scaffold/basecamp/profiles/alice/` and `.scaffold/basecamp/profiles/bob/`, and reports completion.
 - If `[repos.basecamp.attr]` is a per-platform map, setup uses the current host's attr and preserves the map plus scalar fallback on serialize.
 - `basecamp doctor` reports the basecamp + lgpm binaries as present and both profiles as seeded; `--json` returns parseable JSON with the same checks. Immediately after a green first `setup` (before `basecamp modules`) that is four PASS rows — `basecamp binary`, `lgpm binary`, `basecamp profile alice`, `basecamp profile bob`. A doctor that summarizes `0 PASS` there is the regression: it leaves the user with no confirmation that `setup` actually landed.
 - `basecamp doctor` shows a `basecamp pin set` row. On a project using scaffold's defaults it passes and names both pins. It warns only when *one* of the pair is at the default and the other is not — that split is what silently breaks module loading, since the app embeds the same package-manager library the CLI installs with. A project deliberately pinned away from both defaults passes with a note, not a warning.

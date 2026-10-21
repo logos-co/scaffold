@@ -230,7 +230,14 @@ fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
     }
 
     let (cache_root, _) = resolve_cache_root(&project)?;
-    let basecamp_repo_path = cache_root.join("repos/basecamp").join(&basecamp_repo.pin);
+    // Keyed by source as well as pin, like LEZ and spel: a fork pinned at the
+    // same ref must not re-clone over another project's checkout.
+    let basecamp_repo_path = crate::project::managed_repo_dir(
+        &cache_root,
+        "basecamp",
+        &basecamp_repo.source,
+        &basecamp_repo.pin,
+    );
 
     println!("cloning basecamp at {}", &basecamp_repo.pin);
     sync_repo_to_pin_at_path_with_opts(
@@ -241,7 +248,12 @@ fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
         RepoSyncOptions::auto_reclone_cache_repo(),
     )?;
 
-    let pin_artifacts = cache_root.join("basecamp").join(&basecamp_repo.pin);
+    // Same key for the build outputs, so a fork's `result` links stay apart.
+    let pin_artifacts = cache_root.join("basecamp").join(
+        basecamp_repo_path
+            .file_name()
+            .expect("managed_repo_dir ends in a pin component"),
+    );
     fs::create_dir_all(&pin_artifacts)
         .with_context(|| format!("create {}", pin_artifacts.display()))?;
 
