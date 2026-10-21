@@ -895,7 +895,7 @@ Validate that the LEZ counter program can be deployed and that the generated run
 
 - LEZ project exists with L1 completed (setup, build, localnet running).
 - `wallet -- check-health` succeeds.
-- At least one public account exists. If not:
+- A self-owned public account to sign with (`<account-id>`, the bare base58 part):
 
 ```bash
 "$SCAFFOLD_BIN" wallet -- account new public
@@ -909,31 +909,34 @@ From the LEZ project root:
 "$SCAFFOLD_BIN" deploy
 export NSSA_WALLET_HOME_DIR="$PWD/.scaffold/wallet" LEE_WALLET_HOME_DIR="$PWD/.scaffold/wallet"
 export HOST_CC=cc HOST_CXX=c++
-cargo run --bin run_lez_counter -- init --to <account-id>
-cargo run --bin run_lez_counter -- increment --counter <account-id> --authority <account-id> --amount 5
+cargo run --bin run_lez_counter -- init --authority <account-id>
+cargo run --bin run_lez_counter -- show                      # poll until `= 0`
+cargo run --bin run_lez_counter -- increment --authority <account-id> --amount 5
+cargo run --bin run_lez_counter -- show                      # poll until `= 5`
 ```
+
+The counter is not a user account: both instructions derive it as the PDA `[program_id, "counter"]`, so the runner computes the address itself and there is one counter per deployment.
 
 `HOST_CC`/`HOST_CXX` matter for direct `cargo run` in lez-framework projects when the risc0 C++ toolchain is installed: the guest embed refingerprints under your shell env, risc0-build exports plain `CC` = riscv gcc, and the guest graph's host-side proc-macro deps (`spel-framework-macros` → … → `ring`) then compile host C with the riscv compiler and die on `-m64`. Scaffold's own `build`/IDL/client commands pin these automatically; direct cargo invocations need the export (CI's template-e2e does the same at the job level).
 
 ### Expected Success Signals
 
 - `deploy` submits the `lez_counter` program and prints a success summary.
-- `run_lez_counter init` prints confirmation that the counter was initialized at the target account.
-- `run_lez_counter increment` prints confirmation of the increment operation.
-
-Note: as of this writing, the LEZ counter runner contains `TODO` placeholders for actual transaction submission. If the runner only prints diagnostic messages without submitting transactions, record that as the current state. When transaction submission is implemented, update this scenario with account-state verification steps matching D6.
+- `run_lez_counter init` and `increment` each print `submitted transaction: tx_hash=…` and a `verification hint:` naming the counter PDA, and exit 0.
+- `show` reads the counter through the sequencer: `not initialized` before `init` lands, then `counter <pda> = 0`, and `= 5` after the increment. Reads follow block production (15s default), so poll.
+- `"$SCAFFOLD_BIN" wallet -- account get --account-id Public/<pda>` shows the counter's `data` as the little-endian u64 (`0500000000000000` for 5) and `program_owner` set to the program.
 
 ### Failure Signals / Common Pitfalls
 
 - If `deploy` cannot find `lez_counter` in the discovered program list, record the actual discovered list.
 - If the runner panics on wallet initialization, the name this pin reads is unset: either neither name was exported, or only `LEE_WALLET_HOME_DIR` was exported against a pre-v0.2.0 pin. If it instead starts against an empty wallet, the pin is v0.2.0 and only `NSSA_WALLET_HOME_DIR` was exported — that wallet ignores the old name and falls back to `~/.lee/wallet` without an error.
-- If the runner accepts the subcommand but does nothing (due to TODO stubs), record the output and note the gap.
+- A runner that exits 0 while `show` never moves means the transaction was rejected at execution; check the sequencer log (`localnet logs`) for `failed execution check`. `increment` before `init` is that case (`AccountNotInitialized`), and so is a second `init` against an existing counter.
 
 ### Evidence to Capture
 
 - `deploy` output for the LEZ project.
 - `run_lez_counter init` and `increment` output.
-- Whether the runner actually submitted transactions or only printed placeholder messages.
+- `show` output after each step.
 
 ### Execution Notes
 
