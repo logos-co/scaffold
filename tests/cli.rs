@@ -3523,10 +3523,20 @@ fn assert_refused_launch_keeps_running_instance(
     )
     .expect("write state");
 
-    let mut running = std::process::Command::new(&fake_bin)
-        .arg("300")
-        .spawn()
-        .expect("spawn fake basecamp");
+    // Another test thread forking while `fs::copy` still held the copy open
+    // for writing hands that child the write fd; exec then fails with
+    // ETXTBSY until it execs or exits. Retry briefly instead of flaking.
+    const ETXTBSY: i32 = 26; // Linux and macOS
+    let mut attempts = 0;
+    let mut running = loop {
+        match std::process::Command::new(&fake_bin).arg("300").spawn() {
+            Err(err) if err.raw_os_error() == Some(ETXTBSY) && attempts < 50 => {
+                attempts += 1;
+                thread::sleep(Duration::from_millis(20));
+            }
+            other => break other.expect("spawn fake basecamp"),
+        }
+    };
     let profile_dir = project.join(".scaffold/basecamp/profiles/alice");
     fs::create_dir_all(&profile_dir).expect("mkdir profile");
     fs::write(
