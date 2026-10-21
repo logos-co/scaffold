@@ -267,6 +267,7 @@ fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
     let state_path = project.root.join(".scaffold/state/basecamp.state");
     let state = BasecampState {
         pin: basecamp_repo.pin.clone(),
+        lgpm_pin: lgpm_repo.pin.clone(),
         basecamp_bin: basecamp_bin.display().to_string(),
         lgpm_bin: lgpm_bin.display().to_string(),
     };
@@ -325,26 +326,29 @@ pub(crate) fn platform_variant_key(basecamp_repo: Option<&RepoRef>) -> Option<&'
 }
 
 /// `Some(message)` when the binaries `basecamp.state` records were built for
-/// a different basecamp pin than `scaffold.toml` now names — after a pin edit,
-/// or after a scaffold upgrade whose `setup` has not run yet. Installing with
-/// that `lgpm` or launching that app would silently run the old release under
-/// scaffold's assumptions about the new one.
+/// a different basecamp or `lgpm` pin than `scaffold.toml` now names — after a
+/// pin edit, or after a scaffold upgrade whose `setup` has not run yet.
+/// Installing with that `lgpm` or launching that app would silently run the
+/// old release under scaffold's assumptions about the new one.
 fn stale_setup(project: &Project, state: &BasecampState) -> Option<String> {
-    // `setup` always writes `[repos.basecamp]`; without one (or with a blank
-    // pin) there is no configured pin to be stale against.
-    let configured = project
-        .config
-        .basecamp_repo
-        .as_ref()
-        .map(|r| r.pin.as_str())
-        .filter(|p| !p.is_empty())?;
-    (!state.pin.is_empty() && state.pin != configured).then(|| {
-        format!(
-            "basecamp was set up for pin {} but scaffold.toml now pins {configured}; \
-             run: logos-scaffold basecamp setup",
-            state.pin
-        )
-    })
+    // `setup` always writes both repos; without one (or with a blank pin, or
+    // a state file from before that pin was recorded) there is nothing to be
+    // stale against.
+    let stale = |label: &str, built: &str, repo: Option<&RepoRef>| {
+        let configured = repo.map(|r| r.pin.as_str()).filter(|p| !p.is_empty())?;
+        (!built.is_empty() && built != configured).then(|| {
+            format!(
+                "{label} was set up for pin {built} but scaffold.toml now pins {configured}; \
+                 run: logos-scaffold basecamp setup"
+            )
+        })
+    };
+    stale(
+        "basecamp",
+        &state.pin,
+        project.config.basecamp_repo.as_ref(),
+    )
+    .or_else(|| stale("lgpm", &state.lgpm_pin, project.config.lgpm_repo.as_ref()))
 }
 
 /// Where a project stands relative to scaffold's retired default pins (see
@@ -4831,6 +4835,31 @@ mod tests {
         let msg = stale_setup(&project, &state(RETIRED_BASECAMP_PIN_SETS[0].1))
             .expect("a different pin is stale");
         assert!(msg.contains("basecamp setup"), "got: {msg}");
+    }
+
+    #[test]
+    fn stale_setup_flags_lgpm_built_for_another_pin() {
+        let tmp = tempdir().expect("tempdir");
+        let mut project = seed_basecamp_project(tmp.path());
+        project.config.basecamp_repo = Some(default_basecamp_repo(DEFAULT_BASECAMP_PIN));
+        project.config.lgpm_repo = Some(default_lgpm_repo(DEFAULT_LGPM_PIN));
+        let state = |lgpm_pin: &str| BasecampState {
+            pin: DEFAULT_BASECAMP_PIN.to_string(),
+            lgpm_pin: lgpm_pin.to_string(),
+            ..Default::default()
+        };
+        assert!(stale_setup(&project, &state(DEFAULT_LGPM_PIN)).is_none());
+        assert!(
+            stale_setup(&project, &state("")).is_none(),
+            "state files without lgpm_pin pass"
+        );
+        let msg = stale_setup(&project, &state("2222222222222222222222222222222222222222"))
+            .expect("an lgpm pin edit is stale");
+        assert!(
+            msg.starts_with("lgpm was set up for pin 2222"),
+            "got: {msg}"
+        );
+        assert!(msg.contains(DEFAULT_LGPM_PIN), "got: {msg}");
     }
 
     #[test]
