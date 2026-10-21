@@ -342,17 +342,21 @@ pub(crate) fn platform_variant_key(basecamp_repo: Option<&RepoRef>) -> Option<&'
 /// pin edit, or after a scaffold upgrade whose `setup` has not run yet.
 /// Installing with that `lgpm` or launching that app would silently run the
 /// old release under scaffold's assumptions about the new one.
-fn stale_setup(project: &Project, state: &BasecampState) -> Option<String> {
+///
+/// Returns `(component, message)`; `component` is `"basecamp"` or `"lgpm"`,
+/// so doctor can name its row after the binary that is actually stale.
+fn stale_setup(project: &Project, state: &BasecampState) -> Option<(&'static str, String)> {
     // `setup` always writes both repos; without one (or with a blank pin, or
     // a state file from before that pin was recorded) there is nothing to be
     // stale against.
-    let stale = |label: &str, built: &str, repo: Option<&RepoRef>| {
+    let stale = |label: &'static str, built: &str, repo: Option<&RepoRef>| {
         let configured = repo.map(|r| r.pin.as_str()).filter(|p| !p.is_empty())?;
         (!built.is_empty() && built != configured).then(|| {
-            format!(
+            let message = format!(
                 "{label} was set up for pin {built} but scaffold.toml now pins {configured}; \
                  run: logos-scaffold basecamp setup"
-            )
+            );
+            (label, message)
         })
     };
     stale(
@@ -630,7 +634,7 @@ fn cmd_basecamp_launch(
     if !Path::new(&state.basecamp_bin).exists() || !Path::new(&state.lgpm_bin).exists() {
         bail!("basecamp not set up yet; run: logos-scaffold basecamp setup");
     }
-    if let Some(stale) = stale_setup(&project, &state) {
+    if let Some((_, stale)) = stale_setup(&project, &state) {
         bail!("{stale}");
     }
 
@@ -2740,7 +2744,7 @@ fn cmd_basecamp_install(project: Project, probe: &dyn LgxFlakeProbe) -> DynResul
     if !Path::new(&state.basecamp_bin).exists() || !Path::new(&state.lgpm_bin).exists() {
         bail!("basecamp not set up yet; run: logos-scaffold basecamp setup");
     }
-    if let Some(stale) = stale_setup(&project, &state) {
+    if let Some((_, stale)) = stale_setup(&project, &state) {
         bail!("{stale}");
     }
 
@@ -3600,10 +3604,10 @@ fn push_basecamp_doctor_rows(project: &Project, rows: &mut Vec<crate::model::Che
     // profiles it seeds. Without these a green `setup` produced a doctor with
     // no PASS rows at all, so a user had no way to confirm setup actually
     // landed before moving on to `modules` / `install`.
-    if let Some(stale) = stale_setup(project, &state) {
+    if let Some((component, stale)) = stale_setup(project, &state) {
         rows.push(CheckRow {
             status: CheckStatus::Warn,
-            name: "basecamp build pin".to_string(),
+            name: format!("{component} build pin"),
             detail: stale,
             remediation: Some("run `logos-scaffold basecamp setup`".to_string()),
         });
@@ -4852,8 +4856,9 @@ mod tests {
             stale_setup(&project, &state("")).is_none(),
             "pre-pin state files pass"
         );
-        let msg = stale_setup(&project, &state(RETIRED_BASECAMP_PIN_SETS[0].1))
+        let (component, msg) = stale_setup(&project, &state(RETIRED_BASECAMP_PIN_SETS[0].1))
             .expect("a different pin is stale");
+        assert_eq!(component, "basecamp");
         assert!(msg.contains("basecamp setup"), "got: {msg}");
     }
 
@@ -4873,8 +4878,10 @@ mod tests {
             stale_setup(&project, &state("")).is_none(),
             "state files without lgpm_pin pass"
         );
-        let msg = stale_setup(&project, &state("2222222222222222222222222222222222222222"))
-            .expect("an lgpm pin edit is stale");
+        let (component, msg) =
+            stale_setup(&project, &state("2222222222222222222222222222222222222222"))
+                .expect("an lgpm pin edit is stale");
+        assert_eq!(component, "lgpm", "doctor names the row after lgpm");
         assert!(
             msg.starts_with("lgpm was set up for pin 2222"),
             "got: {msg}"
