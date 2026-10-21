@@ -239,7 +239,33 @@ pub(crate) fn resolve_repo_path(
         );
     }
     let (cache_root, _) = resolve_cache_root(project)?;
-    Ok(cache_root.join("repos").join(name).join(&repo.pin))
+    Ok(managed_repo_dir(&cache_root, name, &repo.source, &repo.pin))
+}
+
+/// Directory of a cache-managed checkout of `name` at `pin` cloned from
+/// `source`.
+///
+/// Checkouts from scaffold's default source live at `repos/<name>/<pin>`.
+/// Any other source (`--lez-path`, a fork URL in `[repos.lez].source`) gets
+/// its own `repos/<name>/<pin>-src-<hash>` directory. Keying by pin alone let
+/// two projects on the same pin but different sources share one checkout,
+/// and each sync re-cloned it to its own origin — deleting the other
+/// project's built `target/`, even mid-build.
+pub(crate) fn managed_repo_dir(cache_root: &Path, name: &str, source: &str, pin: &str) -> PathBuf {
+    let base = cache_root.join("repos").join(name);
+    let default_source = match name {
+        "lez" => Some(crate::constants::LEZ_SOURCE),
+        "spel" => Some(crate::constants::SPEL_SOURCE),
+        _ => None,
+    };
+    let source = source.trim();
+    if source.is_empty() || default_source.is_some_and(|d| source == d) {
+        return base.join(pin);
+    }
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(source.as_bytes());
+    let short: String = digest[..4].iter().map(|b| format!("{b:02x}")).collect();
+    base.join(format!("{pin}-src-{short}"))
 }
 
 pub(crate) fn home_dir() -> DynResult<PathBuf> {
@@ -368,6 +394,35 @@ mod tests {
         let path = resolve_repo_path(&project, &project.config.spel, "spel").expect("resolve");
         env::remove_var("LOGOS_SCAFFOLD_CACHE_ROOT");
         assert_eq!(path, PathBuf::from("/tmp/cache/repos/spel/cafef00d"));
+    }
+
+    #[test]
+    fn managed_repo_dir_keys_non_default_sources_apart() {
+        let root = Path::new("/c");
+        let default = managed_repo_dir(root, "lez", crate::constants::LEZ_SOURCE, "p1");
+        assert_eq!(default, PathBuf::from("/c/repos/lez/p1"));
+        assert_eq!(
+            managed_repo_dir(root, "spel", crate::constants::SPEL_SOURCE, "p1"),
+            PathBuf::from("/c/repos/spel/p1")
+        );
+        assert_eq!(
+            managed_repo_dir(root, "lez", "", "p1"),
+            PathBuf::from("/c/repos/lez/p1")
+        );
+
+        let local = managed_repo_dir(root, "lez", "/home/me/lez", "p1");
+        let fork = managed_repo_dir(root, "lez", "https://github.com/me/lez.git", "p1");
+        assert_ne!(local, default);
+        assert_ne!(fork, default);
+        assert_ne!(local, fork);
+        assert_eq!(local.parent(), Some(Path::new("/c/repos/lez")));
+        assert!(local
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("p1-src-"));
+        // Stable across calls: later commands must find the checkout `new` made.
+        assert_eq!(local, managed_repo_dir(root, "lez", "/home/me/lez", "p1"));
     }
 
     #[test]
