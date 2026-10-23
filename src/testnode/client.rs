@@ -436,13 +436,15 @@ impl TestNodeClient {
                                 // rejection — the whole chain on the first
                                 // pass, like `locate_committed` (the caller's
                                 // `after_block` may postdate the commit),
-                                // then only blocks produced since.
+                                // then only blocks produced since. The scan
+                                // stops at the deadline, so on a long chain
+                                // the outcome is a timeout, not a rejection.
                                 let ranges = match scanned_through {
                                     None => vec![(after_block + 1, head), (0, after_block)],
                                     Some(done) => vec![(done + 1, head)],
                                 };
                                 for (from, to) in ranges {
-                                    match self.find_committed_by_hash(tx_hash, from, to) {
+                                    match self.find_committed_by_hash(tx_hash, from, to, deadline) {
                                         Ok(HashScan::Found(block)) => {
                                             return TransactionOutcome::Committed {
                                                 tx_hash: tx_hash.to_string(),
@@ -534,15 +536,20 @@ impl TestNodeClient {
     /// Look for `tx_hash` among the parsed transactions of blocks
     /// `from..=to`. Blocks the node does not serve are skipped. A miss is
     /// [`HashScan::Inconclusive`] when any scanned block was only partially
-    /// parsed, since the transaction may sit in the part that was not.
+    /// parsed, since the transaction may sit in the part that was not, or
+    /// when `deadline` passed before every block was scanned.
     fn find_committed_by_hash(
         &self,
         tx_hash: &str,
         from: u64,
         to: u64,
+        deadline: Instant,
     ) -> Result<HashScan, RpcError> {
         let mut complete = true;
         for block_id in from..=to {
+            if Instant::now() >= deadline {
+                return Ok(HashScan::Inconclusive);
+            }
             let Some(info) = self.block_info(block_id)? else {
                 continue;
             };
@@ -951,6 +958,37 @@ mod tests {
             } => assert_eq!(last_observed_block_id, 10),
             other => panic!("expected timeout, got {other:?}"),
         }
+    }
+
+    /// The pre-boundary scan reaches back to genesis; on a long-lived node
+    /// it must stop at `--timeout-sec` and report a timeout, not overrun it.
+    #[test]
+    fn wait_block_scan_honours_the_timeout() {
+        let (_, tx_hash) = public_tx_and_hash();
+        let node = FakeNode::start(|method, _| match method {
+            "getLastBlockId" => json!(2_000),
+            "getTransaction" => Value::Null,
+            "getBlock" => Value::Null,
+            other => panic!("unexpected method {other}"),
+        });
+
+        let client = TestNodeClient::new(&node.url);
+        let options = WaitOptions {
+            after_block: Some(1_990),
+            timeout: Duration::from_millis(300),
+            ..fast_wait()
+        };
+        let started = Instant::now();
+        let outcome = client.wait(&tx_hash, None, &options);
+        let elapsed = started.elapsed();
+        match outcome {
+            TransactionOutcome::Timeout {
+                last_observed_block_id,
+                ..
+            } => assert_eq!(last_observed_block_id, 2_000),
+            other => panic!("expected timeout, got {other:?}"),
+        }
+        assert!(elapsed < Duration::from_secs(3), "wait took {elapsed:?}");
     }
 
     #[test]
