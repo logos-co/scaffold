@@ -136,6 +136,17 @@ fn cmd_new_spel(
     // directory that already exists, so anything created under `target` before
     // the delegation makes the whole command fail. Vendoring therefore happens
     // *after* `spel init` has created the project.
+    // Building the spel CLI builds the LEZ wallet, which links libpcsclite.
+    // Without it the build dies minutes in with a raw `pcsc-sys` error, and
+    // `doctor` (which carries the readable version) needs a project to run.
+    let pcsc = crate::doctor_checks::check_pcsc_library();
+    if pcsc.status == crate::model::CheckStatus::Warn {
+        eprintln!("Warning: {}", pcsc.detail);
+        if let Some(fix) = &pcsc.remediation {
+            eprintln!("  {fix}");
+        }
+    }
+
     println!(
         "Cloning spel at pin {} from {} (this may take a minute the first time)...",
         DEFAULT_SPEL.sha, SPEL_SOURCE
