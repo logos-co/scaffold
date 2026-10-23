@@ -268,9 +268,13 @@ this way: running in the process cwd broke `api::create_project`, which takes
 an explicit parent, and passing the typed name broke names with a path
 separator (`nested/sub-app` became `nested/nested/sub-app`).
 
-All three constraints are held by tests that drive `finish_spel_project` with a
-stub `spel` which, like the real one, refuses an existing directory and
-resolves names against its own cwd.
+The two placement constraints, and the general rule that nothing may exist at
+the project path before delegating, are held by tests that drive
+`finish_spel_project` with a stub `spel` which, like the real one, refuses an
+existing directory and resolves names against its own cwd. The `--vendor-deps`
+ordering itself is not: those tests run with `vendor_deps: false`, because the
+vendoring step does a real network clone. Moving that block above
+`run_spel_init` would not fail the suite.
 
 ## Vendoring `spel` Per-Project for Program ID Surfacing
 
