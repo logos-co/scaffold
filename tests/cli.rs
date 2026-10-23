@@ -3467,6 +3467,101 @@ fn basecamp_launch_bails_when_no_modules_captured() {
         );
 }
 
+#[cfg(unix)]
+#[test]
+fn basecamp_launch_that_bails_leaves_the_running_instance_alone() {
+    // A launch that refuses to start (here: nothing captured in [modules])
+    // must not first kill the instance the profile already has running.
+    assert_refused_launch_keeps_running_instance(
+        MINIMAL_SCAFFOLD_TOML,
+        &[],
+        |_| {},
+        "no modules captured",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn basecamp_launch_with_unwritable_log_file_leaves_the_running_instance_alone() {
+    // The log destination is only opened after the kill + scrub + reinstall;
+    // a path that can never be created must be refused before any of that.
+    let toml = format!(
+        "{MINIMAL_SCAFFOLD_TOML}\n[modules.swap_module]\nflake = \"github:logos-co/swap-module#lgx\"\nrole = \"project\"\n"
+    );
+    assert_refused_launch_keeps_running_instance(
+        &toml,
+        &["--log-file=not-a-dir/basecamp.log"],
+        |project| fs::write(project.join("not-a-dir"), "a file, not a dir").expect("write"),
+        "create log dir",
+    );
+}
+
+#[cfg(unix)]
+fn assert_refused_launch_keeps_running_instance(
+    scaffold_toml: &str,
+    extra_args: &[&str],
+    prepare: impl FnOnce(&Path),
+    expected_stderr: &str,
+) {
+    let temp = tempdir().expect("tempdir");
+    let project = temp.path();
+    fs::write(project.join("scaffold.toml"), scaffold_toml).expect("write scaffold.toml");
+    prepare(project);
+
+    // A stand-in "basecamp": `sleep` under the launcher's name, so its comm
+    // matches what launch would kill.
+    let fake_bin = project.join("LogosBasecamp");
+    fs::copy("/bin/sleep", &fake_bin).expect("copy sleep");
+    let state_dir = project.join(".scaffold/state");
+    fs::create_dir_all(&state_dir).expect("mkdir state");
+    fs::write(
+        state_dir.join("basecamp.state"),
+        format!(
+            "pin=deadbeef\nbasecamp_bin={0}\nlgpm_bin={0}\n",
+            fake_bin.display()
+        ),
+    )
+    .expect("write state");
+
+    // Another test thread forking while `fs::copy` still held the copy open
+    // for writing hands that child the write fd; exec then fails with
+    // ETXTBSY until it execs or exits. Retry briefly instead of flaking.
+    const ETXTBSY: i32 = 26; // Linux and macOS
+    let mut attempts = 0;
+    let mut running = loop {
+        match std::process::Command::new(&fake_bin).arg("300").spawn() {
+            Err(err) if err.raw_os_error() == Some(ETXTBSY) && attempts < 50 => {
+                attempts += 1;
+                thread::sleep(Duration::from_millis(20));
+            }
+            other => break other.expect("spawn fake basecamp"),
+        }
+    };
+    let profile_dir = project.join(".scaffold/basecamp/profiles/alice");
+    fs::create_dir_all(&profile_dir).expect("mkdir profile");
+    fs::write(
+        profile_dir.join("launch.state"),
+        format!("pid={}\n", running.id()),
+    )
+    .expect("write launch.state");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(project)
+        .args(["basecamp", "launch", "alice"])
+        .args(extra_args)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(expected_stderr));
+
+    let still_running = running.try_wait().expect("try_wait").is_none();
+    let _ = running.kill();
+    let _ = running.wait();
+    assert!(
+        still_running,
+        "a launch that bailed killed the running instance"
+    );
+}
+
 #[test]
 fn basecamp_launch_outside_project_errors() {
     let temp = tempdir().expect("tempdir");

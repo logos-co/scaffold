@@ -239,6 +239,16 @@ fn seed_default_wallet_by_initializing(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sha256_hex_is_real_sha256() {
+        // The prebuilt check compares this against a published `.sha256`
+        // file, so it must be SHA-256 hex, not some other digest.
+        assert_eq!(
+            super::sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
     use crate::commands::wallet_support::WALLET_CONFIG_PRIMARY;
     use std::fs;
 
@@ -422,6 +432,48 @@ mod tests {
     }
 
     #[test]
+    fn prebuilt_checksum_fails_closed() {
+        use super::{verify_prebuilt_checksum, PublishedChecksum};
+        let bytes = b"abc";
+        let digest = super::sha256_hex(bytes);
+
+        let ok = PublishedChecksum::Body(format!("{digest}  sequencer_service\n").into_bytes());
+        assert_eq!(
+            verify_prebuilt_checksum(bytes, &ok).unwrap().as_deref(),
+            Some(digest.as_str())
+        );
+        let upper = PublishedChecksum::Body(digest.to_uppercase().into_bytes());
+        assert!(verify_prebuilt_checksum(bytes, &upper).unwrap().is_some());
+
+        // No usable checksum: never verified, never installed.
+        for unusable in [
+            PublishedChecksum::NotPublished,
+            PublishedChecksum::FetchFailed("connection reset".into()),
+            PublishedChecksum::Body(Vec::new()),
+            PublishedChecksum::Body(b"   \n".to_vec()),
+            PublishedChecksum::Body(b"deadbeef".to_vec()),
+        ] {
+            assert!(verify_prebuilt_checksum(bytes, &unusable)
+                .unwrap()
+                .is_none());
+        }
+
+        let wrong = PublishedChecksum::Body(super::sha256_hex(b"abd").into_bytes());
+        let err = verify_prebuilt_checksum(bytes, &wrong).unwrap_err();
+        assert!(err.to_string().contains("SHA256 mismatch"), "{err}");
+    }
+
+    #[test]
+    fn read_capped_refuses_oversized_bodies() {
+        assert_eq!(
+            super::read_capped(&b"1234"[..], 4, "x").unwrap(),
+            b"1234".to_vec()
+        );
+        let err = super::read_capped(&b"12345"[..], 4, "x").unwrap_err();
+        assert!(err.to_string().contains("exceeds 4 bytes"), "{err}");
+    }
+
+    #[test]
     fn prebuilt_tag_format() {
         let pin = "35d8df0d031315219f94d1546ceb862b0e5b208f";
         let commit = &pin[..8];
@@ -477,31 +529,26 @@ fn try_download_prebuilt(lez: &Path, pin: &str) -> crate::DynResult<bool> {
     let dest = bin_dir.join("sequencer_service");
     match ureq::get(&url).call() {
         Ok(resp) => {
-            let mut reader = resp.into_reader();
-            let mut bytes = Vec::new();
-            std::io::Read::read_to_end(&mut reader, &mut bytes)?;
+            let bytes = read_capped(resp.into_reader(), PREBUILT_MAX_BYTES, "sequencer_service")?;
 
-            // Verify SHA256 integrity if a checksum file is published alongside the binary
+            // Fail closed: install only a binary whose published checksum
+            // matches. Whoever can serve the binary can also serve a 404, an
+            // empty body or a reset for the `.sha256`, so none of those may
+            // skip verification.
             let sha_url = format!("{url}.sha256");
-            if let Ok(sha_resp) = ureq::get(&sha_url).call() {
-                let mut sha_reader = sha_resp.into_reader();
-                let mut sha_bytes = Vec::new();
-                std::io::Read::read_to_end(&mut sha_reader, &mut sha_bytes)?;
-                let expected = String::from_utf8_lossy(&sha_bytes)
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .to_string();
-                if !expected.is_empty() {
-                    let actual = sha256_hex(&bytes);
-                    if actual != expected {
-                        anyhow::bail!(
-                            "SHA256 mismatch for prebuilt sequencer_service: expected {expected}, got {actual}"
-                        );
-                    }
-                    println!("SHA256 verified: {actual}");
-                }
-            }
+            let checksum = match ureq::get(&sha_url).call() {
+                Ok(sha_resp) => PublishedChecksum::Body(read_capped(
+                    sha_resp.into_reader(),
+                    CHECKSUM_MAX_BYTES,
+                    "sequencer_service.sha256",
+                )?),
+                Err(ureq::Error::Status(404, _)) => PublishedChecksum::NotPublished,
+                Err(e) => PublishedChecksum::FetchFailed(e.to_string()),
+            };
+            let Some(actual) = verify_prebuilt_checksum(&bytes, &checksum)? else {
+                return Ok(false);
+            };
+            println!("SHA256 verified: {actual}");
 
             std::fs::write(&dest, &bytes)?;
             #[cfg(unix)]
@@ -523,27 +570,81 @@ fn try_download_prebuilt(lez: &Path, pin: &str) -> crate::DynResult<bool> {
     }
 }
 
+/// Upper bound on a downloaded prebuilt binary; far above any real
+/// `sequencer_service`, low enough that a hostile server can't exhaust memory.
+const PREBUILT_MAX_BYTES: u64 = 1 << 30;
+/// A `.sha256` file is one hex digest, optionally followed by a file name.
+const CHECKSUM_MAX_BYTES: u64 = 4096;
+
+fn read_capped(reader: impl std::io::Read, cap: u64, what: &str) -> crate::DynResult<Vec<u8>> {
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut reader.take(cap + 1), &mut bytes)?;
+    if bytes.len() as u64 > cap {
+        anyhow::bail!("prebuilt {what} download exceeds {cap} bytes; refusing it");
+    }
+    Ok(bytes)
+}
+
+/// What fetching `<binary>.sha256` produced.
+enum PublishedChecksum {
+    Body(Vec<u8>),
+    NotPublished,
+    FetchFailed(String),
+}
+
+/// `Ok(Some(digest))` when `bytes` match the published checksum. `Ok(None)`
+/// (with a warning) when there is no usable checksum: the binary is not
+/// installed and the caller builds from source. `Err` on a mismatch, which
+/// means the download is not what the release published.
+fn verify_prebuilt_checksum(
+    bytes: &[u8],
+    checksum: &PublishedChecksum,
+) -> crate::DynResult<Option<String>> {
+    let body = match checksum {
+        PublishedChecksum::Body(body) => body,
+        PublishedChecksum::NotPublished => {
+            eprintln!(
+                "warning: prebuilt sequencer_service has no published .sha256; \
+                 not installing an unverified binary, falling back to source build"
+            );
+            return Ok(None);
+        }
+        PublishedChecksum::FetchFailed(err) => {
+            eprintln!(
+                "warning: could not fetch the prebuilt sequencer_service .sha256 ({err}); \
+                 not installing an unverified binary, falling back to source build"
+            );
+            return Ok(None);
+        }
+    };
+    let expected = String::from_utf8_lossy(body)
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
+        eprintln!(
+            "warning: published .sha256 for prebuilt sequencer_service is not a SHA-256 digest; \
+             not installing an unverified binary, falling back to source build"
+        );
+        return Ok(None);
+    }
+    let actual = sha256_hex(bytes);
+    if actual != expected {
+        anyhow::bail!(
+            "SHA256 mismatch for prebuilt sequencer_service: expected {expected}, got {actual}"
+        );
+    }
+    Ok(Some(actual))
+}
+
 fn sha256_hex(data: &[u8]) -> String {
-    // Simple SHA256 using the sha2 crate via workspace dependency
-    // Falls back gracefully if not available
-    #[cfg(feature = "sha2")]
-    {
-        use sha2::{Digest, Sha256};
-        let hash = Sha256::digest(data);
-        let mut s = String::new();
-        for byte in hash {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    Sha256::digest(data)
+        .iter()
+        .fold(String::new(), |mut s, byte| {
             write!(s, "{byte:02x}").unwrap();
-        }
-        s
-    }
-    #[cfg(not(feature = "sha2"))]
-    {
-        // Without sha2, compute a simple checksum for basic integrity
-        let mut h: u64 = 0xcbf29ce484222325;
-        for &b in data {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x100000001b3);
-        }
-        format!("{h:016x}")
-    }
+            s
+        })
 }

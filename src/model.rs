@@ -277,6 +277,9 @@ pub(crate) enum BasecampSource {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct BasecampState {
     pub(crate) pin: String,
+    /// `[repos.lgpm].pin` the recorded `lgpm_bin` was built from. Empty in
+    /// state files written before it was recorded.
+    pub(crate) lgpm_pin: String,
     pub(crate) basecamp_bin: String,
     pub(crate) lgpm_bin: String,
 }

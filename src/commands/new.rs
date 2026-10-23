@@ -136,11 +136,23 @@ fn cmd_new_spel(
     // directory that already exists, so anything created under `target` before
     // the delegation makes the whole command fail. Vendoring therefore happens
     // *after* `spel init` has created the project.
+    // Building the spel CLI builds the LEZ wallet, which links libpcsclite.
+    // Without it the build dies minutes in with a raw `pcsc-sys` error, and
+    // `doctor` (which carries the readable version) needs a project to run.
+    let pcsc = crate::doctor_checks::check_pcsc_library();
+    if pcsc.status == crate::model::CheckStatus::Warn {
+        eprintln!("Warning: {}", pcsc.detail);
+        if let Some(fix) = &pcsc.remediation {
+            eprintln!("  {fix}");
+        }
+    }
+
     println!(
         "Cloning spel at pin {} from {} (this may take a minute the first time)...",
         DEFAULT_SPEL.sha, SPEL_SOURCE
     );
-    let cached_spel = bootstrap_cache.join("repos/spel").join(DEFAULT_SPEL.sha);
+    let cached_spel =
+        crate::project::managed_repo_dir(bootstrap_cache, "spel", SPEL_SOURCE, DEFAULT_SPEL.sha);
     {
         let _echo_guard = crate::process::EchoGuard::suppress();
         sync_repo_to_pin_at_path_with_opts(
@@ -329,7 +341,12 @@ fn cmd_new_default(
             )?;
             lez_vendor
         } else {
-            let lez_cached = bootstrap_cache.join("repos/lez").join(DEFAULT_LEZ.sha);
+            let lez_cached = crate::project::managed_repo_dir(
+                &bootstrap_cache,
+                "lez",
+                &lez_source,
+                DEFAULT_LEZ.sha,
+            );
             sync_repo_to_pin_at_path_with_opts(
                 &lez_cached,
                 &lez_source,
@@ -425,6 +442,16 @@ fn cmd_new_default(
         target.display()
     );
     println!("Pinned lez: {}", cfg.lez.pin);
+    if cmd.vendor_deps {
+        // The cache root is still where it says, but this project's LEZ is
+        // not in it; don't let the line suggest otherwise.
+        println!(
+            "Cache root: {} (LEZ and spel are vendored under .scaffold/repos/)",
+            bootstrap_cache.display()
+        );
+    } else {
+        println!("Cache root: {}", bootstrap_cache.display());
+    }
     println!("Template variant: {}", cfg.framework.kind);
     println!("AI skills installed under .claude/skills/, .cursor/rules/, and AGENTS.md.");
 

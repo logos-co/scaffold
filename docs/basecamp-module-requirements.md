@@ -222,6 +222,7 @@ aarch64-linux  = "bin-appimage"
 | `XDG_CONFIG_HOME` | `<profile-dir>/xdg-config` | always |
 | `XDG_DATA_HOME` | `<profile-dir>/xdg-data` | always |
 | `XDG_CACHE_HOME` | `<profile-dir>/xdg-cache` | always |
+| `HOME` | `<profile-dir>/home` — kept across launches, like `xdg-config`. For modules that ignore XDG: the storage module keeps its config, data and node key in `$HOME/.logos_storage`, so without this every profile shared one storage identity with each other and with your own basecamp. | always |
 | `TMPDIR` | the resolved `runtime_dir`, else `<profile-dir>/xdg-tmp` | always |
 | `XDG_RUNTIME_DIR` | the resolved `runtime_dir` | only when one resolves — a configured `runtime_dir`, or the `/tmp/lgs-<profile>` macOS default |
 | `LOGOS_PROFILE` | the profile name | always |

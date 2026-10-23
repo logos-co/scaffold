@@ -665,7 +665,7 @@ fn collect_build_evidence(
     }
     guest_programs.sort();
 
-    let discovered = super::deploy::discover_program_binaries(&project.root, &guest_programs);
+    let discovered = super::deploy::discover_project_binaries(project, &guest_programs);
 
     let mut expected_binaries = Vec::new();
     for program in &guest_programs {
