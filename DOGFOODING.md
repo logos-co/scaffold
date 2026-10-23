@@ -944,7 +944,6 @@ From the SPEL project root:
 
 ```bash
 "$SCAFFOLD_BIN" deploy
-export LEE_WALLET_HOME_DIR="$PWD/.scaffold/wallet"
 
 # Create the signer, and initialise it for the transfer program FIRST.
 "$SCAFFOLD_BIN" wallet -- account new public          # prints Public/<id>
@@ -984,6 +983,10 @@ export LEE_WALLET_HOME_DIR="$PWD/.scaffold/wallet"
 
 - `lgs spel -- <args>` runs the project-vendored spel binary, which is pinned
   in scaffold.toml. Prefer it over any globally installed `spel`.
+- Do not export a wallet home for L4: `lgs spel --` points spel at the
+  project wallet itself, overriding the shell, like `lgs wallet --`. A
+  `spel` transaction that reports `Storage not found` or an empty wallet is
+  the regression this step checks.
 
 
 ## E1. CLI Discoverability and Error Quality
