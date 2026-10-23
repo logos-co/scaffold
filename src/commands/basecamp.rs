@@ -230,7 +230,14 @@ fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
     }
 
     let (cache_root, _) = resolve_cache_root(&project)?;
-    let basecamp_repo_path = cache_root.join("repos/basecamp").join(&basecamp_repo.pin);
+    // Keyed by source as well as pin, like LEZ and spel: a fork pinned at the
+    // same ref must not re-clone over another project's checkout.
+    let basecamp_repo_path = crate::project::managed_repo_dir(
+        &cache_root,
+        "basecamp",
+        &basecamp_repo.source,
+        &basecamp_repo.pin,
+    );
 
     println!("cloning basecamp at {}", &basecamp_repo.pin);
     sync_repo_to_pin_at_path_with_opts(
@@ -241,7 +248,12 @@ fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
         RepoSyncOptions::auto_reclone_cache_repo(),
     )?;
 
-    let pin_artifacts = cache_root.join("basecamp").join(&basecamp_repo.pin);
+    // Same key for the build outputs, so a fork's `result` links stay apart.
+    let pin_artifacts = cache_root.join("basecamp").join(
+        basecamp_repo_path
+            .file_name()
+            .expect("managed_repo_dir ends in a pin component"),
+    );
     fs::create_dir_all(&pin_artifacts)
         .with_context(|| format!("create {}", pin_artifacts.display()))?;
 
@@ -330,17 +342,21 @@ pub(crate) fn platform_variant_key(basecamp_repo: Option<&RepoRef>) -> Option<&'
 /// pin edit, or after a scaffold upgrade whose `setup` has not run yet.
 /// Installing with that `lgpm` or launching that app would silently run the
 /// old release under scaffold's assumptions about the new one.
-fn stale_setup(project: &Project, state: &BasecampState) -> Option<String> {
+///
+/// Returns `(component, message)`; `component` is `"basecamp"` or `"lgpm"`,
+/// so doctor can name its row after the binary that is actually stale.
+fn stale_setup(project: &Project, state: &BasecampState) -> Option<(&'static str, String)> {
     // `setup` always writes both repos; without one (or with a blank pin, or
     // a state file from before that pin was recorded) there is nothing to be
     // stale against.
-    let stale = |label: &str, built: &str, repo: Option<&RepoRef>| {
+    let stale = |label: &'static str, built: &str, repo: Option<&RepoRef>| {
         let configured = repo.map(|r| r.pin.as_str()).filter(|p| !p.is_empty())?;
         (!built.is_empty() && built != configured).then(|| {
-            format!(
+            let message = format!(
                 "{label} was set up for pin {built} but scaffold.toml now pins {configured}; \
                  run: logos-scaffold basecamp setup"
-            )
+            );
+            (label, message)
         })
     };
     stale(
@@ -618,7 +634,7 @@ fn cmd_basecamp_launch(
     if !Path::new(&state.basecamp_bin).exists() || !Path::new(&state.lgpm_bin).exists() {
         bail!("basecamp not set up yet; run: logos-scaffold basecamp setup");
     }
-    if let Some(stale) = stale_setup(&project, &state) {
+    if let Some((_, stale)) = stale_setup(&project, &state) {
         bail!("{stale}");
     }
 
@@ -673,6 +689,13 @@ fn cmd_basecamp_launch(
         Some(rel) => load_env_file(&project.root, rel)?,
         None => BTreeMap::new(),
     };
+
+    // And the log destination: `run_with_log_tee` only creates it at the very
+    // end, so an unwritable `--log-file` / `log_file` would otherwise cost the
+    // user their running instance plus a scrub and reinstall.
+    if let Some(dest) = log_dest.as_deref() {
+        ensure_log_destination_writable(dest)?;
+    }
 
     // Stop the profile's running instance only once every fail-fast check
     // above has passed, so a launch that refuses to start leaves the
@@ -771,6 +794,23 @@ fn cmd_basecamp_launch(
         // terminal + file, recording the child's PID.
         Some(dest) => run_with_log_tee(cmd, &state.basecamp_bin, &launch_state_path, &dest),
     }
+}
+
+/// Check that `log_path` can be opened for writing, creating its parent
+/// directory if needed. Opens in append mode and leaves any existing content
+/// alone: the instance about to be replaced may still be writing to it, and
+/// `run_with_log_tee` truncates it once that instance is gone.
+fn ensure_log_destination_writable(log_path: &Path) -> DynResult<()> {
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create log dir {}", parent.display()))?;
+    }
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("open log file {}", log_path.display()))?;
+    Ok(())
 }
 
 /// Spawn basecamp with stdout/stderr teed to both the terminal and `log_path`,
@@ -959,12 +999,12 @@ fn cmd_basecamp_paths(project: Project, profile: String, json: bool) -> DynResul
     Ok(())
 }
 
-/// Env map exported to the basecamp child on launch. Scaffold-owned names only;
-/// module port-override vars are not yet registered. `runtime_dir` becomes both
-/// `TMPDIR` and `XDG_RUNTIME_DIR`.
 /// Per-profile `HOME` under the profile dir; see [`launch_env`].
 const PROFILE_HOME_DIR: &str = "home";
 
+/// Env map exported to the basecamp child on launch. Scaffold-owned names only;
+/// module port-override vars are not yet registered. `runtime_dir` becomes both
+/// `TMPDIR` and `XDG_RUNTIME_DIR`.
 fn launch_env(
     profile_dir: &Path,
     profile_name: &str,
@@ -2728,7 +2768,7 @@ fn cmd_basecamp_install(project: Project, probe: &dyn LgxFlakeProbe) -> DynResul
     if !Path::new(&state.basecamp_bin).exists() || !Path::new(&state.lgpm_bin).exists() {
         bail!("basecamp not set up yet; run: logos-scaffold basecamp setup");
     }
-    if let Some(stale) = stale_setup(&project, &state) {
+    if let Some((_, stale)) = stale_setup(&project, &state) {
         bail!("{stale}");
     }
 
@@ -3588,10 +3628,10 @@ fn push_basecamp_doctor_rows(project: &Project, rows: &mut Vec<crate::model::Che
     // profiles it seeds. Without these a green `setup` produced a doctor with
     // no PASS rows at all, so a user had no way to confirm setup actually
     // landed before moving on to `modules` / `install`.
-    if let Some(stale) = stale_setup(project, &state) {
+    if let Some((component, stale)) = stale_setup(project, &state) {
         rows.push(CheckRow {
             status: CheckStatus::Warn,
-            name: "basecamp build pin".to_string(),
+            name: format!("{component} build pin"),
             detail: stale,
             remediation: Some("run `logos-scaffold basecamp setup`".to_string()),
         });
@@ -4840,8 +4880,9 @@ mod tests {
             stale_setup(&project, &state("")).is_none(),
             "pre-pin state files pass"
         );
-        let msg = stale_setup(&project, &state(RETIRED_BASECAMP_PIN_SETS[0].1))
+        let (component, msg) = stale_setup(&project, &state(RETIRED_BASECAMP_PIN_SETS[0].1))
             .expect("a different pin is stale");
+        assert_eq!(component, "basecamp");
         assert!(msg.contains("basecamp setup"), "got: {msg}");
     }
 
@@ -4861,8 +4902,10 @@ mod tests {
             stale_setup(&project, &state("")).is_none(),
             "state files without lgpm_pin pass"
         );
-        let msg = stale_setup(&project, &state("2222222222222222222222222222222222222222"))
-            .expect("an lgpm pin edit is stale");
+        let (component, msg) =
+            stale_setup(&project, &state("2222222222222222222222222222222222222222"))
+                .expect("an lgpm pin edit is stale");
+        assert_eq!(component, "lgpm", "doctor names the row after lgpm");
         assert!(
             msg.starts_with("lgpm was set up for pin 2222"),
             "got: {msg}"

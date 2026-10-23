@@ -377,15 +377,43 @@ fn preflight_docker_toolchain(needed_by: &str, alternative: Option<&str>) -> Dyn
 
 /// Whether `docker info` succeeds, i.e. a daemon is up and reachable. Shared
 /// with `doctor` so its `guest build` row and this preflight cannot disagree.
+///
+/// Bounded: a dead local socket fails in milliseconds, but a `DOCKER_HOST`
+/// pointing at an unreachable remote can hang for minutes, and `doctor` is
+/// what people run when things are already wrong. Timing out counts as down.
 pub(crate) fn docker_daemon_running() -> bool {
-    Command::new("docker")
-        .arg("info")
+    let mut cmd = Command::new("docker");
+    cmd.arg("info");
+    succeeds_within(cmd, DOCKER_INFO_TIMEOUT)
+}
+
+const DOCKER_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Run `cmd` with stdio detached; `true` only if it exits successfully within
+/// `timeout`. A command still running at the deadline is killed and reaped.
+fn succeeds_within(mut cmd: Command, timeout: std::time::Duration) -> bool {
+    let Ok(mut child) = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
 }
 
 /// Drop the deterministic artefact tree so a later `lgs deploy` cannot ship
@@ -418,6 +446,32 @@ mod tests {
     use tempfile::tempdir;
 
     const DOCKER_TAG: &str = "r0.0.0.0";
+
+    #[test]
+    fn succeeds_within_reports_exit_status_and_kills_a_hung_probe() {
+        use std::time::{Duration, Instant};
+        assert!(succeeds_within(
+            Command::new("true"),
+            Duration::from_secs(5)
+        ));
+        assert!(!succeeds_within(
+            Command::new("false"),
+            Duration::from_secs(5)
+        ));
+        assert!(!succeeds_within(
+            Command::new("/nonexistent/docker"),
+            Duration::from_secs(5)
+        ));
+
+        let mut hung = Command::new("sleep");
+        hung.arg("30");
+        let started = Instant::now();
+        assert!(!succeeds_within(hung, Duration::from_millis(200)));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a hung probe must be cut off at the timeout"
+        );
+    }
 
     fn write_methods_manifest(root: &Path, body: &str) -> PathBuf {
         let methods = root.join(METHODS_DIR);

@@ -442,7 +442,16 @@ fn cmd_new_default(
         target.display()
     );
     println!("Pinned lez: {}", cfg.lez.pin);
-    println!("Cache root: {}", bootstrap_cache.display());
+    if cmd.vendor_deps {
+        // The cache root is still where it says, but this project's LEZ is
+        // not in it; don't let the line suggest otherwise.
+        println!(
+            "Cache root: {} (LEZ and spel are vendored under .scaffold/repos/)",
+            bootstrap_cache.display()
+        );
+    } else {
+        println!("Cache root: {}", bootstrap_cache.display());
+    }
     println!("Template variant: {}", cfg.framework.kind);
     println!("AI skills installed under .claude/skills/, .cursor/rules/, and AGENTS.md.");
 
