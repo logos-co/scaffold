@@ -267,6 +267,7 @@ fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
     let state_path = project.root.join(".scaffold/state/basecamp.state");
     let state = BasecampState {
         pin: basecamp_repo.pin.clone(),
+        lgpm_pin: lgpm_repo.pin.clone(),
         basecamp_bin: basecamp_bin.display().to_string(),
         lgpm_bin: lgpm_bin.display().to_string(),
     };
@@ -325,26 +326,29 @@ pub(crate) fn platform_variant_key(basecamp_repo: Option<&RepoRef>) -> Option<&'
 }
 
 /// `Some(message)` when the binaries `basecamp.state` records were built for
-/// a different basecamp pin than `scaffold.toml` now names — after a pin edit,
-/// or after a scaffold upgrade whose `setup` has not run yet. Installing with
-/// that `lgpm` or launching that app would silently run the old release under
-/// scaffold's assumptions about the new one.
+/// a different basecamp or `lgpm` pin than `scaffold.toml` now names — after a
+/// pin edit, or after a scaffold upgrade whose `setup` has not run yet.
+/// Installing with that `lgpm` or launching that app would silently run the
+/// old release under scaffold's assumptions about the new one.
 fn stale_setup(project: &Project, state: &BasecampState) -> Option<String> {
-    // `setup` always writes `[repos.basecamp]`; without one (or with a blank
-    // pin) there is no configured pin to be stale against.
-    let configured = project
-        .config
-        .basecamp_repo
-        .as_ref()
-        .map(|r| r.pin.as_str())
-        .filter(|p| !p.is_empty())?;
-    (!state.pin.is_empty() && state.pin != configured).then(|| {
-        format!(
-            "basecamp was set up for pin {} but scaffold.toml now pins {configured}; \
-             run: logos-scaffold basecamp setup",
-            state.pin
-        )
-    })
+    // `setup` always writes both repos; without one (or with a blank pin, or
+    // a state file from before that pin was recorded) there is nothing to be
+    // stale against.
+    let stale = |label: &str, built: &str, repo: Option<&RepoRef>| {
+        let configured = repo.map(|r| r.pin.as_str()).filter(|p| !p.is_empty())?;
+        (!built.is_empty() && built != configured).then(|| {
+            format!(
+                "{label} was set up for pin {built} but scaffold.toml now pins {configured}; \
+                 run: logos-scaffold basecamp setup"
+            )
+        })
+    };
+    stale(
+        "basecamp",
+        &state.pin,
+        project.config.basecamp_repo.as_ref(),
+    )
+    .or_else(|| stale("lgpm", &state.lgpm_pin, project.config.lgpm_repo.as_ref()))
 }
 
 /// Where a project stands relative to scaffold's retired default pins (see
@@ -642,18 +646,6 @@ fn cmd_basecamp_launch(
             .map(|rel| project.root.join(rel)),
     };
 
-    let launch_state_path = profile_dir.join("launch.state");
-    let expected_comm = basecamp_comm_candidates(&state.basecamp_bin);
-    if let Some(pid) = read_launch_pid(&launch_state_path) {
-        // PID reuse means we can't be sure the recorded PID still maps to basecamp.
-        // Only issue signals if the PID's current comm matches; `kill_process_tree`
-        // re-verifies the comm before each signal to reduce the TOCTOU window.
-        if pid_comm_matches(pid, &expected_comm) {
-            kill_process_tree(pid, &expected_comm);
-        }
-        let _ = fs::remove_file(&launch_state_path);
-    }
-
     // Clean-slate launch replays `[modules]` into the freshly-scrubbed
     // profile. An empty capture set would make that replay a silent no-op, so
     // the profile would come up with zero modules. Fail fast with a hint.
@@ -668,6 +660,34 @@ fn cmd_basecamp_launch(
     let runtime_dir =
         resolve_profile_runtime_dir(&project.root, &profile, project.config.basecamp.as_ref());
     ensure_private_runtime_dir(&runtime_dir)?;
+
+    // Read the per-profile env file now too: a malformed one used to surface
+    // only after the profile had been scrubbed and reinstalled.
+    let env_file_vars = match project
+        .config
+        .basecamp
+        .as_ref()
+        .and_then(|bc| bc.profiles.get(&profile))
+        .and_then(|p| p.env_file.as_deref())
+    {
+        Some(rel) => load_env_file(&project.root, rel)?,
+        None => BTreeMap::new(),
+    };
+
+    // Stop the profile's running instance only once every fail-fast check
+    // above has passed, so a launch that refuses to start leaves the
+    // instance the user already had running alone.
+    let launch_state_path = profile_dir.join("launch.state");
+    let expected_comm = basecamp_comm_candidates(&state.basecamp_bin);
+    if let Some(pid) = read_launch_pid(&launch_state_path) {
+        // PID reuse means we can't be sure the recorded PID still maps to basecamp.
+        // Only issue signals if the PID's current comm matches; `kill_process_tree`
+        // re-verifies the comm before each signal to reduce the TOCTOU window.
+        if pid_comm_matches(pid, &expected_comm) {
+            kill_process_tree(pid, &expected_comm);
+        }
+        let _ = fs::remove_file(&launch_state_path);
+    }
 
     // Pre-seed in case a prior crash between scrub and re-seed left the profile
     // without its xdg subdirs; scrub assumes both exist. seed_profiles is
@@ -718,14 +738,6 @@ fn cmd_basecamp_launch(
     // env_file, then [basecamp.env] globals, then
     // [basecamp.profiles.<profile>.env] (profile wins).
     if let Some(bc) = project.config.basecamp.as_ref() {
-        let env_file_vars = match bc
-            .profiles
-            .get(&profile)
-            .and_then(|p| p.env_file.as_deref())
-        {
-            Some(rel) => load_env_file(&project.root, rel)?,
-            None => BTreeMap::new(),
-        };
         apply_launch_env_overrides(&mut env, bc, &profile, &env_file_vars, |k| {
             std::env::var_os(k)
         });
@@ -847,6 +859,8 @@ struct BasecampProfilePaths {
     xdg_config_home: String,
     xdg_data_home: String,
     xdg_cache_home: String,
+    /// `HOME` launch would export, for modules that ignore XDG.
+    home: String,
     /// `TMPDIR` launch would export. Same value as `xdg_runtime_dir`.
     tmpdir: String,
     /// `XDG_RUNTIME_DIR` launch would export. Always resolves; see
@@ -900,6 +914,7 @@ fn cmd_basecamp_paths(project: Project, profile: String, json: bool) -> DynResul
         xdg_config_home: profile_dir.join("xdg-config").display().to_string(),
         xdg_data_home: profile_dir.join("xdg-data").display().to_string(),
         xdg_cache_home: profile_dir.join("xdg-cache").display().to_string(),
+        home: profile_dir.join(PROFILE_HOME_DIR).display().to_string(),
         tmpdir: tmpdir.display().to_string(),
         xdg_runtime_dir: runtime_dir.display().to_string(),
         module_root: module_root.display().to_string(),
@@ -926,6 +941,7 @@ fn cmd_basecamp_paths(project: Project, profile: String, json: bool) -> DynResul
         println!("  xdg_config_home:  {}", paths.xdg_config_home);
         println!("  xdg_data_home:    {}", paths.xdg_data_home);
         println!("  xdg_cache_home:   {}", paths.xdg_cache_home);
+        println!("  home:             {}", paths.home);
         println!("  tmpdir:           {}", paths.tmpdir);
         println!("  xdg_runtime_dir:  {}", paths.xdg_runtime_dir);
         println!("  module_root:      {}", paths.module_root);
@@ -946,6 +962,9 @@ fn cmd_basecamp_paths(project: Project, profile: String, json: bool) -> DynResul
 /// Env map exported to the basecamp child on launch. Scaffold-owned names only;
 /// module port-override vars are not yet registered. `runtime_dir` becomes both
 /// `TMPDIR` and `XDG_RUNTIME_DIR`.
+/// Per-profile `HOME` under the profile dir; see [`launch_env`].
+const PROFILE_HOME_DIR: &str = "home";
+
 fn launch_env(
     profile_dir: &Path,
     profile_name: &str,
@@ -963,6 +982,15 @@ fn launch_env(
     env.insert(
         "XDG_CACHE_HOME".into(),
         profile_dir.join("xdg-cache").into_os_string(),
+    );
+    // Per-profile HOME. Not every module honours XDG: the storage module
+    // keeps its config, data and node key in `$HOME/.logos_storage`, so with
+    // the caller's HOME every profile — and the user's own basecamp — shared
+    // one storage identity and wrote outside the project. Kept across
+    // launches like `xdg-config`.
+    env.insert(
+        "HOME".into(),
+        profile_dir.join(PROFILE_HOME_DIR).into_os_string(),
     );
     // Per-profile TMPDIR (#89): liblogos_core binds each `logos_host`'s
     // QLocalServer socket at a hardcoded `logos_token_<module>` name under
@@ -4311,6 +4339,9 @@ fn seed_profiles(
             fs::create_dir_all(&path)
                 .with_context(|| format!("create profile dir {}", path.display()))?;
         }
+        let home = profile_dir.join(PROFILE_HOME_DIR);
+        fs::create_dir_all(&home)
+            .with_context(|| format!("create profile dir {}", home.display()))?;
         // Per-profile temp root for the launch-time `TMPDIR` export (#89).
         // Flat — no BASECAMP_XDG_APP_SUBPATH suffix: Qt's
         // `QLocalServer::listen("logos_token_…")` writes a socket file
@@ -4812,6 +4843,31 @@ mod tests {
         let msg = stale_setup(&project, &state(RETIRED_BASECAMP_PIN_SETS[0].1))
             .expect("a different pin is stale");
         assert!(msg.contains("basecamp setup"), "got: {msg}");
+    }
+
+    #[test]
+    fn stale_setup_flags_lgpm_built_for_another_pin() {
+        let tmp = tempdir().expect("tempdir");
+        let mut project = seed_basecamp_project(tmp.path());
+        project.config.basecamp_repo = Some(default_basecamp_repo(DEFAULT_BASECAMP_PIN));
+        project.config.lgpm_repo = Some(default_lgpm_repo(DEFAULT_LGPM_PIN));
+        let state = |lgpm_pin: &str| BasecampState {
+            pin: DEFAULT_BASECAMP_PIN.to_string(),
+            lgpm_pin: lgpm_pin.to_string(),
+            ..Default::default()
+        };
+        assert!(stale_setup(&project, &state(DEFAULT_LGPM_PIN)).is_none());
+        assert!(
+            stale_setup(&project, &state("")).is_none(),
+            "state files without lgpm_pin pass"
+        );
+        let msg = stale_setup(&project, &state("2222222222222222222222222222222222222222"))
+            .expect("an lgpm pin edit is stale");
+        assert!(
+            msg.starts_with("lgpm was set up for pin 2222"),
+            "got: {msg}"
+        );
+        assert!(msg.contains(DEFAULT_LGPM_PIN), "got: {msg}");
     }
 
     #[test]
@@ -5484,6 +5540,9 @@ mod tests {
             env.get("XDG_CACHE_HOME").unwrap(),
             &OsString::from("/p/alice/xdg-cache")
         );
+        // Modules that ignore XDG (the storage module uses
+        // `$HOME/.logos_storage`) must not share the caller's HOME.
+        assert_eq!(env.get("HOME").unwrap(), &OsString::from("/p/alice/home"));
         // #89: per-profile TMPDIR prevents the cross-profile QLocalServer
         // socket-name collision that SIGSEGVs Qt RemoteObjects. It is the
         // resolved runtime dir, never a path inside the profile (and so never

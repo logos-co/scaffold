@@ -219,7 +219,7 @@ fn resolve_pins_with_cache_root(
         // Managed cache checkout, keyed by the requested ref so different
         // pins coexist.
         (
-            cache_root.join("repos").join("lez").join(&lez_ref),
+            crate::project::managed_repo_dir(&cache_root, "lez", &lez_source, &lez_ref),
             CheckoutOwnership::ManagedCache,
         )
     };
@@ -668,9 +668,23 @@ mod tests {
         assert_eq!(pins.lez_ref_origin, PinOrigin::ProjectConfig);
         assert_eq!(pins.circuits_version_origin, PinOrigin::ScaffoldDefault);
         assert_eq!(pins.checkout_ownership, CheckoutOwnership::ManagedCache);
+        // A non-default source gets its own cache dir, the same one `setup`
+        // resolves through `resolve_repo_path`.
+        assert_eq!(
+            pins.lez_checkout,
+            crate::project::managed_repo_dir(
+                &crate::project::resolve_cache_root(&project).unwrap().0,
+                "lez",
+                "https://example.com/custom-lez.git",
+                "abc123",
+            )
+        );
         assert!(pins
             .lez_checkout
-            .ends_with(PathBuf::from("repos/lez/abc123")));
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("abc123-src-"));
 
         // Override wins over config.
         let pins = resolve_test_node_pins(

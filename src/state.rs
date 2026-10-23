@@ -71,6 +71,7 @@ pub(crate) fn write_basecamp_state(path: &Path, state: &BasecampState) -> DynRes
     // The state file is a line-oriented key=value format. A newline or CR embedded
     // in a value would split the record and silently corrupt state on the next read.
     check_state_value("pin", &state.pin)?;
+    check_state_value("lgpm_pin", &state.lgpm_pin)?;
     check_state_value("basecamp_bin", &state.basecamp_bin)?;
     check_state_value("lgpm_bin", &state.lgpm_bin)?;
 
@@ -81,6 +82,9 @@ pub(crate) fn write_basecamp_state(path: &Path, state: &BasecampState) -> DynRes
     let mut content = String::new();
     if !state.pin.is_empty() {
         content.push_str(&format!("pin={}\n", state.pin));
+    }
+    if !state.lgpm_pin.is_empty() {
+        content.push_str(&format!("lgpm_pin={}\n", state.lgpm_pin));
     }
     if !state.basecamp_bin.is_empty() {
         content.push_str(&format!("basecamp_bin={}\n", state.basecamp_bin));
@@ -114,6 +118,8 @@ pub(crate) fn read_basecamp_state(path: &Path) -> DynResult<BasecampState> {
 
         if let Some(rest) = line.strip_prefix("pin=") {
             state.pin = rest.to_string();
+        } else if let Some(rest) = line.strip_prefix("lgpm_pin=") {
+            state.lgpm_pin = rest.to_string();
         } else if let Some(rest) = line.strip_prefix("basecamp_bin=") {
             state.basecamp_bin = rest.to_string();
         } else if let Some(rest) = line.strip_prefix("lgpm_bin=") {
@@ -150,6 +156,7 @@ mod tests {
 
         let state = BasecampState {
             pin: "deadbeef".to_string(),
+            lgpm_pin: "cafef00d".to_string(),
             basecamp_bin: "/nix/store/abc/bin/basecamp".to_string(),
             lgpm_bin: "/nix/store/def/bin/lgpm".to_string(),
         };
@@ -158,6 +165,7 @@ mod tests {
         let loaded = read_basecamp_state(&path).expect("read");
 
         assert_eq!(loaded.pin, state.pin);
+        assert_eq!(loaded.lgpm_pin, state.lgpm_pin);
         assert_eq!(loaded.basecamp_bin, state.basecamp_bin);
         assert_eq!(loaded.lgpm_bin, state.lgpm_bin);
     }
@@ -169,6 +177,7 @@ mod tests {
 
         let state = BasecampState {
             pin: "sha1".to_string(),
+            lgpm_pin: String::new(),
             basecamp_bin: String::new(),
             lgpm_bin: String::new(),
         };

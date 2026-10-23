@@ -329,7 +329,12 @@ fn cmd_new_default(
             )?;
             lez_vendor
         } else {
-            let lez_cached = bootstrap_cache.join("repos/lez").join(DEFAULT_LEZ.sha);
+            let lez_cached = crate::project::managed_repo_dir(
+                &bootstrap_cache,
+                "lez",
+                &lez_source,
+                DEFAULT_LEZ.sha,
+            );
             sync_repo_to_pin_at_path_with_opts(
                 &lez_cached,
                 &lez_source,
@@ -425,6 +430,7 @@ fn cmd_new_default(
         target.display()
     );
     println!("Pinned lez: {}", cfg.lez.pin);
+    println!("Cache root: {}", bootstrap_cache.display());
     println!("Template variant: {}", cfg.framework.kind);
     println!("AI skills installed under .claude/skills/, .cursor/rules/, and AGENTS.md.");
 

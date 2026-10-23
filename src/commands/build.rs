@@ -366,21 +366,26 @@ fn preflight_docker_toolchain(needed_by: &str, alternative: Option<&str>) -> Dyn
              Install Docker.{or_alternative}"
         );
     }
-    let daemon_ok = Command::new("docker")
-        .arg("info")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !daemon_ok {
+    if !docker_daemon_running() {
         bail!(
             "{needed_by} needs a running Docker daemon; `docker info` failed.\n\
              Start Docker and retry.{or_alternative}"
         );
     }
     Ok(())
+}
+
+/// Whether `docker info` succeeds, i.e. a daemon is up and reachable. Shared
+/// with `doctor` so its `guest build` row and this preflight cannot disagree.
+pub(crate) fn docker_daemon_running() -> bool {
+    Command::new("docker")
+        .arg("info")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// Drop the deterministic artefact tree so a later `lgs deploy` cannot ship

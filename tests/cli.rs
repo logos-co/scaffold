@@ -3467,6 +3467,58 @@ fn basecamp_launch_bails_when_no_modules_captured() {
         );
 }
 
+#[cfg(unix)]
+#[test]
+fn basecamp_launch_that_bails_leaves_the_running_instance_alone() {
+    // A launch that refuses to start (here: nothing captured in [modules])
+    // must not first kill the instance the profile already has running.
+    let temp = tempdir().expect("tempdir");
+    let project = temp.path();
+    fs::write(project.join("scaffold.toml"), MINIMAL_SCAFFOLD_TOML).expect("write scaffold.toml");
+
+    // A stand-in "basecamp": `sleep` under the launcher's name, so its comm
+    // matches what launch would kill.
+    let fake_bin = project.join("LogosBasecamp");
+    fs::copy("/bin/sleep", &fake_bin).expect("copy sleep");
+    let state_dir = project.join(".scaffold/state");
+    fs::create_dir_all(&state_dir).expect("mkdir state");
+    fs::write(
+        state_dir.join("basecamp.state"),
+        format!(
+            "pin=deadbeef\nbasecamp_bin={0}\nlgpm_bin={0}\n",
+            fake_bin.display()
+        ),
+    )
+    .expect("write state");
+
+    let mut running = std::process::Command::new(&fake_bin)
+        .arg("300")
+        .spawn()
+        .expect("spawn fake basecamp");
+    let profile_dir = project.join(".scaffold/basecamp/profiles/alice");
+    fs::create_dir_all(&profile_dir).expect("mkdir profile");
+    fs::write(
+        profile_dir.join("launch.state"),
+        format!("pid={}\n", running.id()),
+    )
+    .expect("write launch.state");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(project)
+        .args(["basecamp", "launch", "alice"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no modules captured"));
+
+    let still_running = running.try_wait().expect("try_wait").is_none();
+    let _ = running.kill();
+    let _ = running.wait();
+    assert!(
+        still_running,
+        "a launch that bailed killed the running instance"
+    );
+}
+
 #[test]
 fn basecamp_launch_outside_project_errors() {
     let temp = tempdir().expect("tempdir");
