@@ -8,7 +8,7 @@ use notify::{RecursiveMode, Watcher};
 
 use crate::commands::build::cmd_build_shortcut;
 use crate::commands::deploy::{
-    cmd_deploy, discover_deployable_programs, discover_program_binaries, extract_program_id,
+    cmd_deploy, discover_deployable_programs, discover_project_binaries, extract_program_id,
 };
 use crate::commands::idl::{build_idl_for_current_project, IDL_STATE_REL};
 use crate::commands::localnet::{
@@ -603,7 +603,7 @@ fn collect_deployed_programs(project: &Project, skipped: bool) -> DynResult<Depl
     }
     let programs = discover_deployable_programs(&project.root)
         .context("failed to discover deployable programs for run post-deploy env")?;
-    let binaries = discover_program_binaries(&project.root, &programs);
+    let binaries = discover_project_binaries(project, &programs);
     let spel_repo = resolve_repo_path(project, &project.config.spel, "spel")
         .context("failed to resolve spel repo path for run post-deploy env")?;
     let spel_bin = spel_repo.join(SPEL_BIN_REL_PATH);
@@ -754,7 +754,7 @@ fn print_deploy_summary(project: &Project) -> DynResult<()> {
         println!("No deployable programs found in {}", programs_dir.display());
         return Ok(());
     }
-    let binaries = discover_program_binaries(&project.root, &programs);
+    let binaries = discover_project_binaries(project, &programs);
 
     println!();
     println!("Deployed programs:");
