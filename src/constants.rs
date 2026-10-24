@@ -87,8 +87,10 @@ pub(crate) const SEQUENCER_BIN_REL_PATH: &str = "target/release/sequencer_servic
 /// Project-relative directory holding the Risc0 guest crate (`methods/Cargo.toml`,
 /// `methods/guest/...`). Shared between the build side (`build_methods_guests`),
 /// which compiles the manifest, and the deploy side, which discovers the resulting
-/// `.bin` artefacts under the canonical workspace `target/riscv-guest/...` layout
-/// or the supported sub-crate `methods/target/...` compatibility layout.
+/// `.bin` artefacts under the deterministic `target/riscv-guest-docker/...`
+/// root, the canonical workspace `target/riscv-guest/...` layout, the
+/// sub-crate `methods/target/...` compatibility layout, or the
+/// independently-workspaced `methods/guest/target/...` layout.
 pub(crate) const METHODS_DIR: &str = "methods";
 /// `[package.metadata.risc0].methods` entry every risc0 template ships, and the
 /// fallback when `methods/Cargo.toml` declares none. Values are paths relative
