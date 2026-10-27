@@ -16,7 +16,7 @@ This skill activates whenever **any** of these is true:
 - `[modules.*]` entries already exist in `scaffold.toml`.
 - `.scaffold/basecamp/profiles/` already exists (basecamp setup has been run in this project before).
 
-Basecamp activates **independently** of `lez-template` / `lez-framework-template`. A project can be both a templated LEZ project and a basecamp-hosted module project; both skills then apply. Basecamp can also stand alone in an external module project with no LEZ template at all (the canonical case in DOGFOODING B-series — `tictactoe` and similar).
+Basecamp activates **independently** of `lez-template` / `spel-template`. A project can be both a templated LEZ project and a basecamp-hosted module project; both skills then apply. Basecamp can also stand alone in an external module project with no LEZ template at all (the canonical case in DOGFOODING B-series — `tictactoe` and similar).
 
 The canonical compatibility doc — including the full `[modules]` schema and dependency-resolution rules — is `docs/basecamp-module-requirements.md`, mirrored to consumers via `lgs basecamp docs`. Treat it as the source of truth and reference it instead of duplicating its contents.
 

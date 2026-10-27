@@ -73,6 +73,7 @@ Scaffold is also consumable as a Rust library (`logos_scaffold::api`): the same 
 ## Shared Preconditions
 
 - Unix-like environment with `git`, `rustc`, `cargo`, `lsof`, `ps`, and `kill`.
+- On Linux, `pkg-config` and the PCSC headers (`sudo apt install pkgconf libpcsclite-dev`; Fedora `pkgconf pcsc-lite-devel`, Arch `pkgconf pcsclite`). The pinned LEZ wallet links libpcsclite for keycard support, and both `setup` and `new --template spel` (which builds the spel CLI, and with it the wallet) fail without it. `new --template spel` and `doctor` warn up front; the build itself fails minutes in with a raw `pcsc-sys` error. macOS ships PCSC with the system.
 - Docker or Podman available for guest builds. The default guest build is the container one, so without a reachable Docker daemon a bare `build` — and `run`, which chains it — refuses before compiling anything. On such a host run `D1`/`D7`/`L1` with `build --guest local` or `[build].guest = "local"` in `scaffold.toml`, say so in the evidence, and cover `D8`'s container steps through its CI workflow (`guest-reproducibility.yml`, `workflow_dispatch`).
 - `logos-blockchain-circuits` release on disk when validating older projects without `[circuits]`: set `LOGOS_BLOCKCHAIN_CIRCUITS=<path>` (scaffold no longer consults `~/.logos-blockchain-circuits/`). New projects should carry a `[circuits]` table in `scaffold.toml`; `setup`, `build`, `build idl`, `localnet`, and test-node startup resolve and materialize the configured release instead of relying on ambient shell state.
 - No conflicting listener on the scaffold localnet port before `localnet start`.
@@ -122,7 +123,7 @@ mkdir -p "$DEST" && tar xzf /tmp/rust-tc.tar.gz -C "$DEST"
 "$DEST/bin/rustc" --version                        # → rustc 1.91.1-dev
 ```
 
-The `lez-framework` template's guest additionally compiles C (the default template's guests do not), so the L-series `build` also needs the risc0 **C++** toolchain; without it the guest build dies in cc-rs with `failed to find tool "/no_risc0_cpp_toolchain_installed_run_rzup_install_cpp"`. Same rzup layout, date-based version (dir uses the semver form of the tag, e.g. tag `2024.01.05` → dir `v2024.1.5`). The release asset (and the directory inside the tarball) is platform-specific and does **not** follow `$TRIPLE`: pick `riscv32im-linux-x86_64` on Linux x86_64 and `riscv32im-osx-arm64` on macOS arm64:
+The SPEL template also needs `cargo-risczero` itself (`rzup install cargo-risczero 3.0.5`), because its guest builds through `cargo risczero build` rather than risc0-build; without it the build stops at `error: no such command: risczero`. Its guest additionally compiles C (the default template's guests do not), so the L-series `build` also needs the risc0 **C++** toolchain; without it the guest build dies in cc-rs with `failed to find tool "/no_risc0_cpp_toolchain_installed_run_rzup_install_cpp"`. Same rzup layout, date-based version (dir uses the semver form of the tag, e.g. tag `2024.01.05` → dir `v2024.1.5`). The release asset (and the directory inside the tarball) is platform-specific and does **not** follow `$TRIPLE`: pick `riscv32im-linux-x86_64` on Linux x86_64 and `riscv32im-osx-arm64` on macOS arm64:
 
 ```bash
 CPPASSET=riscv32im-linux-x86_64                    # riscv32im-osx-arm64 on macOS arm64
@@ -171,13 +172,13 @@ If any of these is missing, do not "skip the real run" — go back and fix the s
 | D6 | `default` | Core | Example runner interaction and account state verification | `cargo run --bin run_hello_world`, `cargo run --bin run_hello_world_with_move_function`, `wallet -- account get` |
 | D7 | `default` | Core | One-step `run` pipeline and post-deploy hooks | `run`, `run --post-deploy`, `run --no-post-deploy`, `[run]` config |
 | D8 | `default` | Advanced | Reproducible guest builds and the `program_id` they produce | `build`, `build --guest docker`, `[build]` config, `doctor`, `deploy --json` |
-| L1 | `lez-framework` | Core | Fresh LEZ project bootstrap to ready state | `new --template lez-framework`, `setup`, `localnet start`, `doctor`, `build` |
-| L2 | `lez-framework` | Core | LEZ IDL regeneration | `build idl` |
-| L3 | `lez-framework` | Advanced | LEZ client generation from current IDL | `build client` |
-| L4 | `lez-framework` | Core | LEZ deploy and counter interaction | `deploy`, `cargo run --bin run_lez_counter` |
+| L1 | `spel` | Core | Fresh SPEL project bootstrap to ready state | `new --template spel`, `setup`, `localnet start`, `doctor`, `build` |
+| L2 | `spel` | Core | SPEL IDL regeneration | `build idl` |
+| L3 | `spel` | Advanced | SPEL FFI/client generation from current IDL | `build client` |
+| L4 | `spel` | Core | SPEL deploy and program interaction | `deploy`, `spel -- <instruction>` |
 | E1 | N/A | Core | CLI discoverability and error quality | `--help`, `help`, `--version`, unknown commands, out-of-project errors |
 | E2 | N/A | Advanced | Project creation with advanced flags and invalid inputs | `new --template`, `new --vendor-deps`, `new --cache-root` |
-| E3 | N/A | Core | AI skills materialized into generated and adopted projects | `new`, `new --template lez-framework`, `init`, `init` re-run |
+| E3 | N/A | Core | AI skills materialized into generated and adopted projects | `new`, `new --template spel`, `init`, `init` re-run |
 | B1 | external module project | Core | Basecamp + lgpm setup and idempotent re-run | `init`, `basecamp setup`, `basecamp doctor`, `basecamp docs` |
 | B2 | external module project | Core | Module capture, install, paths, and single-instance launch | `basecamp modules`, `basecamp modules --show`, `basecamp install`, `basecamp paths`, `basecamp launch <profile>` |
 | B3 | external module project | Core | Two-instance p2p dogfooding | `basecamp launch <profile>` (parallel) |
@@ -235,7 +236,7 @@ Use `new` for the main runnable project and `create` as the lightweight alias-pa
 
 - Project creation succeeds and prints the destination path, pinned LEZ commit, and cache root.
 - Generated `scaffold.toml` includes a `[circuits]` table. The default install dir is project-local (`.scaffold/circuits`), and the configured version/download template/install dir become the single source of truth for commands that need `logos-blockchain-circuits`.
-- `setup` completes after syncing LEZ to the configured pin, building both `sequencer_service` and `wallet` inside the project's LEZ tree, and either seeding the default wallet or reporting that a default wallet is already configured. Both seeding paths are a PASS: `default wallet seeded from preconfigured account` when the pinned LEZ debug config ships an `initial_accounts` entry, and `default wallet seeded by initializing wallet storage (config ships no preconfigured account)` on LEZ v0.2.0, whose debug config ships none — there `setup` runs the freshly built `wallet` to create its persistent storage and adopts the first `Public/` account on a `/ `-prefixed listing line, ignoring `Public/` addresses on lines that are not `/ `-prefixed — notably the wallet's own `Preconfigured …` entries, which it prints above the stored accounts even when the config ships no `initial_accounts`, and which a first-token scan would adopt instead of the account the wallet just created. Only if no `/ `-prefixed line yields a usable `Public/` address does it fall back to the first `Public/` token anywhere in the output; if the wallet ever stops `/ `-prefixing stored accounts, that fallback starts adopting a preconfigured address, so a seeded address matching a `Preconfigured` line rather than a `/ ` one is worth reporting. Either line is followed by `  Address:` and `  State file:`. Only `warning: could not seed default wallet automatically` is a failure. With `--prebuilt`: `sequencer_service` is downloaded instead of built from source (falls back to source build if no artifact is published). The download is installed only if it matches the `sequencer_service.sha256` published next to it: a missing, unfetchable, empty or malformed checksum prints a `not installing an unverified binary` warning and falls back to the source build, and a digest mismatch is a hard error. An unverified binary landing in `target/release/` is the regression; `wallet` is always built from source regardless of `--prebuilt`.
+- `setup` completes after syncing LEZ to the configured pin, building both `sequencer_service` and `wallet` inside the project's LEZ tree, and either seeding the default wallet or reporting that a default wallet is already configured. Both seeding paths are a PASS: `default wallet seeded from preconfigured account` when the pinned LEZ debug config ships an `initial_accounts` entry, and `default wallet seeded by initializing wallet storage (config ships no preconfigured account)` on LEZ v0.2.0, whose debug config ships none — there `setup` runs the freshly built `wallet` to create its persistent storage and adopts the first `Public/` account on a `/ `-prefixed listing line, ignoring `Public/` addresses on lines that are not `/ `-prefixed — notably the wallet's own `Preconfigured …` entries, which it prints above the stored accounts even when the config ships no `initial_accounts`, and which a first-token scan would adopt instead of the account the wallet just created. Only if no `/ `-prefixed line yields a usable `Public/` address does it fall back to the first `Public/` token anywhere in the output; if the wallet ever stops `/ `-prefixing stored accounts, that fallback starts adopting a preconfigured address, so a seeded address matching a `Preconfigured` line rather than a `/ ` one is worth reporting. Either line is followed by `  Address:` and `  State file:`. From LEZ v0.2.4 every wallet command needs a running sequencer, so on a machine with no localnet up `setup` instead prints `default wallet seeding deferred: wallet commands need a running sequencer (LEZ v0.2.4+). `logos-scaffold run` seeds it once localnet is up.` — also a PASS; the next `build` (which re-runs `setup`) or `run` after `localnet start` prints the seeded line. Only `warning: could not seed default wallet automatically` is a failure. With `--prebuilt`: `sequencer_service` is downloaded instead of built from source (falls back to source build if no artifact is published). The download is installed only if it matches the `sequencer_service.sha256` published next to it: a missing, unfetchable, empty or malformed checksum prints a `not installing an unverified binary` warning and falls back to the source build, and a digest mismatch is a hard error. An unverified binary landing in `target/release/` is the regression; `wallet` is always built from source regardless of `--prebuilt`.
 - `localnet start` reports a ready localnet rather than only a spawned PID.
 - `build` exits successfully after preparing the project workspace, resolving the configured circuits release, and — when the project has a `methods/Cargo.toml` (Risc0 guest crate excluded from the main workspace) — also prints `Building guest methods...` and produces guest `.bin` files under `target/riscv-guest/<methods-crate>/<guest-crate>/riscv32im-risc0-zkvm-elf/release/`, the same paths `deploy` submits from. The default template uses the workspace `target/` tree, not `methods/target/`. This describes the `--guest local` / `[build].guest = "local"` path; the default is the deterministic container build, whose artefacts land under `target/riscv-guest-docker/` instead (see D8).
 - `deploy` prints a submission summary with zero failures when built binaries are present. Multi-program deploys are paced one program per sequencer block (`Waiting for a new block past N before the next deployment ...` between submissions): the pinned LEZ settles each block as a single bedrock inscription with a ~896 KiB payload cap and panics fatally when a block exceeds it, so batching several ~370 KiB deployment ELFs into one block kills the sequencer. Expect roughly one `block_create_timeout` (15s) of wait per additional program. Pacing fails closed: a stalled head or an unreadable post-submission baseline aborts the remaining submissions with `deploy pacing aborted ...` and a non-zero exit rather than batching unpaced (re-run `deploy` for the rest once the sequencer recovers, or raise `LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS` for slow block intervals). A deploy that continues unpaced and crashes localnet mid-flow is a regression; equally, record it if the upstream cap is lifted and pacing becomes dead weight.
@@ -354,7 +355,7 @@ Both deploy paths honor `--json`, with a different shape each. `--program-path -
 - `deploy <name> --json` and bare `deploy --json` print a parseable `{"deploys":[…]}` object whose entries carry the same fields.
 - `deploy --program-path ...` without `--json` prints a human-readable `OK` line with the binary path.
 - `deploy nonexistent_program` fails with an error listing the available discovered programs.
-- The echoed `wallet deploy-program <path>` names which artefact was shipped. With only a `local` build on disk that is the `target/riscv-guest/.../release/` one; a `target/riscv-guest-docker/.../docker/` artefact, when present, outranks it. With the guest artefacts removed (and localnet up — the missing-binary report comes after the sequencer preflight), `deploy` names the searched roots, which must list all three in ranking order: `target/riscv-guest-docker`, `target/riscv-guest`, `methods/target`. A missing root is why a built program looks undeployable. See `D8` for the ranking itself.
+- The echoed `wallet deploy-program <path>` names which artefact was shipped. With only a `local` build on disk that is the `target/riscv-guest/.../release/` one; a `target/riscv-guest-docker/.../docker/` artefact, when present, outranks it. With the guest artefacts removed (and localnet up — the missing-binary report comes after the sequencer preflight), `deploy` names the searched roots, which must list all four in search order: `target/riscv-guest-docker`, `target/riscv-guest`, `methods/target`, `methods/guest/target` (where `cargo risczero build`, and so spel's `make build`, writes). A missing root is why a built program looks undeployable. See `D8` for the ranking itself.
 
 ### Failure Signals / Common Pitfalls
 
@@ -719,6 +720,24 @@ hand: copy the `release/` `.bin` into `$DOCKER_BINS/` and confirm the next
 `deploy` echoes `wallet deploy-program <…/docker/…>` rather than the
 `release/` path. That covers everything except reproducibility itself.
 
+Also check that only the deterministic tree scaffold owns for the project
+kind earns that top rank (`target/riscv-guest-docker` for `default`,
+`methods/guest/target` for `spel`). In a `default` project with a fresh
+`release/` build, plant a leftover where a hand-run `cargo risczero build`
+would put it:
+
+```bash
+mkdir -p methods/guest/target/riscv32im-risc0-zkvm-elf/docker
+cp <some other program>.bin methods/guest/target/riscv32im-risc0-zkvm-elf/docker/hello_world.bin
+"$SCAFFOLD_BIN" deploy hello_world
+rm -rf methods/guest/target
+```
+
+`deploy` must echo the `release/` (or `target/riscv-guest-docker`) path, not
+the planted one, and print `note: ignoring …/methods/guest/target/…/docker/hello_world.bin`
+on stderr. Shipping the planted ELF is the stale-deploy regression: `lgs build`
+never clears `methods/guest/target`, so it would win every later deploy.
+
 ### Expected Success Signals
 
 - Step 1 builds with the host toolchain and succeeds without Docker or `cargo-risczero`; it prints no non-reproducibility note (the choice was explicit).
@@ -733,6 +752,7 @@ hand: copy the `release/` `.bin` into `$DOCKER_BINS/` and confirm the next
 
 - The same `program_id` from steps 1 and 5 usually means `deploy` picked the same artefact twice — check which path `deploy` reported as the binary, not just the ID.
 - `deploy` reporting a `release/` binary while the effective mode is `docker` (the default) is a discovery-ranking regression.
+- `deploy` shipping a `docker/` artefact from a root the project kind does not own (the planted `methods/guest/target` leftover above, in a `default` project) is the opposite regression, and a silent one: the bytes no longer match the last `lgs build`.
 - A deterministic build that succeeds but produces no `.bin` (only extension-less ELFs) means risc0's output layout moved; capture `ls -R target/riscv-guest-docker`.
 - Very slow builds are expected on the first run (~1.7 GB image pull, no cargo cache reuse inside the container). Slowness is worth recording as a DX finding, but it is not a correctness failure.
 - Any large directory in the project root inflates the Docker build context (risc0 excludes only `.git`, `target`, `node_modules`, `tmp`). If the context transfer dominates the build, capture its reported size.
@@ -751,16 +771,23 @@ hand: copy the `release/` `.bin` into `$DOCKER_BINS/` and confirm the next
 - Steps 4 and 5 are the load-bearing ones. If time is short, run 1, 3, 4, and 5.
 - A second machine (or a CI runner) building the same commit and comparing hashes is stronger evidence than two builds on one host; do that when it is available.
 
-## L1. LEZ Template Bootstrap
+## L1. SPEL Template Bootstrap
 
 ### Goal
 
-Validate that the LEZ template scaffolds and reaches a ready-to-build state.
+Validate that the SPEL template scaffolds and reaches a ready-to-build state.
 
 ### Preconditions
 
 - Latest scaffold binary has been built from the repo root.
 - Scratch workspace exists.
+- Docker running, plus risc0's `cargo-risczero` (`rzup install cargo-risczero 3.0.5`).
+  The SPEL guest builds through `cargo risczero build`; without it `build`
+  dies with `error: no such command: risczero`.
+
+`spel` itself does **not** need to be installed: `new --template spel` clones
+and builds the pinned CLI into the scaffold cache, the same way LEZ is
+bootstrapped.
 
 ### Commands / Actions
 
@@ -768,180 +795,219 @@ From the scratch workspace:
 
 ```bash
 cd "$SCRATCH_ROOT"
-"$SCAFFOLD_BIN" new dogfood-lez --template lez-framework
-cd dogfood-lez
-ls -d idl crates/lez-client-gen methods/guest/src/bin src/bin
+"$SCAFFOLD_BIN" new dogfood-spel --template spel
+cd dogfood-spel
+ls -d spel.toml Makefile dogfood_spel_core dogfood_spel_ffi methods/guest/src/bin
 "$SCAFFOLD_BIN" setup
 "$SCAFFOLD_BIN" localnet start
 "$SCAFFOLD_BIN" doctor
 "$SCAFFOLD_BIN" build
 ```
 
-The `ls` step verifies that LEZ-specific directories were scaffolded before proceeding with the build pipeline.
+The `ls` step verifies the SPEL layout was scaffolded before the build runs.
 
 ### Expected Success Signals
 
-- Project creation succeeds with the LEZ template.
-- The generated project contains `idl/`, `crates/lez-client-gen/`, `methods/guest/src/bin/lez_counter.rs`, and `src/bin/run_lez_counter.rs`.
-- `setup`, `localnet start`, and `doctor` behave the same way they do for the default template.
-- `build` succeeds for the LEZ project workspace and also runs IDL generation and client generation automatically.
+- Creation prints the pins it recorded (`Pinned LEZ: v0.2.4`, `Pinned spel: v0.7.0`).
+- The generated project contains `spel.toml`, a `Makefile`, `<name>_core/`,
+  `<name>_ffi/`, and `methods/guest/src/bin/<name>.rs`.
+- `methods/guest/Cargo.toml` pins `spel-framework` at the **tag** scaffold
+  recorded — never `branch = "main"`.
+- `setup`, `localnet start`, and `doctor` behave as for the default template.
+  `doctor` reports zero FAIL.
+- `build` runs `make build` (Docker guest build) and then IDL generation,
+  leaving `<name>-idl.json` at the project root.
 
 ### Failure Signals / Common Pitfalls
 
-- If the generated project is missing LEZ-specific paths such as `idl/`, `crates/lez-client-gen/`, or `methods/guest/src/bin/lez_counter.rs`, record that immediately.
-- If LEZ bootstrap behavior diverges from the default template in setup/localnet/doctor flows, capture the difference explicitly.
-- If `build` does not automatically trigger IDL + client generation for the LEZ template, record that as a regression.
+- `❌ Directory '<name>' already exists` from `spel init` means scaffold
+  created the project directory before delegating — `spel init` requires it
+  not to exist.
+- `spel-framework = { … branch = "main" }` in the generated manifests means
+  the pin flags did not reach `spel init`. Its parser stops at the first
+  non-flag argument and silently ignores everything after it, so the flags
+  must precede the project name (logos-co/spel#286).
+- The first `build` takes 5–15 minutes: the guest cross-compiles in Docker.
+  That is normal, not a hang.
 
 ### Evidence to Capture
 
-- LEZ project creation output.
-- Directory listing showing LEZ-specific scaffolded paths.
+- Creation output including the recorded pins.
+- Directory listing showing the SPEL layout.
+- The `spel-framework` line from `methods/guest/Cargo.toml`.
 - `setup`, `localnet start`, `doctor`, and `build` excerpts.
+
+### Also cover `--vendor-deps`
+
+```bash
+cd "$SCRATCH_ROOT"
+"$SCAFFOLD_BIN" new dogfood-spel-vendored --template spel --vendor-deps
+git -C dogfood-spel-vendored/.scaffold/repos/spel rev-parse HEAD
+grep -A3 'repos.spel' dogfood-spel-vendored/scaffold.toml
+```
+
+The vendored repo must exist at `.scaffold/repos/spel`, checked out at the same
+SHA `scaffold.toml` records under `[repos.spel] pin`, with
+`path = ".scaffold/repos/spel"` alongside it.
+
+This is worth a separate step because it exercises an ordering constraint the
+happy path does not: `spel init` refuses to write into an existing directory, so
+anything created under the project directory *before* the delegation breaks the
+whole command — and it would break several minutes in, after the clone and the
+CLI build. Vendoring therefore has to happen after `spel init` returns. The
+symptom if that regresses is `❌ Directory '<name>' already exists` followed by
+scaffold removing the directory, leaving a long wait and no project.
 
 ### Execution Notes
 
-- Keep LEZ runs separate from default-template runs. The template-specific directories and follow-up commands are part of the validation.
+- Keep SPEL runs separate from default-template runs.
 
-## L2. LEZ IDL Regeneration
+## L2. SPEL IDL Regeneration
 
 ### Goal
 
-Validate that LEZ projects can regenerate IDL from the current project source.
+Validate that SPEL projects regenerate the IDL from the current program source.
 
 ### Preconditions
 
-- LEZ project exists.
-- The LEZ project build environment is working.
+- SPEL project exists and its build environment works.
 
 ### Commands / Actions
 
-From the LEZ project root:
+From the SPEL project root:
 
 ```bash
 "$SCAFFOLD_BIN" build idl
-find idl -maxdepth 1 -type f -name '*.json' | sort
+ls -l ./*-idl.json
 ```
 
 ### Expected Success Signals
 
-- `build idl` writes one or more JSON files under `idl/`.
-- Command output includes explicit `Wrote IDL ...` lines.
-- The regenerated files are valid JSON and match the current program surface.
+- Output includes `✅ IDL written to <name>-idl.json`.
+- The file named by `spel.toml`'s `[program] idl` exists at the project root
+  and is valid JSON matching the current program surface.
 
 ### Failure Signals / Common Pitfalls
 
-- If the command prints that IDL build is being skipped due to framework kind, the scenario is running in the wrong project.
-- Missing IDL marker output or empty IDL generation is a real regression for the LEZ template.
+- IDL JSON printed to the terminal with **no file written** means generation
+  bypassed the Makefile: `spel generate-idl` writes to stdout, and the `idl:`
+  recipe is what redirects it to the file.
+- A later step failing with `expected IDL file …/idl/<stem>.json is missing`
+  means something is still resolving the IDL by the old `<idl-dir>/<stem>.json`
+  convention rather than from `spel.toml`. SPEL projects have no `idl/`
+  directory.
+- `Skipping IDL build for framework kind …` means the scenario is running in
+  the wrong project.
 
 ### Evidence to Capture
 
 - `build idl` output.
-- Listing of generated files under `idl/`.
-- If relevant, a diff between pre-existing and regenerated IDL.
+- `ls -l` of the generated IDL file.
+- If relevant, a diff between the pre-existing and regenerated IDL.
 
-### Execution Notes
-
-- Preserve the raw `Wrote IDL ...` lines. They make it much easier to diagnose partial-generation failures.
-
-## L3. LEZ Client Generation
+## L3. SPEL Client Generation
 
 ### Goal
 
-Validate that LEZ client bindings can be regenerated from the current IDL set.
+Validate that FFI/client bindings regenerate from the current IDL.
 
 ### Preconditions
 
-- LEZ project exists.
-- `build idl` has been run successfully, either directly or via `build client`.
+- SPEL project exists.
+- `setup` has run, so the vendored `spel-client-gen` binary is built.
 
 ### Commands / Actions
 
-From the LEZ project root:
+From the SPEL project root:
 
 ```bash
 "$SCAFFOLD_BIN" build client
-find src/generated -type f | sort
+find ./*_ffi/generated -type f | sort
 ```
 
 ### Expected Success Signals
 
-- `build client` reports that it is regenerating IDL before generating client code.
-- Client artifacts are written under `src/generated`.
-- The generated files reflect the current contents of `idl/`.
+- IDL is regenerated first, then generation reports the client, FFI and header
+  it wrote.
+- `<name>_ffi/generated/` contains `<name>_client.rs`, `<name>_ffi.rs` and
+  `<name>.h`.
+- The command line echoed for the generator points at the **vendored** binary
+  under the scaffold cache, not a `spel-client-gen` from `PATH`.
 
 ### Failure Signals / Common Pitfalls
 
-- If `build client` does not refresh IDL first, record that behavior change.
-- Missing `src/generated` output or missing generator crate paths are LEZ-specific regressions.
+- `no such command: ffi-gen` (or similar) means something invoked
+  `spel ffi-gen`; that subcommand does not exist — generation is the separate
+  `spel-client-gen` binary, driven by `make ffi-gen`.
+- `vendored spel-client-gen binary not found` means `setup` has not built it.
 
 ### Evidence to Capture
 
-- `build client` output.
-- Listing of files under `src/generated`.
-- Any diff in generated client code when the scenario is rerun after a program change.
+- `build client` output including the generator command line.
+- Listing of `<name>_ffi/generated/`.
 
-### Execution Notes
-
-- Treat generated client output as part of the scenario evidence, not as disposable noise.
-- When the generator fails, capture the exact manifest path and working directory that were used.
-
-## L4. LEZ Template Deploy and Counter Interaction
+## L4. SPEL Template Deploy and Program Interaction
 
 ### Goal
 
-Validate that the LEZ counter program can be deployed and that the generated runner binary can invoke `init` and `increment` subcommands against the running localnet.
+Validate that the SPEL program deploys and that its instructions can be
+invoked against the running localnet through the typed CLI.
 
 ### Preconditions
 
-- LEZ project exists with L1 completed (setup, build, localnet running).
+- SPEL project exists with L1 completed (setup, build, localnet running).
 - `wallet -- check-health` succeeds.
-- A self-owned public account to sign with (`<account-id>`, the bare base58 part):
-
-```bash
-"$SCAFFOLD_BIN" wallet -- account new public
-```
 
 ### Commands / Actions
 
-From the LEZ project root:
+From the SPEL project root:
 
 ```bash
 "$SCAFFOLD_BIN" deploy
-export NSSA_WALLET_HOME_DIR="$PWD/.scaffold/wallet" LEE_WALLET_HOME_DIR="$PWD/.scaffold/wallet"
-export HOST_CC=cc HOST_CXX=c++
-cargo run --bin run_lez_counter -- init --authority <account-id>
-cargo run --bin run_lez_counter -- show                      # poll until `= 0`
-cargo run --bin run_lez_counter -- increment --authority <account-id> --amount 5
-cargo run --bin run_lez_counter -- show                      # poll until `= 5`
+
+# Create the signer, and initialise it for the transfer program FIRST.
+"$SCAFFOLD_BIN" wallet -- account new public          # prints Public/<id>
+"$SCAFFOLD_BIN" wallet -- auth-transfer init --account-id Public/<id>
+
+"$SCAFFOLD_BIN" spel -- initialize --owner Public/<id>
+"$SCAFFOLD_BIN" spel -- pda state
+"$SCAFFOLD_BIN" spel -- inspect <pda> --type ProgramState
 ```
-
-The counter is not a user account: both instructions derive it as the PDA `[program_id, "counter"]`, so the runner computes the address itself and there is one counter per deployment.
-
-`HOST_CC`/`HOST_CXX` matter for direct `cargo run` in lez-framework projects when the risc0 C++ toolchain is installed: the guest embed refingerprints under your shell env, risc0-build exports plain `CC` = riscv gcc, and the guest graph's host-side proc-macro deps (`spel-framework-macros` → … → `ring`) then compile host C with the riscv compiler and die on `-m64`. Scaffold's own `build`/IDL/client commands pin these automatically; direct cargo invocations need the export (CI's template-e2e does the same at the job level).
 
 ### Expected Success Signals
 
-- `deploy` submits the `lez_counter` program and prints a success summary.
-- `run_lez_counter init` and `increment` each print `submitted transaction: tx_hash=…` and a `verification hint:` naming the counter PDA, and exit 0.
-- `show` reads the counter through the sequencer: `not initialized` before `init` lands, then `counter <pda> = 0`, and `= 5` after the increment. Reads follow block production (15s default), so poll.
-- `"$SCAFFOLD_BIN" wallet -- account get --account-id Public/<pda>` shows the counter's `data` as the little-endian u64 (`0500000000000000` for 5) and `program_owner` set to the program.
+- `deploy` prints a `program_id` for the guest binary.
+- `initialize` confirms the transaction was included in a block.
+- `inspect` shows the PDA's state — the account does not exist at all until
+  `initialize` succeeds, so readable state is the proof it executed on chain.
 
 ### Failure Signals / Common Pitfalls
 
-- If `deploy` cannot find `lez_counter` in the discovered program list, record the actual discovered list.
-- If the runner panics on wallet initialization, the name this pin reads is unset: either neither name was exported, or only `LEE_WALLET_HOME_DIR` was exported against a pre-v0.2.0 pin. If it instead starts against an empty wallet, the pin is v0.2.0 and only `NSSA_WALLET_HOME_DIR` was exported — that wallet ignores the old name and falls back to `~/.lee/wallet` without an error.
-- A runner that exits 0 while `show` never moves means the transaction was rejected at execution; check the sequencer log (`localnet logs`) for `failed execution check`. `increment` before `init` is that case (`AccountNotInitialized`), and so is a second `init` against an existing counter.
+- **Run `auth-transfer init` before the account signs anything.** A signer
+  claimed by a SPEL program is owned by it permanently: LEZ never reassigns
+  ownership and only an owner may decrease a balance, so such an account can
+  receive tokens but can never send them. This is irreversible.
+- Account ids carry a privacy prefix: pass `Public/<id>`, not the bare id.
+- Instruction names are kebab-case on the CLI (`do-something`), even though
+  the Rust handler is snake_case.
+- `Error: Failed to find leader` from any wallet command means no sequencer is
+  answering — since LEZ v0.2.4 every wallet invocation elects a leader, so
+  wallet commands need a running localnet.
 
 ### Evidence to Capture
 
-- `deploy` output for the LEZ project.
-- `run_lez_counter init` and `increment` output.
-- `show` output after each step.
+- `deploy` output including the `program_id`.
+- The transaction confirmations and the `inspect` output.
 
 ### Execution Notes
 
-- Both `NSSA_WALLET_HOME_DIR` (LEZ up to v0.1.2) and `LEE_WALLET_HOME_DIR` (LEZ v0.2.0) must be exported for the runner. Scaffold wallet commands set both automatically, but direct `cargo run` does not.
-- Keep LEZ interaction evidence separate from default-template interaction evidence.
+- `lgs spel -- <args>` runs the project-vendored spel binary, which is pinned
+  in scaffold.toml. Prefer it over any globally installed `spel`.
+- Do not export a wallet home for L4: `lgs spel --` points spel at the
+  project wallet itself, overriding the shell, like `lgs wallet --`. A
+  `spel` transaction that reports `Storage not found` or an empty wallet is
+  the regression this step checks.
+
 
 ## E1. CLI Discoverability and Error Quality
 
@@ -1032,8 +1098,9 @@ From the scratch workspace:
 ```bash
 cd "$SCRATCH_ROOT"
 "$SCAFFOLD_BIN" new dogfood-invalid-template --template nonexistent-template
-"$SCAFFOLD_BIN" new dogfood-lez-explicit --template lez-framework
-ls -d dogfood-lez-explicit/idl dogfood-lez-explicit/crates/lez-client-gen
+"$SCAFFOLD_BIN" new dogfood-spel-explicit --template spel
+ls -d dogfood-spel-explicit/spel.toml dogfood-spel-explicit/Makefile
+"$SCAFFOLD_BIN" new dogfood-lez-alias --template lez-framework   # deprecated alias: warns, same result
 "$SCAFFOLD_BIN" new dogfood-vendor --vendor-deps
 "$SCAFFOLD_BIN" new dogfood-cache --cache-root "$SCRATCH_ROOT/custom-cache"
 find "$SCRATCH_ROOT/custom-cache/repos/lez" -maxdepth 2 -mindepth 1 -type d | sort
@@ -1042,8 +1109,8 @@ grep -n "^\[wallet\]\|^home_dir\|^binary" dogfood-cache/scaffold.toml
 
 ### Expected Success Signals
 
-- Invalid `--template` name fails with a clear error listing the available templates (`default`, `lez-framework`).
-- `--template lez-framework` creates a project with LEZ-specific structure (same as L1).
+- Invalid `--template` name fails with a clear error listing the available templates (`default`, `spel`) and mentioning the deprecated `lez-framework` alias.
+- `--template spel` creates a project with the SPEL structure (same as L1). `--template lez-framework` still works, printing a deprecation warning and producing the same result.
 - `--vendor-deps` is accepted without error and creates a project that vendors the pinned LEZ repo under `.scaffold/repos/lez`.
 - `--cache-root` is honored and scaffold uses the specified directory for cache operations, with non-vendored LEZ clones isolated by pin under `<cache-root>/repos/lez/<pin>/`.
 - Generated `scaffold.toml` includes `[wallet].home_dir` and does not include a deprecated `wallet.binary` field.
@@ -1061,7 +1128,7 @@ grep -n "^\[wallet\]\|^home_dir\|^binary" dogfood-cache/scaffold.toml
 ### Evidence to Capture
 
 - Error output for invalid `--template`.
-- Creation output for `--template lez-framework` with directory listing.
+- Creation output for `--template spel` with directory listing.
 - Creation output for `--vendor-deps` and `--cache-root` if tested.
 - Directory listing proving the pin-isolated cache path.
 - `scaffold.toml` excerpt showing wallet home config without a wallet binary field.
@@ -1092,7 +1159,7 @@ From the scratch workspace:
 ```bash
 cd "$SCRATCH_ROOT"
 "$SCAFFOLD_BIN" new dogfood-skills-default
-"$SCAFFOLD_BIN" new dogfood-skills-lez --template lez-framework
+"$SCAFFOLD_BIN" new dogfood-skills-spel --template spel
 
 mkdir dogfood-skills-init && cd dogfood-skills-init
 "$SCAFFOLD_BIN" init
@@ -1105,13 +1172,13 @@ Inspect the generated layout in each of the three projects:
 
 ```bash
 find dogfood-skills-default/.claude/skills dogfood-skills-default/.cursor/rules -type f | sort
-find dogfood-skills-lez/.claude/skills dogfood-skills-lez/.cursor/rules -type f | sort
-ls dogfood-skills-default/AGENTS.md dogfood-skills-lez/AGENTS.md dogfood-skills-init/AGENTS.md
+find dogfood-skills-spel/.claude/skills dogfood-skills-spel/.cursor/rules -type f | sort
+ls dogfood-skills-default/AGENTS.md dogfood-skills-spel/AGENTS.md dogfood-skills-init/AGENTS.md
 ```
 
 ### Expected Success Signals
 
-- Every generated project (default template, lez-framework template, and `init`-adopted bare directory) contains exactly four `.claude/skills/<name>/SKILL.md` files: `lgs-cli`, `lez-template`, `lez-framework-template`, `basecamp`.
+- Every generated project (default template, SPEL template, and `init`-adopted bare directory) contains exactly four `.claude/skills/<name>/SKILL.md` files: `lgs-cli`, `lez-template`, `spel-template`, `basecamp`.
 - The same four skills appear under `.cursor/rules/<name>.mdc`.
 - `AGENTS.md` exists at every project root, lists all four skills with their descriptions, and links to `.claude/skills/<name>/SKILL.md`.
 - Re-running `init` on an already-migrated project succeeds (no longer bails) and prints `AI skills refreshed under .claude/skills/, .cursor/rules/, AGENTS.md.` The `shasum` output before and after a re-init is byte-identical for all three skill files.
