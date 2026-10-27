@@ -73,6 +73,7 @@ Scaffold is also consumable as a Rust library (`logos_scaffold::api`): the same 
 ## Shared Preconditions
 
 - Unix-like environment with `git`, `rustc`, `cargo`, `lsof`, `ps`, and `kill`.
+- On Linux, `pkg-config` and the PCSC headers (`sudo apt install pkgconf libpcsclite-dev`; Fedora `pkgconf pcsc-lite-devel`, Arch `pkgconf pcsclite`). The pinned LEZ wallet links libpcsclite for keycard support, and both `setup` and `new --template spel` (which builds the spel CLI, and with it the wallet) fail without it. `new --template spel` and `doctor` warn up front; the build itself fails minutes in with a raw `pcsc-sys` error. macOS ships PCSC with the system.
 - Docker or Podman available for guest builds. The default guest build is the container one, so without a reachable Docker daemon a bare `build` — and `run`, which chains it — refuses before compiling anything. On such a host run `D1`/`D7`/`L1` with `build --guest local` or `[build].guest = "local"` in `scaffold.toml`, say so in the evidence, and cover `D8`'s container steps through its CI workflow (`guest-reproducibility.yml`, `workflow_dispatch`).
 - `logos-blockchain-circuits` release on disk when validating older projects without `[circuits]`: set `LOGOS_BLOCKCHAIN_CIRCUITS=<path>` (scaffold no longer consults `~/.logos-blockchain-circuits/`). New projects should carry a `[circuits]` table in `scaffold.toml`; `setup`, `build`, `build idl`, `localnet`, and test-node startup resolve and materialize the configured release instead of relying on ambient shell state.
 - No conflicting listener on the scaffold localnet port before `localnet start`.
@@ -235,7 +236,7 @@ Use `new` for the main runnable project and `create` as the lightweight alias-pa
 
 - Project creation succeeds and prints the destination path, pinned LEZ commit, and cache root.
 - Generated `scaffold.toml` includes a `[circuits]` table. The default install dir is project-local (`.scaffold/circuits`), and the configured version/download template/install dir become the single source of truth for commands that need `logos-blockchain-circuits`.
-- `setup` completes after syncing LEZ to the configured pin, building both `sequencer_service` and `wallet` inside the project's LEZ tree, and either seeding the default wallet or reporting that a default wallet is already configured. Both seeding paths are a PASS: `default wallet seeded from preconfigured account` when the pinned LEZ debug config ships an `initial_accounts` entry, and `default wallet seeded by initializing wallet storage (config ships no preconfigured account)` on LEZ v0.2.0, whose debug config ships none — there `setup` runs the freshly built `wallet` to create its persistent storage and adopts the first `Public/` account on a `/ `-prefixed listing line, ignoring `Public/` addresses on lines that are not `/ `-prefixed — notably the wallet's own `Preconfigured …` entries, which it prints above the stored accounts even when the config ships no `initial_accounts`, and which a first-token scan would adopt instead of the account the wallet just created. Only if no `/ `-prefixed line yields a usable `Public/` address does it fall back to the first `Public/` token anywhere in the output; if the wallet ever stops `/ `-prefixing stored accounts, that fallback starts adopting a preconfigured address, so a seeded address matching a `Preconfigured` line rather than a `/ ` one is worth reporting. Either line is followed by `  Address:` and `  State file:`. Only `warning: could not seed default wallet automatically` is a failure. With `--prebuilt`: `sequencer_service` is downloaded instead of built from source (falls back to source build if no artifact is published). The download is installed only if it matches the `sequencer_service.sha256` published next to it: a missing, unfetchable, empty or malformed checksum prints a `not installing an unverified binary` warning and falls back to the source build, and a digest mismatch is a hard error. An unverified binary landing in `target/release/` is the regression; `wallet` is always built from source regardless of `--prebuilt`.
+- `setup` completes after syncing LEZ to the configured pin, building both `sequencer_service` and `wallet` inside the project's LEZ tree, and either seeding the default wallet or reporting that a default wallet is already configured. Both seeding paths are a PASS: `default wallet seeded from preconfigured account` when the pinned LEZ debug config ships an `initial_accounts` entry, and `default wallet seeded by initializing wallet storage (config ships no preconfigured account)` on LEZ v0.2.0, whose debug config ships none — there `setup` runs the freshly built `wallet` to create its persistent storage and adopts the first `Public/` account on a `/ `-prefixed listing line, ignoring `Public/` addresses on lines that are not `/ `-prefixed — notably the wallet's own `Preconfigured …` entries, which it prints above the stored accounts even when the config ships no `initial_accounts`, and which a first-token scan would adopt instead of the account the wallet just created. Only if no `/ `-prefixed line yields a usable `Public/` address does it fall back to the first `Public/` token anywhere in the output; if the wallet ever stops `/ `-prefixing stored accounts, that fallback starts adopting a preconfigured address, so a seeded address matching a `Preconfigured` line rather than a `/ ` one is worth reporting. Either line is followed by `  Address:` and `  State file:`. From LEZ v0.2.4 every wallet command needs a running sequencer, so on a machine with no localnet up `setup` instead prints `default wallet seeding deferred: wallet commands need a running sequencer (LEZ v0.2.4+). `logos-scaffold run` seeds it once localnet is up.` — also a PASS; the next `build` (which re-runs `setup`) or `run` after `localnet start` prints the seeded line. Only `warning: could not seed default wallet automatically` is a failure. With `--prebuilt`: `sequencer_service` is downloaded instead of built from source (falls back to source build if no artifact is published). The download is installed only if it matches the `sequencer_service.sha256` published next to it: a missing, unfetchable, empty or malformed checksum prints a `not installing an unverified binary` warning and falls back to the source build, and a digest mismatch is a hard error. An unverified binary landing in `target/release/` is the regression; `wallet` is always built from source regardless of `--prebuilt`.
 - `localnet start` reports a ready localnet rather than only a spawned PID.
 - `build` exits successfully after preparing the project workspace, resolving the configured circuits release, and — when the project has a `methods/Cargo.toml` (Risc0 guest crate excluded from the main workspace) — also prints `Building guest methods...` and produces guest `.bin` files under `target/riscv-guest/<methods-crate>/<guest-crate>/riscv32im-risc0-zkvm-elf/release/`, the same paths `deploy` submits from. The default template uses the workspace `target/` tree, not `methods/target/`. This describes the `--guest local` / `[build].guest = "local"` path; the default is the deterministic container build, whose artefacts land under `target/riscv-guest-docker/` instead (see D8).
 - `deploy` prints a submission summary with zero failures when built binaries are present. Multi-program deploys are paced one program per sequencer block (`Waiting for a new block past N before the next deployment ...` between submissions): the pinned LEZ settles each block as a single bedrock inscription with a ~896 KiB payload cap and panics fatally when a block exceeds it, so batching several ~370 KiB deployment ELFs into one block kills the sequencer. Expect roughly one `block_create_timeout` (15s) of wait per additional program. Pacing fails closed: a stalled head or an unreadable post-submission baseline aborts the remaining submissions with `deploy pacing aborted ...` and a non-zero exit rather than batching unpaced (re-run `deploy` for the rest once the sequencer recovers, or raise `LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS` for slow block intervals). A deploy that continues unpaced and crashes localnet mid-flow is a regression; equally, record it if the upstream cap is lifted and pacing becomes dead weight.
@@ -354,7 +355,7 @@ Both deploy paths honor `--json`, with a different shape each. `--program-path -
 - `deploy <name> --json` and bare `deploy --json` print a parseable `{"deploys":[…]}` object whose entries carry the same fields.
 - `deploy --program-path ...` without `--json` prints a human-readable `OK` line with the binary path.
 - `deploy nonexistent_program` fails with an error listing the available discovered programs.
-- The echoed `wallet deploy-program <path>` names which artefact was shipped. With only a `local` build on disk that is the `target/riscv-guest/.../release/` one; a `target/riscv-guest-docker/.../docker/` artefact, when present, outranks it. With the guest artefacts removed (and localnet up — the missing-binary report comes after the sequencer preflight), `deploy` names the searched roots, which must list all three in ranking order: `target/riscv-guest-docker`, `target/riscv-guest`, `methods/target`. A missing root is why a built program looks undeployable. See `D8` for the ranking itself.
+- The echoed `wallet deploy-program <path>` names which artefact was shipped. With only a `local` build on disk that is the `target/riscv-guest/.../release/` one; a `target/riscv-guest-docker/.../docker/` artefact, when present, outranks it. With the guest artefacts removed (and localnet up — the missing-binary report comes after the sequencer preflight), `deploy` names the searched roots, which must list all four in search order: `target/riscv-guest-docker`, `target/riscv-guest`, `methods/target`, `methods/guest/target` (where `cargo risczero build`, and so spel's `make build`, writes). A missing root is why a built program looks undeployable. See `D8` for the ranking itself.
 
 ### Failure Signals / Common Pitfalls
 
@@ -719,6 +720,24 @@ hand: copy the `release/` `.bin` into `$DOCKER_BINS/` and confirm the next
 `deploy` echoes `wallet deploy-program <…/docker/…>` rather than the
 `release/` path. That covers everything except reproducibility itself.
 
+Also check that only the deterministic tree scaffold owns for the project
+kind earns that top rank (`target/riscv-guest-docker` for `default`,
+`methods/guest/target` for `spel`). In a `default` project with a fresh
+`release/` build, plant a leftover where a hand-run `cargo risczero build`
+would put it:
+
+```bash
+mkdir -p methods/guest/target/riscv32im-risc0-zkvm-elf/docker
+cp <some other program>.bin methods/guest/target/riscv32im-risc0-zkvm-elf/docker/hello_world.bin
+"$SCAFFOLD_BIN" deploy hello_world
+rm -rf methods/guest/target
+```
+
+`deploy` must echo the `release/` (or `target/riscv-guest-docker`) path, not
+the planted one, and print `note: ignoring …/methods/guest/target/…/docker/hello_world.bin`
+on stderr. Shipping the planted ELF is the stale-deploy regression: `lgs build`
+never clears `methods/guest/target`, so it would win every later deploy.
+
 ### Expected Success Signals
 
 - Step 1 builds with the host toolchain and succeeds without Docker or `cargo-risczero`; it prints no non-reproducibility note (the choice was explicit).
@@ -733,6 +752,7 @@ hand: copy the `release/` `.bin` into `$DOCKER_BINS/` and confirm the next
 
 - The same `program_id` from steps 1 and 5 usually means `deploy` picked the same artefact twice — check which path `deploy` reported as the binary, not just the ID.
 - `deploy` reporting a `release/` binary while the effective mode is `docker` (the default) is a discovery-ranking regression.
+- `deploy` shipping a `docker/` artefact from a root the project kind does not own (the planted `methods/guest/target` leftover above, in a `default` project) is the opposite regression, and a silent one: the bytes no longer match the last `lgs build`.
 - A deterministic build that succeeds but produces no `.bin` (only extension-less ELFs) means risc0's output layout moved; capture `ls -R target/riscv-guest-docker`.
 - Very slow builds are expected on the first run (~1.7 GB image pull, no cargo cache reuse inside the container). Slowness is worth recording as a DX finding, but it is not a correctness failure.
 - Any large directory in the project root inflates the Docker build context (risc0 excludes only `.git`, `target`, `node_modules`, `tmp`). If the context transfer dominates the build, capture its reported size.
@@ -951,7 +971,7 @@ From the SPEL project root:
 
 "$SCAFFOLD_BIN" spel -- initialize --owner Public/<id>
 "$SCAFFOLD_BIN" spel -- pda state
-"$SCAFFOLD_BIN" spel --type ProgramState -- inspect <pda>
+"$SCAFFOLD_BIN" spel -- inspect <pda> --type ProgramState
 ```
 
 ### Expected Success Signals
@@ -1079,7 +1099,8 @@ From the scratch workspace:
 cd "$SCRATCH_ROOT"
 "$SCAFFOLD_BIN" new dogfood-invalid-template --template nonexistent-template
 "$SCAFFOLD_BIN" new dogfood-spel-explicit --template spel
-ls -d dogfood-lez-explicit/idl dogfood-lez-explicit/crates/lez-client-gen
+ls -d dogfood-spel-explicit/spel.toml dogfood-spel-explicit/Makefile
+"$SCAFFOLD_BIN" new dogfood-lez-alias --template lez-framework   # deprecated alias: warns, same result
 "$SCAFFOLD_BIN" new dogfood-vendor --vendor-deps
 "$SCAFFOLD_BIN" new dogfood-cache --cache-root "$SCRATCH_ROOT/custom-cache"
 find "$SCRATCH_ROOT/custom-cache/repos/lez" -maxdepth 2 -mindepth 1 -type d | sort
@@ -1151,8 +1172,8 @@ Inspect the generated layout in each of the three projects:
 
 ```bash
 find dogfood-skills-default/.claude/skills dogfood-skills-default/.cursor/rules -type f | sort
-find dogfood-skills-lez/.claude/skills dogfood-skills-lez/.cursor/rules -type f | sort
-ls dogfood-skills-default/AGENTS.md dogfood-skills-lez/AGENTS.md dogfood-skills-init/AGENTS.md
+find dogfood-skills-spel/.claude/skills dogfood-skills-spel/.cursor/rules -type f | sort
+ls dogfood-skills-default/AGENTS.md dogfood-skills-spel/AGENTS.md dogfood-skills-init/AGENTS.md
 ```
 
 ### Expected Success Signals

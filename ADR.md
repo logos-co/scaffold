@@ -544,11 +544,18 @@ of `spel program-id`.
 
 The deploy command must work for any scaffolded project regardless of its name.
 Binary discovery should derive paths from the actual project structure, not assume the template's naming.
-The implementation walks both `target/riscv-guest/` (the canonical risc0 layout used by the
-scaffold template) and `methods/target/` (the sub-crate workspace layout), matching `<program>.bin`
-files whose path components include both a `riscv32im*` target triple and a `release` directory.
-Release builds are preferred; if only a debug build exists, that is used as a fallback. When
-multiple matches exist, the shallowest path wins. This keeps the scaffold general and avoids
+The implementation walks four roots — `target/riscv-guest-docker/` (scaffold's deterministic
+build), `target/riscv-guest/` (the canonical risc0 layout used by the scaffold template),
+`methods/target/` (the sub-crate workspace layout) and `methods/guest/target/` (where
+`cargo risczero build`, and so a spel project's `make build`, writes) — matching `<program>.bin`
+files whose path components include a `riscv32im*` target triple. A `docker` directory directly
+under the triple ranks first, but only inside the one root the project kind owns
+(`target/riscv-guest-docker/` for `default`, `methods/guest/target/` for `spel`): that is the tree
+the last `lgs build` wrote, and `lgs build` never clears the others, so a `docker/` leftover there
+would otherwise win every later deploy with bytes the last build did not produce. `deploy` names
+such a leftover on stderr instead of shipping it. Release builds come next; if only a debug build
+exists, that is used as a fallback. When multiple matches exist within a rank, the shallowest
+path wins. This keeps the scaffold general and avoids
 coupling to a specific project name or workspace layout.
 
 ## Guest Build Discovery
