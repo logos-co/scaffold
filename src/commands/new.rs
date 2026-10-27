@@ -140,7 +140,8 @@ fn cmd_new_spel(
         "Cloning spel at pin {} from {} (this may take a minute the first time)...",
         DEFAULT_SPEL.sha, SPEL_SOURCE
     );
-    let cached_spel = bootstrap_cache.join("repos/spel").join(DEFAULT_SPEL.sha);
+    let cached_spel =
+        crate::project::managed_repo_dir(bootstrap_cache, "spel", SPEL_SOURCE, DEFAULT_SPEL.sha);
     {
         let _echo_guard = crate::process::EchoGuard::suppress();
         sync_repo_to_pin_at_path_with_opts(

@@ -19,7 +19,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::commands::deploy::{discover_deployable_programs, discover_program_binaries};
+use crate::commands::deploy::{discover_deployable_programs, discover_project_binaries};
 use crate::commands::idl::sanitize_file_stem;
 use crate::commands::wallet_support::{
     default_sequencer_http_url_for_project, load_wallet_runtime,
@@ -64,7 +64,7 @@ pub(crate) fn compute_program_hashes(project: &Project) -> DynResult<BTreeMap<St
     if programs.is_empty() {
         return Ok(out);
     }
-    let binaries = discover_program_binaries(&project.root, &programs);
+    let binaries = discover_project_binaries(project, &programs);
     // If a discovered guest source has no compiled `.bin` yet, the cache
     // would otherwise hash only the subset that *is* built and could
     // declare a hit against an old cache that predates the new source.
