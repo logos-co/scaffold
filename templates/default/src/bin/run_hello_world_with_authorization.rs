@@ -1,7 +1,8 @@
 use anyhow::{Context, anyhow};
 use clap::Parser;
+use common::transaction::LeeTransaction;
 use example_program_deployment_methods::HELLO_WORLD_WITH_AUTHORIZATION_ELF;
-use nssa::{
+use lee::{
     PublicTransaction,
     public_transaction::{Message, WitnessSet},
 };
@@ -22,7 +23,9 @@ struct Cli {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let wallet_core = WalletCore::from_env().context("failed to initialize wallet from environment")?;
+    let wallet_core = WalletCore::from_env()
+        .await
+        .context("failed to initialize wallet from environment")?;
 
     let program = load_program(
         cli.program_path.as_deref(),
@@ -32,14 +35,12 @@ async fn main() -> anyhow::Result<()> {
     let account_id = parse_account_id(&cli.account_id)?;
 
     let signing_key = wallet_core
-        .storage()
-        .user_data
-        .get_pub_account_signing_key(account_id)
+        .get_account_public_signing_key(account_id)
         .ok_or_else(|| anyhow!("input account must be a self-owned public account"))?;
 
     let greeting: Vec<u8> = vec![72, 111, 108, 97, 32, 109, 117, 110, 100, 111, 33];
     let nonces = wallet_core
-        .get_accounts_nonces(vec![account_id])
+        .get_accounts_nonces(&[account_id])
         .await
         .context("failed to query account nonce from sequencer")?;
     let message = Message::try_new(program.id(), vec![account_id], nonces, greeting)
@@ -48,8 +49,8 @@ async fn main() -> anyhow::Result<()> {
     let tx = PublicTransaction::new(message, witness_set);
 
     let response = wallet_core
-        .sequencer_client
-        .send_transaction(tx.into())
+        .helm_owned()
+        .send_transaction(LeeTransaction::Public(tx))
         .await
         .context("failed to submit public transaction to localnet")?;
 

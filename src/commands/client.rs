@@ -5,10 +5,12 @@ use std::process::Command;
 use anyhow::{anyhow, bail};
 
 use crate::commands::idl::build_idl_for_current_project;
-use crate::constants::FRAMEWORK_KIND_LEZ_FRAMEWORK;
+use crate::constants::{
+    FRAMEWORK_KIND_LEZ_FRAMEWORK, FRAMEWORK_KIND_SPEL, SPEL_CLIENT_GEN_BIN_REL_PATH,
+};
 use crate::model::Project;
 use crate::process::{apply_host_cc_overrides, run_checked};
-use crate::project::{load_project, run_in_project_dir};
+use crate::project::{load_project, resolve_repo_path, run_in_project_dir};
 use crate::DynResult;
 
 pub(crate) fn cmd_client(args: &[String]) -> DynResult<()> {
@@ -27,35 +29,63 @@ pub(crate) fn cmd_client(args: &[String]) -> DynResult<()> {
 }
 
 pub(crate) fn build_clients_for_current_project() -> DynResult<()> {
-    let project = load_lez_framework_project_for_client_build()?;
-
+    let project = load_project()?;
+    if project.config.framework.kind == FRAMEWORK_KIND_SPEL {
+        // spel projects: delegate IDL regen + FFI gen entirely to spel's own tooling.
+        build_idl_for_current_project()?;
+        return run_spel_ffi_gen(&project);
+    }
+    let project = require_lez_framework_project(project)?;
     // Always regenerate IDL in direct `build client` flows to prevent stale IDL drift.
     println!("[client] Regenerating IDL to ensure it is fresh...");
     build_idl_for_current_project()?;
-
     generate_clients_from_project_idl(&project)
 }
 
 pub(crate) fn generate_clients_from_current_idl() -> DynResult<()> {
-    let project = load_lez_framework_project_for_client_build()?;
+    let project = load_project()?;
+    if project.config.framework.kind == FRAMEWORK_KIND_SPEL {
+        return run_spel_ffi_gen(&project);
+    }
+    let project = require_lez_framework_project(project)?;
     generate_clients_from_project_idl(&project)
 }
 
-fn load_lez_framework_project_for_client_build() -> DynResult<Project> {
-    let project = load_project()?;
+/// Run FFI/client generation for a spel project.
+///
+/// There is no `spel ffi-gen` subcommand: generation is done by the separate
+/// `spel-client-gen` binary, and the `Makefile` written by `spel init` is what
+/// knows this project's IDL file and FFI output directory. So drive `make
+/// ffi-gen` rather than restating that layout here, and point it at the
+/// vendored generator — the Makefile declares `SPEL_CLIENT_GEN ?= ...`, which
+/// the environment overrides, so this works even when only `spel` itself is on
+/// PATH.
+fn run_spel_ffi_gen(project: &Project) -> DynResult<()> {
+    let generator = resolve_repo_path(project, &project.config.spel, "spel")?
+        .join(SPEL_CLIENT_GEN_BIN_REL_PATH);
+    if !generator.exists() {
+        bail!(
+            "vendored spel-client-gen binary not found at `{}`\nNext step: run `logos-scaffold setup` to build it.",
+            generator.display()
+        );
+    }
+    let mut cmd = Command::new("make");
+    cmd.arg("ffi-gen")
+        .current_dir(&project.root)
+        .env("SPEL_CLIENT_GEN", &generator);
+    apply_host_cc_overrides(&mut cmd);
+    run_checked(&mut cmd, "generate spel FFI client")
+}
+
+fn require_lez_framework_project(project: Project) -> DynResult<Project> {
     if project.config.framework.kind == FRAMEWORK_KIND_LEZ_FRAMEWORK {
         return Ok(project);
     }
-
-    // Mirrors `build_idl_for_current_project`: explicit `build client` against
-    // a non-lez-framework project used to silently no-op (exit 0). Bail loudly
-    // so an agent piping `lgs build client && next-step` doesn't carry on
-    // with no generated client code. The `lgs build` shortcut already gates
-    // on framework kind, so it never reaches here for `default` projects.
     bail!(
-        "`build client` is only supported for `lez-framework` projects (current framework.kind = `{}`).\n\
+        "`build client` is only supported for `spel` and `lez-framework` projects \
+         (current framework.kind = `{}`).\n\
          Use `logos-scaffold build` for the framework-agnostic build, \
-         or set `framework.kind = \"lez-framework\"` in scaffold.toml.",
+         or set `framework.kind = \"spel\"` in scaffold.toml.",
         project.config.framework.kind
     )
 }
