@@ -38,6 +38,9 @@ const GUEST_BIN_SEARCH_ROOTS: &[&str] = &[
     SPEL_GUEST_TARGET_DIR,
 ];
 
+/// The risc0 guest target triple `cargo risczero build` writes under.
+const RISC0_GUEST_TRIPLE: &str = "riscv32im-risc0-zkvm-elf";
+
 /// Where `cargo risczero build` (`make build` in spel projects) writes guests.
 const SPEL_GUEST_TARGET_DIR: &str = "methods/guest/target";
 
@@ -157,6 +160,17 @@ pub(crate) fn deploy_for_project(
 
     let selected_programs = resolve_selected_programs(program_name, &available_programs)?;
     let discovered = discover_project_binaries(&project, &selected_programs);
+    // stderr, so `--json` stdout stays a single object.
+    for (program, ignored) in ignored_docker_artifacts(project, &selected_programs) {
+        if discovered.get(&program) != Some(&ignored) {
+            eprintln!(
+                "note: ignoring {} — docker output outside {} is not from `lgs build`, \
+                 which decides what deploy ships",
+                ignored.display(),
+                owned_docker_root(project)
+            );
+        }
+    }
 
     preflight_sequencer_reachability(&sequencer_addr)?;
 
@@ -809,6 +823,32 @@ pub(crate) fn owned_docker_root(project: &Project) -> &'static str {
     }
 }
 
+/// `cargo risczero build` outputs (`<root>/<triple>/docker/<program>.bin`)
+/// sitting in a search root the project does *not* own. Discovery demotes
+/// them on purpose; `deploy` names them so a deliberately hand-built
+/// reproducible ELF is not passed over without a word.
+pub(crate) fn ignored_docker_artifacts(
+    project: &Project,
+    programs: &[String],
+) -> Vec<(String, PathBuf)> {
+    let owned = owned_docker_root(project);
+    let mut out = Vec::new();
+    for root in GUEST_BIN_SEARCH_ROOTS.iter().filter(|r| **r != owned) {
+        for program in programs.iter().filter(|p| is_valid_program_name(p)) {
+            let path = project
+                .root
+                .join(root)
+                .join(RISC0_GUEST_TRIPLE)
+                .join("docker")
+                .join(format!("{program}.bin"));
+            if path.is_file() {
+                out.push((program.clone(), path));
+            }
+        }
+    }
+    out
+}
+
 /// [`discover_program_binaries`] for a loaded project, with the docker rank
 /// scoped to the root that project kind owns.
 pub(crate) fn discover_project_binaries(
@@ -1090,6 +1130,95 @@ mod tests {
             b"docker",
             "the docker build is release-grade and must win over debug"
         );
+    }
+
+    /// Scaffold a minimal project of `kind` at `root`, loaded through the same
+    /// path the CLI uses, so the kind-to-root mapping is what is under test.
+    fn project_of_kind(root: &Path, kind: &str) -> Project {
+        fs::write(
+            root.join("scaffold.toml"),
+            format!(
+                "[scaffold]\nversion = \"0.2.0\"\n\n[repos.lez]\nsource = \"https://example.invalid/lez.git\"\npin = \"p\"\n\n\
+                 [repos.spel]\nsource = \"https://example.invalid/spel.git\"\npin = \"p\"\n\n[wallet]\nhome_dir = \".scaffold/wallet\"\n\n\
+                 [framework]\nkind = \"{kind}\"\nversion = \"0.1.0\"\n\n[framework.idl]\n\
+                 spec = \"lssa-idl/0.1.0\"\npath = \"idl\"\n"
+            ),
+        )
+        .unwrap();
+        crate::project::load_project_at(root).unwrap()
+    }
+
+    /// The ranking rule above is only half the fix: which root a project
+    /// *owns* is decided by `owned_docker_root` from `framework.kind`, and
+    /// swapping that mapping reintroduces the stale-ELF deploy for default
+    /// projects. Drive it end to end through `discover_project_binaries` on
+    /// one tree holding a fresh `release/` build, a `docker/` artefact in
+    /// each candidate root, and a different payload in each.
+    #[test]
+    fn project_kind_decides_which_docker_root_outranks_a_fresh_release() {
+        let tmp = TempDir::new().unwrap();
+        let plant = |rel: &str, bytes: &[u8]| {
+            let dir = tmp.path().join(rel);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("my_program.bin"), bytes).unwrap();
+        };
+        plant(
+            "target/riscv-guest/m/g/riscv32im-risc0-zkvm-elf/release",
+            b"fresh-release",
+        );
+        plant(
+            "methods/guest/target/riscv32im-risc0-zkvm-elf/docker",
+            b"spel-make-build",
+        );
+        let programs = ["my_program".to_string()];
+
+        let default = project_of_kind(tmp.path(), "default");
+        assert_eq!(
+            owned_docker_root(&default),
+            crate::constants::GUEST_DOCKER_TARGET_DIR
+        );
+        let picked = discover_project_binaries(&default, &programs)
+            .remove("my_program")
+            .unwrap();
+        assert_eq!(
+            fs::read(&picked).unwrap(),
+            b"fresh-release",
+            "a default project must not ship a docker/ leftover from methods/guest/target: {}",
+            picked.display()
+        );
+
+        let spel = project_of_kind(tmp.path(), FRAMEWORK_KIND_SPEL);
+        assert_eq!(owned_docker_root(&spel), SPEL_GUEST_TARGET_DIR);
+        let picked = discover_project_binaries(&spel, &programs)
+            .remove("my_program")
+            .unwrap();
+        assert_eq!(
+            fs::read(&picked).unwrap(),
+            b"spel-make-build",
+            "a spel project must ship its make build output: {}",
+            picked.display()
+        );
+
+        // The demoted artefact is named for the default project, not the spel one.
+        let ignored = ignored_docker_artifacts(&default, &programs);
+        assert_eq!(ignored.len(), 1, "{ignored:?}");
+        assert!(ignored[0]
+            .1
+            .starts_with(tmp.path().join(SPEL_GUEST_TARGET_DIR)));
+        assert!(ignored_docker_artifacts(&spel, &programs).is_empty());
+
+        // And the default project's own deterministic tree does win for it.
+        plant(
+            &format!(
+                "{}/riscv32im-risc0-zkvm-elf/docker",
+                crate::constants::GUEST_DOCKER_TARGET_DIR
+            ),
+            b"scaffold-docker",
+        );
+        let picked = discover_project_binaries(&default, &programs)
+            .remove("my_program")
+            .unwrap();
+        assert_eq!(fs::read(&picked).unwrap(), b"scaffold-docker");
     }
 
     /// A `docker/`-shaped artefact outside the root scaffold owns for the
