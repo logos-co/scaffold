@@ -3496,6 +3496,44 @@ fn basecamp_launch_with_unwritable_log_file_leaves_the_running_instance_alone() 
     );
 }
 
+/// A host-independent `sleep <secs>` binary, compiled once per test run.
+///
+/// The basecamp launch tests used to copy `/bin/sleep`, but on hosts whose
+/// coreutils is a multicall binary (uutils on Ubuntu 26.04, busybox) the copy
+/// resolves its applet from its own name and exits at once as
+/// `LogosBasecamp`. A shell-script wrapper is no substitute: its comm is the
+/// interpreter, so launch would never target it. A real executable keeps
+/// comm equal to whatever name it is copied under.
+#[cfg(unix)]
+fn sleeper_binary() -> &'static Path {
+    static SLEEPER: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    SLEEPER.get_or_init(|| {
+        let dir = tempfile::Builder::new()
+            .prefix("scaffold-sleeper")
+            .tempdir()
+            .expect("tempdir")
+            .keep();
+        let src = dir.join("sleeper.rs");
+        fs::write(
+            &src,
+            "fn main() {\n\
+             let secs = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(300);\n\
+             std::thread::sleep(std::time::Duration::from_secs(secs));\n}\n",
+        )
+        .expect("write sleeper.rs");
+        let bin = dir.join("sleeper");
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let status = std::process::Command::new(rustc)
+            .arg(&src)
+            .arg("-o")
+            .arg(&bin)
+            .status()
+            .expect("run rustc");
+        assert!(status.success(), "compiling the sleeper stand-in failed");
+        bin
+    })
+}
+
 #[cfg(unix)]
 fn assert_refused_launch_keeps_running_instance(
     scaffold_toml: &str,
@@ -3508,10 +3546,10 @@ fn assert_refused_launch_keeps_running_instance(
     fs::write(project.join("scaffold.toml"), scaffold_toml).expect("write scaffold.toml");
     prepare(project);
 
-    // A stand-in "basecamp": `sleep` under the launcher's name, so its comm
+    // A stand-in "basecamp": a sleeper under the launcher's name, so its comm
     // matches what launch would kill.
     let fake_bin = project.join("LogosBasecamp");
-    fs::copy("/bin/sleep", &fake_bin).expect("copy sleep");
+    fs::copy(sleeper_binary(), &fake_bin).expect("copy sleeper");
     let state_dir = project.join(".scaffold/state");
     fs::create_dir_all(&state_dir).expect("mkdir state");
     fs::write(
@@ -3544,6 +3582,23 @@ fn assert_refused_launch_keeps_running_instance(
         format!("pid={}\n", running.id()),
     )
     .expect("write launch.state");
+
+    // Guard against a vacuous pass: if the stand-in already exited, or its comm
+    // is not one launch would kill, "still running" below proves nothing.
+    thread::sleep(Duration::from_millis(100));
+    assert!(
+        running.try_wait().expect("try_wait").is_none(),
+        "fake basecamp exited before launch ran; the fixture is broken"
+    );
+    let comm = std::process::Command::new("ps")
+        .args(["-p", &running.id().to_string(), "-o", "comm="])
+        .output()
+        .expect("ps");
+    let comm = String::from_utf8_lossy(&comm.stdout);
+    assert!(
+        comm.trim().ends_with("LogosBasecamp"),
+        "fake basecamp comm is {comm:?}; launch would never target it"
+    );
 
     Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(project)
