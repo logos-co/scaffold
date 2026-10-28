@@ -34,6 +34,14 @@ wallet interaction settings used by deploy and wallet-based interaction commands
 Env files are familiar and automation-friendly,
 but require strict handling to avoid credential leakage.
 
+### Addendum: DevNet targeting has not shipped
+
+The decision above anticipated local and DevNet env files. What shipped is local only.
+Network targeting lives in `scaffold.toml` (`[localnet].port`) and the wallet config under
+`[wallet].home_dir`, which commands read directly. The generated `.env.local` carries only
+`RUST_LOG` and `RISC0_DEV_MODE`. A DevNet target, when it lands, should be recorded as its
+own decision rather than inherited from this one.
+
 ## Portable Artefact Build is Separate from Install
 
 The `.#lgx-portable` output exists to load into a released basecamp AppImage — a
@@ -336,6 +344,15 @@ of its own, the program ID always matches what the sequencer sees, and a
 any spel subcommand without a global install. `extract_program_id` is
 bounded by a wall-clock timeout and falls back to a non-fatal "unavailable"
 hint so a broken or hung `spel` can never gate a successful deploy.
+
+### Addendum: cache-managed location and current pins
+
+"Vendors per project" now means *pinned* per project, not *cloned into* each project. Like
+LEZ, spel is checked out at `<cache_root>/repos/spel/<pin>` by default, with
+`[repos.spel].path` empty (see "Pin-Only Storage, Path Derived at Runtime"). It lands in
+`.scaffold/repos/spel` only for `--vendor-deps` projects. The pins quoted above are history.
+Scaffold 0.4.1 ships spel `v0.7.0` (`DEFAULT_SPEL`) and LEZ `v0.2.4` (`DEFAULT_LEZ`), chosen
+under the same alignment rule, which `doctor` still enforces.
 
 ## Schema Migration via `init` (0.2.0 generalization)
 
@@ -646,3 +663,85 @@ does by rebuilding and diffing its committed `artifacts/`. Without it, the pinne
 could drift or a future risc0 release could reintroduce nondeterminism and nothing
 would notice — the unit tests only pin the invocation, and Template E2E exercises the
 host-toolchain path (`--guest local`).
+
+## Circuits Are Pinned Project Configuration
+
+LEZ's proving and verification crates read the `logos-blockchain-circuits` release at
+compile and run time. Scaffold used to rely on whatever release sat in the developer's
+environment (`~/.logos-blockchain-circuits/`). A mismatched release silently produces
+incompatible verifier keys, and nothing in the project said which release it needed.
+
+`scaffold.toml` now carries a `[circuits]` table (version, download template, install dir),
+and every command that needs circuits resolves it from there. That covers `setup`, `build`,
+`build idl`, `localnet` and test-node startup. The release is downloaded once into
+`[circuits].install_dir`, which defaults to the project-local `.scaffold/circuits`.
+`LOGOS_BLOCKCHAIN_CIRCUITS` remains an explicit override for a local checkout. The ambient
+home-directory location is no longer consulted. `doctor` checks the installed `VERSION`
+against the table and warns when the table drifts from the release the LEZ pin expects.
+
+The tradeoff is one download per project rather than one per machine. The upside is that
+the circuits release is pinned, reviewable and portable like every other dependency, and a
+mismatch is caught by `doctor` instead of at proof time.
+
+## Test Nodes Are Separate From Localnet and Follow the Caller's Pins
+
+Integration tests need many short-lived sequencers, often in parallel. `localnet` is the
+opposite shape: one long-lived developer sequencer per project, on a fixed port. Stretching
+`localnet` to cover tests would have made every test fight over one port and one database.
+
+`test-node` is therefore a separate surface. Each node gets its own port (`--port 0` picks a
+free one), config, database, log and runtime dir under `.scaffold/test-nodes/<id>`. It never
+touches the developer localnet or the LEZ checkout. Nodes follow the *caller project's* pins,
+and every resolved value is reported with its origin: CLI override, then `scaffold.toml`,
+then the scaffold default. A caller-provided checkout (`[repos.lez].path`, or a local
+`--lez-source` directory) is validated as a clean worktree at the requested commit and
+never reset or force-checked-out. Only cache-managed checkouts are synced. RPC observations
+are typed and give explicit outcomes. A transaction ends as exactly one of `committed`,
+`rejected`, `timeout`, `transport_error` or `wire_mismatch`. A stateful rejection requires
+multi-block observation plus a chain scan, never a single sleep.
+
+The tradeoff is a second, overlapping command surface, with its own `pins`/`prepare`/`doctor`
+alongside `setup`/`doctor`. The upside is that tests are isolated and parallel, and they
+cannot mutate a developer's working checkout. A transport failure is never mistaken for a
+business rejection.
+
+## Deploys Are Paced One Program Per Block
+
+The pinned LEZ settles each block as a single bedrock inscription with a payload cap of about
+896 KiB, and it panics fatally when a block exceeds it. A deployment ELF is about 370 KiB, so
+submitting several programs back to back can put them in one block and kill the sequencer.
+
+`deploy` waits for a new block past the previous submission before sending the next program.
+Pacing fails closed. A stalled head, or a post-submission baseline it cannot read, aborts the
+remaining submissions with a non-zero exit rather than sending them unpaced.
+`LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS` raises the ceiling for slow block intervals.
+
+The cost is roughly one block interval (about 15 s by default) per extra program. If the
+upstream cap is lifted, the pacing becomes dead weight and should be removed.
+
+## Prebuilt Sequencer Binaries Must Verify
+
+`setup --prebuilt` saves the multi-minute `sequencer_service` build by downloading a
+published binary. A downloaded executable that lands in `target/release/` is
+indistinguishable from one scaffold built, so it has to be at least as trustworthy.
+
+The download is installed only if it matches the `sequencer_service.sha256` published next
+to it. A missing, unfetchable, empty or malformed checksum prints a warning and falls back to
+the source build. A digest mismatch is a hard error. `wallet` is always built from source.
+
+The tradeoff is that a release without a checksum gives no speed-up. The upside is that
+`--prebuilt` can never install an unverified binary.
+
+## AI Skills Ship Into Every Project
+
+Agents working in a scaffolded project kept rediscovering how to drive `lgs`. Scaffold keeps
+the canonical instructions in `skills/` and installs the four skills (`lgs-cli`,
+`lez-template`, `spel-template`, `basecamp`) into every project that `new`,
+`new --template spel` or `init` touches. They go to `.claude/skills/<name>/SKILL.md`,
+`.cursor/rules/<name>.mdc` (frontmatter rewritten for Cursor) and an `AGENTS.md` index.
+
+The files are version-controlled in the generated project, never gitignored, so a team sees
+and reviews what its agents are told. Re-running `init` refreshes them idempotently and owns
+only those four names, so team-authored skills beside them survive. The tradeoff is that
+`init` is no longer a no-op on an already-migrated project. It now always refreshes skills,
+and a skill update reaches existing projects only when someone re-runs `init`.
