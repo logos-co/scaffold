@@ -3508,28 +3508,38 @@ fn basecamp_launch_with_unwritable_log_file_leaves_the_running_instance_alone() 
 fn sleeper_binary() -> &'static Path {
     static SLEEPER: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     SLEEPER.get_or_init(|| {
-        let dir = tempfile::Builder::new()
-            .prefix("scaffold-sleeper")
-            .tempdir()
-            .expect("tempdir")
-            .keep();
-        let src = dir.join("sleeper.rs");
-        fs::write(
-            &src,
-            "fn main() {\n\
+        const SOURCE: &str = "fn main() {\n\
              let secs = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(300);\n\
-             std::thread::sleep(std::time::Duration::from_secs(secs));\n}\n",
-        )
-        .expect("write sleeper.rs");
+             std::thread::sleep(std::time::Duration::from_secs(secs));\n}\n";
+        // Under cargo's per-target scratch dir, so `cargo clean` sweeps it and
+        // later runs reuse it instead of leaving one copy in /tmp per run.
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("scaffold-sleeper");
         let bin = dir.join("sleeper");
+        if bin.is_file()
+            && fs::read_to_string(dir.join("sleeper.rs")).ok().as_deref() == Some(SOURCE)
+        {
+            return bin;
+        }
+        fs::create_dir_all(&dir).expect("create sleeper dir");
+        // Build in a private dir and rename into place, so concurrent test
+        // runs never exec a half-written binary.
+        let work = tempfile::Builder::new()
+            .prefix("build-")
+            .tempdir_in(&dir)
+            .expect("tempdir");
+        let src = work.path().join("sleeper.rs");
+        fs::write(&src, SOURCE).expect("write sleeper.rs");
+        let built = work.path().join("sleeper");
         let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
         let status = std::process::Command::new(rustc)
             .arg(&src)
             .arg("-o")
-            .arg(&bin)
+            .arg(&built)
             .status()
             .expect("run rustc");
         assert!(status.success(), "compiling the sleeper stand-in failed");
+        fs::rename(&built, &bin).expect("install sleeper");
+        fs::rename(&src, dir.join("sleeper.rs")).expect("install sleeper.rs");
         bin
     })
 }

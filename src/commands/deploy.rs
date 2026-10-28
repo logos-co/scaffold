@@ -20,26 +20,24 @@ use super::wallet_support::{
     RpcReachabilityError,
 };
 
-/// Roots searched for guest `.bin` artefacts. Three layouts exist: risc0's
+/// Roots searched for guest `.bin` artefacts. Four layouts exist: risc0's
 /// default workspace layout emits to `target/riscv-guest/...` (what
 /// `embed_methods()` produces for the scaffold template), sub-crate builds can
-/// land in `methods/target/...`, and the deterministic Docker build
+/// land in `methods/target/...`, the deterministic Docker build
 /// (`[build].guest = "docker"`) emits to
-/// `target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/`. Discovery
-/// walks all three so renamed projects work regardless of which layout
-/// cargo/risc0 chose. The `methods/...` entry is the same project-relative
-/// directory that `build.rs` compiles via `crate::constants::METHODS_DIR`;
-/// keep them in sync. `methods/guest/target` is where `cargo risczero build`
-/// (`make build` in spel projects) writes, under a `docker/` directory.
+/// `target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/`, and
+/// `cargo risczero build` (`make build` in spel projects) writes to
+/// `methods/guest/target/riscv32im-risc0-zkvm-elf/docker/`. Discovery walks
+/// all four so renamed projects work regardless of which layout cargo/risc0
+/// chose. The `methods/...` entries are the same project-relative directory
+/// that `build.rs` compiles via `crate::constants::METHODS_DIR`; keep them in
+/// sync.
 const GUEST_BIN_SEARCH_ROOTS: &[&str] = &[
     crate::constants::GUEST_DOCKER_TARGET_DIR,
     "target/riscv-guest",
     "methods/target",
     SPEL_GUEST_TARGET_DIR,
 ];
-
-/// The risc0 guest target triple `cargo risczero build` writes under.
-const RISC0_GUEST_TRIPLE: &str = "riscv32im-risc0-zkvm-elf";
 
 /// Where `cargo risczero build` (`make build` in spel projects) writes guests.
 const SPEL_GUEST_TARGET_DIR: &str = "methods/guest/target";
@@ -161,15 +159,13 @@ pub(crate) fn deploy_for_project(
     let selected_programs = resolve_selected_programs(program_name, &available_programs)?;
     let discovered = discover_project_binaries(&project, &selected_programs);
     // stderr, so `--json` stdout stays a single object.
-    for (program, ignored) in ignored_docker_artifacts(project, &selected_programs) {
-        if discovered.get(&program) != Some(&ignored) {
-            eprintln!(
-                "note: ignoring {} — docker output outside {} is not from `lgs build`, \
-                 which decides what deploy ships",
-                ignored.display(),
-                owned_docker_root(project)
-            );
-        }
+    for (_, ignored) in ignored_docker_artifacts(project, &selected_programs) {
+        eprintln!(
+            "note: ignoring {} — docker output outside {} is not from `lgs build`, \
+             which decides what deploy ships",
+            ignored.display(),
+            owned_docker_root(project)
+        );
     }
 
     preflight_sequencer_reachability(&sequencer_addr)?;
@@ -823,30 +819,23 @@ pub(crate) fn owned_docker_root(project: &Project) -> &'static str {
     }
 }
 
-/// `cargo risczero build` outputs (`<root>/<triple>/docker/<program>.bin`)
-/// sitting in a search root the project does *not* own. Discovery demotes
-/// them on purpose; `deploy` names them so a deliberately hand-built
-/// reproducible ELF is not passed over without a word.
+/// `docker/` artefacts (a `docker` directory directly under a `riscv32im*`
+/// one, in any search root and at any depth) that discovery demoted because
+/// they sit outside the root the project owns, and that `deploy` does not
+/// ship. Discovery demotes them on purpose; `deploy` names them so a
+/// deliberately hand-built reproducible ELF is not passed over without a
+/// word. Taken from the same walk as [`discover_project_binaries`], so the
+/// note and the ranking cannot disagree about which paths count.
 pub(crate) fn ignored_docker_artifacts(
     project: &Project,
     programs: &[String],
 ) -> Vec<(String, PathBuf)> {
-    let owned = owned_docker_root(project);
-    let mut out = Vec::new();
-    for root in GUEST_BIN_SEARCH_ROOTS.iter().filter(|r| **r != owned) {
-        for program in programs.iter().filter(|p| is_valid_program_name(p)) {
-            let path = project
-                .root
-                .join(root)
-                .join(RISC0_GUEST_TRIPLE)
-                .join("docker")
-                .join(format!("{program}.bin"));
-            if path.is_file() {
-                out.push((program.clone(), path));
-            }
-        }
-    }
-    out
+    let discovery = walk_program_binaries(&project.root, programs, owned_docker_root(project));
+    discovery
+        .demoted_docker
+        .into_iter()
+        .filter(|(program, path)| discovery.chosen.get(program) != Some(path))
+        .collect()
 }
 
 /// [`discover_program_binaries`] for a loaded project, with the docker rank
@@ -890,13 +879,30 @@ pub(crate) fn discover_program_binaries(
     programs: &[String],
     docker_root: &str,
 ) -> HashMap<String, PathBuf> {
+    walk_program_binaries(project_root, programs, docker_root).chosen
+}
+
+/// What one walk of the search roots found.
+struct Discovery {
+    /// `program -> binary` by the ranking on [`discover_program_binaries`].
+    chosen: HashMap<String, PathBuf>,
+    /// Every `docker/` artefact denied the docker rank because it is outside
+    /// `docker_root`, in walk order.
+    demoted_docker: Vec<(String, PathBuf)>,
+}
+
+fn walk_program_binaries(project_root: &Path, programs: &[String], docker_root: &str) -> Discovery {
+    let mut demoted_docker = Vec::new();
     let wanted: HashMap<String, &str> = programs
         .iter()
         .filter(|p| is_valid_program_name(p))
         .map(|p| (format!("{p}.bin"), p.as_str()))
         .collect();
     if wanted.is_empty() {
-        return HashMap::new();
+        return Discovery {
+            chosen: HashMap::new(),
+            demoted_docker,
+        };
     }
 
     let mut docker: HashMap<String, (usize, PathBuf)> = HashMap::new();
@@ -943,6 +949,9 @@ pub(crate) fn discover_program_binaries(
                 continue;
             }
 
+            if has_docker && *root != docker_root {
+                demoted_docker.push((program.to_string(), path.to_path_buf()));
+            }
             let bucket = if has_docker && *root == docker_root {
                 &mut docker
             } else if has_release {
@@ -969,7 +978,10 @@ pub(crate) fn discover_program_binaries(
     for (program, (_, path)) in debug_fallback {
         out.entry(program).or_insert(path);
     }
-    out
+    Discovery {
+        chosen: out,
+        demoted_docker,
+    }
 }
 
 #[cfg(test)]
@@ -1206,6 +1218,23 @@ mod tests {
             .1
             .starts_with(tmp.path().join(SPEL_GUEST_TARGET_DIR)));
         assert!(ignored_docker_artifacts(&spel, &programs).is_empty());
+
+        // `embed_methods()` under `RISC0_USE_DOCKER=1` nests the triple under
+        // `<pkg>/<guest>/` in `target/riscv-guest`. Discovery demotes that
+        // too, so the note must name it as well.
+        plant(
+            "target/riscv-guest/m/g/riscv32im-risc0-zkvm-elf/docker",
+            b"embed-methods-docker",
+        );
+        let ignored = ignored_docker_artifacts(&default, &programs);
+        assert_eq!(ignored.len(), 2, "{ignored:?}");
+        assert!(ignored
+            .iter()
+            .any(|(_, p)| p.ends_with("m/g/riscv32im-risc0-zkvm-elf/docker/my_program.bin")));
+        let picked = discover_project_binaries(&default, &programs)
+            .remove("my_program")
+            .unwrap();
+        assert_eq!(fs::read(&picked).unwrap(), b"fresh-release");
 
         // And the default project's own deterministic tree does win for it.
         plant(
