@@ -130,10 +130,12 @@ fn localnet_reset_dry_run_prints_plan_without_mutations() {
         .success()
         .stdout(
             predicate::str::contains("dry-run: localnet reset")
-                .and(predicate::str::contains("planned: delete sequencer DB")),
+                .and(predicate::str::contains("planned: delete sequencer DB"))
+                // The project's own chain, not the shared LEZ checkout's.
+                .and(predicate::str::contains(".scaffold/localnet/rocksdb")),
         );
 
-    let rocksdb = lez_path.join("rocksdb");
+    let rocksdb = temp.path().join(".scaffold/localnet/rocksdb");
     assert!(
         !rocksdb.exists(),
         "dry-run must not create or require rocksdb at {}",
@@ -152,7 +154,7 @@ fn localnet_reset_without_yes_or_dry_run_refuses_destructive_default() {
     fs::create_dir_all(&lez_path).expect("create lez path");
     write_scaffold_toml(temp.path(), &lez_path);
     // Seed the sequencer DB so we can verify the refusal does NOT delete it.
-    let rocksdb = lez_path.join("rocksdb");
+    let rocksdb = temp.path().join(".scaffold/localnet/rocksdb");
     fs::create_dir_all(&rocksdb).expect("seed rocksdb");
     fs::write(rocksdb.join("CURRENT"), b"sentinel").expect("seed db file");
 

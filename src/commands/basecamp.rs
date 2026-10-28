@@ -239,7 +239,11 @@ fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
         &basecamp_repo.pin,
     );
 
-    println!("cloning basecamp at {}", &basecamp_repo.pin);
+    if basecamp_repo_path.join(".git").exists() {
+        println!("syncing basecamp checkout to {}", &basecamp_repo.pin);
+    } else {
+        println!("cloning basecamp at {}", &basecamp_repo.pin);
+    }
     sync_repo_to_pin_at_path_with_opts(
         &basecamp_repo_path,
         &basecamp_repo.source,
