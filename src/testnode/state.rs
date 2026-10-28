@@ -91,10 +91,12 @@ impl StateSchema {
     /// [`crate::api::testnode::state_schema`], which takes an `api::Project`.
     pub(crate) fn for_project(project: &Project) -> DynResult<Self> {
         let pins = resolve_test_node_pins(project, &PinOverrides::default())?;
-        let shape = GenesisConfigShape::of_checkout(&pins.lez_checkout);
+        let shape = GenesisConfigShape::of_pins(&pins);
         let (private_account_fields, config_keys) = match shape {
-            GenesisConfigShape::Actions => (Vec::new(), vec!["genesis".to_string()]),
-            GenesisConfigShape::InitialAccounts => (
+            Some(GenesisConfigShape::Actions) => (Vec::new(), vec!["genesis".to_string()]),
+            // Not materialised and not the default pin: report the pre-v0.2.4
+            // keys, which every pin before the default used.
+            Some(GenesisConfigShape::InitialAccounts) | None => (
                 vec![
                     "npk".to_string(),
                     "account.program_owner".to_string(),
@@ -389,19 +391,26 @@ impl GenesisConfigShape {
         }
     }
 
-    /// Shape of the debug config in a LEZ checkout. A checkout that is not
-    /// materialised yet is assumed to be the current pin's shape.
-    pub(crate) fn of_checkout(lez: &Path) -> Self {
-        crate::lez_layout::first_existing_lez_path(
-            lez,
+    /// Shape of the debug config in the pinned LEZ checkout. Before the
+    /// checkout is materialised only scaffold's default pin has a known
+    /// shape; any other pin yields `None`, and the start-time check (which
+    /// reads the real config) decides.
+    pub(crate) fn of_pins(pins: &super::pins::TestNodePins) -> Option<Self> {
+        let from_checkout = crate::lez_layout::first_existing_lez_path(
+            &pins.lez_checkout,
             crate::constants::SEQUENCER_CONFIG_REL_PATHS,
             "sequencer debug config",
         )
         .ok()
         .and_then(|path| fs::read_to_string(path).ok())
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .and_then(|doc| doc.as_object().map(Self::of))
-        .unwrap_or(Self::Actions)
+        .and_then(|doc| doc.as_object().map(Self::of));
+        let default = crate::constants::DEFAULT_LEZ;
+        from_checkout.or_else(|| {
+            [default.sha, default.tag]
+                .contains(&pins.lez_ref.as_str())
+                .then_some(Self::Actions)
+        })
     }
 }
 
@@ -535,9 +544,11 @@ pub fn seed_state(
 
     // Snapshot-file input: validate, check pins, and write seed.json.
     let snapshot = StateSnapshot::from_file(input)?;
-    let shape = GenesisConfigShape::of_checkout(&pins.lez_checkout);
-    snapshot.check_seedable(shape)?;
-    if shape == GenesisConfigShape::Actions && !snapshot.public_accounts.is_empty() {
+    let shape = GenesisConfigShape::of_pins(&pins);
+    if let Some(shape) = shape {
+        snapshot.check_seedable(shape)?;
+    }
+    if shape == Some(GenesisConfigShape::Actions) && !snapshot.public_accounts.is_empty() {
         warnings.push(VAULT_CREDIT_WARNING.to_string());
     }
 
@@ -815,6 +826,32 @@ mod tests {
             ])
         );
         assert!(config.get("initial_public_accounts").is_none());
+    }
+
+    /// A project pinned off the default with no checkout yet: its genesis
+    /// shape is unknown, so `state seed` must not apply v0.2.4's limits (a
+    /// pre-v0.2.4 pin seeds private accounts), and `state schema` reports the
+    /// pre-v0.2.4 keys.
+    #[test]
+    fn unmaterialised_non_default_pin_defers_the_shape_check() {
+        let temp = tempdir().unwrap();
+        let mut project = fixture_project(temp.path());
+        project.config.lez.pin = "1111111111111111111111111111111111111111".into();
+
+        let schema = StateSchema::for_project(&project).unwrap();
+        assert!(schema
+            .config_keys
+            .contains(&"initial_private_accounts".to_string()));
+
+        let input = temp.path().join("snapshot.json");
+        fs::write(
+            &input,
+            serde_json::to_string(&one_public_one_private()).unwrap(),
+        )
+        .unwrap();
+        let seeded = seed_state(&project, &input, Some(&temp.path().join("seeded"))).unwrap();
+        assert_eq!(seeded.private_account_count, 1);
+        assert!(!seeded.warnings.iter().any(|w| w == VAULT_CREDIT_WARNING));
     }
 
     #[test]
