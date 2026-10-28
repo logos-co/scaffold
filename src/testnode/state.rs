@@ -8,15 +8,17 @@
 //! instead of a confusing runtime failure deep inside the node:
 //!
 //! 1. **Genesis-config seeding.** When the sequencer starts with no
-//!    database, its config may carry `initial_public_accounts`
+//!    database, it funds the accounts its config lists. From LEZ v0.2.4
+//!    that is the `genesis` action list: each seeded public account becomes
+//!    a `supply_account` action, replacing the debug config's sample
+//!    accounts. Such an action credits the account's **vault PDA**, not the
+//!    account, so the seeded balance is read from the vault. There is no action for private accounts, so a seed carrying
+//!    any is rejected. Up to v0.2.3 the keys were `initial_public_accounts`
 //!    (`{account_id, balance}` pairs) and `initial_private_accounts`
-//!    (`{npk, account}` commitments); the genesis state is then built from
-//!    exactly those accounts — no implicit wallets, sample programs, or
-//!    testnet default accounts. Limitations of this path at the pinned
-//!    revision: public accounts can seed **balance only** (no data, nonce,
-//!    or program owner), while private accounts seed a full account behind
-//!    a commitment. Snapshots that need unsupported public-account fields
-//!    are rejected during validation as a storage-schema mismatch.
+//!    (`{npk, account}` commitments), and private accounts seeded a full
+//!    account behind a commitment. Either way public accounts can seed
+//!    **balance only** (no data, nonce, or program owner); snapshots that
+//!    need more are rejected during validation as a storage-schema mismatch.
 //! 2. **Database seeding.** A state directory containing a `rocksdb/`
 //!    database (exported from a previous node) is copied verbatim; the
 //!    sequencer resumes from it exactly.
@@ -89,6 +91,23 @@ impl StateSchema {
     /// [`crate::api::testnode::state_schema`], which takes an `api::Project`.
     pub(crate) fn for_project(project: &Project) -> DynResult<Self> {
         let pins = resolve_test_node_pins(project, &PinOverrides::default())?;
+        let shape = GenesisConfigShape::require_for(&pins)?;
+        let (private_account_fields, config_keys) = match shape {
+            GenesisConfigShape::Actions => (Vec::new(), vec!["genesis".to_string()]),
+            GenesisConfigShape::InitialAccounts => (
+                vec![
+                    "npk".to_string(),
+                    "account.program_owner".to_string(),
+                    "account.balance".to_string(),
+                    "account.data".to_string(),
+                    "account.nonce".to_string(),
+                ],
+                vec![
+                    "initial_public_accounts".to_string(),
+                    "initial_private_accounts".to_string(),
+                ],
+            ),
+        };
         Ok(Self {
             state_format_version: STATE_FORMAT_VERSION.to_string(),
             lez_ref: pins.lez_ref,
@@ -99,17 +118,8 @@ impl StateSchema {
                 "state directory containing a rocksdb/ database".to_string(),
             ],
             public_account_fields: vec!["account_id".to_string(), "balance".to_string()],
-            private_account_fields: vec![
-                "npk".to_string(),
-                "account.program_owner".to_string(),
-                "account.balance".to_string(),
-                "account.data".to_string(),
-                "account.nonce".to_string(),
-            ],
-            config_keys: vec![
-                "initial_public_accounts".to_string(),
-                "initial_private_accounts".to_string(),
-            ],
+            private_account_fields,
+            config_keys,
         })
     }
 }
@@ -350,6 +360,132 @@ impl StateSnapshot {
     }
 }
 
+/// LEZ v0.2.4's `supply_account` genesis action pays the faucet into the
+/// account's vault PDA (vault program, seed derived from the account id),
+/// so the account itself starts empty.
+pub(crate) const VAULT_CREDIT_WARNING: &str =
+    "LEZ v0.2.4+ credits each seeded public balance to the account's vault PDA, not to the \
+     account itself: `account get <id>` reports the account missing until its owner claims \
+     the vault balance";
+
+/// How the pinned sequencer config describes genesis, which decides how a
+/// seed is applied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GenesisConfigShape {
+    /// LEZ v0.2.4+: a `genesis` list of actions (`supply_account`,
+    /// `supply_bridge_account`, …). Public accounts are seeded as
+    /// `supply_account` actions; there is no action for private accounts.
+    Actions,
+    /// LEZ ≤ v0.2.3: `initial_public_accounts` / `initial_private_accounts`.
+    InitialAccounts,
+}
+
+impl GenesisConfigShape {
+    pub(crate) fn of(config: &serde_json::Map<String, Value>) -> Self {
+        if config.get("genesis").is_some_and(Value::is_array) {
+            Self::Actions
+        } else {
+            Self::InitialAccounts
+        }
+    }
+
+    /// Shape of the debug config in the pinned LEZ checkout. Before the
+    /// checkout is materialised only scaffold's default pin has a known
+    /// shape; any other pin yields `None`, and the start-time check (which
+    /// reads the real config) decides.
+    pub(crate) fn of_pins(pins: &super::pins::TestNodePins) -> Option<Self> {
+        let from_checkout = crate::lez_layout::first_existing_lez_path(
+            &pins.lez_checkout,
+            crate::constants::SEQUENCER_CONFIG_REL_PATHS,
+            "sequencer debug config",
+        )
+        .ok()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|doc| doc.as_object().map(Self::of));
+        from_checkout.or_else(|| names_default_lez(&pins.lez_ref).then_some(Self::Actions))
+    }
+
+    /// [`Self::of_pins`], or an error telling the caller how to make the
+    /// shape knowable. Guessing is worse than refusing: a guessed legacy shape
+    /// accepts seeds that `start --state` then rejects, and a guessed v0.2.4
+    /// shape rejects private accounts a legacy pin can seed.
+    pub(crate) fn require_for(pins: &super::pins::TestNodePins) -> DynResult<Self> {
+        Self::of_pins(pins).ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot tell which genesis config LEZ `{}` uses: its checkout at {} is not \
+                 materialised. Run `lgs test-node prepare` first.",
+                pins.lez_ref,
+                pins.lez_checkout.display()
+            )
+        })
+    }
+}
+
+/// Whether `lez_ref` names scaffold's default LEZ pin: its tag, its full
+/// SHA, or an abbreviation of it (7+ hex digits).
+fn names_default_lez(lez_ref: &str) -> bool {
+    let default = crate::constants::DEFAULT_LEZ;
+    lez_ref == default.tag
+        || (lez_ref.len() >= 7
+            && lez_ref.chars().all(|c| c.is_ascii_hexdigit())
+            && default.sha.starts_with(&lez_ref.to_ascii_lowercase()))
+}
+
+impl StateSnapshot {
+    /// Reject what `shape` cannot seed: private accounts have no genesis
+    /// action from LEZ v0.2.4.
+    pub(crate) fn check_seedable(&self, shape: GenesisConfigShape) -> Result<(), SeedError> {
+        if shape == GenesisConfigShape::Actions && !self.private_accounts.is_empty() {
+            return Err(SeedError::StorageSchemaMismatch(format!(
+                "the snapshot has {} private account(s), but the pinned sequencer's genesis \
+                 config (LEZ v0.2.4+) can seed public balances only. Export the node's \
+                 database directory instead for full-fidelity seeding.",
+                self.private_accounts.len()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Write the seed into a sequencer config. On a v0.2.4+ config the
+    /// seeded accounts replace the debug config's `supply_account` actions
+    /// (so its sample accounts are not funded); other actions, such as the
+    /// bridge supply, are kept.
+    pub(crate) fn apply_to_config(
+        &self,
+        config: &mut serde_json::Map<String, Value>,
+    ) -> Result<(), SeedError> {
+        let shape = GenesisConfigShape::of(config);
+        self.check_seedable(shape)?;
+        match shape {
+            GenesisConfigShape::Actions => {
+                let mut actions: Vec<Value> = config["genesis"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|action| action.get("supply_account").is_none())
+                    .cloned()
+                    .collect();
+                actions.extend(self.public_accounts.iter().map(|account| {
+                    json!({
+                        "supply_account": {
+                            "account_id": account.account_id,
+                            "balance": account.balance,
+                        }
+                    })
+                }));
+                config.insert("genesis".to_string(), Value::Array(actions));
+            }
+            GenesisConfigShape::InitialAccounts => {
+                let (public, private) = self.to_config_values();
+                config.insert("initial_public_accounts".to_string(), public);
+                config.insert("initial_private_accounts".to_string(), private);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Result of `state seed`: a directory `test-node start --state` accepts,
 /// plus the metadata tests need to verify the seeded state.
 #[derive(Clone, Debug, Serialize)]
@@ -442,6 +578,12 @@ pub fn seed_state(
         warnings.push(
             "snapshot carries no `lez_commit`; pin compatibility was not verified".to_string(),
         );
+    }
+
+    let shape = GenesisConfigShape::require_for(&pins)?;
+    snapshot.check_seedable(shape)?;
+    if shape == GenesisConfigShape::Actions && !snapshot.public_accounts.is_empty() {
+        warnings.push(VAULT_CREDIT_WARNING.to_string());
     }
 
     let normalized = StateSnapshot {
@@ -653,10 +795,114 @@ mod tests {
         let project = fixture_project(temp.path());
         let schema = StateSchema::for_project(&project).unwrap();
         assert_eq!(schema.state_format_version, "nssa-v03");
-        assert!(schema
-            .config_keys
-            .contains(&"initial_public_accounts".to_string()));
+        // No checkout yet: the current pin's (v0.2.4) action-list shape.
+        assert_eq!(schema.config_keys, ["genesis"]);
+        assert!(schema.private_account_fields.is_empty());
         assert_eq!(schema.public_account_fields, ["account_id", "balance"]);
+    }
+
+    fn one_public_one_private() -> StateSnapshot {
+        StateSnapshot::new(
+            vec![PublicSeedAccount {
+                account_id: ACCOUNT_ID.to_string(),
+                balance: 42,
+            }],
+            vec![PrivateSeedAccount {
+                npk: vec![1; 32],
+                account: SeedAccountState {
+                    program_owner: Vec::new(),
+                    balance: 5,
+                    data: Vec::new(),
+                    nonce: 0,
+                },
+            }],
+        )
+    }
+
+    #[test]
+    fn actions_config_seeds_public_accounts_as_supply_actions() {
+        let mut config = json!({
+            "genesis": [
+                { "supply_bridge_account": { "balance": 1000 } },
+                { "supply_account": { "account_id": "Sample", "balance": 10 } },
+            ]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let mut snapshot = one_public_one_private();
+        snapshot.private_accounts.clear();
+
+        snapshot.apply_to_config(&mut config).unwrap();
+
+        assert_eq!(
+            config["genesis"],
+            json!([
+                { "supply_bridge_account": { "balance": 1000 } },
+                { "supply_account": { "account_id": ACCOUNT_ID, "balance": 42 } },
+            ])
+        );
+        assert!(config.get("initial_public_accounts").is_none());
+    }
+
+    /// No checkout yet: only the default pin's shape is known, in any of its
+    /// spellings. Any other pin must refuse rather than guess either way.
+    #[test]
+    fn unmaterialised_checkout_knows_only_the_default_pin() {
+        assert!(names_default_lez(crate::constants::DEFAULT_LEZ.sha));
+        assert!(names_default_lez(crate::constants::DEFAULT_LEZ.tag));
+        assert!(names_default_lez(&crate::constants::DEFAULT_LEZ.sha[..8]));
+        assert!(names_default_lez(
+            &crate::constants::DEFAULT_LEZ.sha[..8].to_ascii_uppercase()
+        ));
+        assert!(!names_default_lez(&crate::constants::DEFAULT_LEZ.sha[..6]));
+        assert!(!names_default_lez("v0.2.3"));
+
+        let temp = tempdir().unwrap();
+        let mut project = fixture_project(temp.path());
+        project.config.lez.pin = crate::constants::DEFAULT_LEZ.sha[..8].to_string();
+        let schema = StateSchema::for_project(&project).unwrap();
+        assert_eq!(schema.config_keys, ["genesis"]);
+
+        project.config.lez.pin = "1111111111111111111111111111111111111111".into();
+        let err = StateSchema::for_project(&project).unwrap_err();
+        assert!(err.to_string().contains("test-node prepare"), "{err}");
+        let input = temp.path().join("snapshot.json");
+        fs::write(
+            &input,
+            serde_json::to_string(&one_public_one_private()).unwrap(),
+        )
+        .unwrap();
+        let err = seed_state(&project, &input, Some(&temp.path().join("seeded"))).unwrap_err();
+        assert!(err.to_string().contains("test-node prepare"), "{err}");
+    }
+
+    #[test]
+    fn actions_config_rejects_private_accounts() {
+        let mut config = json!({ "genesis": [] }).as_object().unwrap().clone();
+        let err = one_public_one_private()
+            .apply_to_config(&mut config)
+            .unwrap_err();
+        assert!(matches!(err, SeedError::StorageSchemaMismatch(_)), "{err}");
+        assert_eq!(
+            config["genesis"],
+            json!([]),
+            "config must be left as it was"
+        );
+    }
+
+    #[test]
+    fn legacy_config_keeps_initial_account_keys() {
+        let mut config = json!({ "genesis_id": 1 }).as_object().unwrap().clone();
+        one_public_one_private()
+            .apply_to_config(&mut config)
+            .unwrap();
+        assert_eq!(config["initial_public_accounts"][0]["balance"], json!(42));
+        assert_eq!(
+            config["initial_private_accounts"][0]["account"]["balance"],
+            json!(5)
+        );
+        assert!(config.get("genesis").is_none());
     }
 
     #[test]
@@ -779,6 +1025,8 @@ mod tests {
 
         let loaded = load_seed_from_state_dir(&out).unwrap().unwrap();
         assert_eq!(loaded.public_accounts[0].balance, 777);
+        // No checkout: the current pin's shape, whose supply credits vaults.
+        assert!(seeded.warnings.iter().any(|w| w == VAULT_CREDIT_WARNING));
     }
 
     #[test]

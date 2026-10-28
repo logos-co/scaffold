@@ -699,6 +699,9 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> DynResult<()> {
     Ok(())
 }
 
+/// Block id LEZ v0.2.4+ gives its genesis block (the config no longer says).
+const GENESIS_BLOCK_ID: u64 = 1;
+
 /// Produce the node's sequencer config: the pinned LEZ debug config with
 /// `home` pointed at the node's runtime directory, the port recorded, and
 /// `max_block_size` widened (same rationale as localnet). Returns the config
@@ -729,19 +732,37 @@ fn write_node_config(
             );
         }
 
-        // Genesis-config seeding: a seed.json placed in the work dir (by
-        // `--state <seeded dir>`) becomes the node's initial accounts. The
-        // sequencer builds its genesis state from exactly these values when no
-        // database exists — no testnet default accounts are added.
-        if let Some(snapshot) = state::load_seed_from_state_dir(work_dir)? {
-            let (public, private) = snapshot.to_config_values();
-            obj.insert("initial_public_accounts".to_string(), public);
-            obj.insert("initial_private_accounts".to_string(), private);
+        // A test node is one of possibly several sequencers on this host
+        // (other nodes, the project localnet). From LEZ v0.2.4 each one
+        // starts a Prometheus exporter on the config's `metrics_address`
+        // (default 0.0.0.0:9000), so the second to start dies on a bind
+        // error. Test nodes need no metrics; turn the exporter off.
+        let actions_shape =
+            state::GenesisConfigShape::of(obj) == state::GenesisConfigShape::Actions;
+        if actions_shape {
+            obj.insert("metrics_address".to_string(), Value::Null);
         }
 
-        obj.get("genesis_id")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| anyhow!("sequencer_config.json has no numeric `genesis_id`"))
+        // Genesis-config seeding: a seed.json placed in the work dir (by
+        // `--state <seeded dir>`) becomes the node's initial accounts, which
+        // the sequencer funds at genesis when no database exists.
+        if let Some(snapshot) = state::load_seed_from_state_dir(work_dir)? {
+            snapshot.apply_to_config(obj)?;
+        }
+
+        // Up to LEZ v0.2.3 the config names the genesis block (`genesis_id`).
+        // v0.2.4 dropped the key in favour of a `genesis` action list and
+        // always starts at block 1.
+        match obj.get("genesis_id") {
+            Some(value) => value
+                .as_u64()
+                .ok_or_else(|| anyhow!("sequencer_config.json has a non-numeric `genesis_id`")),
+            None if actions_shape => Ok(GENESIS_BLOCK_ID),
+            None => Err(anyhow!(
+                "sequencer_config.json has no numeric `genesis_id` (and no `genesis` action \
+                 list, so this is not a LEZ v0.2.4+ config either)"
+            )),
+        }
     })?;
 
     Ok((dest_path, genesis_block_id))
@@ -1117,6 +1138,54 @@ mod tests {
             "private accounts key must be present (empty) so the sequencer skips the \
              testnet default state"
         );
+    }
+
+    /// LEZ v0.2.4's debug config: no `genesis_id`, a `genesis` action list,
+    /// and a metrics exporter every sequencer on the host would bind.
+    #[test]
+    fn write_node_config_handles_lez_024_genesis_actions() {
+        let temp = tempdir().unwrap();
+        let lez = temp.path().join("lez");
+        let work = temp.path().join("node");
+        fs::create_dir_all(&work).unwrap();
+        let config_path = lez.join(SEQUENCER_CONFIG_NESTED_REL_PATH);
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(
+            &config_path,
+            r#"{ "home": ".", "genesis": [
+                { "supply_bridge_account": { "balance": 1000000 } },
+                { "supply_account": { "account_id": "CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r", "balance": 10000 } }
+            ] }"#,
+        )
+        .unwrap();
+        fs::write(
+            work.join("seed.json"),
+            serde_json::json!({
+                "format": "lgs-state-snapshot/1",
+                "public_accounts": [
+                    { "account_id": "6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV", "balance": 42 }
+                ],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let (dest, genesis) =
+            write_node_config(&lez, &work, 41236, BlockTimingOverrides::default()).unwrap();
+        assert_eq!(genesis, 1);
+
+        let doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
+        assert_eq!(doc["metrics_address"], serde_json::Value::Null);
+        assert!(doc.as_object().unwrap().contains_key("metrics_address"));
+        assert_eq!(
+            doc["genesis"],
+            serde_json::json!([
+                { "supply_bridge_account": { "balance": 1000000 } },
+                { "supply_account": { "account_id": "6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV", "balance": 42 } }
+            ])
+        );
+        assert!(doc.get("initial_public_accounts").is_none());
     }
 
     #[test]
