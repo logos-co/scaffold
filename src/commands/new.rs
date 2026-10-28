@@ -19,7 +19,7 @@ use crate::process::{apply_host_cc_overrides, run_checked};
 use crate::project::bootstrap_cache_root;
 use crate::repo::{sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
 use crate::state::write_text;
-use crate::template::copy::{copy_dir_contents, patch_simple_tail_call_program_id};
+use crate::template::copy::{copy_dir_contents, patch_tail_call_program_ids};
 use crate::template::project::{apply_overlay, ensure_scaffold_in_gitignore, OverlayRenderContext};
 use crate::template::skills::apply_skills;
 use crate::DynResult;
@@ -418,7 +418,7 @@ fn cmd_new_default(
 
     copy_dir_contents(&template_root, target).context("failed to copy scaffold template")?;
     if template_variant == FRAMEWORK_KIND_DEFAULT {
-        patch_simple_tail_call_program_id(target)?;
+        patch_tail_call_program_ids(target)?;
     }
     let overlay_ctx = OverlayRenderContext {
         crate_name: &crate_name,

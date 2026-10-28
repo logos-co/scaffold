@@ -7,15 +7,18 @@ use anyhow::{anyhow, bail, Context};
 
 use crate::circuits::ensure_circuits_for_project;
 use crate::commands::client::generate_clients_from_current_idl;
+use crate::commands::deploy::{discover_project_binaries, extract_program_id};
 use crate::commands::idl::build_idl_for_current_project;
 use crate::commands::setup::cmd_setup;
 use crate::constants::{
     DEFAULT_RISC0_METHODS_ENTRY, FRAMEWORK_KIND_DEFAULT, FRAMEWORK_KIND_LEZ_FRAMEWORK,
-    FRAMEWORK_KIND_SPEL, GUEST_DOCKER_TARGET_DIR, METHODS_DIR,
+    FRAMEWORK_KIND_SPEL, GUEST_DOCKER_TARGET_DIR, METHODS_DIR, SPEL_BIN_REL_PATH,
+    TAIL_CALL_TARGETS,
 };
-use crate::model::GuestBuildMode;
+use crate::model::{GuestBuildMode, Project};
 use crate::process::{apply_host_cc_overrides, run_checked, which};
-use crate::project::{load_project, run_in_project_dir};
+use crate::project::{load_project, resolve_repo_path, run_in_project_dir};
+use crate::template::copy::{guest_bin_dir, set_hex_const};
 use crate::DynResult;
 
 pub(crate) fn cmd_build_shortcut(
@@ -96,8 +99,64 @@ pub(crate) fn cmd_build_shortcut(
         let mode = guest_override.unwrap_or(project.config.build.guest);
         build_methods_guests(&cwd, mode, &project.config.build.risc0_docker_tag)?;
 
+        // The tail-call examples hardcode their callee's program id, which
+        // is a hash of the callee's ELF, so it changes with the build mode
+        // and toolchain. Point them at what was just built; the callees do
+        // not depend on the callers, so one rebuild settles it.
+        if project.config.framework.kind == FRAMEWORK_KIND_DEFAULT
+            && sync_tail_call_program_ids(&project)?
+        {
+            println!("Rebuilding guest methods with the updated tail-call program ids...");
+            build_methods_guests(&cwd, mode, &project.config.build.risc0_docker_tag)?;
+        }
+
         Ok(())
     })
+}
+
+/// Rewrite each tail-call caller's hardcoded callee id (see
+/// [`TAIL_CALL_TARGETS`]) to the id of the callee binary `deploy` would ship.
+/// Returns whether any source changed. Callers or callees that are absent,
+/// and ids the vendored `spel` cannot compute, are skipped.
+fn sync_tail_call_program_ids(project: &Project) -> DynResult<bool> {
+    let bin_dir = guest_bin_dir(&project.root);
+    let callees: Vec<String> = TAIL_CALL_TARGETS
+        .iter()
+        .filter(|target| bin_dir.join(target.caller_file).is_file())
+        .map(|target| target.callee.to_string())
+        .collect();
+    if callees.is_empty() {
+        return Ok(false);
+    }
+    let binaries = discover_project_binaries(project, &callees);
+    let spel_bin =
+        resolve_repo_path(project, &project.config.spel, "spel")?.join(SPEL_BIN_REL_PATH);
+
+    let mut changed = false;
+    for target in TAIL_CALL_TARGETS {
+        let Some(binary) = binaries.get(target.callee) else {
+            continue;
+        };
+        let Some(program_id) = extract_program_id(&spel_bin, binary) else {
+            println!(
+                "Note: could not compute the {} program id; {} keeps its hardcoded {}.",
+                target.callee, target.caller_file, target.const_name
+            );
+            continue;
+        };
+        if set_hex_const(
+            &bin_dir.join(target.caller_file),
+            target.const_name,
+            &program_id,
+        )? {
+            println!(
+                "Updated {} in methods/guest/src/bin/{} to the built {} program id {}.",
+                target.const_name, target.caller_file, target.callee, program_id
+            );
+            changed = true;
+        }
+    }
+    Ok(changed)
 }
 
 /// Build a spel project's guest via the Makefile `spel init` generated.

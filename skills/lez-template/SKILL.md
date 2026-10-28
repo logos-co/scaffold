@@ -154,6 +154,15 @@ cargo run --bin run_hello_world_through_tail_call_private -- \
   <private_account_id>
 ```
 
+`simple_tail_call` and `tail_call_with_pda` call `hello_world` /
+`hello_world_with_authorization` by a program id hardcoded in their source
+(`HELLO_WORLD_PROGRAM_ID_HEX`, `HELLO_WORLD_WITH_AUTHORIZATION_PROGRAM_ID_HEX`).
+A program id is the hash of the built ELF, so it changes with the build mode
+and toolchain. `lgs build` rewrites both constants to the ids it just built
+and rebuilds once (`Updated … program id …`). A tail call that the sequencer
+log rejects with `Unknown program` means the deployed caller and callee come
+from different builds: run `lgs build` and redeploy both.
+
 ## Iteration Loop
 
 1. Edit guest at `methods/guest/src/bin/<program>.rs`.
