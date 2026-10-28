@@ -21,9 +21,12 @@
 //!   recovered without the upstream types. `PrivacyPreserving` transactions
 //!   carry nested proof structures; the walker stops there and reports the
 //!   block as partially parsed rather than guessing.
-//! - The genesis block is constructed with **zero** transactions; every
-//!   later block carries the mandatory sequencer clock transaction plus any
-//!   user transactions. The clock transaction is a `Public` transaction
+//! - Every post-genesis block carries the mandatory sequencer clock
+//!   transaction plus any user transactions. The genesis block is block 1
+//!   with timestamp 0. Up to LEZ v0.2.3 it holds **zero** transactions; from
+//!   v0.2.4 it holds the genesis setup transactions (token config, one supply
+//!   transaction per `genesis` action) and a final `clock(0)` tick, none of
+//!   which are user transactions. The clock transaction is a `Public` transaction
 //!   whose account set is exactly the three `/LEZ/ClockProgramAccount/…`
 //!   accounts.
 //! - Each clock account's `data` is borsh `ClockAccountData { block_id:
@@ -36,6 +39,9 @@ use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
 
 use super::client::{parse_block_prefix, BlockContext, RpcError, TestNodeClient};
+
+/// Block id the LEZ sequencer gives its genesis block.
+const GENESIS_BLOCK_ID: u64 = 1;
 
 /// Borsh size of the block header (`u64` + 32 + 32 + `u64` + 64-byte
 /// signature).
@@ -85,16 +91,16 @@ pub struct BlockInfo {
     pub timestamp: u64,
     /// Total number of transactions in the block body.
     pub transaction_count: u32,
-    /// `true` for the genesis block — the only block constructed with zero
-    /// transactions (no clock tick happens at genesis; tests must not
-    /// replay one).
+    /// `true` for the genesis block: an empty block (LEZ ≤ v0.2.3), or block
+    /// 1 at timestamp 0 (v0.2.4+, whose genesis carries setup transactions).
+    /// Tests must not replay it.
     pub is_genesis: bool,
     /// `true` when the block carries the mandatory sequencer clock
     /// transaction (every post-genesis block; empty blocks still advance
     /// clock state through it).
     pub has_clock_transaction: bool,
     /// `true` when the block carries at least one user transaction beyond
-    /// the clock transaction.
+    /// the clock transaction. Always `false` for genesis.
     pub has_user_transactions: bool,
     /// Per-transaction summaries, in block order. May be shorter than
     /// `transaction_count` when `fully_parsed` is `false`.
@@ -382,9 +388,11 @@ pub(crate) fn parse_block_info(block_bytes: &[u8]) -> Result<BlockInfo, String> 
         }
     }
 
-    let is_genesis = transaction_count == 0;
+    let is_genesis = transaction_count == 0 || (block_id == GENESIS_BLOCK_ID && timestamp == 0);
+    // v0.2.4's genesis ends in clock(0), but that initialises the clock
+    // accounts; it is not a tick a replay should apply.
     let has_clock_transaction = !is_genesis;
-    let has_user_transactions = transaction_count >= 2;
+    let has_user_transactions = !is_genesis && transaction_count >= 2;
 
     Ok(BlockInfo {
         block_id,
@@ -567,6 +575,23 @@ mod tests {
         assert!(!info.has_user_transactions);
         assert_eq!(info.transaction_count, 0);
         assert!(info.fully_parsed);
+    }
+
+    /// LEZ v0.2.4 genesis: block 1, timestamp 0, setup transactions plus a
+    /// final clock(0) tick. None of them is a user transaction.
+    #[test]
+    fn genesis_block_with_setup_transactions() {
+        let supply_tx = fake_public_tx(&[[0x55; 32]]);
+        let info = parse_block_info(&fake_block(
+            1,
+            0,
+            &[supply_tx.clone(), supply_tx, fake_clock_tx()],
+        ))
+        .unwrap();
+        assert!(info.is_genesis);
+        assert!(!info.has_clock_transaction);
+        assert!(!info.has_user_transactions);
+        assert_eq!(info.transaction_count, 3);
     }
 
     #[test]
