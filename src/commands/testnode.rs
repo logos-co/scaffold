@@ -748,6 +748,9 @@ pub(crate) fn cmd_test_node(action: TestNodeAction) -> DynResult<()> {
                     }
                     None => println!("proof: missing (commitment unknown to the node)"),
                 }
+                if let Some(root) = &read.root {
+                    println!("root: {root}");
+                }
             }
             Ok(())
         }
