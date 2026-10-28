@@ -91,12 +91,10 @@ impl StateSchema {
     /// [`crate::api::testnode::state_schema`], which takes an `api::Project`.
     pub(crate) fn for_project(project: &Project) -> DynResult<Self> {
         let pins = resolve_test_node_pins(project, &PinOverrides::default())?;
-        let shape = GenesisConfigShape::of_pins(&pins);
+        let shape = GenesisConfigShape::require_for(&pins)?;
         let (private_account_fields, config_keys) = match shape {
-            Some(GenesisConfigShape::Actions) => (Vec::new(), vec!["genesis".to_string()]),
-            // Not materialised and not the default pin: report the pre-v0.2.4
-            // keys, which every pin before the default used.
-            Some(GenesisConfigShape::InitialAccounts) | None => (
+            GenesisConfigShape::Actions => (Vec::new(), vec!["genesis".to_string()]),
+            GenesisConfigShape::InitialAccounts => (
                 vec![
                     "npk".to_string(),
                     "account.program_owner".to_string(),
@@ -405,13 +403,33 @@ impl GenesisConfigShape {
         .and_then(|path| fs::read_to_string(path).ok())
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
         .and_then(|doc| doc.as_object().map(Self::of));
-        let default = crate::constants::DEFAULT_LEZ;
-        from_checkout.or_else(|| {
-            [default.sha, default.tag]
-                .contains(&pins.lez_ref.as_str())
-                .then_some(Self::Actions)
+        from_checkout.or_else(|| names_default_lez(&pins.lez_ref).then_some(Self::Actions))
+    }
+
+    /// [`Self::of_pins`], or an error telling the caller how to make the
+    /// shape knowable. Guessing is worse than refusing: a guessed legacy shape
+    /// accepts seeds that `start --state` then rejects, and a guessed v0.2.4
+    /// shape rejects private accounts a legacy pin can seed.
+    pub(crate) fn require_for(pins: &super::pins::TestNodePins) -> DynResult<Self> {
+        Self::of_pins(pins).ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot tell which genesis config LEZ `{}` uses: its checkout at {} is not \
+                 materialised. Run `lgs test-node prepare` first.",
+                pins.lez_ref,
+                pins.lez_checkout.display()
+            )
         })
     }
+}
+
+/// Whether `lez_ref` names scaffold's default LEZ pin: its tag, its full
+/// SHA, or an abbreviation of it (7+ hex digits).
+fn names_default_lez(lez_ref: &str) -> bool {
+    let default = crate::constants::DEFAULT_LEZ;
+    lez_ref == default.tag
+        || (lez_ref.len() >= 7
+            && lez_ref.chars().all(|c| c.is_ascii_hexdigit())
+            && default.sha.starts_with(&lez_ref.to_ascii_lowercase()))
 }
 
 impl StateSnapshot {
@@ -544,13 +562,6 @@ pub fn seed_state(
 
     // Snapshot-file input: validate, check pins, and write seed.json.
     let snapshot = StateSnapshot::from_file(input)?;
-    let shape = GenesisConfigShape::of_pins(&pins);
-    if let Some(shape) = shape {
-        snapshot.check_seedable(shape)?;
-    }
-    if shape == Some(GenesisConfigShape::Actions) && !snapshot.public_accounts.is_empty() {
-        warnings.push(VAULT_CREDIT_WARNING.to_string());
-    }
 
     if let (Some(snapshot_commit), Some(project_commit)) =
         (&snapshot.lez_commit, &pins.lez_resolved_commit)
@@ -567,6 +578,12 @@ pub fn seed_state(
         warnings.push(
             "snapshot carries no `lez_commit`; pin compatibility was not verified".to_string(),
         );
+    }
+
+    let shape = GenesisConfigShape::require_for(&pins)?;
+    snapshot.check_seedable(shape)?;
+    if shape == GenesisConfigShape::Actions && !snapshot.public_accounts.is_empty() {
+        warnings.push(VAULT_CREDIT_WARNING.to_string());
     }
 
     let normalized = StateSnapshot {
@@ -828,30 +845,36 @@ mod tests {
         assert!(config.get("initial_public_accounts").is_none());
     }
 
-    /// A project pinned off the default with no checkout yet: its genesis
-    /// shape is unknown, so `state seed` must not apply v0.2.4's limits (a
-    /// pre-v0.2.4 pin seeds private accounts), and `state schema` reports the
-    /// pre-v0.2.4 keys.
+    /// No checkout yet: only the default pin's shape is known, in any of its
+    /// spellings. Any other pin must refuse rather than guess either way.
     #[test]
-    fn unmaterialised_non_default_pin_defers_the_shape_check() {
+    fn unmaterialised_checkout_knows_only_the_default_pin() {
+        assert!(names_default_lez(crate::constants::DEFAULT_LEZ.sha));
+        assert!(names_default_lez(crate::constants::DEFAULT_LEZ.tag));
+        assert!(names_default_lez(&crate::constants::DEFAULT_LEZ.sha[..8]));
+        assert!(names_default_lez(
+            &crate::constants::DEFAULT_LEZ.sha[..8].to_ascii_uppercase()
+        ));
+        assert!(!names_default_lez(&crate::constants::DEFAULT_LEZ.sha[..6]));
+        assert!(!names_default_lez("v0.2.3"));
+
         let temp = tempdir().unwrap();
         let mut project = fixture_project(temp.path());
-        project.config.lez.pin = "1111111111111111111111111111111111111111".into();
-
+        project.config.lez.pin = crate::constants::DEFAULT_LEZ.sha[..8].to_string();
         let schema = StateSchema::for_project(&project).unwrap();
-        assert!(schema
-            .config_keys
-            .contains(&"initial_private_accounts".to_string()));
+        assert_eq!(schema.config_keys, ["genesis"]);
 
+        project.config.lez.pin = "1111111111111111111111111111111111111111".into();
+        let err = StateSchema::for_project(&project).unwrap_err();
+        assert!(err.to_string().contains("test-node prepare"), "{err}");
         let input = temp.path().join("snapshot.json");
         fs::write(
             &input,
             serde_json::to_string(&one_public_one_private()).unwrap(),
         )
         .unwrap();
-        let seeded = seed_state(&project, &input, Some(&temp.path().join("seeded"))).unwrap();
-        assert_eq!(seeded.private_account_count, 1);
-        assert!(!seeded.warnings.iter().any(|w| w == VAULT_CREDIT_WARNING));
+        let err = seed_state(&project, &input, Some(&temp.path().join("seeded"))).unwrap_err();
+        assert!(err.to_string().contains("test-node prepare"), "{err}");
     }
 
     #[test]
