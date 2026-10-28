@@ -735,6 +735,9 @@ fn build_status_report(
 /// project's own `.scaffold/localnet/` instead, next to `dest_dir`.
 fn prepare_sequencer_config(lez: &Path, dest_dir: &Path, port: u16) -> DynResult<PathBuf> {
     let home = localnet_home_for_state_dir(dest_dir);
+    if let Some(note) = moved_chain_note(lez, &home) {
+        eprintln!("{note}");
+    }
     fs::create_dir_all(&home)
         .with_context(|| format!("failed to create localnet home {}", home.display()))?;
     let home = home.canonicalize().unwrap_or(home);
@@ -747,6 +750,25 @@ fn prepare_sequencer_config(lez: &Path, dest_dir: &Path, port: u16) -> DynResult
         Ok(())
     })?;
     Ok(dest_path)
+}
+
+/// One-time notice for a project upgraded from a scaffold that kept the
+/// chain in the shared LEZ checkout: its first start here begins at genesis,
+/// and without a word its deployed programs and accounts seem to vanish.
+/// Shown only while the project has no chain of its own yet.
+fn moved_chain_note(lez: &Path, home: &Path) -> Option<String> {
+    let legacy = lez.join("rocksdb");
+    if home.join("rocksdb").exists() || !legacy.is_dir() {
+        return None;
+    }
+    Some(format!(
+        "note: localnet now keeps this project's chain in {}, so this start begins from \
+         genesis (redeploy with `logos-scaffold deploy` or `run`). The chain at {} was \
+         shared by every project on this LEZ pin; scaffold no longer uses it, and it can be \
+         deleted once no project on an older scaffold needs it.",
+        home.display(),
+        legacy.display()
+    ))
 }
 
 /// Project-relative directory holding the localnet chain (`rocksdb/`) and the
@@ -1210,6 +1232,32 @@ mod tests {
             config,
         };
         (project, lez_dir)
+    }
+
+    #[test]
+    fn moved_chain_note_only_before_the_project_has_its_own_chain() {
+        let temp = tempdir().unwrap();
+        let lez = temp.path().join("lez");
+        let home = temp.path().join("project/.scaffold/localnet");
+        fs::create_dir_all(&home).unwrap();
+        assert!(
+            super::moved_chain_note(&lez, &home).is_none(),
+            "no legacy chain"
+        );
+
+        fs::create_dir_all(lez.join("rocksdb")).unwrap();
+        let note = super::moved_chain_note(&lez, &home).expect("legacy chain, none here yet");
+        assert!(note.contains(&home.display().to_string()), "{note}");
+        assert!(
+            note.contains(&lez.join("rocksdb").display().to_string()),
+            "{note}"
+        );
+
+        fs::create_dir_all(home.join("rocksdb")).unwrap();
+        assert!(
+            super::moved_chain_note(&lez, &home).is_none(),
+            "already moved"
+        );
     }
 
     #[test]
