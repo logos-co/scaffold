@@ -10,7 +10,7 @@
 //! retryable error instead of silently inconsistent data.
 //!
 //! The pinned sequencer serves only the *latest* state (`getAccount` /
-//! `getProofForCommitment` have no historical parameter). `ReadAt::Block`
+//! `getProofsAndRoot` have no historical parameter). `ReadAt::Block`
 //! therefore validates that the node's head **is** the requested block and
 //! fails with a targeted error otherwise — which still gives tests an exact
 //! block-scoped read right after `blocks wait` / `tx submit-and-wait`
@@ -95,6 +95,10 @@ pub struct ProofRead {
     pub block_id: u64,
     /// `None` when the node does not know the commitment.
     pub proof: Option<ProofValue>,
+    /// Commitment-set root the proof verifies against, hex. `None` on
+    /// pre-v0.2.4 nodes, whose `getProofForCommitment` does not return it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
 }
 
 /// A membership proof (`(leaf_index, sibling_path)` on the wire).
@@ -150,24 +154,65 @@ impl TestNodeClient {
         let commitment_hex = hex_string(&bytes);
         let param: Vec<u64> = bytes.iter().map(|byte| u64::from(*byte)).collect();
 
-        let (block_id, proof) = self.read_at_boundary(at, |client| {
-            let result = client.call("getProofForCommitment", json!([param]))?;
-            match result {
-                Value::Null => Ok(None),
-                other => parse_proof(&other)
-                    .map(Some)
-                    .map_err(|message| RpcError::Other {
-                        operation: "getProofForCommitment".to_string(),
-                        message,
-                    }),
-            }
-        })?;
+        let (block_id, (proof, root)) =
+            self.read_at_boundary(at, |client| client.fetch_proof(&param))?;
 
         Ok(ProofRead {
             commitment: commitment_hex,
             block_id,
             proof,
+            root,
         })
+    }
+
+    /// LEZ v0.2.4 replaced `getProofForCommitment(c)` with the batched
+    /// `getProofsAndRoot([c, …])`, which answers `[[proof | null, …], root]`.
+    /// Older nodes answer the batched call with "method not found"; fall
+    /// back to the single-commitment call for them.
+    fn fetch_proof(
+        &self,
+        commitment: &[u64],
+    ) -> Result<(Option<ProofValue>, Option<String>), RpcError> {
+        const METHOD_NOT_FOUND: i64 = -32601;
+        let operation = "getProofsAndRoot";
+        let malformed = |message: String| RpcError::Other {
+            operation: operation.to_string(),
+            message,
+        };
+        match self.call(operation, json!([[commitment]])) {
+            Ok(result) => {
+                let pair = result
+                    .as_array()
+                    .filter(|items| items.len() == 2)
+                    .ok_or_else(|| malformed(format!("expected [proofs, root], got {result}")))?;
+                let proof = match pair[0].as_array().map(Vec::as_slice) {
+                    Some([Value::Null]) => None,
+                    Some([proof]) => Some(parse_proof(proof).map_err(malformed)?),
+                    _ => return Err(malformed(format!("expected one proof, got {}", pair[0]))),
+                };
+                let root = byte_array(&pair[1])
+                    .filter(|bytes| bytes.len() == 32)
+                    .map(|bytes| hex_string(&bytes))
+                    .ok_or_else(|| malformed(format!("root is not 32 bytes: {}", pair[1])))?;
+                Ok((proof, Some(root)))
+            }
+            Err(RpcError::JsonRpc {
+                code: Some(METHOD_NOT_FOUND),
+                ..
+            }) => {
+                let result = self.call("getProofForCommitment", json!([commitment]))?;
+                match result {
+                    Value::Null => Ok((None, None)),
+                    other => parse_proof(&other)
+                        .map(|proof| (Some(proof), None))
+                        .map_err(|message| RpcError::Other {
+                            operation: "getProofForCommitment".to_string(),
+                            message,
+                        }),
+                }
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn fetch_account_value(&self, account_id: &str) -> Result<AccountValue, RpcError> {
@@ -332,19 +377,22 @@ fn parse_proof(value: &Value) -> Result<ProofValue, String> {
         .ok_or("proof path is not an array")?
         .iter()
         .map(|node| {
-            let bytes: Option<Vec<u8>> = node.as_array().map(|items| {
-                items
-                    .iter()
-                    .map(|item| item.as_u64().and_then(|byte| u8::try_from(byte).ok()))
-                    .collect::<Option<Vec<u8>>>()
-            })?;
-            bytes
+            byte_array(node)
                 .filter(|bytes| bytes.len() == 32)
                 .map(|b| hex_string(&b))
         })
         .collect::<Option<Vec<String>>>()
         .ok_or("proof path nodes are not 32-byte arrays")?;
     Ok(ProofValue { leaf_index, path })
+}
+
+/// A JSON array of byte values (`[u8; N]` as serde writes it).
+fn byte_array(value: &Value) -> Option<Vec<u8>> {
+    value
+        .as_array()?
+        .iter()
+        .map(|item| item.as_u64().and_then(|byte| u8::try_from(byte).ok()))
+        .collect()
 }
 
 /// Accept a commitment as 64 hex chars or base58 of 32 bytes. Anything else
@@ -561,10 +609,13 @@ mod tests {
     }
 
     #[test]
-    fn proof_read_distinguishes_missing_and_present() {
+    fn proof_read_falls_back_to_get_proof_for_commitment() {
         let commitment_hex = "ab".repeat(32);
         let node = FakeNode::start(|method, params| match method {
             "getLastBlockId" => json!(20),
+            "getProofsAndRoot" => {
+                json!({"__jsonrpc_error": {"code": -32601, "message": "Method not found"}})
+            }
             "getProofForCommitment" => {
                 // Commitment arrives as an array of 32 numbers.
                 let bytes = params[0].as_array().unwrap();
@@ -589,6 +640,41 @@ mod tests {
 
         let missing = client.proof(&"cd".repeat(32), ReadAt::Latest).unwrap();
         assert!(missing.proof.is_none());
+    }
+
+    #[test]
+    fn proof_read_uses_get_proofs_and_root() {
+        let commitment_hex = "ab".repeat(32);
+        let node = FakeNode::start(|method, params| match method {
+            "getLastBlockId" => json!(20),
+            "getProofsAndRoot" => {
+                // One batch holding one commitment of 32 numbers.
+                let batch = params[0].as_array().unwrap();
+                assert_eq!(batch.len(), 1);
+                let bytes = batch[0].as_array().unwrap();
+                assert_eq!(bytes.len(), 32);
+                let proof = if bytes[0].as_u64() == Some(0xAB) {
+                    json!([3, [vec![1_u8; 32], vec![2_u8; 32]]])
+                } else {
+                    Value::Null
+                };
+                json!([[proof], vec![9_u8; 32]])
+            }
+            other => panic!("unexpected method {other}"),
+        });
+
+        let client = TestNodeClient::new(&node.url);
+
+        let read = client.proof(&commitment_hex, ReadAt::Latest).unwrap();
+        assert_eq!(read.block_id, 20);
+        assert_eq!(read.root.as_deref(), Some("09".repeat(32).as_str()));
+        let proof = read.proof.expect("proof present");
+        assert_eq!(proof.leaf_index, 3);
+        assert_eq!(proof.path[1], "02".repeat(32));
+
+        let missing = client.proof(&"cd".repeat(32), ReadAt::Latest).unwrap();
+        assert!(missing.proof.is_none());
+        assert!(missing.root.is_some());
     }
 
     #[test]
