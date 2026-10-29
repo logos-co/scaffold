@@ -153,10 +153,12 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
     // would have produced.
     cmd_build_shortcut(None, false, None)?;
 
-    // Step 2: Build IDL (no-op for non-lez-framework projects). `build_idl_for_current_project`
-    // deliberately bails when typed directly against a non-lez-framework project, so the
-    // pipeline must gate on framework kind here the same way `lgs build` does — otherwise
-    // `lgs run` aborts at this step for every `default`-template project.
+    // Step 2: Build IDL. Only legacy lez-framework projects need it as a step
+    // of its own: SPEL projects already generated their IDL inside step 1, and
+    // `default` projects have none. `build_idl_for_current_project` bails when
+    // typed directly against a `default` project, so the pipeline must gate on
+    // framework kind here the same way `lgs build` does — otherwise `lgs run`
+    // aborts at this step for every `default`-template project.
     println!("[2/{total_steps}] Building IDL...");
     if project.config.framework.kind == FRAMEWORK_KIND_LEZ_FRAMEWORK {
         build_idl_for_current_project()?;
