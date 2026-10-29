@@ -81,7 +81,7 @@ pub(crate) fn cmd_build_shortcut(
         build_workspace_for_current_project(&cwd)?;
         match project.config.framework.kind.as_str() {
             FRAMEWORK_KIND_DEFAULT => {}
-            // lez-framework uses scaffold's internal IDL/client pipeline.
+            // Legacy lez-framework projects use scaffold's internal IDL/client pipeline.
             FRAMEWORK_KIND_LEZ_FRAMEWORK => {
                 build_idl_for_current_project()?;
                 generate_clients_from_current_idl()?;

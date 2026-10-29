@@ -70,8 +70,8 @@ pub(crate) fn run_checked(cmd: &mut Command, label: &str) -> DynResult<()> {
 /// cargo build (and a bogus placeholder path when it is missing). cc-rs
 /// resolves compilers for host-target artifacts — build scripts and
 /// proc-macro dependencies compiled for the build machine inside the guest
-/// graph (e.g. `ring` pulled in via `spel-framework-macros` in the
-/// lez-framework template) — in the order `CC_<host-triple>` → `HOST_CC` →
+/// graph (e.g. `ring` pulled in via `spel-framework-macros` in SPEL
+/// projects) — in the order `CC_<host-triple>` → `HOST_CC` →
 /// `CC`, so the riscv compiler leaks into host compiles and fails on
 /// host-only flags (`unrecognized command-line option '-m64'`). Pinning the
 /// `HOST_*` slots to the system defaults restores the pre-risc0 behavior for

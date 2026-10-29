@@ -11,18 +11,23 @@ For the command surface itself, see [commands.md](./commands.md).
 To run one or more post-deploy hooks automatically (e.g. submit a transaction
 with [spel](https://github.com/logos-co/spel)), add a `[run]` section to
 `scaffold.toml`. `post_deploy` is a list of shell commands executed in order;
-the run aborts at the first non-zero exit:
+the run aborts at the first non-zero exit. For a `--template spel` project:
 
 ```toml
 [run]
 post_deploy = [
-  "lgs spel -- --idl $SCAFFOLD_IDL_DIR/counter.json -p $SCAFFOLD_GUEST_BIN init",
-  "lgs spel -- --idl $SCAFFOLD_IDL_DIR/counter.json -p $SCAFFOLD_GUEST_BIN increment --by 5",
+  # The owner must already be initialised for the transfer program
+  # (`lgs wallet -- auth-transfer init --account-id <owner>`); see the
+  # spel-template skill.
+  "lgs spel -- initialize --owner Public/<owner-account-id>",
+  "lgs spel -- inspect $(lgs spel -- pda state) --type ProgramState",
 ]
 ```
 
 The `lgs spel --` passthrough invokes the project-vendored `spel` binary
-so hooks pick up the same pinned version `deploy` used.
+so hooks pick up the same pinned version `deploy` used. It reads the program
+binary and IDL from the project's `spel.toml`, so SPEL hooks need neither
+`$SCAFFOLD_GUEST_BIN` nor `$SCAFFOLD_IDL_DIR`.
 
 A single command may also be written as a plain string for brevity:
 `post_deploy = "echo done"`.
@@ -36,7 +41,7 @@ environment variables pre-set:
 | `NSSA_WALLET_HOME_DIR` | Absolute path to project wallet directory (name read by LEZ up to v0.1.2) |
 | `LEE_WALLET_HOME_DIR` | Same path under the name LEZ v0.2.0 reads. Both are always set, so a hook that execs the wallet binary works on either pin |
 | `SCAFFOLD_PROJECT_ROOT` | Absolute path to project root |
-| `SCAFFOLD_IDL_DIR` | Absolute path to IDL output directory |
+| `SCAFFOLD_IDL_DIR` | Absolute path to `[framework.idl].path` (default `idl/`). SPEL projects keep their IDL where `spel.toml` says (the project root), not here |
 | `SCAFFOLD_TOPUP_SKIPPED` | `1` when step 4 was skipped (`topup = false`), `0` when scaffold topped up the wallet. Always set |
 | `SCAFFOLD_DEPLOY_SKIPPED` | `1` when step 5 deployed nothing — either `deploy = false`, or the deploy cache found guest binaries, IDL, config and sequencer unchanged — and `0` when it deployed. Always set |
 | `SCAFFOLD_PROGRAM_ID` | risc0 image ID (hex) of the deployed program. Set only when the project has exactly one deployable program; unset if `spel program-id` cannot extract the ID |
