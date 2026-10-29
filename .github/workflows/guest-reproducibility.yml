@@ -185,7 +185,9 @@ jobs:
       # guests; if those are stale, the first build rewrites them and pays a
       # second full container rebuild on every fresh project. The digest diff
       # below cannot see that (the first pass already fixed the scratch
-      # project), so fail on the rewrite itself.
+      # project), so report the rewrite itself. A warning, not a failure: the
+      # guest has no Cargo.lock, so the ids drift with crates.io and would
+      # otherwise fail unrelated PRs (and the weekly run) until refreshed.
       - name: Build guests deterministically (first pass)
         run: |
           set -euo pipefail
@@ -193,8 +195,13 @@ jobs:
           "$GITHUB_WORKSPACE/target/release/logos-scaffold" build --guest docker \
             | tee "$RUNNER_TEMP/first-pass.log"
           if grep '^Updated .* program id' "$RUNNER_TEMP/first-pass.log"; then
-            echo "::error::TAIL_CALL_TARGETS docker_program_id in src/constants.rs is stale; set it to the id printed above"
-            exit 1
+            echo "::warning::TAIL_CALL_TARGETS docker_program_id in src/constants.rs has drifted from what this build produced (see the Updated lines); refresh it so fresh projects skip the second container build"
+            {
+              echo "### Tail-call program ids drifted"
+              echo '```'
+              grep '^Updated .* program id' "$RUNNER_TEMP/first-pass.log"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Record first-pass digests
