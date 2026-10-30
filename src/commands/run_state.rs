@@ -209,23 +209,8 @@ pub(crate) fn load_state(project: &Project) -> RunDeployState {
 }
 
 pub(crate) fn save_state(project: &Project, state: &RunDeployState) -> DynResult<()> {
-    let path = state_path(&project.root);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
-    let bytes = serde_json::to_vec_pretty(state).context("serialize run_deploy.json")?;
-    // Atomic write: stage to a sibling tempfile, then rename. A SIGINT
-    // between write and rename leaves the prior cache intact rather than
-    // truncating it. Same parent dir so rename(2) stays atomic across the
-    // same filesystem.
-    let tmp_name = match path.file_name().and_then(|n| n.to_str()) {
-        Some(n) => format!("{n}.tmp"),
-        None => return Err(anyhow::anyhow!("invalid state path: {}", path.display())),
-    };
-    let tmp = path.with_file_name(tmp_name);
-    std::fs::write(&tmp, &bytes).with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
+    let text = serde_json::to_string_pretty(state).context("serialize run_deploy.json")?;
+    crate::state::write_text_atomic(&state_path(&project.root), &text)
 }
 
 /// `true` → all known programs hashed, hashes match prior, AND the
