@@ -9,6 +9,7 @@ use anyhow::{bail, Context};
 use serde_json::Value;
 
 use crate::constants::{DEFAULT_WALLET_PASSWORD, WALLET_BIN_REL_PATH, WALLET_HOME_ENV_VARS};
+use crate::doctor_checks::one_line;
 use crate::model::Project;
 use crate::project::resolve_repo_path;
 use crate::state::write_text;
@@ -594,12 +595,7 @@ fn extract_tx_hash_from_hash_type_bytes(text: &str) -> Option<String> {
             continue;
         }
 
-        let mut hex_hash = String::from("0x");
-        for byte in bytes {
-            use std::fmt::Write as _;
-            let _ = write!(&mut hex_hash, "{byte:02x}");
-        }
-        return Some(hex_hash);
+        return Some(format!("0x{}", crate::hex(&bytes)));
     }
 
     None
@@ -704,10 +700,6 @@ pub(crate) fn sequencer_unreachable_hint(sequencer_addr: &str) -> String {
     format!(
         "sequencer appears unavailable at {sequencer_addr}\nRun `logos-scaffold localnet start`.\nAnother project's sequencer may already be running and may not match this project."
     )
-}
-
-fn one_line(text: &str) -> String {
-    text.replace(['\n', '\r'], " ")
 }
 
 #[cfg(test)]

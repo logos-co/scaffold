@@ -1,8 +1,8 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
@@ -35,21 +35,11 @@ struct IdlBuildState {
     outputs: Vec<String>,
 }
 
-pub(crate) fn cmd_idl(args: &[String]) -> DynResult<()> {
-    if args.is_empty() {
-        bail!("usage: logos-scaffold build idl [project-path]");
-    }
-
-    match args[0].as_str() {
-        "build" => {
-            let project_dir = parse_optional_project_path(&args[1..], "logos-scaffold build idl")?;
-            // Explicit `build idl` regenerates unconditionally (force = true):
-            // it's the documented "regenerate the IDL" escape hatch, so it
-            // must not silently short-circuit on the cache.
-            run_in_project_dir(project_dir.as_deref(), || build_idl_inner(true))
-        }
-        other => Err(anyhow!("unknown idl command: {other}")),
-    }
+pub(crate) fn cmd_idl(project_dir: Option<&Path>) -> DynResult<()> {
+    // Explicit `build idl` regenerates unconditionally (force = true): it's
+    // the documented "regenerate the IDL" escape hatch, so it must not
+    // silently short-circuit on the cache.
+    run_in_project_dir(project_dir, || build_idl_inner(true))
 }
 
 /// Cache-aware IDL build used by the `build` / `run` pipelines. Short-circuits
@@ -227,7 +217,7 @@ fn compute_idl_input_hash(project: &Project) -> DynResult<String> {
     hasher.update(b"\x00");
     hasher.update(project.config.framework.idl.path.as_bytes());
 
-    Ok(hex_encode(&hasher.finalize()))
+    Ok(crate::hex(&hasher.finalize()))
 }
 
 /// `filter_entry` predicate: keep the root, every file, and any directory that
@@ -274,44 +264,8 @@ fn load_idl_state(project: &Project) -> Option<IdlBuildState> {
 }
 
 fn save_idl_state(project: &Project, state: &IdlBuildState) -> DynResult<()> {
-    let path = project.root.join(IDL_STATE_REL);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
     let text = serde_json::to_string_pretty(state).context("serialize idl_build.json")?;
-    // Atomic write: stage to a sibling tempfile, then rename. A SIGINT
-    // between write and rename leaves the prior cache intact rather than
-    // truncating it. Same parent dir keeps rename(2) atomic.
-    let tmp = path.with_file_name("idl_build.json.tmp");
-    fs::write(&tmp, &text).with_context(|| format!("write {}", tmp.display()))?;
-    fs::rename(&tmp, &path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
-}
-
-fn parse_optional_project_path(args: &[String], usage_label: &str) -> DynResult<Option<PathBuf>> {
-    let mut project_dir: Option<PathBuf> = None;
-
-    for arg in args {
-        if arg.starts_with("--") {
-            bail!("unknown flag for `{usage_label}`: {arg}");
-        }
-        if project_dir.is_none() {
-            project_dir = Some(PathBuf::from(arg));
-        } else {
-            bail!("unexpected argument `{arg}` for `{usage_label}`");
-        }
-    }
-
-    Ok(project_dir)
+    crate::state::write_text_atomic(&project.root.join(IDL_STATE_REL), &text)
 }
 
 fn clear_existing_json_files(dir: &std::path::Path) -> DynResult<()> {

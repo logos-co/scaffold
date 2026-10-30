@@ -953,10 +953,6 @@ fn scrub_path_string(raw: &str, sanitize_ctx: &SanitizeContext) -> String {
     scrubbed
 }
 
-fn scrub_manifest_text(raw: &str, sanitize_ctx: &SanitizeContext) -> String {
-    scrub_path_string(raw, sanitize_ctx)
-}
-
 fn scrub_manifest_entries(
     collected: &mut [CollectedItem],
     skipped: &mut [SkippedItem],
@@ -964,20 +960,20 @@ fn scrub_manifest_entries(
     sanitize_ctx: &SanitizeContext,
 ) {
     for item in collected {
-        item.path = scrub_manifest_text(&item.path, sanitize_ctx);
-        item.source = scrub_manifest_text(&item.source, sanitize_ctx);
+        item.path = scrub_path_string(&item.path, sanitize_ctx);
+        item.source = scrub_path_string(&item.source, sanitize_ctx);
         if let Some(notes) = &item.notes {
-            item.notes = Some(scrub_manifest_text(notes, sanitize_ctx));
+            item.notes = Some(scrub_path_string(notes, sanitize_ctx));
         }
     }
 
     for item in skipped {
-        item.path = scrub_manifest_text(&item.path, sanitize_ctx);
-        item.reason = scrub_manifest_text(&item.reason, sanitize_ctx);
+        item.path = scrub_path_string(&item.path, sanitize_ctx);
+        item.reason = scrub_path_string(&item.reason, sanitize_ctx);
     }
 
     for warning in warnings {
-        *warning = scrub_manifest_text(warning, sanitize_ctx);
+        *warning = scrub_path_string(warning, sanitize_ctx);
     }
 }
 
@@ -1092,6 +1088,14 @@ fn is_private_key_block_end_line(line: &str) -> bool {
     upper.contains("-----END") && upper.contains("PRIVATE KEY-----")
 }
 
+/// Length of the URL token that starts `after_scheme` (the text after `://`):
+/// it ends at whitespace, a quote or a closing bracket.
+fn url_token_len(after_scheme: &str) -> usize {
+    after_scheme
+        .find(|ch: char| ch.is_ascii_whitespace() || matches!(ch, '"' | '\'' | ')' | ']' | '>'))
+        .unwrap_or(after_scheme.len())
+}
+
 fn redact_sensitive_line(line: &str) -> (String, usize) {
     let lower = line.to_ascii_lowercase();
 
@@ -1148,17 +1152,7 @@ fn redact_sensitive_line(line: &str) -> (String, usize) {
         let after_scheme_start = scheme_idx + 3;
         if after_scheme_start <= line.len() {
             let after_scheme = &line[after_scheme_start..];
-            let url_len = after_scheme
-                .char_indices()
-                .find_map(|(idx, ch)| {
-                    if ch.is_ascii_whitespace() || matches!(ch, '"' | '\'' | ')' | ']' | '>') {
-                        Some(idx)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(after_scheme.len());
-            let url_end = after_scheme_start + url_len;
+            let url_end = after_scheme_start + url_token_len(after_scheme);
             if eq_idx > scheme_idx && eq_idx < url_end {
                 return (line.to_string(), 0);
             }
@@ -1218,16 +1212,7 @@ fn redact_url_credentials(line: &str) -> (String, usize) {
         let (prefix_with_scheme, after_scheme) = rest.split_at(split_at);
         output.push_str(prefix_with_scheme);
 
-        let end = after_scheme
-            .char_indices()
-            .find_map(|(idx, ch)| {
-                if ch.is_ascii_whitespace() || matches!(ch, '"' | '\'' | ')' | ']' | '>') {
-                    Some(idx)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(after_scheme.len());
+        let end = url_token_len(after_scheme);
 
         let url_slice = &after_scheme[..end];
         let authority_end = url_slice

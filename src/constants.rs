@@ -38,11 +38,9 @@ pub(crate) const DEFAULT_SPEL: GitRef = GitRef {
 /// `logos-blockchain-{pol,poc,poq,zksign}` build script reads at compile time
 /// via `logos-blockchain-circuits-utils::circuits_dir()`.
 ///
-/// Pinned to the version LEZ v0.1.2's `flake.lock` resolves to (its
-/// `logos-blockchain-circuits` input is `d6cf41f…`, whose `flake.nix` declares
-/// `circuitsVersion = "0.4.1"`). A mismatched circuits release silently
-/// produces incompatible verifier keys, so bump this in lock-step with
-/// `DEFAULT_LB_PIN` / `DEFAULT_LEZ`.
+/// A mismatched circuits release silently produces incompatible verifier
+/// keys, so bump this in lock-step with `DEFAULT_LEZ` (match the
+/// `circuitsVersion` its `flake.lock` resolves to).
 ///
 /// Default for `[circuits].version`. Materialised on demand into the
 /// project's `[circuits].install_dir` (default `.scaffold/circuits`) by
@@ -64,8 +62,12 @@ pub(crate) struct TailCallTarget {
     /// The callee guest program.
     pub(crate) callee: &'static str,
     /// The callee's id from a deterministic (`[build].guest = "docker"`)
-    /// build at the pinned LEZ. `new` writes it so the default build needs
-    /// no rebuild; `build` replaces it whenever the built callee differs.
+    /// build at the pinned LEZ. `new` writes it so the default build usually
+    /// needs no rebuild; `build` replaces it whenever the built callee differs.
+    /// Only a best-effort snapshot: the template's guest has no `Cargo.lock`,
+    /// so the container resolves dependencies from crates.io at build time and
+    /// the id moves whenever a dependency publishes a new version. The
+    /// guest-reproducibility workflow warns when it has drifted.
     pub(crate) docker_program_id: &'static str,
 }
 
@@ -74,13 +76,13 @@ pub(crate) const TAIL_CALL_TARGETS: &[TailCallTarget] = &[
         caller_file: "simple_tail_call.rs",
         const_name: "HELLO_WORLD_PROGRAM_ID_HEX",
         callee: "hello_world",
-        docker_program_id: "6709b56b856db0fbded2b13a274b2a931a01a2591022997d44b17d77f93b2c07",
+        docker_program_id: "761215837f994b739e3ed9391a90909b622d9126b9d79e380da9b06ff7a7f997",
     },
     TailCallTarget {
         caller_file: "tail_call_with_pda.rs",
         const_name: "HELLO_WORLD_WITH_AUTHORIZATION_PROGRAM_ID_HEX",
         callee: "hello_world_with_authorization",
-        docker_program_id: "9a64767daf50d8019730330f06675c2e79f570e84d4d382ec82b5db089c04be9",
+        docker_program_id: "115362359a96eacc0a9beab8c45239c801f7bafc0e733edd7c9040f24d5e6b3f",
     },
 ];
 pub(crate) const DEFAULT_WALLET_PASSWORD: &str = "logos-scaffold-v0";

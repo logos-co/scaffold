@@ -34,14 +34,12 @@
 
 use std::time::{Duration, Instant};
 
+use crate::sha256_hex;
 use serde::Serialize;
 use serde_json::{json, Value};
-use sha2::{Digest as _, Sha256};
 
 use super::client::{parse_block_prefix, BlockContext, RpcError, TestNodeClient};
-
-/// Block id the LEZ sequencer gives its genesis block.
-const GENESIS_BLOCK_ID: u64 = 1;
+use super::GENESIS_BLOCK_ID;
 
 /// Borsh size of the block header (`u64` + 32 + 32 + `u64` + 64-byte
 /// signature).
@@ -348,7 +346,7 @@ fn parse_clock_account(account_id: &str, value: &Value) -> Result<ClockAccount, 
     })
 }
 
-fn read_u128(value: Option<&Value>) -> Option<u128> {
+pub(super) fn read_u128(value: Option<&Value>) -> Option<u128> {
     let value = value?;
     if let Some(number) = value.as_u64() {
         return Some(u128::from(number));
@@ -499,16 +497,6 @@ fn skip_fixed(bytes: &[u8], offset: usize, size: usize, field: &str) -> Result<u
         return Err(format!("payload too short for `{field}`"));
     }
     Ok(end)
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
 }
 
 #[cfg(test)]
