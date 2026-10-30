@@ -1,8 +1,8 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::Command;
 
-use anyhow::{anyhow, bail};
+use anyhow::bail;
 
 use crate::commands::idl::build_idl_for_current_project;
 use crate::constants::{
@@ -13,19 +13,8 @@ use crate::process::{apply_host_cc_overrides, run_checked};
 use crate::project::{load_project, resolve_repo_path, run_in_project_dir};
 use crate::DynResult;
 
-pub(crate) fn cmd_client(args: &[String]) -> DynResult<()> {
-    if args.is_empty() {
-        bail!("usage: logos-scaffold build client [project-path]");
-    }
-
-    match args[0].as_str() {
-        "build" => {
-            let project_dir =
-                parse_optional_project_path(&args[1..], "logos-scaffold build client")?;
-            run_in_project_dir(project_dir.as_deref(), build_clients_for_current_project)
-        }
-        other => Err(anyhow!("unknown client command: {other}")),
-    }
+pub(crate) fn cmd_client(project_dir: Option<&Path>) -> DynResult<()> {
+    run_in_project_dir(project_dir, build_clients_for_current_project)
 }
 
 pub(crate) fn build_clients_for_current_project() -> DynResult<()> {
@@ -120,21 +109,4 @@ fn generate_clients_from_project_idl(project: &Project) -> DynResult<()> {
     run_checked(&mut cmd, "run lez client generator")?;
 
     Ok(())
-}
-
-fn parse_optional_project_path(args: &[String], usage_label: &str) -> DynResult<Option<PathBuf>> {
-    let mut project_dir: Option<PathBuf> = None;
-
-    for arg in args {
-        if arg.starts_with("--") {
-            bail!("unknown flag for `{usage_label}`: {arg}");
-        }
-        if project_dir.is_none() {
-            project_dir = Some(PathBuf::from(arg));
-        } else {
-            bail!("unexpected argument `{arg}` for `{usage_label}`");
-        }
-    }
-
-    Ok(project_dir)
 }
