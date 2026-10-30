@@ -5,16 +5,9 @@ use std::path::Path;
 use anyhow::{bail, Context};
 use toml_edit::DocumentMut;
 
-use crate::config::{
-    default_basecamp_repo, default_lez_repo, default_lgpm_repo, default_spel_repo, serialize_config,
-};
-use crate::constants::{
-    DEFAULT_BASECAMP_PIN, DEFAULT_FRAMEWORK_IDL_PATH, DEFAULT_FRAMEWORK_IDL_SPEC,
-    DEFAULT_FRAMEWORK_VERSION, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL, FRAMEWORK_KIND_DEFAULT,
-    SCAFFOLD_TOML_SCHEMA_VERSION,
-};
+use crate::config::serialize_config;
+use crate::constants::{FRAMEWORK_KIND_DEFAULT, SCAFFOLD_TOML_SCHEMA_VERSION};
 use crate::migrate::migrate_to_v0_2_0;
-use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RunConfig};
 use crate::state::write_text_atomic;
 use crate::template::project::ensure_scaffold_in_gitignore;
 use crate::template::skills::apply_skills;
@@ -168,7 +161,7 @@ pub(crate) fn cmd_init_at(
     // Fresh init — schema 0.2.0 by construction. Create the .scaffold/
     // directories first so that a failure here leaves no scaffold.toml
     // behind and a re-run starts cleanly.
-    let cfg = fresh_default_config();
+    let cfg = crate::config::default_config(FRAMEWORK_KIND_DEFAULT);
     if dry_run {
         println!(
             "dry-run: would create scaffold.toml at {} (schema v{})",
@@ -211,37 +204,14 @@ fn create_scaffold_dirs(target: &Path) -> DynResult<()> {
     Ok(())
 }
 
-fn fresh_default_config() -> Config {
-    Config {
-        version: SCAFFOLD_TOML_SCHEMA_VERSION.to_string(),
-        cache_root: String::new(),
-        lez: default_lez_repo(DEFAULT_LEZ.sha),
-        spel: default_spel_repo(DEFAULT_SPEL.sha),
-        basecamp_repo: Some(default_basecamp_repo(DEFAULT_BASECAMP_PIN)),
-        lgpm_repo: Some(default_lgpm_repo(DEFAULT_LGPM_PIN)),
-        wallet_home_dir: ".scaffold/wallet".to_string(),
-        circuits: crate::model::CircuitsConfig::default(),
-        framework: FrameworkConfig {
-            kind: FRAMEWORK_KIND_DEFAULT.to_string(),
-            version: DEFAULT_FRAMEWORK_VERSION.to_string(),
-            idl: FrameworkIdlConfig {
-                spec: DEFAULT_FRAMEWORK_IDL_SPEC.to_string(),
-                path: DEFAULT_FRAMEWORK_IDL_PATH.to_string(),
-            },
-        },
-        build: crate::model::BuildConfig::default(),
-        localnet: LocalnetConfig::default(),
-        modules: std::collections::BTreeMap::new(),
-        basecamp: None,
-        run: RunConfig::default(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::parse_config;
-    use crate::constants::{BASECAMP_ATTR, LEZ_SOURCE, LGPM_ATTR, SPEL_SOURCE};
+    use crate::constants::{
+        BASECAMP_ATTR, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL, LEZ_SOURCE, LGPM_ATTR,
+        SPEL_SOURCE,
+    };
     use std::fs;
     use tempfile::tempdir;
 

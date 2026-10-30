@@ -1191,6 +1191,34 @@ pub(crate) fn check_toml_value(key: &str, value: &str) -> DynResult<()> {
 // `model.rs` stays free of constant references — the defaults live with
 // the file format that consumes them.
 
+/// The `scaffold.toml` that `init` and `new` write for a fresh project.
+pub(crate) fn default_config(framework_kind: &str) -> Config {
+    use crate::constants::{DEFAULT_BASECAMP_PIN, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL};
+    Config {
+        version: SCAFFOLD_TOML_SCHEMA_VERSION.to_string(),
+        cache_root: String::new(),
+        lez: default_lez_repo(DEFAULT_LEZ.sha),
+        spel: default_spel_repo(DEFAULT_SPEL.sha),
+        basecamp_repo: Some(default_basecamp_repo(DEFAULT_BASECAMP_PIN)),
+        lgpm_repo: Some(default_lgpm_repo(DEFAULT_LGPM_PIN)),
+        wallet_home_dir: ".scaffold/wallet".to_string(),
+        circuits: CircuitsConfig::default(),
+        framework: FrameworkConfig {
+            kind: framework_kind.to_string(),
+            version: DEFAULT_FRAMEWORK_VERSION.to_string(),
+            idl: FrameworkIdlConfig {
+                spec: DEFAULT_FRAMEWORK_IDL_SPEC.to_string(),
+                path: DEFAULT_FRAMEWORK_IDL_PATH.to_string(),
+            },
+        },
+        build: BuildConfig::default(),
+        localnet: LocalnetConfig::default(),
+        modules: std::collections::BTreeMap::new(),
+        basecamp: None,
+        run: RunConfig::default(),
+    }
+}
+
 pub(crate) fn default_lez_repo(pin: &str) -> RepoRef {
     RepoRef {
         source: LEZ_SOURCE.to_string(),
