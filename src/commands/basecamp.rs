@@ -782,10 +782,8 @@ fn cmd_basecamp_launch(
     for (k, v) in &env {
         cmd.env(k, v);
     }
-    // Per-module port-override env vars are owned by each module and flow in
-    // via a registry — empty in v1 since no modules have published names.
-    // Concurrent alice/bob on the same host may collide on module-level ports
-    // until upstreams adopt overrides.
+    // No module publishes a port-override env var yet, so concurrent
+    // alice/bob on one host may collide on module-level ports.
     match log_dest {
         // No log file: exec and hand the terminal straight to basecamp. exec
         // preserves the PID, so launch.state stays valid once it succeeds; on
@@ -1795,18 +1793,6 @@ fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
     false
 }
 
-/// `lgs basecamp build [--variant lgx|lgx-portable|all] [--module NAME]` —
-/// build the project's `.lgx` artefacts and symlink them into
-/// `.scaffold/basecamp/<variant-dir>/` in load order, without installing them
-/// into any profile (idempotent: no writes to `basecamp.state` or profiles).
-///
-/// Operates on `role = Project` modules only — `role = Dependency` companions
-/// are skipped (the target basecamp/AppImage provides its own). Each variant
-/// is a flake output attr: `lgx` (dev) builds the captured `#lgx` refs as-is;
-/// `lgx-portable` attr-swaps `#lgx` → `#lgx-portable` first. `module` restricts
-/// the build to a single captured project module.
-///
-/// `build-portable` is the back-compat alias for `build --variant lgx-portable`.
 /// Validate, reject-empty, and de-duplicate the requested build variants. The
 /// CLI constrains these to a `ValueEnum`, but the public Rust API takes a
 /// free-form `Vec<String>`, so an unexpected value (empty list, unknown attr,
@@ -1829,6 +1815,18 @@ fn normalize_build_variants(variants: Vec<String>) -> DynResult<Vec<String>> {
     Ok(out)
 }
 
+/// `lgs basecamp build [--variant lgx|lgx-portable|all] [--module NAME]` —
+/// build the project's `.lgx` artefacts and symlink them into
+/// `.scaffold/basecamp/<variant-dir>/` in load order, without installing them
+/// into any profile (idempotent: no writes to `basecamp.state` or profiles).
+///
+/// Operates on `role = Project` modules only — `role = Dependency` companions
+/// are skipped (the target basecamp/AppImage provides its own). Each variant
+/// is a flake output attr: `lgx` (dev) builds the captured `#lgx` refs as-is;
+/// `lgx-portable` attr-swaps `#lgx` → `#lgx-portable` first. `module` restricts
+/// the build to a single captured project module.
+///
+/// `build-portable` is the back-compat alias for `build --variant lgx-portable`.
 fn cmd_basecamp_build(
     project: Project,
     variants: Vec<String>,
@@ -2254,8 +2252,8 @@ fn resolve_dep_from_project_flake_lock(source_flake_path: &Path, dep_name: &str)
 /// - Auto (default, no args): walk project flakes; record as `role =
 ///   "project"`.
 ///
-/// Dependency resolution from each source's `metadata.json.dependencies`
-/// array lands in M2d and is intentionally absent here.
+/// Each source's `metadata.json.dependencies` are then resolved and captured
+/// as `role = "dependency"` entries.
 ///
 /// Idempotency: if a module_name already exists in `[modules]`, its
 /// entry is preserved — user intent (a hand-edited flake or role override)
@@ -2721,7 +2719,7 @@ fn resolve_manifest_dependencies(
     Ok(new_entries)
 }
 
-/// Pure replay of `state.project_sources` + `state.dependencies` into every
+/// Pure replay of the `[modules]` project and dependency entries into every
 /// seeded profile. Dependencies build first (fail-fast on a broken companion
 /// pin, before we invest time on project sources). If state has no captured
 /// sources, transparently invokes `basecamp modules` in auto-discover mode
@@ -3459,8 +3457,8 @@ pub(crate) fn check_manifest_variants(
     issues
 }
 
-/// Sources `basecamp modules` would auto-discover today but which aren't in
-/// `state.sources`. Used by `doctor` to flag missing captures without running
+/// Sources `basecamp modules` would auto-discover today but which aren't
+/// captured in `[modules]`. Used by `doctor` to flag missing captures without running
 /// the real capture. The reverse direction (captured-but-not-discovered) is
 /// intentionally not reported: explicitly captured sources (e.g. `--path` to
 /// a nix store, a github ref outside the project tree) are never
@@ -3509,8 +3507,7 @@ pub(crate) fn compute_module_drift(project: &Project) -> DynResult<ModuleDriftRe
 /// formatting helpers.
 ///
 /// Intentionally separate from top-level `logos-scaffold doctor` so basecamp
-/// remains a self-contained subcommand surface. A follow-up PR may merge the
-/// rows into the global doctor once the core basecamp feature has landed.
+/// remains a self-contained subcommand surface.
 fn cmd_basecamp_doctor(project: Project, as_json: bool) -> DynResult<()> {
     use crate::commands::doctor::{finalize_report, print_report};
     use crate::model::CheckStatus;

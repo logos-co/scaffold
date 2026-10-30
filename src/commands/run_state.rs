@@ -56,10 +56,8 @@ pub(crate) fn current_localnet_pid(project: &Project) -> Option<u32> {
 
 pub(crate) fn compute_program_hashes(project: &Project) -> DynResult<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
-    // `discover_deployable_programs` returns an empty Vec when the bin dir
-    // is missing, so we don't need to pre-check. Surfacing its errors
-    // (unreadable dir, etc.) is preferable to silently treating them as
-    // "no programs to hash".
+    // `discover_deployable_programs` errors when the bin dir is missing or
+    // unreadable; surfacing that beats silently hashing "no programs".
     let programs = discover_deployable_programs(&project.root)?;
     if programs.is_empty() {
         return Ok(out);

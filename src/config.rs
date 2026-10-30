@@ -259,7 +259,6 @@ fn parse_post_deploy(item: Option<&Item>) -> DynResult<Vec<String>> {
 /// user-facing error doesn't enumerate these — they're a structured signal
 /// for tests and any future verbose log path.
 #[derive(Debug, Default, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct OldSchemaMarkers {
     pub(crate) version_stale: bool,
     pub(crate) has_lssa: bool,
@@ -814,7 +813,6 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
             ModuleRole::Project => "project",
             ModuleRole::Dependency => "dependency",
         };
-        let path = format!("modules.{name}");
         let table = ensure_subtable(&mut doc, "modules", name);
         table["flake"] = value(&entry.flake);
         table["role"] = value(role_str);
@@ -822,8 +820,6 @@ pub(crate) fn serialize_config(cfg: &Config) -> DynResult<String> {
             check_toml_value(&format!("modules.{name}.standalone_app"), app)?;
             table["standalone_app"] = value(app);
         }
-        // Defensive: the function's check above already covered both fields.
-        let _ = path;
     }
 
     // [wallet]
@@ -1262,11 +1258,6 @@ pub(crate) fn default_lgpm_repo(pin: &str) -> RepoRef {
         path: String::new(),
     }
 }
-
-// The old `parse_inline_string_array`, `unquote`, and `escape_toml_string`
-// helpers are no longer needed — toml_edit handles array parsing, quote
-// unwrapping, and string escaping for `value(..)` calls. The hand-rolled
-// preserving emitter is gone along with them.
 
 #[cfg(test)]
 mod tests {

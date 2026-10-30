@@ -24,8 +24,6 @@ use crate::DynResult;
 
 use super::wallet_support::{rpc_get_last_block_id, wallet_state_path, RpcReachabilityError};
 
-// LOCALNET_ADDR is now read from project config (localnet.port)
-
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum LocalnetAction {
     Start {
