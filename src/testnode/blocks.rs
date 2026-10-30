@@ -34,9 +34,9 @@
 
 use std::time::{Duration, Instant};
 
+use crate::sha256_hex;
 use serde::Serialize;
 use serde_json::{json, Value};
-use sha2::{Digest as _, Sha256};
 
 use super::client::{parse_block_prefix, BlockContext, RpcError, TestNodeClient};
 
@@ -499,16 +499,6 @@ fn skip_fixed(bytes: &[u8], offset: usize, size: usize, field: &str) -> Result<u
         return Err(format!("payload too short for `{field}`"));
     }
     Ok(end)
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
 }
 
 #[cfg(test)]

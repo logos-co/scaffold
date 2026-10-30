@@ -1249,13 +1249,7 @@ fn project_root_tag(project_root: &Path) -> String {
         .unwrap_or_else(|_| project_root.to_path_buf());
     let mut hasher = Sha256::new();
     hasher.update(canon.as_os_str().as_encoded_bytes());
-    let digest = hasher.finalize();
-    use std::fmt::Write as _;
-    let mut tag = String::new();
-    for byte in &digest[..4] {
-        let _ = write!(tag, "{byte:02x}");
-    }
-    tag
+    crate::hex(&hasher.finalize()[..4])
 }
 
 /// `lgs basecamp develop <module>` — enter a module's Nix dev shell.
