@@ -15,7 +15,7 @@ use crate::model::{
 };
 use crate::process::{
     command_echo_enabled, listener_pid, pid_alive, pid_command, pid_running, port_open,
-    spawn_to_log,
+    spawn_to_log, wait_for_pid_exit,
 };
 use crate::project::{ensure_dir_exists, find_project_root, load_project, resolve_repo_path};
 use crate::sequencer_config::{apply_common_runtime_overrides, patch_runtime_sequencer_config};
@@ -981,19 +981,6 @@ fn remove_file_if_exists(path: &Path, label: &str) -> DynResult<()> {
 
 /// Poll `pid` until it is no longer running (exited or zombie), or `timeout`
 /// elapses. Returns `true` if the process exited within the deadline.
-fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if !pid_running(pid) {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-}
-
 /// Poll `localnet_addr` until no listener is accepting, or `timeout` elapses.
 fn wait_for_port_free(localnet_addr: &str, timeout: Duration) -> Result<(), ()> {
     let deadline = Instant::now() + timeout;

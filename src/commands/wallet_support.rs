@@ -9,6 +9,7 @@ use anyhow::{bail, Context};
 use serde_json::Value;
 
 use crate::constants::{DEFAULT_WALLET_PASSWORD, WALLET_BIN_REL_PATH, WALLET_HOME_ENV_VARS};
+use crate::doctor_checks::one_line;
 use crate::model::Project;
 use crate::project::resolve_repo_path;
 use crate::state::write_text;
@@ -699,10 +700,6 @@ pub(crate) fn sequencer_unreachable_hint(sequencer_addr: &str) -> String {
     format!(
         "sequencer appears unavailable at {sequencer_addr}\nRun `logos-scaffold localnet start`.\nAnother project's sequencer may already be running and may not match this project."
     )
-}
-
-fn one_line(text: &str) -> String {
-    text.replace(['\n', '\r'], " ")
 }
 
 #[cfg(test)]

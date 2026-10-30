@@ -451,18 +451,10 @@ fn wait_for_block_past(
     timeout: Duration,
     poll_interval: Duration,
 ) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Ok(head) = rpc_get_last_block_id(sequencer_addr) {
-            if head > submitted_at_head {
-                return true;
-            }
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(poll_interval);
-    }
+    poll_head(sequencer_addr, timeout, poll_interval, |head| {
+        head > submitted_at_head
+    })
+    .is_some()
 }
 
 /// Read the sequencer head, retrying transient RPC failures until `timeout`.
@@ -475,10 +467,22 @@ fn read_head_with_retry(
     timeout: Duration,
     poll_interval: Duration,
 ) -> Option<u64> {
+    poll_head(sequencer_addr, timeout, poll_interval, |_| true)
+}
+
+/// Poll the sequencer head until `accept` takes it or `timeout` elapses.
+fn poll_head(
+    sequencer_addr: &str,
+    timeout: Duration,
+    poll_interval: Duration,
+    accept: impl Fn(u64) -> bool,
+) -> Option<u64> {
     let deadline = Instant::now() + timeout;
     loop {
         if let Ok(head) = rpc_get_last_block_id(sequencer_addr) {
-            return Some(head);
+            if accept(head) {
+                return Some(head);
+            }
         }
         if Instant::now() >= deadline {
             return None;

@@ -43,7 +43,7 @@ use crate::commands::wallet_support::{rpc_get_last_block_id, RpcReachabilityErro
 use crate::constants::SEQUENCER_BIN_REL_PATH;
 use crate::error::BlockTimingValidationError;
 use crate::model::Project;
-use crate::process::{pid_running, port_open, spawn_to_log};
+use crate::process::{pid_running, port_open, spawn_to_log, wait_for_pid_exit};
 use crate::project::resolve_repo_path;
 use crate::sequencer_config::{apply_common_runtime_overrides, patch_runtime_sequencer_config};
 use crate::DynResult;
@@ -571,19 +571,6 @@ fn terminate_pid(pid: u32, wait: Duration) -> DynResult<()> {
         return Ok(());
     }
     bail!("test node process {pid} did not exit after TERM and KILL");
-}
-
-fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if !pid_running(pid) {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
 }
 
 /// Bind port 0 to learn a free port, then release it. There is a small race
