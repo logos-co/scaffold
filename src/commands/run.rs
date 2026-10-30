@@ -8,7 +8,7 @@ use notify::{RecursiveMode, Watcher};
 
 use crate::commands::build::cmd_build_shortcut;
 use crate::commands::deploy::{
-    cmd_deploy, discover_deployable_programs, discover_program_binaries, extract_program_id,
+    cmd_deploy, discover_deployable_programs, discover_project_binaries, extract_program_id,
 };
 use crate::commands::idl::{build_idl_for_current_project, IDL_STATE_REL};
 use crate::commands::localnet::{
@@ -187,6 +187,19 @@ fn run_pipeline_once(project: &Project, params: &PipelineParams) -> DynResult<()
     } else {
         println!("[3/{total_steps}] Ensuring localnet...");
         ensure_localnet(project, params.localnet_timeout_sec)?;
+    }
+
+    // Localnet is up for the first time in this pipeline, so this is the
+    // earliest point wallet commands can work at all: since LEZ v0.2.4,
+    // `WalletCore::from_env` elects a sequencer leader on *every* wallet
+    // invocation and aborts with `Failed to find leader` when none answers.
+    // `setup` therefore cannot seed the default wallet — it runs before any
+    // node exists — and without a default address step 4 has no destination.
+    // Seeding here is a no-op once a default address is recorded.
+    {
+        let wallet_home = project.root.join(&project.config.wallet_home_dir);
+        let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
+        ensure_default_wallet_seeded(&project.root, &wallet_home, &lez.join(WALLET_BIN_REL_PATH))?;
     }
 
     // Step 4: Wallet topup. Skipped entirely when the run profile sets
@@ -590,7 +603,7 @@ fn collect_deployed_programs(project: &Project, skipped: bool) -> DynResult<Depl
     }
     let programs = discover_deployable_programs(&project.root)
         .context("failed to discover deployable programs for run post-deploy env")?;
-    let binaries = discover_program_binaries(&project.root, &programs);
+    let binaries = discover_project_binaries(project, &programs);
     let spel_repo = resolve_repo_path(project, &project.config.spel, "spel")
         .context("failed to resolve spel repo path for run post-deploy env")?;
     let spel_bin = spel_repo.join(SPEL_BIN_REL_PATH);
@@ -741,7 +754,7 @@ fn print_deploy_summary(project: &Project) -> DynResult<()> {
         println!("No deployable programs found in {}", programs_dir.display());
         return Ok(());
     }
-    let binaries = discover_program_binaries(&project.root, &programs);
+    let binaries = discover_project_binaries(project, &programs);
 
     println!();
     println!("Deployed programs:");

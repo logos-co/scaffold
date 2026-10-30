@@ -16,7 +16,7 @@ This skill activates whenever **any** of these is true:
 - `[modules.*]` entries already exist in `scaffold.toml`.
 - `.scaffold/basecamp/profiles/` already exists (basecamp setup has been run in this project before).
 
-Basecamp activates **independently** of `lez-template` / `lez-framework-template`. A project can be both a templated LEZ project and a basecamp-hosted module project; both skills then apply. Basecamp can also stand alone in an external module project with no LEZ template at all (the canonical case in DOGFOODING B-series — `tictactoe` and similar).
+Basecamp activates **independently** of `lez-template` / `spel-template`. A project can be both a templated LEZ project and a basecamp-hosted module project; both skills then apply. Basecamp can also stand alone in an external module project with no LEZ template at all (the canonical case in DOGFOODING B-series — `tictactoe` and similar).
 
 The canonical compatibility doc — including the full `[modules]` schema and dependency-resolution rules — is `docs/basecamp-module-requirements.md`, mirrored to consumers via `lgs basecamp docs`. Treat it as the source of truth and reference it instead of duplicating its contents.
 
@@ -89,7 +89,7 @@ Basecamp state is **always project-local** under `<project>/.scaffold/basecamp/`
 
 | Path | Purpose |
 |---|---|
-| `.scaffold/basecamp/profiles/alice/`, `.../bob/` | Per-profile XDG roots. `launch <profile>` sets `XDG_{CONFIG,DATA,CACHE}_HOME` to the profile root. |
+| `.scaffold/basecamp/profiles/alice/`, `.../bob/` | Per-profile XDG roots. `launch <profile>` sets `XDG_{CONFIG,DATA,CACHE}_HOME` and `HOME` (`<profile>/home`) under the profile root. |
 | `.scaffold/basecamp/portable/<NN>-<name>.lgx` | Symlinks to `.#lgx-portable` builds, ordered by dependency topology. Wiped by each portable build. |
 | `.scaffold/state/basecamp.state` | Pinned basecamp + lgpm binary paths; pin-derived metadata. |
 | `.scaffold/logs/<ts>-setup-*.log`, `<ts>-install.log` | Build logs. |

@@ -226,6 +226,56 @@ that any resolver fix automatically applies to both commands, and the "only
 `.#lgx-portable` found" and "only `.#lgx` found" error paths are symmetric by
 construction.
 
+## Bootstrapping the `spel` CLI at `new` Time
+
+`--template spel` delegates project generation to `spel init`, which raised the
+question of where that binary comes from. The first implementation looked it up
+on `PATH` and failed with an install hint when absent, with a version probe to
+warn on mismatch.
+
+That was wrong in the same way for every user: it made the *ambient* `spel` the
+one that scaffolds the project, while `scaffold.toml` recorded `DEFAULT_SPEL`.
+The two can disagree, and the probe could not even detect it — no spel release
+implements `--version`, so the check compared against an empty string and warned
+on every run.
+
+Scaffold now clones `DEFAULT_SPEL.sha` into the cache (`<cache>/repos/spel/<sha>`)
+and builds the CLI there, exactly as it already bootstraps LEZ, basecamp and
+lgpm. Consequences:
+
+- Nothing has to be installed first; a `spel` on `PATH` is irrelevant.
+- The pin is the only version that can be used, so "scaffolded with one spel,
+  pinned to another" stops being a failure mode rather than being detected.
+  `find_spel_on_path` and `check_spel_version` were deleted with it.
+- For cache-managed projects it is the same checkout and target directory
+  `setup` uses, so a later `lgs setup` reuses the build instead of repeating
+  it. With `--vendor-deps` it is not: `scaffold.toml` then points `setup` at
+  the project-local clone, which has no build in it, so the CLI is built a
+  second time there. That is a deliberate trade — the cache's `target/` is
+  about 1.7 GB, too much to copy into every vendored project to save one build.
+
+Ordering matters and is easy to get wrong: `spel init` refuses to write into a
+directory that already exists, so **nothing** may be created under the project
+directory before the delegation — including the vendored repo for
+`--vendor-deps`, which is therefore cloned after `spel init` returns.
+
+Placement is the other trap. `spel init` resolves the name it is given against
+its own working directory, so the invocation is derived from the target path
+alone: its parent as the working directory, its final component as the name.
+Deriving either half from anything else splits the project — scaffold's overlay
+in one directory, the spel project in another, with exit 0. It went wrong twice
+this way: running in the process cwd broke `api::create_project`, which takes
+an explicit parent, and passing the typed name broke names with a path
+separator (`nested/sub-app` became `nested/nested/sub-app`).
+
+The two placement constraints, and the general rule that nothing may exist at
+the project path before delegating, are held by tests that drive
+`finish_spel_project` with a stub `spel` which, like the real one, refuses an
+existing directory and resolves names against its own cwd. The `--vendor-deps`
+ordering itself is not: those tests run with `vendor_deps: false`, because the
+vendoring step does a real network clone. Moving that block above
+`run_spel_init` would not fail the suite.
+
 ## Vendoring `spel` Per-Project for Program ID Surfacing
 
 `deploy` needs to print the deployed program's on-chain ID (the risc0 image
@@ -494,13 +544,18 @@ of `spel program-id`.
 
 The deploy command must work for any scaffolded project regardless of its name.
 Binary discovery should derive paths from the actual project structure, not assume the template's naming.
-The implementation walks four roots: `target/riscv-guest-docker/` (the deterministic build
-output, see "Deterministic Guest Builds are the Default" below), `target/riscv-guest/` (the
-canonical risc0 layout used by the scaffold template), `methods/target/` (the sub-crate workspace
-layout) and `methods/guest/target/` (a guest crate with its own workspace), matching
-`<program>.bin` files whose path components include a `riscv32im*` target triple. A `docker`
-build in `target/riscv-guest-docker/` ranks first, then `release` builds; if only a debug build
-exists, that is used as a fallback. Within a rank the shallowest path wins. This keeps the scaffold general and avoids
+The implementation walks four roots — `target/riscv-guest-docker/` (scaffold's deterministic
+build), `target/riscv-guest/` (the canonical risc0 layout used by the scaffold template),
+`methods/target/` (the sub-crate workspace layout) and `methods/guest/target/` (where
+`cargo risczero build`, and so a spel project's `make build`, writes) — matching `<program>.bin`
+files whose path components include a `riscv32im*` target triple. A `docker` directory directly
+under the triple ranks first, but only inside the one root the project kind owns
+(`target/riscv-guest-docker/` for `default`, `methods/guest/target/` for `spel`): that is the tree
+the last `lgs build` wrote, and `lgs build` never clears the others, so a `docker/` leftover there
+would otherwise win every later deploy with bytes the last build did not produce. `deploy` names
+such a leftover on stderr instead of shipping it. Release builds come next; if only a debug build
+exists, that is used as a fallback. When multiple matches exist within a rank, the shallowest
+path wins. This keeps the scaffold general and avoids
 coupling to a specific project name or workspace layout.
 
 ## Guest Build Discovery
@@ -518,6 +573,34 @@ regardless of whether it is a workspace member. The probe is a single stat; abse
 so non-Risc0 projects pay nothing. Release mode is chosen so the produced `.bin` lands in the
 same `release/` path component the deploy-side discovery requires — the two halves are designed
 together. The shared `methods` directory name lives in `crate::constants::METHODS_DIR`.
+
+### Addendum: a second producer for `spel` projects
+
+The above describes the `default` template. `spel` projects do not build their
+guest this way, for two independent reasons:
+
+1. `cargo build --workspace` *panics* on a `spel init`-generated project. Its
+   `methods/Cargo.toml` runs `risc0_build::embed_methods()` from a build script
+   but carries no `[package.metadata.risc0]` section, which that function
+   unwraps (reported upstream as logos-co/spel#287).
+2. More fundamentally, a host `cargo build` does not produce the artefact that
+   gets deployed. `make build` runs `cargo risczero build`, whose Docker output
+   under `methods/guest/target/<triple>/docker/<name>.bin` is the reproducible
+   binary whose ImageID **is** the ProgramId. A host-side build never creates it.
+
+So `build` delegates spel projects to their own Makefile, and discovery gained a
+third search root (`methods/guest/target`) and spel's `make build` output lands under a
+`docker` path component, which discovery ranks above `release` (see "Deterministic
+Guest Builds are the Default" below).
+The invariant is unchanged and still designed as a pair — there are simply now
+two producers, and both land somewhere discovery looks.
+
+The same reasoning applies to IDL and FFI generation: `spel generate-idl` writes
+to *stdout*, and the Makefile's `idl:` recipe is what redirects it to the file
+`spel.toml` names; `spel-client-gen` is a separate binary with no `spel`
+subcommand. Scaffold drives `make idl` / `make ffi-gen` rather than restating
+either layout, pointing `SPEL_CLIENT_GEN` at the vendored build so the project
+never depends on what happens to be on `PATH`.
 
 ## Deterministic Guest Builds are the Default
 
@@ -555,12 +638,6 @@ leave a deterministic `.bin` on disk that outranks the fresh local one and would
 deployed; without the ranking, the reverse. The pin itself (`DEFAULT_RISC0_DOCKER_TAG`) is a
 scaffold constant, not risc0's default, so the emitted ELF never depends on which
 `cargo-risczero` version happens to be installed.
-
-The `docker` rank applies only inside `target/riscv-guest-docker/`, the one tree scaffold both
-writes (via `CARGO_TARGET_DIR`) and clears. A `docker/` component under any other search root,
-for example from a hand-run `cargo risczero build` in `methods/guest`, earns no `docker` rank;
-with no `release` component it is only a last-resort fallback. Otherwise a stale artefact in a tree scaffold never clears could outrank a fresh
-`local` build and break the invariant above (scaffold#262).
 
 Reproducibility is a claim, so CI checks it rather than asserting it: the Guest Build
 Reproducibility workflow renders a project, builds its guests through the container

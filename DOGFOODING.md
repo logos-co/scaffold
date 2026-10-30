@@ -18,7 +18,7 @@ If you are an automated agent running this runbook, treat the following as bindi
    - `git push` and PR creation via the default proxy/MCP may `403`; push and open PRs with `https://x-access-token:$GH_TOKEN@github.com/<owner>/<repo>.git` and the GitHub REST API.
    Do not report "impossible" until you have exhausted the curl + token fallbacks.
 4. **Builds are long; background them so they survive turns.** The sequencer build is ~6 min, `setup` (wallet + spel) ~3 min. Launch them with a mechanism that outlives a single shell — the harness's background-run, or a Monitor with an `until` loop — because `nohup … &` from a one-shot shell gets killed when the shell tears down. Wait on a sentinel (the built binary path, or an `EXIT=` marker you append), not a fixed sleep.
-5. **Leave the box provisioned.** Once installed, the toolchain persists in the container cache and the `~/.risc0` extensions dir, so later runs are fast. Reuse it rather than reinstalling.
+5. **Leave the box provisioned.** Once installed, the toolchain persists in the container cache and rzup's home (`$RISC0_HOME`, default `~/.risc0`), so later runs are fast. Reuse it rather than reinstalling.
 
 ## Purpose and Audience
 
@@ -44,7 +44,7 @@ The recommended dogfooding pattern is:
 
 For repo dogfooding, prefer the freshly built local binary over an already-installed global binary.
 
-Scaffold now treats LEZ tooling as project-local state. For non-vendored projects, the shared cache layout is `<cache_root>/repos/lez/<pin>/...`; for vendored projects, LEZ lives under `<project>/.scaffold/repos/lez`. In both cases, the wallet binary under test is the LEZ-local build artifact at `<lez>/target/release/wallet`, invoked through `logos-scaffold wallet ...` rather than a `wallet` binary on `PATH`.
+Scaffold now treats LEZ tooling as project-local state. For non-vendored projects, the shared cache layout is `<cache_root>/repos/lez/<pin>/...` (`<pin>-src-<hash>/...` when the project's LEZ source is not the default, e.g. `new --lez-path`); for vendored projects, LEZ lives under `<project>/.scaffold/repos/lez`. In both cases, the wallet binary under test is the LEZ-local build artifact at `<lez>/target/release/wallet`, invoked through `logos-scaffold wallet ...` rather than a `wallet` binary on `PATH`.
 
 ```bash
 export REPO_ROOT=/absolute/path/to/logos-scaffold
@@ -73,7 +73,8 @@ Scaffold is also consumable as a Rust library (`logos_scaffold::api`): the same 
 ## Shared Preconditions
 
 - Unix-like environment with `git`, `rustc`, `cargo`, `lsof`, `ps`, and `kill`.
-- Docker or Podman available for guest builds.
+- On Linux, `pkg-config` and the PCSC headers (`sudo apt install pkgconf libpcsclite-dev`; Fedora `pkgconf pcsc-lite-devel`, Arch `pkgconf pcsclite`). The pinned LEZ wallet links libpcsclite for keycard support, and both `setup` and `new --template spel` (which builds the spel CLI, and with it the wallet) fail without it. `new --template spel` and `doctor` warn up front; the build itself fails minutes in with a raw `pcsc-sys` error. macOS ships PCSC with the system.
+- Docker or Podman available for guest builds. The default guest build is the container one, so without a reachable Docker daemon a bare `build` — and `run`, which chains it — refuses before compiling anything. On such a host run `D1`/`D7`/`L1` with `build --guest local` or `[build].guest = "local"` in `scaffold.toml`, say so in the evidence, and cover `D8`'s container steps through its CI workflow (`guest-reproducibility.yml`, `workflow_dispatch`).
 - `logos-blockchain-circuits` release on disk when validating older projects without `[circuits]`: set `LOGOS_BLOCKCHAIN_CIRCUITS=<path>` (scaffold no longer consults `~/.logos-blockchain-circuits/`). New projects should carry a `[circuits]` table in `scaffold.toml`; `setup`, `build`, `build idl`, `localnet`, and test-node startup resolve and materialize the configured release instead of relying on ambient shell state.
 - No conflicting listener on the scaffold localnet port before `localnet start`.
 - Network access available for setup/build flows that fetch dependencies.
@@ -85,7 +86,7 @@ The `lgs` binary is a short alias for `logos-scaffold` produced by the same crat
 
 ## Provisioning the Real LEZ Sequencer Toolchain
 
-The `T`-series (and any real `localnet` / `deploy` / `run` validation) needs a real LEZ sequencer. A fresh container has none of the pieces; provision them once — they then live in the scaffold cache and `~/.risc0`, and persist for later runs. This whole section was reverse-engineered from a real run; follow it rather than re-deriving it.
+The `T`-series (and any real `localnet` / `deploy` / `run` validation) needs a real LEZ sequencer. A fresh container has none of the pieces; provision them once — they then live in the scaffold cache and rzup's home (`$RISC0_HOME`, default `~/.risc0`), and persist for later runs. This whole section was reverse-engineered from a real run; follow it rather than re-deriving it.
 
 Assume `"$P"` is a generated project root (e.g. `$SCRATCH_ROOT/dogfood-default`) and `GH_TOKEN` is set.
 
@@ -100,15 +101,16 @@ grep -A1 'name = "risc0-zkvm"' "$LEZ/Cargo.lock"   # e.g. version = "3.0.5"
 
 ```bash
 VER=3.0.5; TRIPLE=x86_64-unknown-linux-gnu       # aarch64-apple-darwin on macOS
+RZUP_HOME="${RISC0_HOME:-$HOME/.risc0}"           # rzup's home, as rzup and scaffold resolve it
 curl -sSL -H "Authorization: Bearer $GH_TOKEN" -o /tmp/cr.tgz \
   "https://github.com/risc0/risc0/releases/download/v$VER/cargo-risczero-$TRIPLE.tgz"
 mkdir -p /tmp/cr && tar xzf /tmp/cr.tgz -C /tmp/cr
-EXT="$HOME/.risc0/extensions/v$VER-cargo-risczero-$TRIPLE"   # scaffold's expected path
+EXT="$RZUP_HOME/extensions/v$VER-cargo-risczero-$TRIPLE"   # scaffold's expected path
 mkdir -p "$EXT" && cp /tmp/cr/r0vm "$EXT/r0vm" && chmod +x "$EXT/r0vm"
 "$EXT/r0vm" --version                              # → risc0-r0vm 3.0.5
 ```
 
-`find_r0vm_path_for_lez` looks at `~/.risc0/extensions/v<risc0-zkvm-version>-cargo-risczero-<arch>-<os>/r0vm`; placing r0vm there is what wires it into a spawned sequencer (scaffold sets `RISC0_SERVER_PATH` from it). The sequencer runs with `RISC0_DEV_MODE=1` (the test-node default), so r0vm executes guests without real proving — which is why no GPU/prover is needed.
+`find_r0vm_path_for_lez` looks at `<rzup home>/extensions/v<risc0-zkvm-version>-cargo-risczero-<arch>-<os>/r0vm`, where the rzup home is `$RISC0_HOME` when set (a relative value is taken from the directory you run scaffold in) and `~/.risc0` otherwise; placing r0vm there is what wires it into a spawned sequencer (scaffold sets `RISC0_SERVER_PATH` from it). The sequencer runs with `RISC0_DEV_MODE=1` (the test-node default), so r0vm executes guests without real proving — which is why no GPU/prover is needed.
 
 **2b. (Only for guest compilation — `build`, D-series/L-series.) Install the risc0 Rust toolchain.** `risc0-build` resolves the guest toolchain through rzup's directory layout; without one installed, `build` fails with `Risc Zero Rust toolchain not found. Try running rzup install rust`. When rzup itself is unusable (same TLS issue as above), install it from the `risc0/rust` release assets — the directory name must follow the `v<version>-rust-<triple>` pattern for discovery, and no `settings.toml` is needed (the highest installed version wins). Pick the newest available tag: guest dependency floats (e.g. `ruint`) carry MSRVs that outrun older toolchains — 1.88.0 already fails with `rustc 1.88.0-dev is not supported by the following packages` on a fresh default-template project.
 
@@ -116,21 +118,21 @@ mkdir -p "$EXT" && cp /tmp/cr/r0vm "$EXT/r0vm" && chmod +x "$EXT/r0vm"
 TCVER=1.91.1   # tag r0.1.91.1 — newest published as of 2026-07
 curl -sSL -H "Authorization: Bearer $GH_TOKEN" -o /tmp/rust-tc.tar.gz \
   "https://github.com/risc0/rust/releases/download/r0.$TCVER/rust-toolchain-$TRIPLE.tar.gz"
-DEST="$HOME/.risc0/toolchains/v$TCVER-rust-$TRIPLE"
+DEST="$RZUP_HOME/toolchains/v$TCVER-rust-$TRIPLE"
 mkdir -p "$DEST" && tar xzf /tmp/rust-tc.tar.gz -C "$DEST"
 "$DEST/bin/rustc" --version                        # → rustc 1.91.1-dev
 ```
 
-The `lez-framework` template's guest additionally compiles C (the default template's guests do not), so the L-series `build` also needs the risc0 **C++** toolchain; without it the guest build dies in cc-rs with `failed to find tool "/no_risc0_cpp_toolchain_installed_run_rzup_install_cpp"`. Same rzup layout, date-based version (dir uses the semver form of the tag, e.g. tag `2024.01.05` → dir `v2024.1.5`). The release asset (and the directory inside the tarball) is platform-specific and does **not** follow `$TRIPLE`: pick `riscv32im-linux-x86_64` on Linux x86_64 and `riscv32im-osx-arm64` on macOS arm64:
+The SPEL template also needs `cargo-risczero` itself (`rzup install cargo-risczero 3.0.5`), because its guest builds through `cargo risczero build` rather than risc0-build; without it the build stops at `error: no such command: risczero`. Its guest additionally compiles C (the default template's guests do not), so the L-series `build` also needs the risc0 **C++** toolchain; without it the guest build dies in cc-rs with `failed to find tool "/no_risc0_cpp_toolchain_installed_run_rzup_install_cpp"`. Same rzup layout, date-based version (dir uses the semver form of the tag, e.g. tag `2024.01.05` → dir `v2024.1.5`). The release asset (and the directory inside the tarball) is platform-specific and does **not** follow `$TRIPLE`: pick `riscv32im-linux-x86_64` on Linux x86_64 and `riscv32im-osx-arm64` on macOS arm64:
 
 ```bash
 CPPASSET=riscv32im-linux-x86_64                    # riscv32im-osx-arm64 on macOS arm64
 curl -sSL -H "Authorization: Bearer $GH_TOKEN" -o /tmp/cpp-tc.tar.xz \
   "https://github.com/risc0/toolchain/releases/download/2024.01.05/$CPPASSET.tar.xz"
-CPPDEST="$HOME/.risc0/toolchains/v2024.1.5-cpp-$TRIPLE"
+CPPDEST="$RZUP_HOME/toolchains/v2024.1.5-cpp-$TRIPLE"
 mkdir -p /tmp/cpp-tc && tar xJf /tmp/cpp-tc.tar.xz -C /tmp/cpp-tc
 mkdir -p "$CPPDEST" && mv /tmp/cpp-tc/"$CPPASSET"/* "$CPPDEST/"
-ln -sfn "$CPPDEST" "$HOME/.risc0/cpp"
+ln -sfn "$CPPDEST" "$RZUP_HOME/cpp"
 "$CPPDEST/bin/riscv32-unknown-elf-gcc" --version   # → gcc 13.2.0
 ```
 
@@ -170,13 +172,13 @@ If any of these is missing, do not "skip the real run" — go back and fix the s
 | D6 | `default` | Core | Example runner interaction and account state verification | `cargo run --bin run_hello_world`, `cargo run --bin run_hello_world_with_move_function`, `wallet -- account get` |
 | D7 | `default` | Core | One-step `run` pipeline and post-deploy hooks | `run`, `run --post-deploy`, `run --no-post-deploy`, `[run]` config |
 | D8 | `default` | Advanced | Reproducible guest builds and the `program_id` they produce | `build`, `build --guest docker`, `[build]` config, `doctor`, `deploy --json` |
-| L1 | `lez-framework` | Core | Fresh LEZ project bootstrap to ready state | `new --template lez-framework`, `setup`, `localnet start`, `doctor`, `build` |
-| L2 | `lez-framework` | Core | LEZ IDL regeneration | `build idl` |
-| L3 | `lez-framework` | Advanced | LEZ client generation from current IDL | `build client` |
-| L4 | `lez-framework` | Core | LEZ deploy and counter interaction | `deploy`, `cargo run --bin run_lez_counter` |
+| L1 | `spel` | Core | Fresh SPEL project bootstrap to ready state | `new --template spel`, `setup`, `localnet start`, `doctor`, `build` |
+| L2 | `spel` | Core | SPEL IDL regeneration | `build idl` |
+| L3 | `spel` | Advanced | SPEL FFI/client generation from current IDL | `build client` |
+| L4 | `spel` | Core | SPEL deploy and program interaction | `deploy`, `spel -- <instruction>` |
 | E1 | N/A | Core | CLI discoverability and error quality | `--help`, `help`, `--version`, unknown commands, out-of-project errors |
 | E2 | N/A | Advanced | Project creation with advanced flags and invalid inputs | `new --template`, `new --vendor-deps`, `new --cache-root` |
-| E3 | N/A | Core | AI skills materialized into generated and adopted projects | `new`, `new --template lez-framework`, `init`, `init` re-run |
+| E3 | N/A | Core | AI skills materialized into generated and adopted projects | `new`, `new --template spel`, `init`, `init` re-run |
 | B1 | external module project | Core | Basecamp + lgpm setup and idempotent re-run | `init`, `basecamp setup`, `basecamp doctor`, `basecamp docs` |
 | B2 | external module project | Core | Module capture, install, paths, and single-instance launch | `basecamp modules`, `basecamp modules --show`, `basecamp install`, `basecamp paths`, `basecamp launch <profile>` |
 | B3 | external module project | Core | Two-instance p2p dogfooding | `basecamp launch <profile>` (parallel) |
@@ -234,7 +236,7 @@ Use `new` for the main runnable project and `create` as the lightweight alias-pa
 
 - Project creation succeeds and prints the destination path, pinned LEZ commit, and cache root.
 - Generated `scaffold.toml` includes a `[circuits]` table. The default install dir is project-local (`.scaffold/circuits`), and the configured version/download template/install dir become the single source of truth for commands that need `logos-blockchain-circuits`.
-- `setup` completes after syncing LEZ to the configured pin, building both `sequencer_service` and `wallet` inside the project's LEZ tree, and either seeding the default wallet or reporting that a default wallet is already configured. Both seeding paths are a PASS: `default wallet seeded from preconfigured account` when the pinned LEZ debug config ships an `initial_accounts` entry, and `default wallet seeded by initializing wallet storage (config ships no preconfigured account)` on LEZ v0.2.0, whose debug config ships none — there `setup` runs the freshly built `wallet` to create its persistent storage and adopts the first `Public/` account on a `/ `-prefixed listing line, ignoring `Public/` addresses on lines that are not `/ `-prefixed — notably the wallet's own `Preconfigured …` entries, which it prints above the stored accounts even when the config ships no `initial_accounts`, and which a first-token scan would adopt instead of the account the wallet just created. Only if no `/ `-prefixed line yields a usable `Public/` address does it fall back to the first `Public/` token anywhere in the output; if the wallet ever stops `/ `-prefixing stored accounts, that fallback starts adopting a preconfigured address, so a seeded address matching a `Preconfigured` line rather than a `/ ` one is worth reporting. Either line is followed by `  Address:` and `  State file:`. Only `warning: could not seed default wallet automatically` is a failure. With `--prebuilt`: `sequencer_service` is downloaded instead of built from source (falls back to source build if no artifact is published); `wallet` is always built from source regardless of `--prebuilt`.
+- `setup` completes after syncing LEZ to the configured pin, building both `sequencer_service` and `wallet` inside the project's LEZ tree, and either seeding the default wallet or reporting that a default wallet is already configured. Both seeding paths are a PASS: `default wallet seeded from preconfigured account` when the pinned LEZ debug config ships an `initial_accounts` entry, and `default wallet seeded by initializing wallet storage (config ships no preconfigured account)` on LEZ v0.2.0, whose debug config ships none — there `setup` runs the freshly built `wallet` to create its persistent storage and adopts the first `Public/` account on a `/ `-prefixed listing line, ignoring `Public/` addresses on lines that are not `/ `-prefixed — notably the wallet's own `Preconfigured …` entries, which it prints above the stored accounts even when the config ships no `initial_accounts`, and which a first-token scan would adopt instead of the account the wallet just created. Only if no `/ `-prefixed line yields a usable `Public/` address does it fall back to the first `Public/` token anywhere in the output; if the wallet ever stops `/ `-prefixing stored accounts, that fallback starts adopting a preconfigured address, so a seeded address matching a `Preconfigured` line rather than a `/ ` one is worth reporting. Either line is followed by `  Address:` and `  State file:`. From LEZ v0.2.4 every wallet command needs a running sequencer, so on a machine with no localnet up `setup` instead prints `default wallet seeding deferred: wallet commands need a running sequencer (LEZ v0.2.4+). `logos-scaffold run` seeds it once localnet is up.` — also a PASS; the next `build` (which re-runs `setup`) or `run` after `localnet start` prints the seeded line. Only `warning: could not seed default wallet automatically` is a failure. With `--prebuilt`: `sequencer_service` is downloaded instead of built from source (falls back to source build if no artifact is published). The download is installed only if it matches the `sequencer_service.sha256` published next to it: a missing, unfetchable, empty or malformed checksum prints a `not installing an unverified binary` warning and falls back to the source build, and a digest mismatch is a hard error. An unverified binary landing in `target/release/` is the regression; `wallet` is always built from source regardless of `--prebuilt`.
 - `localnet start` reports a ready localnet rather than only a spawned PID.
 - `build` exits successfully after preparing the project workspace, resolving the configured circuits release, and — when the project has a `methods/Cargo.toml` (Risc0 guest crate excluded from the main workspace) — also prints `Building guest methods...` and produces guest `.bin` files under `target/riscv-guest/<methods-crate>/<guest-crate>/riscv32im-risc0-zkvm-elf/release/`, the same paths `deploy` submits from. The default template uses the workspace `target/` tree, not `methods/target/`. This describes the `--guest local` / `[build].guest = "local"` path; the default is the deterministic container build, whose artefacts land under `target/riscv-guest-docker/` instead (see D8).
 - `deploy` prints a submission summary with zero failures when built binaries are present. Multi-program deploys are paced one program per sequencer block (`Waiting for a new block past N before the next deployment ...` between submissions): the pinned LEZ settles each block as a single bedrock inscription with a ~896 KiB payload cap and panics fatally when a block exceeds it, so batching several ~370 KiB deployment ELFs into one block kills the sequencer. Expect roughly one `block_create_timeout` (15s) of wait per additional program. Pacing fails closed: a stalled head or an unreadable post-submission baseline aborts the remaining submissions with `deploy pacing aborted ...` and a non-zero exit rather than batching unpaced (re-run `deploy` for the rest once the sequencer recovers, or raise `LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS` for slow block intervals). A deploy that continues unpaced and crashes localnet mid-flow is a regression; equally, record it if the upstream cap is lifted and pacing becomes dead weight.
@@ -353,7 +355,7 @@ Both deploy paths honor `--json`, with a different shape each. `--program-path -
 - `deploy <name> --json` and bare `deploy --json` print a parseable `{"deploys":[…]}` object whose entries carry the same fields.
 - `deploy --program-path ...` without `--json` prints a human-readable `OK` line with the binary path.
 - `deploy nonexistent_program` fails with an error listing the available discovered programs.
-- The echoed `wallet deploy-program <path>` names which artefact was shipped. With only a `local` build on disk that is the `target/riscv-guest/.../release/` one; a `target/riscv-guest-docker/.../docker/` artefact, when present, outranks it. With the guest artefacts removed (and localnet up — the missing-binary report comes after the sequencer preflight), `deploy` names the searched roots, which must list all four in the order `deploy` searches and lists them: `target/riscv-guest-docker`, `target/riscv-guest`, `methods/target`, `methods/guest/target`. A missing root is why a built program looks undeployable. See `D8` for the ranking itself.
+- The echoed `wallet deploy-program <path>` names which artefact was shipped. With only a `local` build on disk that is the `target/riscv-guest/.../release/` one; a `target/riscv-guest-docker/.../docker/` artefact, when present, outranks it. With the guest artefacts removed (and localnet up — the missing-binary report comes after the sequencer preflight), `deploy` names the searched roots, which must list all four in search order: `target/riscv-guest-docker`, `target/riscv-guest`, `methods/target`, `methods/guest/target` (where `cargo risczero build`, and so spel's `make build`, writes). A missing root is why a built program looks undeployable. See `D8` for the ranking itself.
 
 ### Failure Signals / Common Pitfalls
 
@@ -556,7 +558,7 @@ The first runner (`run_hello_world`) submits a basic public transaction; once co
 
 - The wallet home must be exported for runners that initialize `WalletCore::from_env()`. The scaffold wallet commands set it automatically, but direct `cargo run` does not. Export **both** names: LEZ reads `NSSA_WALLET_HOME_DIR` up to v0.1.2 and `LEE_WALLET_HOME_DIR` from v0.2.0. The two half-exports fail differently: a v0.2.0 pin given only `NSSA_WALLET_HOME_DIR` falls back to `~/.lee/wallet` with no error, so the runner reports an unknown or empty account instead of failing loudly; a pre-v0.2.0 pin given only `LEE_WALLET_HOME_DIR` has no wallet home at all and fails in `WalletCore::from_env()`. Only the first shape is silent — treat an empty-looking wallet as the signal to check.
 - Use the fresh public account created in the preconditions rather than reusing accounts from other scenarios. This avoids confusion about pre-existing state.
-- If additional runners are available (e.g., `run_hello_world_private`, `run_hello_world_through_tail_call`), exercising them is valuable but not required for this scenario.
+- If additional runners are available (e.g., `run_hello_world_private`, `run_hello_world_through_tail_call`), exercising them is valuable but not required for this scenario. The tail-call runners need their callee ids to match the build: `build` rewrites `HELLO_WORLD_PROGRAM_ID_HEX` in `simple_tail_call.rs` and `HELLO_WORLD_WITH_AUTHORIZATION_PROGRAM_ID_HEX` in `tail_call_with_pda.rs` and rebuilds once, printing `Updated … program id …`. A later `build` that prints it again, or a sequencer-log `Unknown program` rejection for a tail-call transaction, is a regression. `run_hello_world_through_tail_call` signs its transaction; on a fresh account it must land `Hello from tail call` (an unsigned one is rejected with `ClaimedUnauthorizedAccount`).
 
 ## D7. `run` Pipeline and Post-Deploy Hooks
 
@@ -718,6 +720,24 @@ hand: copy the `release/` `.bin` into `$DOCKER_BINS/` and confirm the next
 `deploy` echoes `wallet deploy-program <…/docker/…>` rather than the
 `release/` path. That covers everything except reproducibility itself.
 
+Also check that only the deterministic tree scaffold owns for the project
+kind earns that top rank (`target/riscv-guest-docker` for `default`,
+`methods/guest/target` for `spel`). In a `default` project with a fresh
+`release/` build, plant a leftover where a hand-run `cargo risczero build`
+would put it:
+
+```bash
+mkdir -p methods/guest/target/riscv32im-risc0-zkvm-elf/docker
+cp <some other program>.bin methods/guest/target/riscv32im-risc0-zkvm-elf/docker/hello_world.bin
+"$SCAFFOLD_BIN" deploy hello_world
+rm -rf methods/guest/target
+```
+
+`deploy` must echo the `release/` (or `target/riscv-guest-docker`) path, not
+the planted one, and print `note: ignoring …/methods/guest/target/…/docker/hello_world.bin`
+on stderr. Shipping the planted ELF is the stale-deploy regression: `lgs build`
+never clears `methods/guest/target`, so it would win every later deploy.
+
 ### Expected Success Signals
 
 - Step 1 builds with the host toolchain and succeeds without Docker or `cargo-risczero`; it prints no non-reproducibility note (the choice was explicit).
@@ -725,14 +745,14 @@ hand: copy the `release/` `.bin` into `$DOCKER_BINS/` and confirm the next
 - Step 3 prints `Building guest methods (deterministic, risc0-guest-builder:<tag>)...`, then risc0's own `ELFs ready at: ImageID: <hex> - <path>` lines, and leaves one `<program>.bin` per program under `target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/`.
 - Step 4's `sha256sum -c` passes. This is the whole point of the scenario: a differing hash between two builds of unchanged source means the deterministic path is not deterministic, and is the single most important thing to report from D8.
 - Comparing against **another machine** only proves anything if both used the same `Cargo.lock`. The container builds `--locked`, and cargo's MSRV-aware resolver picks dependency versions from the host toolchain, so two machines that each generated their own lockfile legitimately produce different `program_id`s. Copy the lockfile across, or compare within one commit that has it committed. A mismatch with differing lockfiles is not a D8 failure — record the two lockfiles before concluding anything.
-- Step 5's `doctor` row names the mode and the pin either way, with no `[build]` section needed: `PASS | guest build | docker — reproducible via risczero/risc0-guest-builder:<tag>` when the toolchain is installed, `FAIL | guest build | docker (risczero/risc0-guest-builder:<tag>) — … not found on PATH` when it is not. A `docker` row that does not mention the tag at all is a regression — the tag is what makes the ID reproducible. The `program_id` in `/tmp/d8-docker.json` matches the `ImageID` risc0 printed in step 3 and is **different** from the one in `/tmp/d8-local.json` (different toolchains, different bytes) — record both values.
+- Step 5's `doctor` row names the mode and the pin either way, with no `[build]` section needed: `PASS | guest build | docker — reproducible via risczero/risc0-guest-builder:<tag>` when the toolchain is installed, `FAIL | guest build | docker (risczero/risc0-guest-builder:<tag>) — … not found on PATH` when it is not, and `FAIL | guest build | docker (…) — Docker daemon not running (`docker info` failed)` when both tools are on PATH but no daemon answers (within 10 s: a `DOCKER_HOST` pointing at an unreachable remote must not hang `doctor`) — the same condition step 2's `build` refuses on, so a PASS row next to a failing bare `build` is the regression. A `docker` row that does not mention the tag at all is a regression — the tag is what makes the ID reproducible. The `program_id` in `/tmp/d8-docker.json` matches the `ImageID` risc0 printed in step 3 and is **different** from the one in `/tmp/d8-local.json` (different toolchains, different bytes) — record both values.
 - Step 6's `doctor` row reads `PASS | guest build | local — host risc0 toolchain ... not reproducible ...`. It also prints `Clearing deterministic guest artefacts in ...` and `target/riscv-guest-docker` no longer exists, so a later `deploy` cannot ship a stale deterministic ELF.
 
 ### Failure Signals / Common Pitfalls
 
 - The same `program_id` from steps 1 and 5 usually means `deploy` picked the same artefact twice — check which path `deploy` reported as the binary, not just the ID.
 - `deploy` reporting a `release/` binary while the effective mode is `docker` (the default) is a discovery-ranking regression.
-- The `docker` rank applies only under `target/riscv-guest-docker`, the one root `lgs build` writes and clears. `methods/guest/target` (an independently-workspaced guest crate, typically a hand-run `cargo risczero build`) is searched, but a `docker/` artefact there is ranked like any other path: `release/` if present, else the debug fallback. It never outranks a fresh `release/` build. `deploy` shipping a stale hand-built ELF right after `lgs build --guest local` is a regression.
+- `deploy` shipping a `docker/` artefact from a root the project kind does not own (the planted `methods/guest/target` leftover above, in a `default` project) is the opposite regression, and a silent one: the bytes no longer match the last `lgs build`.
 - A deterministic build that succeeds but produces no `.bin` (only extension-less ELFs) means risc0's output layout moved; capture `ls -R target/riscv-guest-docker`.
 - Very slow builds are expected on the first run (~1.7 GB image pull, no cargo cache reuse inside the container). Slowness is worth recording as a DX finding, but it is not a correctness failure.
 - Any large directory in the project root inflates the Docker build context (risc0 excludes only `.git`, `target`, `node_modules`, `tmp`). If the context transfer dominates the build, capture its reported size.
@@ -751,16 +771,23 @@ hand: copy the `release/` `.bin` into `$DOCKER_BINS/` and confirm the next
 - Steps 4 and 5 are the load-bearing ones. If time is short, run 1, 3, 4, and 5.
 - A second machine (or a CI runner) building the same commit and comparing hashes is stronger evidence than two builds on one host; do that when it is available.
 
-## L1. LEZ Template Bootstrap
+## L1. SPEL Template Bootstrap
 
 ### Goal
 
-Validate that the LEZ template scaffolds and reaches a ready-to-build state.
+Validate that the SPEL template scaffolds and reaches a ready-to-build state.
 
 ### Preconditions
 
 - Latest scaffold binary has been built from the repo root.
 - Scratch workspace exists.
+- Docker running, plus risc0's `cargo-risczero` (`rzup install cargo-risczero 3.0.5`).
+  The SPEL guest builds through `cargo risczero build`; without it `build`
+  dies with `error: no such command: risczero`.
+
+`spel` itself does **not** need to be installed: `new --template spel` clones
+and builds the pinned CLI into the scaffold cache, the same way LEZ is
+bootstrapped.
 
 ### Commands / Actions
 
@@ -768,177 +795,219 @@ From the scratch workspace:
 
 ```bash
 cd "$SCRATCH_ROOT"
-"$SCAFFOLD_BIN" new dogfood-lez --template lez-framework
-cd dogfood-lez
-ls -d idl crates/lez-client-gen methods/guest/src/bin src/bin
+"$SCAFFOLD_BIN" new dogfood-spel --template spel
+cd dogfood-spel
+ls -d spel.toml Makefile dogfood_spel_core dogfood_spel_ffi methods/guest/src/bin
 "$SCAFFOLD_BIN" setup
 "$SCAFFOLD_BIN" localnet start
 "$SCAFFOLD_BIN" doctor
 "$SCAFFOLD_BIN" build
 ```
 
-The `ls` step verifies that LEZ-specific directories were scaffolded before proceeding with the build pipeline.
+The `ls` step verifies the SPEL layout was scaffolded before the build runs.
 
 ### Expected Success Signals
 
-- Project creation succeeds with the LEZ template.
-- The generated project contains `idl/`, `crates/lez-client-gen/`, `methods/guest/src/bin/lez_counter.rs`, and `src/bin/run_lez_counter.rs`.
-- `setup`, `localnet start`, and `doctor` behave the same way they do for the default template.
-- `build` succeeds for the LEZ project workspace and also runs IDL generation and client generation automatically.
+- Creation prints the pins it recorded (`Pinned LEZ: v0.2.4`, `Pinned spel: v0.7.0`).
+- The generated project contains `spel.toml`, a `Makefile`, `<name>_core/`,
+  `<name>_ffi/`, and `methods/guest/src/bin/<name>.rs`.
+- `methods/guest/Cargo.toml` pins `spel-framework` at the **tag** scaffold
+  recorded — never `branch = "main"`.
+- `setup`, `localnet start`, and `doctor` behave as for the default template.
+  `doctor` reports zero FAIL.
+- `build` runs `make build` (Docker guest build) and then IDL generation,
+  leaving `<name>-idl.json` at the project root.
 
 ### Failure Signals / Common Pitfalls
 
-- If the generated project is missing LEZ-specific paths such as `idl/`, `crates/lez-client-gen/`, or `methods/guest/src/bin/lez_counter.rs`, record that immediately.
-- If LEZ bootstrap behavior diverges from the default template in setup/localnet/doctor flows, capture the difference explicitly.
-- If `build` does not automatically trigger IDL + client generation for the LEZ template, record that as a regression.
+- `❌ Directory '<name>' already exists` from `spel init` means scaffold
+  created the project directory before delegating — `spel init` requires it
+  not to exist.
+- `spel-framework = { … branch = "main" }` in the generated manifests means
+  the pin flags did not reach `spel init`. Its parser stops at the first
+  non-flag argument and silently ignores everything after it, so the flags
+  must precede the project name (logos-co/spel#286).
+- The first `build` takes 5–15 minutes: the guest cross-compiles in Docker.
+  That is normal, not a hang.
 
 ### Evidence to Capture
 
-- LEZ project creation output.
-- Directory listing showing LEZ-specific scaffolded paths.
+- Creation output including the recorded pins.
+- Directory listing showing the SPEL layout.
+- The `spel-framework` line from `methods/guest/Cargo.toml`.
 - `setup`, `localnet start`, `doctor`, and `build` excerpts.
+
+### Also cover `--vendor-deps`
+
+```bash
+cd "$SCRATCH_ROOT"
+"$SCAFFOLD_BIN" new dogfood-spel-vendored --template spel --vendor-deps
+git -C dogfood-spel-vendored/.scaffold/repos/spel rev-parse HEAD
+grep -A3 'repos.spel' dogfood-spel-vendored/scaffold.toml
+```
+
+The vendored repo must exist at `.scaffold/repos/spel`, checked out at the same
+SHA `scaffold.toml` records under `[repos.spel] pin`, with
+`path = ".scaffold/repos/spel"` alongside it.
+
+This is worth a separate step because it exercises an ordering constraint the
+happy path does not: `spel init` refuses to write into an existing directory, so
+anything created under the project directory *before* the delegation breaks the
+whole command — and it would break several minutes in, after the clone and the
+CLI build. Vendoring therefore has to happen after `spel init` returns. The
+symptom if that regresses is `❌ Directory '<name>' already exists` followed by
+scaffold removing the directory, leaving a long wait and no project.
 
 ### Execution Notes
 
-- Keep LEZ runs separate from default-template runs. The template-specific directories and follow-up commands are part of the validation.
+- Keep SPEL runs separate from default-template runs.
 
-## L2. LEZ IDL Regeneration
+## L2. SPEL IDL Regeneration
 
 ### Goal
 
-Validate that LEZ projects can regenerate IDL from the current project source.
+Validate that SPEL projects regenerate the IDL from the current program source.
 
 ### Preconditions
 
-- LEZ project exists.
-- The LEZ project build environment is working.
+- SPEL project exists and its build environment works.
 
 ### Commands / Actions
 
-From the LEZ project root:
+From the SPEL project root:
 
 ```bash
 "$SCAFFOLD_BIN" build idl
-find idl -maxdepth 1 -type f -name '*.json' | sort
+ls -l ./*-idl.json
 ```
 
 ### Expected Success Signals
 
-- `build idl` writes one or more JSON files under `idl/`.
-- Command output includes explicit `Wrote IDL ...` lines.
-- The regenerated files are valid JSON and match the current program surface.
+- Output includes `✅ IDL written to <name>-idl.json`.
+- The file named by `spel.toml`'s `[program] idl` exists at the project root
+  and is valid JSON matching the current program surface.
 
 ### Failure Signals / Common Pitfalls
 
-- If the command prints that IDL build is being skipped due to framework kind, the scenario is running in the wrong project.
-- Missing IDL marker output or empty IDL generation is a real regression for the LEZ template.
+- IDL JSON printed to the terminal with **no file written** means generation
+  bypassed the Makefile: `spel generate-idl` writes to stdout, and the `idl:`
+  recipe is what redirects it to the file.
+- A later step failing with `expected IDL file …/idl/<stem>.json is missing`
+  means something is still resolving the IDL by the old `<idl-dir>/<stem>.json`
+  convention rather than from `spel.toml`. SPEL projects have no `idl/`
+  directory.
+- `Skipping IDL build for framework kind …` means the scenario is running in
+  the wrong project.
 
 ### Evidence to Capture
 
 - `build idl` output.
-- Listing of generated files under `idl/`.
-- If relevant, a diff between pre-existing and regenerated IDL.
+- `ls -l` of the generated IDL file.
+- If relevant, a diff between the pre-existing and regenerated IDL.
 
-### Execution Notes
-
-- Preserve the raw `Wrote IDL ...` lines. They make it much easier to diagnose partial-generation failures.
-
-## L3. LEZ Client Generation
+## L3. SPEL Client Generation
 
 ### Goal
 
-Validate that LEZ client bindings can be regenerated from the current IDL set.
+Validate that FFI/client bindings regenerate from the current IDL.
 
 ### Preconditions
 
-- LEZ project exists.
-- `build idl` has been run successfully, either directly or via `build client`.
+- SPEL project exists.
+- `setup` has run, so the vendored `spel-client-gen` binary is built.
 
 ### Commands / Actions
 
-From the LEZ project root:
+From the SPEL project root:
 
 ```bash
 "$SCAFFOLD_BIN" build client
-find src/generated -type f | sort
+find ./*_ffi/generated -type f | sort
 ```
 
 ### Expected Success Signals
 
-- `build client` reports that it is regenerating IDL before generating client code.
-- Client artifacts are written under `src/generated`.
-- The generated files reflect the current contents of `idl/`.
+- IDL is regenerated first, then generation reports the client, FFI and header
+  it wrote.
+- `<name>_ffi/generated/` contains `<name>_client.rs`, `<name>_ffi.rs` and
+  `<name>.h`.
+- The command line echoed for the generator points at the **vendored** binary
+  under the scaffold cache, not a `spel-client-gen` from `PATH`.
 
 ### Failure Signals / Common Pitfalls
 
-- If `build client` does not refresh IDL first, record that behavior change.
-- Missing `src/generated` output or missing generator crate paths are LEZ-specific regressions.
+- `no such command: ffi-gen` (or similar) means something invoked
+  `spel ffi-gen`; that subcommand does not exist — generation is the separate
+  `spel-client-gen` binary, driven by `make ffi-gen`.
+- `vendored spel-client-gen binary not found` means `setup` has not built it.
 
 ### Evidence to Capture
 
-- `build client` output.
-- Listing of files under `src/generated`.
-- Any diff in generated client code when the scenario is rerun after a program change.
+- `build client` output including the generator command line.
+- Listing of `<name>_ffi/generated/`.
 
-### Execution Notes
-
-- Treat generated client output as part of the scenario evidence, not as disposable noise.
-- When the generator fails, capture the exact manifest path and working directory that were used.
-
-## L4. LEZ Template Deploy and Counter Interaction
+## L4. SPEL Template Deploy and Program Interaction
 
 ### Goal
 
-Validate that the LEZ counter program can be deployed and that the generated runner binary can invoke `init` and `increment` subcommands against the running localnet.
+Validate that the SPEL program deploys and that its instructions can be
+invoked against the running localnet through the typed CLI.
 
 ### Preconditions
 
-- LEZ project exists with L1 completed (setup, build, localnet running).
+- SPEL project exists with L1 completed (setup, build, localnet running).
 - `wallet -- check-health` succeeds.
-- At least one public account exists. If not:
-
-```bash
-"$SCAFFOLD_BIN" wallet -- account new public
-```
 
 ### Commands / Actions
 
-From the LEZ project root:
+From the SPEL project root:
 
 ```bash
 "$SCAFFOLD_BIN" deploy
-export NSSA_WALLET_HOME_DIR="$PWD/.scaffold/wallet" LEE_WALLET_HOME_DIR="$PWD/.scaffold/wallet"
-export HOST_CC=cc HOST_CXX=c++
-cargo run --bin run_lez_counter -- init --to <account-id>
-cargo run --bin run_lez_counter -- increment --counter <account-id> --authority <account-id> --amount 5
-```
 
-`HOST_CC`/`HOST_CXX` matter for direct `cargo run` in lez-framework projects when the risc0 C++ toolchain is installed: the guest embed refingerprints under your shell env, risc0-build exports plain `CC` = riscv gcc, and the guest graph's host-side proc-macro deps (`spel-framework-macros` → … → `ring`) then compile host C with the riscv compiler and die on `-m64`. Scaffold's own `build`/IDL/client commands pin these automatically; direct cargo invocations need the export (CI's template-e2e does the same at the job level).
+# Create the signer, and initialise it for the transfer program FIRST.
+"$SCAFFOLD_BIN" wallet -- account new public          # prints Public/<id>
+"$SCAFFOLD_BIN" wallet -- auth-transfer init --account-id Public/<id>
+
+"$SCAFFOLD_BIN" spel -- initialize --owner Public/<id>
+"$SCAFFOLD_BIN" spel -- pda state
+"$SCAFFOLD_BIN" spel -- inspect <pda> --type ProgramState
+```
 
 ### Expected Success Signals
 
-- `deploy` submits the `lez_counter` program and prints a success summary.
-- `run_lez_counter init` prints confirmation that the counter was initialized at the target account.
-- `run_lez_counter increment` prints confirmation of the increment operation.
-
-Note: as of this writing, the LEZ counter runner contains `TODO` placeholders for actual transaction submission. If the runner only prints diagnostic messages without submitting transactions, record that as the current state. When transaction submission is implemented, update this scenario with account-state verification steps matching D6.
+- `deploy` prints a `program_id` for the guest binary.
+- `initialize` confirms the transaction was included in a block.
+- `inspect` shows the PDA's state — the account does not exist at all until
+  `initialize` succeeds, so readable state is the proof it executed on chain.
 
 ### Failure Signals / Common Pitfalls
 
-- If `deploy` cannot find `lez_counter` in the discovered program list, record the actual discovered list.
-- If the runner panics on wallet initialization, the name this pin reads is unset: either neither name was exported, or only `LEE_WALLET_HOME_DIR` was exported against a pre-v0.2.0 pin. If it instead starts against an empty wallet, the pin is v0.2.0 and only `NSSA_WALLET_HOME_DIR` was exported — that wallet ignores the old name and falls back to `~/.lee/wallet` without an error.
-- If the runner accepts the subcommand but does nothing (due to TODO stubs), record the output and note the gap.
+- **Run `auth-transfer init` before the account signs anything.** A signer
+  claimed by a SPEL program is owned by it permanently: LEZ never reassigns
+  ownership and only an owner may decrease a balance, so such an account can
+  receive tokens but can never send them. This is irreversible.
+- Account ids carry a privacy prefix: pass `Public/<id>`, not the bare id.
+- Instruction names are kebab-case on the CLI (`do-something`), even though
+  the Rust handler is snake_case.
+- `Error: Failed to find leader` from any wallet command means no sequencer is
+  answering — since LEZ v0.2.4 every wallet invocation elects a leader, so
+  wallet commands need a running localnet.
 
 ### Evidence to Capture
 
-- `deploy` output for the LEZ project.
-- `run_lez_counter init` and `increment` output.
-- Whether the runner actually submitted transactions or only printed placeholder messages.
+- `deploy` output including the `program_id`.
+- The transaction confirmations and the `inspect` output.
 
 ### Execution Notes
 
-- Both `NSSA_WALLET_HOME_DIR` (LEZ up to v0.1.2) and `LEE_WALLET_HOME_DIR` (LEZ v0.2.0) must be exported for the runner. Scaffold wallet commands set both automatically, but direct `cargo run` does not.
-- Keep LEZ interaction evidence separate from default-template interaction evidence.
+- `lgs spel -- <args>` runs the project-vendored spel binary, which is pinned
+  in scaffold.toml. Prefer it over any globally installed `spel`.
+- Do not export a wallet home for L4: `lgs spel --` points spel at the
+  project wallet itself, overriding the shell, like `lgs wallet --`. A
+  `spel` transaction that reports `Storage not found` or an empty wallet is
+  the regression this step checks.
+
 
 ## E1. CLI Discoverability and Error Quality
 
@@ -1029,8 +1098,9 @@ From the scratch workspace:
 ```bash
 cd "$SCRATCH_ROOT"
 "$SCAFFOLD_BIN" new dogfood-invalid-template --template nonexistent-template
-"$SCAFFOLD_BIN" new dogfood-lez-explicit --template lez-framework
-ls -d dogfood-lez-explicit/idl dogfood-lez-explicit/crates/lez-client-gen
+"$SCAFFOLD_BIN" new dogfood-spel-explicit --template spel
+ls -d dogfood-spel-explicit/spel.toml dogfood-spel-explicit/Makefile
+"$SCAFFOLD_BIN" new dogfood-lez-alias --template lez-framework   # deprecated alias: warns, same result
 "$SCAFFOLD_BIN" new dogfood-vendor --vendor-deps
 "$SCAFFOLD_BIN" new dogfood-cache --cache-root "$SCRATCH_ROOT/custom-cache"
 find "$SCRATCH_ROOT/custom-cache/repos/lez" -maxdepth 2 -mindepth 1 -type d | sort
@@ -1039,8 +1109,8 @@ grep -n "^\[wallet\]\|^home_dir\|^binary" dogfood-cache/scaffold.toml
 
 ### Expected Success Signals
 
-- Invalid `--template` name fails with a clear error listing the available templates (`default`, `lez-framework`).
-- `--template lez-framework` creates a project with LEZ-specific structure (same as L1).
+- Invalid `--template` name fails with a clear error listing the available templates (`default`, `spel`) and mentioning the deprecated `lez-framework` alias.
+- `--template spel` creates a project with the SPEL structure (same as L1). `--template lez-framework` still works, printing a deprecation warning and producing the same result.
 - `--vendor-deps` is accepted without error and creates a project that vendors the pinned LEZ repo under `.scaffold/repos/lez`.
 - `--cache-root` is honored and scaffold uses the specified directory for cache operations, with non-vendored LEZ clones isolated by pin under `<cache-root>/repos/lez/<pin>/`.
 - Generated `scaffold.toml` includes `[wallet].home_dir` and does not include a deprecated `wallet.binary` field.
@@ -1050,12 +1120,15 @@ grep -n "^\[wallet\]\|^home_dir\|^binary" dogfood-cache/scaffold.toml
 - If an invalid template name silently falls back to `default`, record that as a regression.
 - If `--vendor-deps` or `--cache-root` are silently ignored or produce an error, record the exact output.
 - If `--lez-path` is tested and the path does not exist, verify the error message points to the bad path.
+- `--lez-path` with a real checkout must clone into its own `<cache-root>/repos/lez/<pin>-src-<hash>/` directory and leave `<cache-root>/repos/lez/<pin>/` (and its built `target/`) untouched — check with another project's `setup` running. A `--lez-path` create that re-clones the default-source checkout is the regression: it deletes the other project's binaries, mid-build if one is running.
+- In that `--lez-path` project, `test-node pins --json` must report `lez_checkout` as the same `<pin>-src-<hash>` directory with `ownership: managed_cache`, not the `--lez-path` source directory: `test-node prepare` builds where `setup` / `localnet` look. (Only a directory passed as `test-node … --lez-source DIR` is a caller-provided checkout.)
+- Expected one-time cost, not a regression: a non-default-source project created before source-keyed checkouts (scaffold ≤ 0.4.0) still has its build under `repos/lez/<pin>/`. Its next `setup` clones and builds into `<pin>-src-<hash>/` from scratch (~10 minutes for LEZ); later runs reuse it.
 - If non-vendored cache reuse collapses different LEZ pins into a single shared `repos/lez` checkout, record that as a cache-isolation regression.
 
 ### Evidence to Capture
 
 - Error output for invalid `--template`.
-- Creation output for `--template lez-framework` with directory listing.
+- Creation output for `--template spel` with directory listing.
 - Creation output for `--vendor-deps` and `--cache-root` if tested.
 - Directory listing proving the pin-isolated cache path.
 - `scaffold.toml` excerpt showing wallet home config without a wallet binary field.
@@ -1086,7 +1159,7 @@ From the scratch workspace:
 ```bash
 cd "$SCRATCH_ROOT"
 "$SCAFFOLD_BIN" new dogfood-skills-default
-"$SCAFFOLD_BIN" new dogfood-skills-lez --template lez-framework
+"$SCAFFOLD_BIN" new dogfood-skills-spel --template spel
 
 mkdir dogfood-skills-init && cd dogfood-skills-init
 "$SCAFFOLD_BIN" init
@@ -1099,13 +1172,13 @@ Inspect the generated layout in each of the three projects:
 
 ```bash
 find dogfood-skills-default/.claude/skills dogfood-skills-default/.cursor/rules -type f | sort
-find dogfood-skills-lez/.claude/skills dogfood-skills-lez/.cursor/rules -type f | sort
-ls dogfood-skills-default/AGENTS.md dogfood-skills-lez/AGENTS.md dogfood-skills-init/AGENTS.md
+find dogfood-skills-spel/.claude/skills dogfood-skills-spel/.cursor/rules -type f | sort
+ls dogfood-skills-default/AGENTS.md dogfood-skills-spel/AGENTS.md dogfood-skills-init/AGENTS.md
 ```
 
 ### Expected Success Signals
 
-- Every generated project (default template, lez-framework template, and `init`-adopted bare directory) contains exactly four `.claude/skills/<name>/SKILL.md` files: `lgs-cli`, `lez-template`, `lez-framework-template`, `basecamp`.
+- Every generated project (default template, SPEL template, and `init`-adopted bare directory) contains exactly four `.claude/skills/<name>/SKILL.md` files: `lgs-cli`, `lez-template`, `spel-template`, `basecamp`.
 - The same four skills appear under `.cursor/rules/<name>.mdc`.
 - `AGENTS.md` exists at every project root, lists all four skills with their descriptions, and links to `.claude/skills/<name>/SKILL.md`.
 - Re-running `init` on an already-migrated project succeeds (no longer bails) and prints `AI skills refreshed under .claude/skills/, .cursor/rules/, AGENTS.md.` The `shasum` output before and after a re-init is byte-identical for all three skill files.
@@ -1180,14 +1253,14 @@ ls .scaffold/basecamp/profiles
 
 - `basecamp --help` lists `setup`, `modules`, `install`, `launch`, `develop`, `build`, `build-portable`, `run`, `doctor`, `paths`, and `docs`.
 - `basecamp docs` prints the canonical project-compatibility rules, including per-profile `env_file`, `runtime_dir`, `log_file`, custom profile names, and per-platform `[repos.basecamp.attr]`.
-- First `basecamp setup` clones the pinned basecamp repo into a pin-isolated cache path, builds `basecamp` and `lgpm` via Nix, seeds `.scaffold/basecamp/profiles/alice/` and `.scaffold/basecamp/profiles/bob/`, and reports completion.
+- First `basecamp setup` clones the pinned basecamp repo into a pin-isolated cache path (`<cache_root>/repos/basecamp/<pin>`, or `<pin>-src-<hash>` when `[repos.basecamp].source` is a fork), builds `basecamp` and `lgpm` via Nix, seeds `.scaffold/basecamp/profiles/alice/` and `.scaffold/basecamp/profiles/bob/`, and reports completion.
 - If `[repos.basecamp.attr]` is a per-platform map, setup uses the current host's attr and preserves the map plus scalar fallback on serialize.
 - `basecamp doctor` reports the basecamp + lgpm binaries as present and both profiles as seeded; `--json` returns parseable JSON with the same checks. Immediately after a green first `setup` (before `basecamp modules`) that is four PASS rows — `basecamp binary`, `lgpm binary`, `basecamp profile alice`, `basecamp profile bob`. A doctor that summarizes `0 PASS` there is the regression: it leaves the user with no confirmation that `setup` actually landed.
 - `basecamp doctor` shows a `basecamp pin set` row. On a project using scaffold's defaults it passes and names both pins. It warns only when *one* of the pair is at the default and the other is not — that split is what silently breaks module loading, since the app embeds the same package-manager library the CLI installs with. A project deliberately pinned away from both defaults passes with a note, not a warning.
 - On a fresh `setup` against the default pin, the built basecamp carries its own bundled modules inside the nix output (`result/modules`: `capability_module`, `modules_state`, `package_downloader`, `package_manager`; `result/plugins`: `package_manager_ui` plus the manifest-less `main_ui` shell library) rather than pushing them into the profile — so a freshly seeded profile's `modules/` holding only the project's own modules is correct.
 - Second `basecamp setup` is idempotent: pin unchanged → it prints `basecamp (.#<attr>) already built at /nix/store/…; skipping nix build` and exits 0 in seconds. It must not re-evaluate the basecamp flake (that alone costs minutes and ~5 GB of RAM), so a second run that shows a `building basecamp` step for an unchanged commit pin is the regression. `lgpm` is still re-built each time; it substitutes in seconds.
 - Retired default pins move forward. Put the previous default set in `scaffold.toml` (`[repos.basecamp].pin = "aa237766baf61404e12da86b7303cb41065464c9"`, `[repos.lgpm].pin = "202af6fa0f0f4493bc59c8a609dff9326f78a18d"` — basecamp 0.2.3) and run `basecamp doctor`: the `basecamp pin set` row warns `basecamp 0.2.3, a retired scaffold default; scaffold supports basecamp 0.3.0 only`. `basecamp setup` then prints one `[repos.basecamp].pin: … -> …` and one `[repos.lgpm].pin: … -> …` line, rewrites both in `scaffold.toml`, and doctor passes again. With only *one* half on a retired default and the other hand-picked, setup moves nothing and doctor's remediation names both pins to set by hand — moving one half would manufacture a split pair.
-- After a pin edit that `setup` has not been re-run for, `basecamp install` and `basecamp launch` refuse with `basecamp was set up for pin <old> but scaffold.toml now pins <new>; run: logos-scaffold basecamp setup`, and doctor shows a `basecamp build pin` warning. Installing with the old `lgpm` or launching the old app silently would run the previous release under scaffold's assumptions about the new one.
+- After a pin edit that `setup` has not been re-run for, `basecamp install` and `basecamp launch` refuse with `basecamp was set up for pin <old> but scaffold.toml now pins <new>; run: logos-scaffold basecamp setup`, and doctor shows a `basecamp build pin` warning. Editing only `[repos.lgpm].pin` must trip the same guard with `lgpm was set up for pin <old> …`, and doctor's row is then named `lgpm build pin` — `basecamp.state` records both pins (`pin=` and `lgpm_pin=`); a state file written before `lgpm_pin=` existed passes until the next `setup`. Installing with the old `lgpm` or launching the old app silently would run the previous release under scaffold's assumptions about the new one.
 - All commands run only inside the project; running them from outside the project must fail with the existing scaffold "not a logos-scaffold project" message.
 
 ### Failure Signals / Common Pitfalls
@@ -1276,7 +1349,7 @@ If your project does not auto-discover correctly, capture explicit sources:
 - Custom profile names launch like default profiles when they are a single safe path component; `env_file` is sourced before global/profile inline env, `runtime_dir` is exported as both `TMPDIR` and `XDG_RUNTIME_DIR`, and `--log-file` overrides the configured `log_file`.
 - `launch` prepares the runtime dir before it scrubs or reinstalls anything, and refuses to use one that is a symlink, is not a directory, or is owned by another user; it creates it `0700` and tightens loose permissions on an existing one. The default sits in world-writable `/tmp` under a name derived from the project path, so a local attacker can claim it first — and whatever lands there holds the modules' `logos_token_*` sockets. A launch that follows a pre-planted symlink, or that scrubs the profile before discovering the runtime dir is unusable, is the regression.
 - With no configured `runtime_dir`, every profile still gets one: `basecamp paths <profile> --json` reports `tmpdir` == `xdg_runtime_dir` == `/tmp/lgs-<project-hash>-<profile>` (the hash scopes it to the project root, so two checkouts never share a temp root). This path is deliberately **outside** the project tree — `launch` leaves live `logos_token_*` Unix sockets in it, and `nix build path:<project-root>#lgx` refuses to copy a socket (`file ... has an unsupported type`). An in-project temp root therefore broke every `basecamp install` / `basecamp launch` after the first launch, and made concurrent `alice` / `bob` launches fail against each other's live sockets. A `tmpdir` that resolves under `<project>/.scaffold/` by default is that regression; so is any socket found by `find .scaffold -type s` after a launch.
-- `basecamp launch alice` kills any prior `logos_host` / `LogosBasecamp` descendants for that profile, scrubs the profile's XDG dirs under `.scaffold/basecamp/profiles/alice/`, reinstalls each captured source for that profile, sets `XDG_{CONFIG,DATA,CACHE}_HOME` plus `LOGOS_PROFILE=alice` and `LOGOS_USER_DIR`, and `exec`s basecamp.
+- `basecamp launch alice` kills any prior `logos_host` / `LogosBasecamp` descendants for that profile, scrubs the profile's XDG dirs under `.scaffold/basecamp/profiles/alice/`, reinstalls each captured source for that profile, sets `XDG_{CONFIG,DATA,CACHE}_HOME`, `HOME=<profile>/home`, `LOGOS_PROFILE=alice` and `LOGOS_USER_DIR`, and `exec`s basecamp.
 
 ### Failure Signals / Common Pitfalls
 
@@ -1348,7 +1421,7 @@ Within the running UIs, exercise whatever p2p surface the module exposes (chat e
 
 ### Failure Signals / Common Pitfalls
 
-- Two windows opening but sharing identity keys, profile state, or message history is a clean-slate / XDG-isolation regression.
+- Two windows opening but sharing identity keys, profile state, or message history is a clean-slate / XDG-isolation regression. Modules that ignore XDG are covered by the per-profile `HOME`: with a storage-backed module (e.g. one depending on `storage_module`), each profile gets its own `<profile>/home/.logos_storage/data/key`, and the real `~/.logos_storage/config.json` keeps its mtime across both launches. A changed `~/.logos_storage` is the regression.
 - On macOS — either stack — both windows showing only basecamp's bundled modules and none of the project's `.lgx` modules, while their logs report a base data directory under the shared `~/Library/Application Support/Logos/LogosBasecamp[Dev]`, is the profile-collapse signature: the app is not reading the per-profile module root at all. Check that `LOGOS_USER_DIR` is present, absolute, and distinct per profile in each process environment.
 - A non-module port collision (Qt remote objects, etc.) is a real finding — file upstream against the affected component, do not patch around it inside scaffold.
 - A module that hardcodes its port is a known gap pending an upstream fix on that module. Scaffold exports no override for it to honor (see the signal above), so capture the module name and the observed collision — not a missing env var.
@@ -1388,18 +1461,18 @@ From the module project root:
 "$SCAFFOLD_BIN" basecamp launch alice    # let it come up, then close it
 "$SCAFFOLD_BIN" basecamp paths alice --json
 ls .scaffold/basecamp/profiles/alice
-mkdir -p .scaffold/basecamp/profiles/alice/.scaffold-xdg-data/scratch
-echo "marker-$(date -u +%s)" > .scaffold/basecamp/profiles/alice/.scaffold-xdg-data/scratch/marker.txt
+mkdir -p .scaffold/basecamp/profiles/alice/xdg-data/scratch
+echo "marker-$(date -u +%s)" > .scaffold/basecamp/profiles/alice/xdg-data/scratch/marker.txt
 "$SCAFFOLD_BIN" basecamp launch alice    # scrub-and-reinstall
-test -e .scaffold/basecamp/profiles/alice/.scaffold-xdg-data/scratch/marker.txt && echo "REGRESSION: marker survived clean launch" || echo "OK: marker scrubbed"
+test -e .scaffold/basecamp/profiles/alice/xdg-data/scratch/marker.txt && echo "REGRESSION: marker survived clean launch" || echo "OK: marker scrubbed"
 "$SCAFFOLD_BIN" basecamp paths ../escape
 ```
 
 ### Expected Success Signals
 
-- `launch alice` removes any user-introduced files under the alice profile XDG dirs and reinstalls each captured source before `exec`ing basecamp.
+- `launch alice` removes any user-introduced files under the alice profile XDG dirs and reinstalls each captured source before `exec`ing basecamp. `profiles/alice/home/` (the profile's `HOME`) is deliberately exempt, like `xdg-config`: modules keep identities there (e.g. `.logos_storage`), so files surviving under it are correct, not a scrub regression.
 - `rm -rf` on `launch` is bounded to `<project>/.scaffold/basecamp/profiles/<profile>/`. Never any path outside that root.
-- A `launch` that finds no modules in `[modules]` bails before scrubbing (the empty-install + scrubbed profile combination is the regression we're guarding against).
+- A `launch` that finds no modules in `[modules]` bails before scrubbing (the empty-install + scrubbed profile combination is the regression we're guarding against). Every fail-fast refusal — empty `[modules]`, an unusable `runtime_dir`, a malformed `env_file`, a `--log-file` / `log_file` that cannot be created — also leaves the profile's *running* instance alone: check `kill -0 <pid from launch.state>` after the refused launch. A refused launch that still killed it is the regression.
 - `basecamp paths` rejects the same unsafe profile names as `launch` and remains non-mutating for valid profiles.
 - A second `launch alice` while the first is still running terminates the first, leaving no orphan behind. Check with `pgrep -fl LogosBasecamp` (or `ps -o comm=`) before and after. The reported process name is usually not the file `launch` execed, because the Linux entry points are Qt-env launcher scripts: **the dev build reports `.LogosBasecamp`** (`bin/LogosBasecamp` execs the hidden real binary), **the Linux portable bundle (`bin-bundle-dir`) reports `.LogosBasecamp.`** (its launcher execs `bin/.LogosBasecamp.elf`, cut to the kernel's 15-byte `comm`), and the macOS bundle reports `LogosBasecamp` directly. All are expected — a surviving process of any of those names after the second launch is the regression, and it is a silent one: the kill is skipped rather than failing loudly.
 - `module_data/` and basecamp's own `logs/` under the profile's module root are gone after a relaunch, like every other child of that root. That is clean-slate working as designed, not data loss: `basecamp paths <profile>` names both directories so their lifetime is discoverable before a module puts anything there.
@@ -1758,7 +1831,7 @@ Against the running node URL:
 
 - `tx submit-and-wait --json` emits exactly one terminal outcome object: `committed` (with the actual sequencer `block_id` and `timestamp`), `rejected` (`phase` = `stateless` | `stateful`, with `reason` or `observed_after_block_id`), `timeout` (`last_observed_block_id`), `transport_error`, or `wire_mismatch`; it exits non-zero for anything but `committed`. Transport failures are never reported as business rejections, and a stateful rejection follows an explicit multi-block observation rule (not a single sleep).
 - `tx submit` returns the node-assigned tx hash or a structured stateless rejection; `tx wait` observes a previously submitted hash, honoring `--after-block` when supplied.
-- `blocks head` / `blocks range` report each block's id and timestamp and classify it explicitly: genesis (the only zero-transaction block — no clock tick to replay), clock-only (empty post-genesis blocks still advance clock state via the mandatory clock transaction), and blocks carrying user transactions, with per-tx hashes for public/deployment transactions.
+- `blocks head` / `blocks range` report each block's id and timestamp and classify it explicitly: genesis (block 1 — zero transactions up to LEZ v0.2.3; from v0.2.4 it carries genesis setup transactions ending in a `clock(0)` initialisation, still `has_clock_transaction: false` and `has_user_transactions: false`, since there is no clock tick to replay), clock-only (empty post-genesis blocks still advance clock state via the mandatory clock transaction), and blocks carrying user transactions, with per-tx hashes for public/deployment transactions.
 - `blocks wait` returns the requested number of blocks after the boundary.
 - `clock read` returns all three `/LEZ/ClockProgramAccount/...` accounts with decoded `block_id`/`timestamp`; `clock wait-stable` returns a snapshot only after consecutive identical samples (head + clock state), or a retryable timeout error.
 - `account get` distinguishes `present` (with lossless base64 account bytes plus decoded balance/nonce/owner/data), `missing` (never written), and `decode_error`; every read reports the `block_id` it was scoped to. `batch-get` reads all accounts at one consistent block boundary.
@@ -1825,14 +1898,16 @@ echo '{"format":"bogus/1"}' > ./bad.json
 
 - `state schema` identifies the exact snapshot formats the project's pins accept (`lgs-state-snapshot/1`, the `lgs-account-snapshot/1` output of `snapshot accounts`, or a rocksdb state directory), the state format version (`nssa-v03`), the LEZ ref/commit, and the seedable account fields.
 - `state seed` validates the snapshot before producing a state directory and reports the seed kind (`config` vs `database`), the LEZ commit, the state format version, and the public/private account counts. Validation errors are distinguished: format mismatch, storage-schema mismatch (e.g. public-account data, which the genesis config cannot seed), LEZ pin mismatch, and account decode errors.
-- `test-node start --state ./seeded-state` starts from exactly the snapshot's accounts — the sequencer builds genesis state from `initial_public_accounts` / `initial_private_accounts` with no implicit wallets, sample programs, or default testnet accounts. A database-seeded directory (a node's preserved `rocksdb/`) resumes from it verbatim.
+- A database-seeded node forgets transaction *lookups* but not transactions: the pinned sequencer serves `getTransaction` from an in-memory index it does not rebuild, so it answers `null` for anything committed before the restart. `test-node tx wait --hash <pre-restart tx> --after-block <b>` must still report `committed` with the original block (scaffold scans the chain's blocks before deciding) — including when `<b>` is *later* than the commit block, as a live node would answer; `rejected` with `phase: stateful` there misreports a committed transaction and is the regression. If a scanned block holds a privacy-preserving transaction, scaffold cannot see past it in that block, so `wait` ends in `timeout` rather than a stateful rejection.
+- `test-node start --state ./seeded-state` funds exactly the snapshot's accounts at genesis. On LEZ v0.2.4 (the current pin) each public account becomes a `supply_account` entry in the runtime config's `genesis` list, replacing the debug config's sample accounts (the `supply_bridge_account` entry stays). The sequencer's built-in testnet state is part of every v0.2.4 genesis and is not removable. `state seed` rejects private accounts on v0.2.4 (`storage schema mismatch`): its genesis has no action for them. Pins up to v0.2.3 used `initial_public_accounts` / `initial_private_accounts` instead, with no default accounts. A database-seeded directory (a node's preserved `rocksdb/`) resumes from it verbatim.
 - `state export` writes named public-account balances from a running node into an `lgs-state-snapshot/1` file (the pinned RPC exposes public balances only; full-fidelity state comes from a stopped node's database directory, which the command output notes).
-- **Confirmed against a real node:** seed an account at a distinctive balance (e.g. 4242), `start --state`, then `test-node account get --account-id <id>` returns `state: present` with `balance: 4242` and the account exists at genesis — proving the sequencer built genesis from exactly the snapshot (no testnet defaults). This is the end-to-end proof that exact-state seeding works, not just that the file validated.
+- **Confirmed against a real node:** seed an account at a distinctive balance (e.g. 4242) and `start --state`. On v0.2.4 a `supply_account` pays into the account's **vault PDA**, not the account, so `state seed` warns about it and `test-node account get --account-id <id>` reports the account itself `missing`. Read the balance from the vault instead: its id is the public PDA of the vault program with seed `sha256("/LEZ/v0.3/VaultSeed/00000000000/" ‖ account_id)`, and the vault program id is the `vault_program_id` inside any genesis `supply_account` transaction. For the debug config's `CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r` that vault is `G1u9gmu1Gb8PG59zHZYNL5WdJNNtBKEN4U5qUdx2y6sG`, which must read `state: present`, `balance: 4242`. The vault of a debug-config sample account the seed left out (e.g. `2RHZhw9h534Zr3eq2RGhQete2Hh667foECzXPmSkGni2` → `Ey6P7CkwXHLskqFjQzU8C1kTwb54TkZfhzv9wUijb3Wc`) must read `missing`. That is the end-to-end proof that seeding replaced the sample accounts, not just that the file validated.
 
 ### Failure Signals / Common Pitfalls
 
-- A node started with `--state` that injects extra accounts (default testnet wallets, sample programs) beyond the snapshot is a regression — seeded startup must be exact.
-- A snapshot needing unsupported state (e.g. public-account data/nonce via the genesis config) that fails late inside the node instead of up front during `state seed` validation is a regression.
+- A node started with `--state` that still funds the debug config's sample accounts is a regression — the seed replaces them. (The v0.2.4 sequencer's built-in testnet state is always present and is not.)
+- `error: sequencer_config.json has no numeric `genesis_id`` from `start` means scaffold is reading a v0.2.4 config the pre-v0.2.4 way.
+- A snapshot needing unsupported state (e.g. public-account data/nonce via the genesis config) that fails late inside the node instead of up front during `state seed` validation is a regression. So is one that *succeeds*: a `public_accounts` entry with any field besides `account_id`/`balance` (`"data": "00"`, `"nonce": 3`) must fail `state seed` with `storage schema mismatch` naming the field — seeding it anyway silently drops the field.
 - A pin mismatch (snapshot's `lez_commit` differs from the project's resolved pin) that is silently accepted is a regression.
 - An unknown snapshot format accepted instead of rejected with a `format mismatch` error is a regression.
 

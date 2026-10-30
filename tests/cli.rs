@@ -3467,6 +3467,166 @@ fn basecamp_launch_bails_when_no_modules_captured() {
         );
 }
 
+#[cfg(unix)]
+#[test]
+fn basecamp_launch_that_bails_leaves_the_running_instance_alone() {
+    // A launch that refuses to start (here: nothing captured in [modules])
+    // must not first kill the instance the profile already has running.
+    assert_refused_launch_keeps_running_instance(
+        MINIMAL_SCAFFOLD_TOML,
+        &[],
+        |_| {},
+        "no modules captured",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn basecamp_launch_with_unwritable_log_file_leaves_the_running_instance_alone() {
+    // The log destination is only opened after the kill + scrub + reinstall;
+    // a path that can never be created must be refused before any of that.
+    let toml = format!(
+        "{MINIMAL_SCAFFOLD_TOML}\n[modules.swap_module]\nflake = \"github:logos-co/swap-module#lgx\"\nrole = \"project\"\n"
+    );
+    assert_refused_launch_keeps_running_instance(
+        &toml,
+        &["--log-file=not-a-dir/basecamp.log"],
+        |project| fs::write(project.join("not-a-dir"), "a file, not a dir").expect("write"),
+        "create log dir",
+    );
+}
+
+/// A host-independent `sleep <secs>` binary, compiled once per test run.
+///
+/// The basecamp launch tests used to copy `/bin/sleep`, but on hosts whose
+/// coreutils is a multicall binary (uutils on Ubuntu 26.04, busybox) the copy
+/// resolves its applet from its own name and exits at once as
+/// `LogosBasecamp`. A shell-script wrapper is no substitute: its comm is the
+/// interpreter, so launch would never target it. A real executable keeps
+/// comm equal to whatever name it is copied under.
+#[cfg(unix)]
+fn sleeper_binary() -> &'static Path {
+    static SLEEPER: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    SLEEPER.get_or_init(|| {
+        const SOURCE: &str = "fn main() {\n\
+             let secs = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(300);\n\
+             std::thread::sleep(std::time::Duration::from_secs(secs));\n}\n";
+        // Under cargo's per-target scratch dir, so `cargo clean` sweeps it and
+        // later runs reuse it instead of leaving one copy in /tmp per run.
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("scaffold-sleeper");
+        let bin = dir.join("sleeper");
+        if bin.is_file()
+            && fs::read_to_string(dir.join("sleeper.rs")).ok().as_deref() == Some(SOURCE)
+        {
+            return bin;
+        }
+        fs::create_dir_all(&dir).expect("create sleeper dir");
+        // Build in a private dir and rename into place, so concurrent test
+        // runs never exec a half-written binary.
+        let work = tempfile::Builder::new()
+            .prefix("build-")
+            .tempdir_in(&dir)
+            .expect("tempdir");
+        let src = work.path().join("sleeper.rs");
+        fs::write(&src, SOURCE).expect("write sleeper.rs");
+        let built = work.path().join("sleeper");
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let status = std::process::Command::new(rustc)
+            .arg(&src)
+            .arg("-o")
+            .arg(&built)
+            .status()
+            .expect("run rustc");
+        assert!(status.success(), "compiling the sleeper stand-in failed");
+        fs::rename(&built, &bin).expect("install sleeper");
+        fs::rename(&src, dir.join("sleeper.rs")).expect("install sleeper.rs");
+        bin
+    })
+}
+
+#[cfg(unix)]
+fn assert_refused_launch_keeps_running_instance(
+    scaffold_toml: &str,
+    extra_args: &[&str],
+    prepare: impl FnOnce(&Path),
+    expected_stderr: &str,
+) {
+    let temp = tempdir().expect("tempdir");
+    let project = temp.path();
+    fs::write(project.join("scaffold.toml"), scaffold_toml).expect("write scaffold.toml");
+    prepare(project);
+
+    // A stand-in "basecamp": a sleeper under the launcher's name, so its comm
+    // matches what launch would kill.
+    let fake_bin = project.join("LogosBasecamp");
+    fs::copy(sleeper_binary(), &fake_bin).expect("copy sleeper");
+    let state_dir = project.join(".scaffold/state");
+    fs::create_dir_all(&state_dir).expect("mkdir state");
+    fs::write(
+        state_dir.join("basecamp.state"),
+        format!(
+            "pin=deadbeef\nbasecamp_bin={0}\nlgpm_bin={0}\n",
+            fake_bin.display()
+        ),
+    )
+    .expect("write state");
+
+    // Another test thread forking while `fs::copy` still held the copy open
+    // for writing hands that child the write fd; exec then fails with
+    // ETXTBSY until it execs or exits. Retry briefly instead of flaking.
+    const ETXTBSY: i32 = 26; // Linux and macOS
+    let mut attempts = 0;
+    let mut running = loop {
+        match std::process::Command::new(&fake_bin).arg("300").spawn() {
+            Err(err) if err.raw_os_error() == Some(ETXTBSY) && attempts < 50 => {
+                attempts += 1;
+                thread::sleep(Duration::from_millis(20));
+            }
+            other => break other.expect("spawn fake basecamp"),
+        }
+    };
+    let profile_dir = project.join(".scaffold/basecamp/profiles/alice");
+    fs::create_dir_all(&profile_dir).expect("mkdir profile");
+    fs::write(
+        profile_dir.join("launch.state"),
+        format!("pid={}\n", running.id()),
+    )
+    .expect("write launch.state");
+
+    // Guard against a vacuous pass: if the stand-in already exited, or its comm
+    // is not one launch would kill, "still running" below proves nothing.
+    thread::sleep(Duration::from_millis(100));
+    assert!(
+        running.try_wait().expect("try_wait").is_none(),
+        "fake basecamp exited before launch ran; the fixture is broken"
+    );
+    let comm = std::process::Command::new("ps")
+        .args(["-p", &running.id().to_string(), "-o", "comm="])
+        .output()
+        .expect("ps");
+    let comm = String::from_utf8_lossy(&comm.stdout);
+    assert!(
+        comm.trim().ends_with("LogosBasecamp"),
+        "fake basecamp comm is {comm:?}; launch would never target it"
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(project)
+        .args(["basecamp", "launch", "alice"])
+        .args(extra_args)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(expected_stderr));
+
+    let still_running = running.try_wait().expect("try_wait").is_none();
+    let _ = running.kill();
+    let _ = running.wait();
+    assert!(
+        still_running,
+        "a launch that bailed killed the running instance"
+    );
+}
+
 #[test]
 fn basecamp_launch_outside_project_errors() {
     let temp = tempdir().expect("tempdir");
@@ -4512,12 +4672,7 @@ fn init_refreshes_skills_when_already_at_v0_2_0_scaffold_toml() {
         "init must not overwrite an already-migrated scaffold.toml"
     );
 
-    for skill in [
-        "lgs-cli",
-        "lez-template",
-        "lez-framework-template",
-        "basecamp",
-    ] {
+    for skill in ["lgs-cli", "lez-template", "spel-template", "basecamp"] {
         assert!(
             temp.path()
                 .join(format!(".claude/skills/{skill}/SKILL.md"))
@@ -5000,8 +5155,10 @@ fn build_idl_fails_loudly_on_default_framework() {
         .assert()
         .failure()
         .stderr(
-            predicate::str::contains("`build idl` is only supported for `lez-framework`")
-                .and(predicate::str::contains("framework.kind = `default`")),
+            predicate::str::contains(
+                "`build idl` is only supported for `spel` and `lez-framework`",
+            )
+            .and(predicate::str::contains("framework.kind = `default`")),
         );
 }
 
@@ -5019,8 +5176,10 @@ fn build_client_fails_loudly_on_default_framework() {
         .assert()
         .failure()
         .stderr(
-            predicate::str::contains("`build client` is only supported for `lez-framework`")
-                .and(predicate::str::contains("framework.kind = `default`")),
+            predicate::str::contains(
+                "`build client` is only supported for `spel` and `lez-framework`",
+            )
+            .and(predicate::str::contains("framework.kind = `default`")),
         );
 }
 
@@ -5411,4 +5570,81 @@ fn basecamp_paths_json_lists_the_base_dir_children() {
         module_root.contains(".scaffold/basecamp/profiles/alice/xdg-data"),
         "module root must sit inside the profile's scrubbed tree, got: {module_root}"
     );
+}
+
+// --- `new --template` dispatch -------------------------------------------
+//
+// These cover the argument-handling half of the spel path, which is the part
+// that must fail fast and say something useful. They deliberately stop before
+// anything that would clone or build, so they need no network and no `spel`
+// on PATH.
+
+#[test]
+fn new_rejects_an_unknown_template_and_names_the_valid_ones() {
+    let temp = tempdir().expect("tempdir");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["new", "demo", "--template", "lez-frmework"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unsupported template"))
+        .stderr(predicate::str::contains("`default` or `spel`"))
+        // A typo close to the deprecated alias must not be told the option
+        // does not exist at all — the alias is still accepted.
+        .stderr(predicate::str::contains("lez-framework"));
+}
+
+#[test]
+fn new_spel_rejects_lez_path_before_touching_the_environment() {
+    let temp = tempdir().expect("tempdir");
+
+    // User error takes priority over environment error: this must report the
+    // unsupported flag, not "spel not found", and must not leave a directory
+    // behind.
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args([
+            "new",
+            "demo",
+            "--template",
+            "spel",
+            "--lez-path",
+            temp.path().to_str().expect("utf8 path"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "`--lez-path` is not supported with `--template spel`",
+        ));
+
+    assert!(
+        !temp.path().join("demo").exists(),
+        "a failed `new` must not leave a partial project directory behind"
+    );
+}
+
+#[test]
+fn new_lez_framework_warns_and_maps_to_spel() {
+    let temp = tempdir().expect("tempdir");
+
+    // `--lez-path` makes the spel path bail immediately, so this asserts the
+    // deprecation warning without cloning anything. Reaching the spel-only
+    // error at all is what proves the alias mapped to `spel`.
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args([
+            "new",
+            "demo",
+            "--template",
+            "lez-framework",
+            "--lez-path",
+            temp.path().to_str().expect("utf8 path"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "template `lez-framework` is deprecated; use `--template spel` instead",
+        ))
+        .stderr(predicate::str::contains("`--template spel`"));
 }

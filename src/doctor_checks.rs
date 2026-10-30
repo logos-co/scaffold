@@ -33,11 +33,114 @@ pub(crate) fn check_binary(binary: &str, required: bool) -> CheckRow {
     }
 }
 
-pub(crate) fn check_container_runtime() -> CheckRow {
-    container_runtime_row(which("docker"), which("podman"))
+/// The LEZ wallet links against libpcsclite (keycard support), so a missing
+/// PCSC dev package breaks `setup` deep inside a cargo build, with a
+/// `pcsc-sys` link error that says nothing about scaffold. Surface it here
+/// instead. macOS ships PCSC in the system frameworks, so only probe on Linux.
+pub(crate) fn check_pcsc_library() -> CheckRow {
+    if !cfg!(target_os = "linux") {
+        return CheckRow {
+            status: CheckStatus::Pass,
+            name: "PCSC library".to_string(),
+            detail: "not required on this platform".to_string(),
+            remediation: None,
+        };
+    }
+    let found = which("pkg-config").is_some_and(|pkg_config| {
+        std::process::Command::new(pkg_config)
+            .args(["--exists", "libpcsclite"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    });
+    if found {
+        CheckRow {
+            status: CheckStatus::Pass,
+            name: "PCSC library".to_string(),
+            detail: "pkg-config found libpcsclite".to_string(),
+            remediation: None,
+        }
+    } else {
+        CheckRow {
+            status: CheckStatus::Warn,
+            name: "PCSC library".to_string(),
+            detail: "pkg-config could not find libpcsclite; building the LEZ wallet will fail with `Could not find a PCSC library`".to_string(),
+            remediation: Some(
+                "Install the PCSC headers: `sudo apt install pkgconf libpcsclite-dev` \
+                 (Fedora: `pkgconf pcsc-lite-devel`, Arch: `pkgconf pcsclite`)"
+                    .to_string(),
+            ),
+        }
+    }
 }
 
-fn container_runtime_row(docker: Option<PathBuf>, podman: Option<PathBuf>) -> CheckRow {
+/// `cargo risczero`, the guest-build driver for spel projects.
+pub(crate) fn check_cargo_risczero() -> CheckRow {
+    match which("cargo-risczero") {
+        Some(path) => CheckRow {
+            status: CheckStatus::Pass,
+            name: "cargo-risczero".to_string(),
+            detail: format!("found {}", path.display()),
+            remediation: None,
+        },
+        None => CheckRow {
+            status: CheckStatus::Warn,
+            name: "cargo-risczero".to_string(),
+            detail: "not found on PATH; `make build` will fail with `no such command: risczero`"
+                .to_string(),
+            remediation: Some(
+                "Install it with rzup: `curl -L https://risc0.com/install | bash` then \
+                 `rzup install cargo-risczero 3.0.5`"
+                    .to_string(),
+            ),
+        },
+    }
+}
+
+pub(crate) fn check_container_runtime() -> CheckRow {
+    let docker = which("docker");
+    let podman = which("podman");
+    // A binary on PATH is not a working runtime. Every spel guest build goes
+    // through `cargo risczero build`, which needs the daemon, so a stopped
+    // daemon otherwise gives a clean `doctor` and a failing `build`.
+    let selected = docker.as_ref().or(podman.as_ref());
+    let daemon_ok = selected.is_none_or(|bin| daemon_responds(bin));
+    container_runtime_row(docker, podman, daemon_ok)
+}
+
+/// Does the runtime's daemon answer? `info` is the cheapest call that fails
+/// when the daemon is down but the client is installed.
+fn daemon_responds(bin: &Path) -> bool {
+    std::process::Command::new(bin)
+        .arg("info")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn container_runtime_row(
+    docker: Option<PathBuf>,
+    podman: Option<PathBuf>,
+    daemon_ok: bool,
+) -> CheckRow {
+    if let Some(path) = docker.as_ref().or(podman.as_ref()) {
+        if !daemon_ok {
+            let name = if docker.is_some() { "docker" } else { "podman" };
+            return CheckRow {
+                status: CheckStatus::Warn,
+                name: "container runtime".to_string(),
+                detail: format!(
+                    "found {name} at {} but its daemon is not responding; guest builds will fail",
+                    path.display()
+                ),
+                remediation: Some(format!(
+                    "Start the {name} daemon (e.g. `sudo systemctl start {name}`) and re-run `logos-scaffold doctor`"
+                )),
+            };
+        }
+    }
     match (docker, podman) {
         (Some(path), _) => CheckRow {
             status: CheckStatus::Pass,
@@ -72,12 +175,17 @@ pub(crate) fn check_guest_build(build: &BuildConfig) -> CheckRow {
         .into_iter()
         .filter(|tool| which(tool).is_none())
         .collect();
-    guest_build_row(build, &missing)
+    // Same probe `lgs build` runs before its first container step. Only
+    // worth running when the tools are there and the mode needs them.
+    let daemon_running = !build.guest.is_deterministic()
+        || !missing.is_empty()
+        || crate::commands::build::docker_daemon_running();
+    guest_build_row(build, &missing, daemon_running)
 }
 
 /// Split from [`check_guest_build`] so the row shape is testable without
 /// depending on what happens to be installed on the test machine.
-fn guest_build_row(build: &BuildConfig, missing: &[&str]) -> CheckRow {
+fn guest_build_row(build: &BuildConfig, missing: &[&str], daemon_running: bool) -> CheckRow {
     if !build.guest.is_deterministic() {
         return CheckRow {
             status: CheckStatus::Pass,
@@ -93,7 +201,22 @@ fn guest_build_row(build: &BuildConfig, missing: &[&str]) -> CheckRow {
     // The pinned tag is reported on both branches: it is the value that makes
     // `program_id` reproducible, so it belongs in the diagnostic whether or
     // not this machine can currently run the build.
-    if missing.is_empty() {
+    if missing.is_empty() && !daemon_running {
+        CheckRow {
+            status: CheckStatus::Fail,
+            name: "guest build".to_string(),
+            detail: format!(
+                "docker (risczero/risc0-guest-builder:{}) — Docker daemon not running \
+                 (`docker info` failed)",
+                build.risc0_docker_tag
+            ),
+            remediation: Some(
+                "Start Docker, or set [build].guest = \"local\" in scaffold.toml \
+                 (non-reproducible program_id)"
+                    .to_string(),
+            ),
+        }
+    } else if missing.is_empty() {
         CheckRow {
             status: CheckStatus::Pass,
             name: "guest build".to_string(),
@@ -429,6 +552,7 @@ mod tests {
                 ..BuildConfig::default()
             },
             &[],
+            true,
         );
         assert_eq!(row.status, CheckStatus::Pass);
         assert!(row.detail.starts_with("local"), "got: {}", row.detail);
@@ -445,7 +569,7 @@ mod tests {
             guest: GuestBuildMode::Docker,
             risc0_docker_tag: "r0.1.91.1".to_string(),
         };
-        let row = guest_build_row(&build, &[]);
+        let row = guest_build_row(&build, &[], true);
         assert_eq!(row.status, CheckStatus::Pass);
         assert!(
             row.detail.contains("risc0-guest-builder:r0.1.91.1"),
@@ -463,7 +587,7 @@ mod tests {
             guest: GuestBuildMode::Docker,
             ..BuildConfig::default()
         };
-        let row = guest_build_row(&build, &["cargo-risczero", "docker"]);
+        let row = guest_build_row(&build, &["cargo-risczero", "docker"], true);
         assert_eq!(row.status, CheckStatus::Fail);
         assert!(row.detail.contains("cargo-risczero and docker"));
         // The pin is reported even when the build cannot run — see the
@@ -479,11 +603,45 @@ mod tests {
         assert!(row.remediation.is_some());
     }
 
+    /// Tools on PATH but no daemon: `lgs build` refuses at `docker info`, so
+    /// doctor must not report the default build as ready.
+    #[test]
+    fn guest_build_row_fails_when_docker_daemon_is_down() {
+        let build = BuildConfig {
+            guest: GuestBuildMode::Docker,
+            ..BuildConfig::default()
+        };
+        let row = guest_build_row(&build, &[], false);
+        assert_eq!(row.status, CheckStatus::Fail);
+        assert!(
+            row.detail.contains("daemon not running"),
+            "got: {}",
+            row.detail
+        );
+        assert!(
+            row.detail.contains("risc0-guest-builder:"),
+            "got: {}",
+            row.detail
+        );
+        assert!(row.remediation.is_some());
+
+        let local = BuildConfig {
+            guest: GuestBuildMode::Local,
+            ..BuildConfig::default()
+        };
+        assert_eq!(
+            guest_build_row(&local, &[], false).status,
+            CheckStatus::Pass,
+            "local mode never needs the daemon"
+        );
+    }
+
     #[test]
     fn container_runtime_row_prefers_docker() {
         let row = container_runtime_row(
             Some(PathBuf::from("/usr/local/bin/docker")),
             Some(PathBuf::from("/usr/local/bin/podman")),
+            true,
         );
         assert_eq!(row.status, CheckStatus::Pass);
         assert!(row.detail.contains("docker"));
@@ -491,14 +649,24 @@ mod tests {
 
     #[test]
     fn container_runtime_row_passes_with_podman_when_docker_missing() {
-        let row = container_runtime_row(None, Some(PathBuf::from("/usr/local/bin/podman")));
+        let row = container_runtime_row(None, Some(PathBuf::from("/usr/local/bin/podman")), true);
         assert_eq!(row.status, CheckStatus::Pass);
         assert!(row.detail.contains("podman"));
     }
 
+    /// A client binary with a stopped daemon used to pass, which meant a clean
+    /// `doctor` followed by a failing spel guest build.
+    #[test]
+    fn container_runtime_row_warns_when_daemon_is_down() {
+        let row = container_runtime_row(Some(PathBuf::from("/usr/bin/docker")), None, false);
+        assert_eq!(row.status, CheckStatus::Warn);
+        assert!(row.detail.contains("daemon is not responding"), "{row:?}");
+        assert!(row.remediation.is_some(), "{row:?}");
+    }
+
     #[test]
     fn container_runtime_row_warns_when_missing() {
-        let row = container_runtime_row(None, None);
+        let row = container_runtime_row(None, None, true);
         assert_eq!(row.status, CheckStatus::Warn);
         assert!(row.detail.contains("neither docker nor podman"));
         assert!(row.remediation.is_some());

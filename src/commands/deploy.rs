@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context};
 use walkdir::WalkDir;
 
-use crate::constants::SPEL_BIN_REL_PATH;
+use crate::constants::{FRAMEWORK_KIND_SPEL, SPEL_BIN_REL_PATH};
+use crate::model::Project;
 use crate::process::{run_with_stdin, EchoGuard};
 use crate::project::{load_project, resolve_repo_path};
 use crate::DynResult;
@@ -24,19 +25,22 @@ use super::wallet_support::{
 /// `embed_methods()` produces for the scaffold template), sub-crate builds can
 /// land in `methods/target/...`, the deterministic Docker build
 /// (`[build].guest = "docker"`) emits to
-/// `target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/`, and a guest
-/// crate that carries its own `[workspace]` (so it builds independently of the
-/// parent) emits to `methods/guest/target/...`. Discovery walks all four so
-/// renamed projects and independently-workspaced guest crates work regardless
-/// of which layout cargo/risc0 chose. The `methods/...` entries are the same
-/// project-relative directory that `build.rs` compiles via
-/// `crate::constants::METHODS_DIR`; keep them in sync.
+/// `target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/`, and
+/// `cargo risczero build` (`make build` in spel projects) writes to
+/// `methods/guest/target/riscv32im-risc0-zkvm-elf/docker/`. Discovery walks
+/// all four so renamed projects work regardless of which layout cargo/risc0
+/// chose. The `methods/...` entries are the same project-relative directory
+/// that `build.rs` compiles via `crate::constants::METHODS_DIR`; keep them in
+/// sync.
 const GUEST_BIN_SEARCH_ROOTS: &[&str] = &[
     crate::constants::GUEST_DOCKER_TARGET_DIR,
     "target/riscv-guest",
     "methods/target",
-    "methods/guest/target",
+    SPEL_GUEST_TARGET_DIR,
 ];
+
+/// Where `cargo risczero build` (`make build` in spel projects) writes guests.
+const SPEL_GUEST_TARGET_DIR: &str = "methods/guest/target";
 
 /// `spel program-id` line prefix that carries the risc0 image ID — the value
 /// the sequencer uses as the on-chain program ID. Format is whitespace-tolerant:
@@ -153,7 +157,16 @@ pub(crate) fn deploy_for_project(
     }
 
     let selected_programs = resolve_selected_programs(program_name, &available_programs)?;
-    let discovered = discover_program_binaries(&project.root, &selected_programs);
+    let discovered = discover_project_binaries(&project, &selected_programs);
+    // stderr, so `--json` stdout stays a single object.
+    for (_, ignored) in ignored_docker_artifacts(project, &selected_programs) {
+        eprintln!(
+            "note: ignoring {} — docker output outside {} is not from `lgs build`, \
+             which decides what deploy ships",
+            ignored.display(),
+            owned_docker_root(project)
+        );
+    }
 
     preflight_sequencer_reachability(&sequencer_addr)?;
 
@@ -791,17 +804,57 @@ fn is_valid_program_name(program: &str) -> bool {
         && !program.contains("..")
 }
 
+/// The search root whose `<triple>/docker/` output is scaffold's own build
+/// artefact for this project, and so earns the top discovery rank.
+///
+/// For spel projects that is `methods/guest/target`, where `make build`
+/// (`cargo risczero build`) writes. For everything else it is
+/// [`GUEST_DOCKER_TARGET_DIR`](crate::constants::GUEST_DOCKER_TARGET_DIR),
+/// which `lgs build` populates in `docker` mode and deletes in `local` mode.
+pub(crate) fn owned_docker_root(project: &Project) -> &'static str {
+    if project.config.framework.kind == FRAMEWORK_KIND_SPEL {
+        SPEL_GUEST_TARGET_DIR
+    } else {
+        crate::constants::GUEST_DOCKER_TARGET_DIR
+    }
+}
+
+/// `docker/` artefacts (a `docker` directory directly under a `riscv32im*`
+/// one, in any search root and at any depth) that discovery demoted because
+/// they sit outside the root the project owns, and that `deploy` does not
+/// ship. Discovery demotes them on purpose; `deploy` names them so a
+/// deliberately hand-built reproducible ELF is not passed over without a
+/// word. Taken from the same walk as [`discover_project_binaries`], so the
+/// note and the ranking cannot disagree about which paths count.
+pub(crate) fn ignored_docker_artifacts(
+    project: &Project,
+    programs: &[String],
+) -> Vec<(String, PathBuf)> {
+    let discovery = walk_program_binaries(&project.root, programs, owned_docker_root(project));
+    discovery
+        .demoted_docker
+        .into_iter()
+        .filter(|(program, path)| discovery.chosen.get(program) != Some(path))
+        .collect()
+}
+
+/// [`discover_program_binaries`] for a loaded project, with the docker rank
+/// scoped to the root that project kind owns.
+pub(crate) fn discover_project_binaries(
+    project: &Project,
+    programs: &[String],
+) -> HashMap<String, PathBuf> {
+    discover_program_binaries(&project.root, programs, owned_docker_root(project))
+}
+
 /// Walk every `GUEST_BIN_SEARCH_ROOTS` once and return a `program -> binary_path`
 /// map. Only paths whose components include a `riscv32im*` target triple match.
 ///
 /// Ranking, highest first:
 ///
-/// 1. a `docker` component *directly under* the `riscv32im*` one, inside
-///    `GUEST_DOCKER_TARGET_DIR` only — the deterministic `cargo risczero build`
-///    output, whose layout is always
-///    `<target-dir>/riscv32im-risc0-zkvm-elf/docker/`. Other roots are trees
-///    scaffold neither writes nor clears, so a `docker/` there (e.g. a
-///    hand-run `cargo risczero build`) must not outrank a fresh `release/`;
+/// 1. a `docker` component *directly under* the `riscv32im*` one — the
+///    deterministic `cargo risczero build` output, whose layout is always
+///    `<target-dir>/riscv32im-risc0-zkvm-elf/docker/`;
 /// 2. a `release` component — the host-toolchain `embed_methods()` output;
 /// 3. anything else (a `debug` build) as a last-resort fallback.
 ///
@@ -813,17 +866,43 @@ fn is_valid_program_name(program: &str) -> bool {
 /// being promoted: `embed_methods()` puts package names *above* the target
 /// triple, never below it. Within a rank the shallowest path wins, preferring
 /// the canonical risc0 layout over nested workspace duplicates.
+///
+/// The docker rank is further confined to `docker_root`, the one search root
+/// whose `docker/` tree scaffold itself writes and clears (see
+/// [`owned_docker_root`]). A `docker/`-shaped leftover anywhere else — a
+/// hand-run `cargo risczero build` in a default project, say — is never
+/// cleared by `lgs build`, so letting it outrank a fresh `release/` build
+/// would make every later deploy ship stale bytes. Such paths fall through to
+/// the debug fallback instead.
 pub(crate) fn discover_program_binaries(
     project_root: &Path,
     programs: &[String],
+    docker_root: &str,
 ) -> HashMap<String, PathBuf> {
+    walk_program_binaries(project_root, programs, docker_root).chosen
+}
+
+/// What one walk of the search roots found.
+struct Discovery {
+    /// `program -> binary` by the ranking on [`discover_program_binaries`].
+    chosen: HashMap<String, PathBuf>,
+    /// Every `docker/` artefact denied the docker rank because it is outside
+    /// `docker_root`, in walk order.
+    demoted_docker: Vec<(String, PathBuf)>,
+}
+
+fn walk_program_binaries(project_root: &Path, programs: &[String], docker_root: &str) -> Discovery {
+    let mut demoted_docker = Vec::new();
     let wanted: HashMap<String, &str> = programs
         .iter()
         .filter(|p| is_valid_program_name(p))
         .map(|p| (format!("{p}.bin"), p.as_str()))
         .collect();
     if wanted.is_empty() {
-        return HashMap::new();
+        return Discovery {
+            chosen: HashMap::new(),
+            demoted_docker,
+        };
     }
 
     let mut docker: HashMap<String, (usize, PathBuf)> = HashMap::new();
@@ -835,7 +914,6 @@ pub(crate) fn discover_program_binaries(
         if !search_dir.exists() {
             continue;
         }
-        let root_owns_docker_rank = *root == crate::constants::GUEST_DOCKER_TARGET_DIR;
         for entry in WalkDir::new(&search_dir)
             .follow_links(false)
             .into_iter()
@@ -863,7 +941,7 @@ pub(crate) fn discover_program_binaries(
                     has_release |= name == "release";
                     // Only the segment immediately below the target triple —
                     // see the ranking notes on this function.
-                    has_docker |= root_owns_docker_rank && name == "docker" && prev_was_riscv32im;
+                    has_docker |= name == "docker" && prev_was_riscv32im;
                     prev_was_riscv32im = is_riscv32im;
                 }
             }
@@ -871,7 +949,10 @@ pub(crate) fn discover_program_binaries(
                 continue;
             }
 
-            let bucket = if has_docker {
+            if has_docker && *root != docker_root {
+                demoted_docker.push((program.to_string(), path.to_path_buf()));
+            }
+            let bucket = if has_docker && *root == docker_root {
                 &mut docker
             } else if has_release {
                 &mut release
@@ -897,7 +978,10 @@ pub(crate) fn discover_program_binaries(
     for (program, (_, path)) in debug_fallback {
         out.entry(program).or_insert(path);
     }
-    out
+    Discovery {
+        chosen: out,
+        demoted_docker,
+    }
 }
 
 #[cfg(test)]
@@ -908,7 +992,11 @@ mod tests {
     use tempfile::TempDir;
 
     fn lookup(root: &Path, program: &str) -> Option<PathBuf> {
-        discover_program_binaries(root, &[program.to_string()]).remove(program)
+        lookup_owned(root, program, crate::constants::GUEST_DOCKER_TARGET_DIR)
+    }
+
+    fn lookup_owned(root: &Path, program: &str, docker_root: &str) -> Option<PathBuf> {
+        discover_program_binaries(root, &[program.to_string()], docker_root).remove(program)
     }
 
     /// Serve one scripted `getLastBlockId` response per incoming connection,
@@ -1013,6 +1101,205 @@ mod tests {
         assert!(result.ends_with("my_program.bin"));
     }
 
+    /// `cargo risczero build` (spel projects, via `make build`) writes the
+    /// Docker-reproducible guest under `methods/guest/target/<triple>/docker/`.
+    /// That is the binary whose ImageID *is* the ProgramId, so discovery has to
+    /// find it — neither the root nor the `docker` component existed before.
+    #[test]
+    fn finds_binary_in_spel_docker_layout() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp
+            .path()
+            .join("methods/guest/target/riscv32im-risc0-zkvm-elf/docker");
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(bin_dir.join("my_program.bin"), b"fake").unwrap();
+
+        let result = lookup_owned(tmp.path(), "my_program", SPEL_GUEST_TARGET_DIR)
+            .expect("the cargo-risczero docker layout must be discoverable");
+        assert!(result.ends_with("my_program.bin"));
+    }
+
+    /// `docker/` is the reproducible build, so it must rank with `release/`
+    /// rather than as a debug fallback: given both, neither may be discarded
+    /// and the one that wins must not be the debug build.
+    #[test]
+    fn spel_docker_binary_outranks_a_debug_build() {
+        let tmp = TempDir::new().unwrap();
+        let docker_dir = tmp
+            .path()
+            .join("methods/guest/target/riscv32im-risc0-zkvm-elf/docker");
+        let debug_dir = tmp
+            .path()
+            .join("methods/target/x/riscv32im-risc0-zkvm-elf/debug");
+        fs::create_dir_all(&docker_dir).unwrap();
+        fs::create_dir_all(&debug_dir).unwrap();
+        fs::write(docker_dir.join("my_program.bin"), b"docker").unwrap();
+        fs::write(debug_dir.join("my_program.bin"), b"debug").unwrap();
+
+        let result = lookup_owned(tmp.path(), "my_program", SPEL_GUEST_TARGET_DIR).unwrap();
+        assert_eq!(
+            fs::read(&result).unwrap(),
+            b"docker",
+            "the docker build is release-grade and must win over debug"
+        );
+    }
+
+    /// Scaffold a minimal project of `kind` at `root`, loaded through the same
+    /// path the CLI uses, so the kind-to-root mapping is what is under test.
+    fn project_of_kind(root: &Path, kind: &str) -> Project {
+        fs::write(
+            root.join("scaffold.toml"),
+            format!(
+                "[scaffold]\nversion = \"0.2.0\"\n\n[repos.lez]\nsource = \"https://example.invalid/lez.git\"\npin = \"p\"\n\n\
+                 [repos.spel]\nsource = \"https://example.invalid/spel.git\"\npin = \"p\"\n\n[wallet]\nhome_dir = \".scaffold/wallet\"\n\n\
+                 [framework]\nkind = \"{kind}\"\nversion = \"0.1.0\"\n\n[framework.idl]\n\
+                 spec = \"lssa-idl/0.1.0\"\npath = \"idl\"\n"
+            ),
+        )
+        .unwrap();
+        crate::project::load_project_at(root).unwrap()
+    }
+
+    /// The ranking rule above is only half the fix: which root a project
+    /// *owns* is decided by `owned_docker_root` from `framework.kind`, and
+    /// swapping that mapping reintroduces the stale-ELF deploy for default
+    /// projects. Drive it end to end through `discover_project_binaries` on
+    /// one tree holding a fresh `release/` build, a `docker/` artefact in
+    /// each candidate root, and a different payload in each.
+    #[test]
+    fn project_kind_decides_which_docker_root_outranks_a_fresh_release() {
+        let tmp = TempDir::new().unwrap();
+        let plant = |rel: &str, bytes: &[u8]| {
+            let dir = tmp.path().join(rel);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("my_program.bin"), bytes).unwrap();
+        };
+        plant(
+            "target/riscv-guest/m/g/riscv32im-risc0-zkvm-elf/release",
+            b"fresh-release",
+        );
+        plant(
+            "methods/guest/target/riscv32im-risc0-zkvm-elf/docker",
+            b"spel-make-build",
+        );
+        let programs = ["my_program".to_string()];
+
+        let default = project_of_kind(tmp.path(), "default");
+        assert_eq!(
+            owned_docker_root(&default),
+            crate::constants::GUEST_DOCKER_TARGET_DIR
+        );
+        let picked = discover_project_binaries(&default, &programs)
+            .remove("my_program")
+            .unwrap();
+        assert_eq!(
+            fs::read(&picked).unwrap(),
+            b"fresh-release",
+            "a default project must not ship a docker/ leftover from methods/guest/target: {}",
+            picked.display()
+        );
+
+        let spel = project_of_kind(tmp.path(), FRAMEWORK_KIND_SPEL);
+        assert_eq!(owned_docker_root(&spel), SPEL_GUEST_TARGET_DIR);
+        let picked = discover_project_binaries(&spel, &programs)
+            .remove("my_program")
+            .unwrap();
+        assert_eq!(
+            fs::read(&picked).unwrap(),
+            b"spel-make-build",
+            "a spel project must ship its make build output: {}",
+            picked.display()
+        );
+
+        // The demoted artefact is named for the default project, not the spel one.
+        let ignored = ignored_docker_artifacts(&default, &programs);
+        assert_eq!(ignored.len(), 1, "{ignored:?}");
+        assert!(ignored[0]
+            .1
+            .starts_with(tmp.path().join(SPEL_GUEST_TARGET_DIR)));
+        assert!(ignored_docker_artifacts(&spel, &programs).is_empty());
+
+        // `embed_methods()` under `RISC0_USE_DOCKER=1` nests the triple under
+        // `<pkg>/<guest>/` in `target/riscv-guest`. Discovery demotes that
+        // too, so the note must name it as well.
+        plant(
+            "target/riscv-guest/m/g/riscv32im-risc0-zkvm-elf/docker",
+            b"embed-methods-docker",
+        );
+        let ignored = ignored_docker_artifacts(&default, &programs);
+        assert_eq!(ignored.len(), 2, "{ignored:?}");
+        assert!(ignored
+            .iter()
+            .any(|(_, p)| p.ends_with("m/g/riscv32im-risc0-zkvm-elf/docker/my_program.bin")));
+        let picked = discover_project_binaries(&default, &programs)
+            .remove("my_program")
+            .unwrap();
+        assert_eq!(fs::read(&picked).unwrap(), b"fresh-release");
+
+        // And the default project's own deterministic tree does win for it.
+        plant(
+            &format!(
+                "{}/riscv32im-risc0-zkvm-elf/docker",
+                crate::constants::GUEST_DOCKER_TARGET_DIR
+            ),
+            b"scaffold-docker",
+        );
+        let picked = discover_project_binaries(&default, &programs)
+            .remove("my_program")
+            .unwrap();
+        assert_eq!(fs::read(&picked).unwrap(), b"scaffold-docker");
+    }
+
+    /// A `docker/`-shaped artefact outside the root scaffold owns for the
+    /// project kind is never cleared by `lgs build`, so it must not outrank a
+    /// fresh `release/` build — otherwise one hand-run `cargo risczero build`
+    /// in a default project makes every later deploy ship that stale ELF.
+    /// Checked in both directions: each kind's owned root must not leak the
+    /// top rank to the other kind's root.
+    #[test]
+    fn docker_output_in_an_unowned_root_does_not_beat_a_fresh_release() {
+        let tmp = TempDir::new().unwrap();
+        let stale_spel_style = tmp
+            .path()
+            .join("methods/guest/target/riscv32im-risc0-zkvm-elf/docker");
+        let stale_scaffold_docker = tmp
+            .path()
+            .join(crate::constants::GUEST_DOCKER_TARGET_DIR)
+            .join("riscv32im-risc0-zkvm-elf/docker");
+        let fresh = tmp
+            .path()
+            .join("target/riscv-guest/m/g/riscv32im-risc0-zkvm-elf/release");
+        for dir in [&stale_spel_style, &stale_scaffold_docker, &fresh] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(stale_spel_style.join("my_program.bin"), b"stale-spel").unwrap();
+        fs::write(fresh.join("my_program.bin"), b"fresh").unwrap();
+
+        // Default project: only the scaffold-owned docker tree is trusted.
+        let result = lookup(tmp.path(), "my_program").unwrap();
+        assert_eq!(
+            fs::read(&result).unwrap(),
+            b"fresh",
+            "got {}",
+            result.display()
+        );
+
+        // Spel project: `target/riscv-guest-docker` is not its build output.
+        fs::remove_file(stale_spel_style.join("my_program.bin")).unwrap();
+        fs::write(
+            stale_scaffold_docker.join("my_program.bin"),
+            b"stale-docker",
+        )
+        .unwrap();
+        let result = lookup_owned(tmp.path(), "my_program", SPEL_GUEST_TARGET_DIR).unwrap();
+        assert_eq!(
+            fs::read(&result).unwrap(),
+            b"fresh",
+            "got {}",
+            result.display()
+        );
+    }
+
     /// Regression test for issue #59: a project named anything other than
     /// the scaffold template (`example_program_deployment`) places its guest
     /// binaries under `target/riscv-guest/<project>_methods/<project>_programs/...`.
@@ -1032,42 +1319,6 @@ mod tests {
         assert!(result
             .components()
             .any(|c| c.as_os_str() == "my_app_methods"));
-    }
-
-    /// Regression test for issue #231: a guest crate that carries its own
-    /// `[workspace]` (so it builds independently of the parent workspace)
-    /// emits to `methods/guest/target/...` rather than `methods/target/...`
-    /// or `target/riscv-guest/...`, and that root was not searched.
-    #[test]
-    fn finds_binary_in_independent_guest_workspace_layout() {
-        let tmp = TempDir::new().unwrap();
-        let bin_dir = tmp
-            .path()
-            .join("methods/guest/target/riscv32im-risc0-zkvm-elf/docker");
-        fs::create_dir_all(&bin_dir).unwrap();
-        fs::write(bin_dir.join("my_program.bin"), b"fake").unwrap();
-
-        let result = lookup(tmp.path(), "my_program").unwrap();
-        assert!(result.ends_with("my_program.bin"));
-        assert!(result.to_string_lossy().contains("methods/guest/target"));
-    }
-
-    #[test]
-    fn docker_dir_outside_scaffold_root_does_not_outrank_release() {
-        let tmp = TempDir::new().unwrap();
-        let stale = tmp
-            .path()
-            .join("methods/guest/target/riscv32im-risc0-zkvm-elf/docker");
-        let fresh = tmp
-            .path()
-            .join("target/riscv-guest/m/g/riscv32im-risc0-zkvm-elf/release");
-        for dir in [&stale, &fresh] {
-            fs::create_dir_all(dir).unwrap();
-            fs::write(dir.join("my_program.bin"), b"fake").unwrap();
-        }
-
-        let result = lookup(tmp.path(), "my_program").unwrap();
-        assert!(result.starts_with(tmp.path().join("target/riscv-guest")));
     }
 
     #[test]
@@ -1238,6 +1489,7 @@ mod tests {
         let map = discover_program_binaries(
             tmp.path(),
             &["foo".to_string(), "bar".to_string(), "missing".to_string()],
+            crate::constants::GUEST_DOCKER_TARGET_DIR,
         );
         assert!(map.get("foo").unwrap().ends_with("foo.bin"));
         assert!(map.get("bar").unwrap().ends_with("bar.bin"));

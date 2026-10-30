@@ -7,15 +7,18 @@ use anyhow::{anyhow, bail, Context};
 
 use crate::circuits::ensure_circuits_for_project;
 use crate::commands::client::generate_clients_from_current_idl;
+use crate::commands::deploy::{discover_project_binaries, extract_program_id};
 use crate::commands::idl::build_idl_for_current_project;
 use crate::commands::setup::cmd_setup;
 use crate::constants::{
     DEFAULT_RISC0_METHODS_ENTRY, FRAMEWORK_KIND_DEFAULT, FRAMEWORK_KIND_LEZ_FRAMEWORK,
-    GUEST_DOCKER_TARGET_DIR, METHODS_DIR,
+    FRAMEWORK_KIND_SPEL, GUEST_DOCKER_TARGET_DIR, METHODS_DIR, SPEL_BIN_REL_PATH,
+    TAIL_CALL_TARGETS,
 };
-use crate::model::GuestBuildMode;
+use crate::model::{GuestBuildMode, Project};
 use crate::process::{apply_host_cc_overrides, run_checked, which};
-use crate::project::{load_project, run_in_project_dir};
+use crate::project::{load_project, resolve_repo_path, run_in_project_dir};
+use crate::template::copy::{guest_bin_dir, set_hex_const};
 use crate::DynResult;
 
 pub(crate) fn cmd_build_shortcut(
@@ -29,9 +32,26 @@ pub(crate) fn cmd_build_shortcut(
         // step: `setup` can compile the LEZ sequencer from source for
         // minutes, and telling someone their Docker daemon is down only
         // after that is a bad trade for one `which` and one `docker info`.
-        let early_mode = guest_override.unwrap_or(load_project()?.config.build.guest);
-        if early_mode.is_deterministic() && cwd.join(METHODS_DIR).join("Cargo.toml").is_file() {
-            preflight_deterministic_toolchain()?;
+        let early_project = load_project()?;
+        if early_project.config.framework.kind == FRAMEWORK_KIND_SPEL {
+            // spel projects always build in Docker through `make build`
+            // (`cargo risczero build`), whatever `[build].guest` says, so the
+            // check always applies and there is no `local` fallback to offer.
+            if guest_override == Some(GuestBuildMode::Local) {
+                println!(
+                    "Note: --guest local does not apply to spel projects; `make build` always \
+                     builds the guest in Docker."
+                );
+            }
+            preflight_docker_toolchain(SPEL_TOOLCHAIN_NEEDED_BY, None)?;
+        } else {
+            let early_mode = guest_override.unwrap_or(early_project.config.build.guest);
+            if early_mode.is_deterministic() && cwd.join(METHODS_DIR).join("Cargo.toml").is_file() {
+                preflight_docker_toolchain(
+                    DETERMINISTIC_TOOLCHAIN_NEEDED_BY,
+                    Some(LOCAL_GUEST_ALTERNATIVE),
+                )?;
+            }
         }
 
         cmd_setup(prebuilt)?;
@@ -39,9 +59,29 @@ pub(crate) fn cmd_build_shortcut(
         // Re-read after `setup`, which is allowed to touch project state.
         let project = load_project()?;
         ensure_circuits_for_project(&project)?;
+
+        // spel projects build through their own Makefile. Two reasons, both
+        // load-bearing:
+        //
+        //  * `cargo build --workspace` panics. `spel init` writes a
+        //    `methods/Cargo.toml` whose build script calls
+        //    `risc0_build::embed_methods()`, but the manifest carries no
+        //    `[package.metadata.risc0]` section, and embed_methods unwraps it.
+        //  * `make build` runs `cargo risczero build`, which produces the
+        //    Docker-reproducible guest binary under
+        //    `methods/guest/target/<triple>/docker/`. That is the binary
+        //    `deploy` needs and the one whose ImageID is the ProgramId; a
+        //    host-side `cargo build` never produces it.
+        if project.config.framework.kind == FRAMEWORK_KIND_SPEL {
+            build_spel_guest(&cwd)?;
+            build_idl_for_current_project()?;
+            return Ok(());
+        }
+
         build_workspace_for_current_project(&cwd)?;
         match project.config.framework.kind.as_str() {
             FRAMEWORK_KIND_DEFAULT => {}
+            // lez-framework uses scaffold's internal IDL/client pipeline.
             FRAMEWORK_KIND_LEZ_FRAMEWORK => {
                 build_idl_for_current_project()?;
                 generate_clients_from_current_idl()?;
@@ -59,8 +99,73 @@ pub(crate) fn cmd_build_shortcut(
         let mode = guest_override.unwrap_or(project.config.build.guest);
         build_methods_guests(&cwd, mode, &project.config.build.risc0_docker_tag)?;
 
+        // The tail-call examples hardcode their callee's program id, which
+        // is a hash of the callee's ELF, so it changes with the build mode
+        // and toolchain. Point them at what was just built; the callees do
+        // not depend on the callers, so one rebuild settles it.
+        if project.config.framework.kind == FRAMEWORK_KIND_DEFAULT
+            && sync_tail_call_program_ids(&project)?
+        {
+            println!("Rebuilding guest methods with the updated tail-call program ids...");
+            build_methods_guests(&cwd, mode, &project.config.build.risc0_docker_tag)?;
+        }
+
         Ok(())
     })
+}
+
+/// Rewrite each tail-call caller's hardcoded callee id (see
+/// [`TAIL_CALL_TARGETS`]) to the id of the callee binary `deploy` would ship.
+/// Returns whether any source changed. Callers or callees that are absent,
+/// and ids the vendored `spel` cannot compute, are skipped.
+fn sync_tail_call_program_ids(project: &Project) -> DynResult<bool> {
+    let bin_dir = guest_bin_dir(&project.root);
+    let callees: Vec<String> = TAIL_CALL_TARGETS
+        .iter()
+        .filter(|target| bin_dir.join(target.caller_file).is_file())
+        .map(|target| target.callee.to_string())
+        .collect();
+    if callees.is_empty() {
+        return Ok(false);
+    }
+    let binaries = discover_project_binaries(project, &callees);
+    let spel_bin =
+        resolve_repo_path(project, &project.config.spel, "spel")?.join(SPEL_BIN_REL_PATH);
+
+    let mut changed = false;
+    for target in TAIL_CALL_TARGETS {
+        let Some(binary) = binaries.get(target.callee) else {
+            continue;
+        };
+        let Some(program_id) = extract_program_id(&spel_bin, binary) else {
+            println!(
+                "Note: could not compute the {} program id; {} keeps its hardcoded {}.",
+                target.callee, target.caller_file, target.const_name
+            );
+            continue;
+        };
+        if set_hex_const(
+            &bin_dir.join(target.caller_file),
+            target.const_name,
+            &program_id,
+        )? {
+            println!(
+                "Updated {} in methods/guest/src/bin/{} to the built {} program id {}.",
+                target.const_name, target.caller_file, target.callee, program_id
+            );
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+/// Build a spel project's guest via the Makefile `spel init` generated.
+fn build_spel_guest(cwd: &Path) -> DynResult<()> {
+    println!("Building guest via `make build` (spel project)...");
+    let mut cmd = Command::new("make");
+    cmd.current_dir(cwd).arg("build");
+    apply_host_cc_overrides(&mut cmd);
+    run_checked(&mut cmd, "make build (spel guest)")
 }
 
 fn build_workspace_for_current_project(cwd: &Path) -> DynResult<()> {
@@ -139,7 +244,10 @@ fn build_methods_guests_docker(
     // Deliberately re-checked here even though `cmd_build_shortcut` already
     // ran it: `setup` in between can take minutes, and this is the function's
     // own precondition rather than the caller's.
-    preflight_deterministic_toolchain()?;
+    preflight_docker_toolchain(
+        DETERMINISTIC_TOOLCHAIN_NEEDED_BY,
+        Some(LOCAL_GUEST_ALTERNATIVE),
+    )?;
 
     // One `CARGO_TARGET_DIR` is shared by every guest package, so clear it
     // once up front rather than per package — otherwise the second package's
@@ -286,43 +394,85 @@ fn risc0_guest_manifests(cwd: &Path, methods_manifest: &Path) -> DynResult<Vec<P
 
 /// Fail before the first (slow) container pull if the deterministic path
 /// cannot possibly work, with the fix rather than a raw docker/cargo error.
-fn preflight_deterministic_toolchain() -> DynResult<()> {
+const DETERMINISTIC_TOOLCHAIN_NEEDED_BY: &str = "[build].guest = \"docker\"";
+const SPEL_TOOLCHAIN_NEEDED_BY: &str = "Building a spel project (`make build`)";
+const LOCAL_GUEST_ALTERNATIVE: &str = "set [build].guest = \"local\" in scaffold.toml to build \
+     guests with the host toolchain (non-reproducible `program_id`)";
+
+/// Check for what a Docker guest build needs (`cargo-risczero`, `docker` and
+/// a running daemon) before `setup` spends minutes compiling. `needed_by`
+/// names what requires it. `alternative` is an escape hatch to offer, if one
+/// exists: spel projects have none, because `make build` always builds in
+/// Docker.
+fn preflight_docker_toolchain(needed_by: &str, alternative: Option<&str>) -> DynResult<()> {
+    let or_alternative = alternative
+        .map(|alt| format!(" Or {alt}."))
+        .unwrap_or_default();
     if which("cargo-risczero").is_none() {
         // `rzup install rust` — the command people actually run to get a
         // risc0 setup — does NOT install this; it is a separate component.
         // Naming the exact command matters: someone with a working guest
         // toolchain will otherwise assume they already have it.
         bail!(
-            "[build].guest = \"docker\" needs `cargo-risczero` on PATH, which was not found.\n\
+            "{needed_by} needs `cargo-risczero` on PATH, which was not found.\n\
              Install it with `rzup install cargo-risczero` (a separate component from \
-             `rzup install rust`), or `cargo install cargo-risczero`. Or set \
-             [build].guest = \"local\" in scaffold.toml to build guests with the host \
-             toolchain (non-reproducible `program_id`)."
+             `rzup install rust`), or `cargo install cargo-risczero`.{or_alternative}"
         );
     }
     if which("docker").is_none() {
         bail!(
-            "[build].guest = \"docker\" needs `docker` on PATH, which was not found.\n\
-             Install Docker, or set [build].guest = \"local\" in scaffold.toml to build guests \
-             with the host toolchain (non-reproducible `program_id`)."
+            "{needed_by} needs `docker` on PATH, which was not found.\n\
+             Install Docker.{or_alternative}"
         );
     }
-    let daemon_ok = Command::new("docker")
-        .arg("info")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !daemon_ok {
+    if !docker_daemon_running() {
         bail!(
-            "[build].guest = \"docker\" needs a running Docker daemon; `docker info` failed.\n\
-             Start Docker and retry, or set [build].guest = \"local\" in scaffold.toml to build \
-             guests with the host toolchain (non-reproducible `program_id`)."
+            "{needed_by} needs a running Docker daemon; `docker info` failed.\n\
+             Start Docker and retry.{or_alternative}"
         );
     }
     Ok(())
+}
+
+/// Whether `docker info` succeeds, i.e. a daemon is up and reachable. Shared
+/// with `doctor` so its `guest build` row and this preflight cannot disagree.
+///
+/// Bounded: a dead local socket fails in milliseconds, but a `DOCKER_HOST`
+/// pointing at an unreachable remote can hang for minutes, and `doctor` is
+/// what people run when things are already wrong. Timing out counts as down.
+pub(crate) fn docker_daemon_running() -> bool {
+    let mut cmd = Command::new("docker");
+    cmd.arg("info");
+    succeeds_within(cmd, DOCKER_INFO_TIMEOUT)
+}
+
+const DOCKER_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Run `cmd` with stdio detached; `true` only if it exits successfully within
+/// `timeout`. A command still running at the deadline is killed and reaped.
+fn succeeds_within(mut cmd: Command, timeout: std::time::Duration) -> bool {
+    let Ok(mut child) = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
 }
 
 /// Drop the deterministic artefact tree so a later `lgs deploy` cannot ship
@@ -355,6 +505,32 @@ mod tests {
     use tempfile::tempdir;
 
     const DOCKER_TAG: &str = "r0.0.0.0";
+
+    #[test]
+    fn succeeds_within_reports_exit_status_and_kills_a_hung_probe() {
+        use std::time::{Duration, Instant};
+        assert!(succeeds_within(
+            Command::new("true"),
+            Duration::from_secs(5)
+        ));
+        assert!(!succeeds_within(
+            Command::new("false"),
+            Duration::from_secs(5)
+        ));
+        assert!(!succeeds_within(
+            Command::new("/nonexistent/docker"),
+            Duration::from_secs(5)
+        ));
+
+        let mut hung = Command::new("sleep");
+        hung.arg("30");
+        let started = Instant::now();
+        assert!(!succeeds_within(hung, Duration::from_millis(200)));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a hung probe must be cut off at the timeout"
+        );
+    }
 
     fn write_methods_manifest(root: &Path, body: &str) -> PathBuf {
         let methods = root.join(METHODS_DIR);

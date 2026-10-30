@@ -78,6 +78,11 @@ jobs:
                       /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-/nonexistent}" || true
           echo "after:  $(df -h / | awk 'NR==2 {print $4}') free"
 
+      # The LEZ wallet links against libpcsclite (keycard support), so `setup`
+      # cannot build it on a bare runner: `Could not find a PCSC library`.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkgconf libpcsclite-dev
+
       - name: Build scaffold CLI
         run: cargo build --release --bin logos-scaffold
 
@@ -107,6 +112,11 @@ jobs:
       # Retried because rzup resolves versions through api.github.com, which
       # rate-limits by runner IP and has flaked here before.
       - name: Install Risc Zero toolchain
+        # rzup resolves each component through the GitHub releases API, which
+        # is rate-limited per source IP for unauthenticated callers. rzup reads
+        # GITHUB_TOKEN for exactly this reason (same as template-e2e).
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           curl -fsSL --retry 3 --retry-delay 2 \
@@ -171,11 +181,21 @@ jobs:
             echo "\`risczero/risc0-guest-builder:$tag\` — rustc: \`$image_rustc\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # `new` writes TAIL_CALL_TARGETS' docker_program_id into the tail-call
+      # guests; if those are stale, the first build rewrites them and pays a
+      # second full container rebuild on every fresh project. The digest diff
+      # below cannot see that (the first pass already fixed the scratch
+      # project), so fail on the rewrite itself.
       - name: Build guests deterministically (first pass)
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/repro-app"
-          "$GITHUB_WORKSPACE/target/release/logos-scaffold" build --guest docker
+          "$GITHUB_WORKSPACE/target/release/logos-scaffold" build --guest docker \
+            | tee "$RUNNER_TEMP/first-pass.log"
+          if grep '^Updated .* program id' "$RUNNER_TEMP/first-pass.log"; then
+            echo "::error::TAIL_CALL_TARGETS docker_program_id in src/constants.rs is stale; set it to the id printed above"
+            exit 1
+          fi
 
       - name: Record first-pass digests
         run: |

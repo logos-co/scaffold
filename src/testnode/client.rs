@@ -14,7 +14,8 @@
 //!   string. Stateless check failures (e.g. `InvalidSignature`) surface as a
 //!   JSON-RPC error before the transaction enters the mempool.
 //! - `getTransaction` returns the borsh+base64 echo of a transaction once it
-//!   is part of a committed block, `null` before that.
+//!   is part of a committed block, `null` before that. From LEZ v0.2.4 the
+//!   echo comes paired with the containing block id: `[<base64>, <block_id>]`.
 //! - `getBlock` returns the whole block as borsh+base64. The header prefix
 //!   is fixed-layout: `block_id: u64` at bytes 0..8 and `timestamp: u64` at
 //!   bytes 72..80 (after two 32-byte hashes). Because borsh serialization is
@@ -324,10 +325,31 @@ impl TestNodeClient {
     /// `getTransaction` — base64 borsh echo of a committed transaction, or
     /// `None` when the node does not (yet) have it in a block.
     pub fn transaction(&self, tx_hash: &str) -> Result<Option<String>, RpcError> {
+        Ok(self
+            .transaction_with_block(tx_hash)?
+            .map(|(encoded, _)| encoded))
+    }
+
+    /// `getTransaction` plus the containing block id when the node reports
+    /// one. LEZ v0.2.4 answers `[<base64 tx>, <block_id>]`; earlier pins
+    /// answer the bare base64 string, which yields `None` for the block.
+    fn transaction_with_block(
+        &self,
+        tx_hash: &str,
+    ) -> Result<Option<(String, Option<u64>)>, RpcError> {
         let result = self.call("getTransaction", json!([tx_hash]))?;
         match result {
             Value::Null => Ok(None),
-            Value::String(encoded) => Ok(Some(encoded)),
+            Value::String(encoded) => Ok(Some((encoded, None))),
+            Value::Array(ref pair) if pair.len() == 2 => match (&pair[0], pair[1].as_u64()) {
+                (Value::String(encoded), Some(block_id)) => {
+                    Ok(Some((encoded.clone(), Some(block_id))))
+                }
+                _ => Err(RpcError::Other {
+                    operation: "getTransaction".to_string(),
+                    message: format!("unexpected result shape: {}", one_line(&result.to_string())),
+                }),
+            },
             other => Err(RpcError::Other {
                 operation: "getTransaction".to_string(),
                 message: format!("unexpected result shape: {}", one_line(&other.to_string())),
@@ -397,10 +419,15 @@ impl TestNodeClient {
         let mut last_observed_head = after_block;
         let mut last_error: Option<RpcError> = None;
         let mut any_successful_poll = false;
+        // Block-scan progress once the observation window is exhausted:
+        // the highest block already scanned, and whether any scanned block
+        // could not be fully parsed (so "not found" is not conclusive).
+        let mut scanned_through: Option<u64> = None;
+        let mut scan_inconclusive = false;
 
         loop {
-            match self.transaction(tx_hash) {
-                Ok(Some(echoed)) => {
+            match self.transaction_with_block(tx_hash) {
+                Ok(Some((echoed, block_hint))) => {
                     if let Some(submitted) = submitted {
                         if echoed != submitted.to_base64() {
                             return TransactionOutcome::WireMismatch {
@@ -411,7 +438,7 @@ impl TestNodeClient {
                             };
                         }
                     }
-                    return self.locate_committed(tx_hash, &echoed, after_block);
+                    return self.locate_committed(tx_hash, &echoed, block_hint, after_block);
                 }
                 Ok(None) => {
                     any_successful_poll = true;
@@ -421,13 +448,50 @@ impl TestNodeClient {
                             if head.saturating_sub(after_block) >= options.rejection_blocks {
                                 // Observation window exhausted: the node
                                 // produced enough blocks to have included a
-                                // valid transaction.
-                                return TransactionOutcome::Rejected {
-                                    tx_hash: Some(tx_hash.to_string()),
-                                    phase: RejectionPhase::Stateful,
-                                    reason: None,
-                                    observed_after_block_id: Some(head),
+                                // valid transaction. `getTransaction` is
+                                // served from an in-memory index the
+                                // sequencer does not rebuild on restart, so
+                                // a node resumed from a database (or a
+                                // restarted localnet) answers `null` for
+                                // transactions it did commit. Check the
+                                // blocks themselves before calling it a
+                                // rejection — the whole chain on the first
+                                // pass, like `locate_committed` (the caller's
+                                // `after_block` may postdate the commit),
+                                // then only blocks produced since. The scan
+                                // stops at the deadline, so on a long chain
+                                // the outcome is a timeout, not a rejection.
+                                let ranges = match scanned_through {
+                                    None => vec![(after_block + 1, head), (0, after_block)],
+                                    Some(done) => vec![(done + 1, head)],
                                 };
+                                for (from, to) in ranges {
+                                    match self.find_committed_by_hash(tx_hash, from, to, deadline) {
+                                        Ok(HashScan::Found(block)) => {
+                                            return TransactionOutcome::Committed {
+                                                tx_hash: tx_hash.to_string(),
+                                                block,
+                                            }
+                                        }
+                                        Ok(HashScan::NotFound) => {}
+                                        Ok(HashScan::Inconclusive) => scan_inconclusive = true,
+                                        Err(err) => return err.into_transport_outcome(),
+                                    }
+                                }
+                                scanned_through = Some(head);
+                                // A block this client could not fully parse
+                                // (a privacy-preserving transaction hides the
+                                // rest of its list) may hold the transaction:
+                                // keep polling and report a timeout rather
+                                // than a confident rejection.
+                                if !scan_inconclusive {
+                                    return TransactionOutcome::Rejected {
+                                        tx_hash: Some(tx_hash.to_string()),
+                                        phase: RejectionPhase::Stateful,
+                                        reason: None,
+                                        observed_after_block_id: Some(head),
+                                    };
+                                }
                             }
                         }
                         Err(err) => last_error = Some(err),
@@ -491,12 +555,52 @@ impl TestNodeClient {
         self.wait(&tx_hash, Some(tx), &wait_options)
     }
 
+    /// Look for `tx_hash` among the parsed transactions of blocks
+    /// `from..=to`. Blocks the node does not serve are skipped. A miss is
+    /// [`HashScan::Inconclusive`] when any scanned block was only partially
+    /// parsed, since the transaction may sit in the part that was not, or
+    /// when `deadline` passed before every block was scanned.
+    fn find_committed_by_hash(
+        &self,
+        tx_hash: &str,
+        from: u64,
+        to: u64,
+        deadline: Instant,
+    ) -> Result<HashScan, RpcError> {
+        let mut complete = true;
+        for block_id in from..=to {
+            if Instant::now() >= deadline {
+                return Ok(HashScan::Inconclusive);
+            }
+            let Some(info) = self.block_info(block_id)? else {
+                continue;
+            };
+            if info
+                .transactions
+                .iter()
+                .any(|tx| tx.hash.eq_ignore_ascii_case(tx_hash))
+            {
+                return Ok(HashScan::Found(BlockContext {
+                    block_id: info.block_id,
+                    timestamp: info.timestamp,
+                }));
+            }
+            complete &= info.fully_parsed;
+        }
+        Ok(if complete {
+            HashScan::NotFound
+        } else {
+            HashScan::Inconclusive
+        })
+    }
+
     /// The transaction is committed; find its containing block after
     /// `after_block` and return the block context.
     fn locate_committed(
         &self,
         tx_hash: &str,
         echoed_base64: &str,
+        block_hint: Option<u64>,
         after_block: u64,
     ) -> TransactionOutcome {
         let tx_bytes =
@@ -518,9 +622,15 @@ impl TestNodeClient {
         // Scan the post-boundary range first (the overwhelmingly common
         // case), then fall back to the rest of the chain — the caller may
         // have passed an `after_block` that postdates the commit.
+        // A block id reported by `getTransaction` is checked first; it is
+        // still verified against the block bytes like any other candidate.
         let post_boundary = (after_block + 1)..=head;
         let pre_boundary = 0..=after_block;
-        for block_id in post_boundary.chain(pre_boundary) {
+        for block_id in block_hint
+            .into_iter()
+            .chain(post_boundary)
+            .chain(pre_boundary)
+        {
             match self.block_bytes(block_id) {
                 Ok(Some(block_bytes)) => {
                     if contains_subsequence(&block_bytes, &tx_bytes) {
@@ -555,6 +665,13 @@ impl TestNodeClient {
             ),
         }
     }
+}
+
+/// Result of [`TestNodeClient::find_committed_by_hash`].
+enum HashScan {
+    Found(BlockContext),
+    NotFound,
+    Inconclusive,
 }
 
 /// Borsh block layout prefix: `header.block_id: u64` at 0..8, then two
@@ -674,6 +791,66 @@ mod tests {
         }
     }
 
+    /// LEZ v0.2.4 pairs the echo with its block id. The pair must be read as
+    /// a commit (not a transport error), and the reported block is checked
+    /// first even when it sits below the caller's boundary.
+    #[test]
+    fn wait_accepts_tx_and_block_id_pair() {
+        let tx_bytes: Vec<u8> = vec![9, 8, 7, 6, 5, 4, 3, 2];
+        let block = fake_block_bytes(4, 1_710_000_000_123, &tx_bytes);
+        let tx_echo = b64(&tx_bytes);
+        let block_b64 = b64(&block);
+        let fetched = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let fetched_in_node = Arc::clone(&fetched);
+
+        let node = FakeNode::start(move |method, params| match method {
+            "getLastBlockId" => json!(9),
+            "getTransaction" => json!([tx_echo.clone(), 4]),
+            "getBlock" => {
+                let id = params[0].as_u64().unwrap();
+                fetched_in_node.lock().unwrap().push(id);
+                if id == 4 {
+                    json!(block_b64.clone())
+                } else {
+                    Value::Null
+                }
+            }
+            other => panic!("unexpected method {other}"),
+        });
+
+        let client = TestNodeClient::new(&node.url);
+        assert_eq!(client.transaction(TX_HASH).unwrap(), Some(b64(&tx_bytes)));
+        let outcome = client.wait(
+            TX_HASH,
+            Some(&TransactionBytes::borsh(tx_bytes.clone())),
+            &WaitOptions {
+                after_block: Some(8),
+                ..fast_wait()
+            },
+        );
+
+        match outcome {
+            TransactionOutcome::Committed { block, .. } => {
+                assert_eq!(block.block_id, 4);
+                assert_eq!(block.timestamp, 1_710_000_000_123);
+            }
+            other => panic!("expected Committed, got {other:?}"),
+        }
+        assert_eq!(fetched.lock().unwrap().first(), Some(&4));
+    }
+
+    #[test]
+    fn get_transaction_rejects_malformed_pair() {
+        let node = FakeNode::start(|method, _| match method {
+            "getTransaction" => json!(["not-a-number", "x"]),
+            other => panic!("unexpected method {other}"),
+        });
+        let err = TestNodeClient::new(&node.url)
+            .transaction(TX_HASH)
+            .unwrap_err();
+        assert!(err.to_string().contains("unexpected result shape"), "{err}");
+    }
+
     #[test]
     fn committed_json_shape_matches_contract() {
         let outcome = TransactionOutcome::Committed {
@@ -734,6 +911,8 @@ mod tests {
             "getLastBlockId" => json!(head_for_node.fetch_add(1, Ordering::Relaxed)),
             "sendTransaction" => json!(TX_HASH),
             "getTransaction" => Value::Null,
+            // The pre-decision block scan finds nothing.
+            "getBlock" => Value::Null,
             other => panic!("unexpected method {other}"),
         });
 
@@ -753,6 +932,152 @@ mod tests {
             }
             other => panic!("expected stateful rejection, got {other:?}"),
         }
+    }
+
+    /// A Public tx (tag, program_id, one account, one nonce, two
+    /// instruction words, one (sig, pk) pair) and its hash.
+    fn public_tx_and_hash() -> (Vec<u8>, String) {
+        let mut tx = vec![0_u8];
+        tx.extend_from_slice(&[0x11; 32]);
+        tx.extend_from_slice(&1_u32.to_le_bytes());
+        tx.extend_from_slice(&[0x55; 32]);
+        tx.extend_from_slice(&1_u32.to_le_bytes());
+        tx.extend_from_slice(&[0; 16]);
+        tx.extend_from_slice(&2_u32.to_le_bytes());
+        tx.extend_from_slice(&[0; 8]);
+        tx.extend_from_slice(&1_u32.to_le_bytes());
+        tx.extend_from_slice(&[0x22; 96]);
+        let tx_hash = {
+            use sha2::{Digest as _, Sha256};
+            Sha256::digest(&tx[1..])
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        };
+        (tx, tx_hash)
+    }
+
+    /// A node resumed from a database answers `getTransaction` with `null`
+    /// for transactions it committed before the restart; the block scan must
+    /// still report them as committed, not as a stateful rejection.
+    #[test]
+    fn wait_finds_committed_tx_the_node_index_forgot() {
+        let (tx, tx_hash) = public_tx_and_hash();
+        let mut block = fake_block_bytes(27, 1_710_000_000_027, &tx);
+        block.push(0); // bedrock status
+        block.extend_from_slice(&[0; 32]); // bedrock parent id
+        let block_b64 = b64(&block);
+
+        let node = FakeNode::start(move |method, params| match method {
+            "getLastBlockId" => json!(30),
+            "getTransaction" => Value::Null,
+            "getBlock" if params[0] == json!(27) => json!(block_b64.clone()),
+            "getBlock" => Value::Null,
+            other => panic!("unexpected method {other}"),
+        });
+
+        let client = TestNodeClient::new(&node.url);
+        let options = WaitOptions {
+            after_block: Some(20),
+            ..fast_wait()
+        };
+        match client.wait(&tx_hash, None, &options) {
+            TransactionOutcome::Committed { block, .. } => {
+                assert_eq!(block.block_id, 27);
+                assert_eq!(block.timestamp, 1_710_000_000_027);
+            }
+            other => panic!("expected committed, got {other:?}"),
+        }
+    }
+
+    /// `--after-block` may postdate the commit; the block scan must then
+    /// look below the boundary too, as `locate_committed` does, or the same
+    /// query answers differently before and after a node restart.
+    #[test]
+    fn wait_finds_committed_tx_below_the_after_block_boundary() {
+        let (tx, tx_hash) = public_tx_and_hash();
+        let block_b64 = b64(&fake_block_bytes(2, 1_710_000_000_002, &tx));
+
+        let node = FakeNode::start(move |method, params| match method {
+            "getLastBlockId" => json!(10),
+            "getTransaction" => Value::Null,
+            "getBlock" if params[0] == json!(2) => json!(block_b64.clone()),
+            "getBlock" => Value::Null,
+            other => panic!("unexpected method {other}"),
+        });
+
+        let client = TestNodeClient::new(&node.url);
+        let options = WaitOptions {
+            after_block: Some(4),
+            ..fast_wait()
+        };
+        match client.wait(&tx_hash, None, &options) {
+            TransactionOutcome::Committed { block, .. } => assert_eq!(block.block_id, 2),
+            other => panic!("expected committed, got {other:?}"),
+        }
+    }
+
+    /// A block holding a privacy-preserving transaction is only parsed up to
+    /// it, so not finding the hash there proves nothing: report a timeout,
+    /// never a stateful rejection.
+    #[test]
+    fn wait_does_not_reject_on_a_partially_parsed_block() {
+        let (_, tx_hash) = public_tx_and_hash();
+        let private_tx = [1_u8, 0xDE, 0xAD]; // tag 1: not walked
+        let block_b64 = b64(&fake_block_bytes(8, 1_710_000_000_008, &private_tx));
+
+        let node = FakeNode::start(move |method, params| match method {
+            "getLastBlockId" => json!(10),
+            "getTransaction" => Value::Null,
+            "getBlock" if params[0] == json!(8) => json!(block_b64.clone()),
+            "getBlock" => Value::Null,
+            other => panic!("unexpected method {other}"),
+        });
+
+        let client = TestNodeClient::new(&node.url);
+        let options = WaitOptions {
+            after_block: Some(5),
+            timeout: Duration::from_millis(300),
+            ..fast_wait()
+        };
+        match client.wait(&tx_hash, None, &options) {
+            TransactionOutcome::Timeout {
+                last_observed_block_id,
+                ..
+            } => assert_eq!(last_observed_block_id, 10),
+            other => panic!("expected timeout, got {other:?}"),
+        }
+    }
+
+    /// The pre-boundary scan reaches back to genesis; on a long-lived node
+    /// it must stop at `--timeout-sec` and report a timeout, not overrun it.
+    #[test]
+    fn wait_block_scan_honours_the_timeout() {
+        let (_, tx_hash) = public_tx_and_hash();
+        let node = FakeNode::start(|method, _| match method {
+            "getLastBlockId" => json!(2_000),
+            "getTransaction" => Value::Null,
+            "getBlock" => Value::Null,
+            other => panic!("unexpected method {other}"),
+        });
+
+        let client = TestNodeClient::new(&node.url);
+        let options = WaitOptions {
+            after_block: Some(1_990),
+            timeout: Duration::from_millis(300),
+            ..fast_wait()
+        };
+        let started = Instant::now();
+        let outcome = client.wait(&tx_hash, None, &options);
+        let elapsed = started.elapsed();
+        match outcome {
+            TransactionOutcome::Timeout {
+                last_observed_block_id,
+                ..
+            } => assert_eq!(last_observed_block_id, 2_000),
+            other => panic!("expected timeout, got {other:?}"),
+        }
+        assert!(elapsed < Duration::from_secs(3), "wait took {elapsed:?}");
     }
 
     #[test]
