@@ -763,7 +763,7 @@ pub(crate) fn cmd_test_node(action: TestNodeAction) -> DynResult<()> {
             let client = TestNodeClient::new(url.clone());
             let batch = client.accounts(&account_ids, ReadAt::Latest)?;
             let snapshot = serde_json::json!({
-                "format": "lgs-account-snapshot/1",
+                "format": crate::testnode::state::ACCOUNT_SNAPSHOT_FORMAT,
                 "rpc_url": url,
                 "block_id": batch.block_id,
                 "accounts": batch.accounts,

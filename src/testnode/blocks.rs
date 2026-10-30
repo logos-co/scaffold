@@ -39,9 +39,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use super::client::{parse_block_prefix, BlockContext, RpcError, TestNodeClient};
-
-/// Block id the LEZ sequencer gives its genesis block.
-const GENESIS_BLOCK_ID: u64 = 1;
+use super::GENESIS_BLOCK_ID;
 
 /// Borsh size of the block header (`u64` + 32 + 32 + `u64` + 64-byte
 /// signature).
@@ -348,7 +346,7 @@ fn parse_clock_account(account_id: &str, value: &Value) -> Result<ClockAccount, 
     })
 }
 
-fn read_u128(value: Option<&Value>) -> Option<u128> {
+pub(super) fn read_u128(value: Option<&Value>) -> Option<u128> {
     let value = value?;
     if let Some(number) = value.as_u64() {
         return Some(u128::from(number));
