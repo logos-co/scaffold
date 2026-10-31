@@ -32,8 +32,9 @@ use crate::repo::{sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
 use crate::state::{read_basecamp_state, write_basecamp_state};
 use crate::DynResult;
 
+const BASECAMP_STATE_REL: &str = ".scaffold/state/basecamp.state";
+
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields wired up in later phases
 pub(crate) enum BasecampAction {
     Setup,
     Modules {
@@ -276,7 +277,7 @@ fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
     )?;
     println!("seeded profiles: {}", seeded.join(", "));
 
-    let state_path = project.root.join(".scaffold/state/basecamp.state");
+    let state_path = project.root.join(BASECAMP_STATE_REL);
     let state = BasecampState {
         pin: basecamp_repo.pin.clone(),
         lgpm_pin: lgpm_repo.pin.clone(),
@@ -345,6 +346,23 @@ pub(crate) fn platform_variant_key(basecamp_repo: Option<&RepoRef>) -> Option<&'
 ///
 /// Returns `(component, message)`; `component` is `"basecamp"` or `"lgpm"`,
 /// so doctor can name its row after the binary that is actually stale.
+/// The recorded `basecamp setup`, refusing when it is missing, its binaries
+/// are gone, or they were built for other pins.
+fn load_setup_state(project: &Project) -> DynResult<BasecampState> {
+    let state = read_basecamp_state(&project.root.join(BASECAMP_STATE_REL)).unwrap_or_default();
+    if state.basecamp_bin.is_empty()
+        || state.lgpm_bin.is_empty()
+        || !Path::new(&state.basecamp_bin).exists()
+        || !Path::new(&state.lgpm_bin).exists()
+    {
+        bail!("basecamp not set up yet; run: logos-scaffold basecamp setup");
+    }
+    if let Some((_, stale)) = stale_setup(project, &state) {
+        bail!("{stale}");
+    }
+    Ok(state)
+}
+
 fn stale_setup(project: &Project, state: &BasecampState) -> Option<(&'static str, String)> {
     // `setup` always writes both repos; without one (or with a blank pin, or
     // a state file from before that pin was recorded) there is nothing to be
@@ -626,17 +644,7 @@ fn cmd_basecamp_launch(
     profile: String,
     log_file: Option<Option<PathBuf>>,
 ) -> DynResult<()> {
-    let state_path = project.root.join(".scaffold/state/basecamp.state");
-    let state = match read_basecamp_state(&state_path).ok() {
-        Some(s) if !s.basecamp_bin.is_empty() && !s.lgpm_bin.is_empty() => s,
-        _ => bail!("basecamp not set up yet; run: logos-scaffold basecamp setup"),
-    };
-    if !Path::new(&state.basecamp_bin).exists() || !Path::new(&state.lgpm_bin).exists() {
-        bail!("basecamp not set up yet; run: logos-scaffold basecamp setup");
-    }
-    if let Some((_, stale)) = stale_setup(&project, &state) {
-        bail!("{stale}");
-    }
+    let state = load_setup_state(&project)?;
 
     // Any profile name is accepted (custom profiles beyond the alice/bob pair
     // setup seeds); an unknown profile is seeded on first launch below. The
@@ -1252,6 +1260,22 @@ fn project_root_tag(project_root: &Path) -> String {
     crate::hex(&hasher.finalize()[..4])
 }
 
+/// The `[modules]` entry named `module`, or an error listing the known names.
+fn captured_module<'a>(project: &'a Project, module: &str) -> DynResult<&'a ModuleEntry> {
+    project.config.modules.get(module).ok_or_else(|| {
+        let known: Vec<&str> = project.config.modules.keys().map(String::as_str).collect();
+        let known = if known.is_empty() {
+            "none captured yet".to_string()
+        } else {
+            known.join(", ")
+        };
+        anyhow!(
+            "no module `{module}` in scaffold.toml [modules] (known: {known}). \
+             Capture project sources with `logos-scaffold basecamp modules`."
+        )
+    })
+}
+
 /// `lgs basecamp develop <module>` — enter a module's Nix dev shell.
 ///
 /// Resolves the module's flake from `[modules.<module>]`, strips its output
@@ -1265,18 +1289,7 @@ fn cmd_basecamp_develop(
     module: String,
     dev_shell: Option<String>,
 ) -> DynResult<()> {
-    let entry = project.config.modules.get(&module).ok_or_else(|| {
-        let known: Vec<&str> = project.config.modules.keys().map(String::as_str).collect();
-        let known = if known.is_empty() {
-            "none captured yet".to_string()
-        } else {
-            known.join(", ")
-        };
-        anyhow!(
-            "no module `{module}` in scaffold.toml [modules] (known: {known}). \
-             Capture project sources with `logos-scaffold basecamp modules`."
-        )
-    })?;
+    let entry = captured_module(&project, &module)?;
 
     ensure_nix_present()?;
 
@@ -1349,18 +1362,7 @@ fn nix_flake_target(project_root: &Path, flake: &str, attr: Option<&str>) -> Str
 /// The module lookup runs before the `nix` presence check so an unknown module
 /// name fails fast with the known-module list even on a host without Nix.
 fn cmd_basecamp_run(project: Project, module: String, host: Option<String>) -> DynResult<()> {
-    let entry = project.config.modules.get(&module).ok_or_else(|| {
-        let known: Vec<&str> = project.config.modules.keys().map(String::as_str).collect();
-        let known = if known.is_empty() {
-            "none captured yet".to_string()
-        } else {
-            known.join(", ")
-        };
-        anyhow!(
-            "no module `{module}` in scaffold.toml [modules] (known: {known}). \
-             Capture project sources with `logos-scaffold basecamp modules`."
-        )
-    })?;
+    let entry = captured_module(&project, &module)?;
 
     // `nix run` needs a flake. A module captured via `--path <file.lgx>` is a
     // prebuilt artefact with no runnable app — reject it with a fix-it hint
@@ -2294,23 +2296,7 @@ fn cmd_basecamp_modules(
         }
         out
     } else {
-        let cache_root_first = first_path_component(&project.config.cache_root);
-        let mut skip_subdirs: Vec<&str> =
-            BASECAMP_AUTODISCOVER_SKIP_SUBDIRS.iter().copied().collect();
-        if let Some(c) = cache_root_first.as_deref() {
-            if !skip_subdirs.contains(&c) {
-                skip_subdirs.push(c);
-            }
-        }
-        resolve_install_sources(
-            &project.root,
-            &[],
-            &[],
-            probe,
-            &skip_subdirs,
-            "lgx",
-            "lgx-portable",
-        )?
+        discover_project_sources(&project, probe)?
     };
 
     // Derive module_name per source, emit one stderr note per heuristic
@@ -2745,20 +2731,7 @@ fn resolve_manifest_dependencies(
 /// lives in state, managed by `basecamp modules`. No selective profile
 /// installs either (KISS); install overwrites both profiles in one pass.
 fn cmd_basecamp_install(project: Project, probe: &dyn LgxFlakeProbe) -> DynResult<()> {
-    let state_path = project.root.join(".scaffold/state/basecamp.state");
-    let state = read_basecamp_state(&state_path)
-        .ok()
-        .filter(|s| !s.basecamp_bin.is_empty() && !s.lgpm_bin.is_empty())
-        .ok_or_else(|| {
-            anyhow::anyhow!("basecamp not set up yet; run: logos-scaffold basecamp setup")
-        })?;
-
-    if !Path::new(&state.basecamp_bin).exists() || !Path::new(&state.lgpm_bin).exists() {
-        bail!("basecamp not set up yet; run: logos-scaffold basecamp setup");
-    }
-    if let Some((_, stale)) = stale_setup(&project, &state) {
-        bail!("{stale}");
-    }
+    let state = load_setup_state(&project)?;
 
     // Nix preflight comes after the setup-state guard so a user without
     // nix who hasn't run `basecamp setup` still gets the more specific
@@ -3504,25 +3477,7 @@ pub(crate) struct ModuleDriftReport {
 /// at capture time, so any dep drift surfaces via the modules command itself
 /// rather than via this doctor row.
 pub(crate) fn compute_module_drift(project: &Project) -> DynResult<ModuleDriftReport> {
-    let cache_root_first = first_path_component(&project.config.cache_root);
-    let mut skip_subdirs: Vec<&str> = BASECAMP_AUTODISCOVER_SKIP_SUBDIRS.iter().copied().collect();
-    if let Some(c) = cache_root_first.as_deref() {
-        if !skip_subdirs.contains(&c) {
-            skip_subdirs.push(c);
-        }
-    }
-
-    let probe = NixLgxProbe;
-    let discovered_project = resolve_install_sources(
-        &project.root,
-        &[],
-        &[],
-        &probe,
-        &skip_subdirs,
-        "lgx",
-        "lgx-portable",
-    )
-    .unwrap_or_default();
+    let discovered_project = discover_project_sources(project, &NixLgxProbe).unwrap_or_default();
 
     // Compare on the normalized (absolutized) form. `basecamp modules`
     // persists in-project sources relatively (`path:.#lgx`) so a committed
@@ -3603,7 +3558,7 @@ fn cmd_basecamp_doctor(project: Project, as_json: bool) -> DynResult<()> {
 fn push_basecamp_doctor_rows(project: &Project, rows: &mut Vec<crate::model::CheckRow>) {
     use crate::model::{CheckRow, CheckStatus};
 
-    let state_path = project.root.join(".scaffold/state/basecamp.state");
+    let state_path = project.root.join(BASECAMP_STATE_REL);
     let state = read_basecamp_state(&state_path).unwrap_or_default();
     let module_count = total_captured_modules(project);
     if state.basecamp_bin.is_empty() && state.lgpm_bin.is_empty() && module_count == 0 {
@@ -4063,26 +4018,29 @@ trait LgxFlakeProbe {
 /// `attr` selects which flake output to target (`"lgx"` for `install`, `"lgx-portable"`
 /// for `build-portable`). `alt_attr` is the variant reported in the fail-hint when only
 /// the other one is present.
+/// Auto-discover the project's own `.lgx` flakes, skipping scaffold's
+/// directories and the project-local cache root.
+fn discover_project_sources(
+    project: &Project,
+    probe: &dyn LgxFlakeProbe,
+) -> DynResult<Vec<BasecampSource>> {
+    let mut skip_subdirs: Vec<&str> = BASECAMP_AUTODISCOVER_SKIP_SUBDIRS.to_vec();
+    let cache_root_first = first_path_component(&project.config.cache_root);
+    if let Some(c) = cache_root_first.as_deref() {
+        if !skip_subdirs.contains(&c) {
+            skip_subdirs.push(c);
+        }
+    }
+    resolve_install_sources(&project.root, probe, &skip_subdirs, "lgx", "lgx-portable")
+}
+
 fn resolve_install_sources(
     project_root: &Path,
-    explicit_paths: &[PathBuf],
-    explicit_flakes: &[String],
     probe: &dyn LgxFlakeProbe,
     skip_subdirs: &[&str],
     attr: &str,
     alt_attr: &str,
 ) -> DynResult<Vec<BasecampSource>> {
-    if !explicit_paths.is_empty() || !explicit_flakes.is_empty() {
-        let mut out = Vec::new();
-        for p in explicit_paths {
-            out.push(BasecampSource::Path(p.display().to_string()));
-        }
-        for f in explicit_flakes {
-            out.push(BasecampSource::Flake(f.clone()));
-        }
-        return Ok(out);
-    }
-
     let mut found = Vec::new();
     let mut alt_only_dirs = Vec::new();
     let root_flake = project_root.join("flake.nix");
@@ -4425,39 +4383,14 @@ mod tests {
     }
 
     #[test]
-    fn resolve_install_sources_explicit_paths_win() {
-        let tmp = tempdir().expect("tempdir");
-        let probe = FakeProbe::new(&[]);
-        let paths = vec![PathBuf::from("/a/mod.lgx")];
-        let flakes = vec!["./sub#lgx".to_string()];
-        let got = resolve_install_sources(
-            tmp.path(),
-            &paths,
-            &flakes,
-            &probe,
-            &[],
-            "lgx",
-            "lgx-portable",
-        )
-        .expect("resolve");
-        assert_eq!(
-            got,
-            vec![
-                BasecampSource::Path("/a/mod.lgx".to_string()),
-                BasecampSource::Flake("./sub#lgx".to_string()),
-            ]
-        );
-    }
-
-    #[test]
     fn resolve_install_sources_uses_root_flake_lgx() {
         let tmp = tempdir().expect("tempdir");
         let root = tmp.path();
         fs::write(root.join("flake.nix"), b"{}").unwrap();
         let root_ref = format!("path:{}", root.display());
         let probe = FakeProbe::new(&[(root_ref.as_str(), &["lgx", "default"])]);
-        let got = resolve_install_sources(root, &[], &[], &probe, &[], "lgx", "lgx-portable")
-            .expect("resolve");
+        let got =
+            resolve_install_sources(root, &probe, &[], "lgx", "lgx-portable").expect("resolve");
         assert_eq!(got, vec![BasecampSource::Flake(format!("{root_ref}#lgx"))]);
     }
 
@@ -4468,8 +4401,8 @@ mod tests {
         fs::write(root.join("flake.nix"), b"{}").unwrap();
         let root_ref = format!("path:{}", root.display());
         let probe = FakeProbe::new(&[(root_ref.as_str(), &["lgx", "lgx-portable"])]);
-        let got = resolve_install_sources(root, &[], &[], &probe, &[], "lgx-portable", "lgx")
-            .expect("resolve");
+        let got =
+            resolve_install_sources(root, &probe, &[], "lgx-portable", "lgx").expect("resolve");
         assert_eq!(
             got,
             vec![BasecampSource::Flake(format!("{root_ref}#lgx-portable"))],
@@ -4484,8 +4417,7 @@ mod tests {
         fs::write(root.join("flake.nix"), b"{}").unwrap();
         let root_ref = format!("path:{}", root.display());
         let probe = FakeProbe::new(&[(root_ref.as_str(), &["lgx"])]);
-        let err = resolve_install_sources(root, &[], &[], &probe, &[], "lgx-portable", "lgx")
-            .unwrap_err();
+        let err = resolve_install_sources(root, &probe, &[], "lgx-portable", "lgx").unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("lgx-portable") && msg.contains("lgx") && msg.contains("--flake"),
@@ -4514,8 +4446,8 @@ mod tests {
             .map(|(k, v)| (k.as_str(), v.as_slice()))
             .collect();
         let probe = FakeProbe::new(&answers);
-        let got = resolve_install_sources(root, &[], &[], &probe, &[], "lgx", "lgx-portable")
-            .expect("resolve");
+        let got =
+            resolve_install_sources(root, &probe, &[], "lgx", "lgx-portable").expect("resolve");
         assert_eq!(
             got,
             vec![
@@ -4533,8 +4465,7 @@ mod tests {
         fs::write(root.join("flake.nix"), b"{}").unwrap();
         let root_ref = format!("path:{}", root.display());
         let probe = FakeProbe::new(&[(root_ref.as_str(), &["lgx-portable"])]);
-        let err = resolve_install_sources(root, &[], &[], &probe, &[], "lgx", "lgx-portable")
-            .unwrap_err();
+        let err = resolve_install_sources(root, &probe, &[], "lgx", "lgx-portable").unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("lgx-portable") && msg.contains("--flake"),
@@ -4570,16 +4501,9 @@ mod tests {
             .map(|(k, v)| (k.as_str(), v.as_slice()))
             .collect();
         let probe = FakeProbe::new(&answers);
-        let got = resolve_install_sources(
-            root,
-            &[],
-            &[],
-            &probe,
-            &["target", "cache"],
-            "lgx",
-            "lgx-portable",
-        )
-        .expect("resolve");
+        let got =
+            resolve_install_sources(root, &probe, &["target", "cache"], "lgx", "lgx-portable")
+                .expect("resolve");
         assert_eq!(
             got,
             vec![BasecampSource::Flake(format!(
@@ -4594,8 +4518,8 @@ mod tests {
     fn resolve_install_sources_no_lgx_anywhere_fails_with_generic_hint() {
         let tmp = tempdir().expect("tempdir");
         let probe = FakeProbe::new(&[]);
-        let err = resolve_install_sources(tmp.path(), &[], &[], &probe, &[], "lgx", "lgx-portable")
-            .unwrap_err();
+        let err =
+            resolve_install_sources(tmp.path(), &probe, &[], "lgx", "lgx-portable").unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("--path") && msg.contains("--flake"),
