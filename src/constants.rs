@@ -68,7 +68,7 @@ pub(crate) struct TailCallTarget {
     /// needs no rebuild; `build` replaces it whenever the built callee differs.
     /// Only a best-effort snapshot: the template's guest has no `Cargo.lock`,
     /// so the container resolves dependencies from crates.io at build time and
-    /// the id moves whenever a dependency publishes a new version. The
+    /// the id moves whenever a dependency publishes a new version (#315). The
     /// guest-reproducibility workflow warns when it has drifted.
     pub(crate) docker_program_id: &'static str,
 }

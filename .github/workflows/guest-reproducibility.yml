@@ -188,6 +188,7 @@ jobs:
       # project), so report the rewrite itself. A warning, not a failure: the
       # guest has no Cargo.lock, so the ids drift with crates.io and would
       # otherwise fail unrelated PRs (and the weekly run) until refreshed.
+      # Make it fail again once #315 ships a lock.
       - name: Build guests deterministically (first pass)
         run: |
           set -euo pipefail
@@ -195,9 +196,10 @@ jobs:
           "$GITHUB_WORKSPACE/target/release/logos-scaffold" build --guest docker \
             | tee "$RUNNER_TEMP/first-pass.log"
           if grep '^Updated .* program id' "$RUNNER_TEMP/first-pass.log"; then
-            echo "::warning::TAIL_CALL_TARGETS docker_program_id in src/constants.rs has drifted from what this build produced (see the Updated lines); refresh it so fresh projects skip the second container build"
+            echo "::warning::TAIL_CALL_TARGETS docker_program_id in src/constants.rs has drifted from what this build produced (see the Updated lines); refresh it so fresh projects skip the second container build. Root cause: the template guest has no Cargo.lock (https://github.com/logos-co/scaffold/issues/315)"
             {
               echo "### Tail-call program ids drifted"
+              echo "Refresh \`TAIL_CALL_TARGETS\` in \`src/constants.rs\`. Root cause: [#315](https://github.com/logos-co/scaffold/issues/315)."
               echo '```'
               grep '^Updated .* program id' "$RUNNER_TEMP/first-pass.log"
               echo '```'
