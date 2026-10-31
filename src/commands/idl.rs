@@ -78,10 +78,9 @@ fn build_idl_inner(force: bool) -> DynResult<()> {
     }
     if project.config.framework.kind != FRAMEWORK_KIND_LEZ_FRAMEWORK {
         // Explicit `build idl` otherwise only applies to legacy lez-framework
-        // projects. The
-        // `lgs build` shortcut already gates on framework kind and won't
-        // call this for `default` projects, so reaching this branch means
-        // the user typed `build idl` against an incompatible framework.
+        // projects. The `lgs build` shortcut already gates on framework kind
+        // and won't call this for `default` projects, so reaching this branch
+        // means the user typed `build idl` against an incompatible framework.
         // Fail loudly instead of silently no-op'ing — agents that piped
         // `lgs build idl && next-step` would otherwise carry on with no IDL.
         bail!(
