@@ -227,7 +227,7 @@ fn compute_idl_input_hash(project: &Project) -> DynResult<String> {
     hasher.update(b"\x00");
     hasher.update(project.config.framework.idl.path.as_bytes());
 
-    Ok(hex_encode(&hasher.finalize()))
+    Ok(crate::hex(&hasher.finalize()))
 }
 
 /// `filter_entry` predicate: keep the root, every file, and any directory that
@@ -286,15 +286,6 @@ fn save_idl_state(project: &Project, state: &IdlBuildState) -> DynResult<()> {
     fs::write(&tmp, &text).with_context(|| format!("write {}", tmp.display()))?;
     fs::rename(&tmp, &path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
 }
 
 fn parse_optional_project_path(args: &[String], usage_label: &str) -> DynResult<Option<PathBuf>> {

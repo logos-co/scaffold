@@ -594,12 +594,7 @@ fn extract_tx_hash_from_hash_type_bytes(text: &str) -> Option<String> {
             continue;
         }
 
-        let mut hex_hash = String::from("0x");
-        for byte in bytes {
-            use std::fmt::Write as _;
-            let _ = write!(&mut hex_hash, "{byte:02x}");
-        }
-        return Some(hex_hash);
+        return Some(format!("0x{}", crate::hex(&bytes)));
     }
 
     None

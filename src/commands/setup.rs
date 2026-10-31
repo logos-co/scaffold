@@ -8,7 +8,7 @@ use crate::process::{run_checked, run_with_stdin};
 use crate::project::{ensure_dir_exists, load_project, resolve_repo_path};
 use crate::repo::{sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
 use crate::state::prepare_wallet_home;
-use crate::DynResult;
+use crate::{sha256_hex, DynResult};
 
 use super::wallet_support::{
     first_public_address_in_listing, first_public_wallet_address, read_default_wallet_address,
@@ -636,15 +636,4 @@ fn verify_prebuilt_checksum(
         );
     }
     Ok(Some(actual))
-}
-
-fn sha256_hex(data: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    use std::fmt::Write as _;
-    Sha256::digest(data)
-        .iter()
-        .fold(String::new(), |mut s, byte| {
-            write!(s, "{byte:02x}").unwrap();
-            s
-        })
 }

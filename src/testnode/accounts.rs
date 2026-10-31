@@ -151,7 +151,7 @@ impl TestNodeClient {
     /// transport failures.
     pub fn proof(&self, commitment: &str, at: ReadAt) -> Result<ProofRead, RpcError> {
         let bytes = parse_commitment(commitment)?;
-        let commitment_hex = hex_string(&bytes);
+        let commitment_hex = crate::hex(&bytes);
         let param: Vec<u64> = bytes.iter().map(|byte| u64::from(*byte)).collect();
 
         let (block_id, (proof, root)) =
@@ -192,7 +192,7 @@ impl TestNodeClient {
                 };
                 let root = byte_array(&pair[1])
                     .filter(|bytes| bytes.len() == 32)
-                    .map(|bytes| hex_string(&bytes))
+                    .map(|bytes| crate::hex(&bytes))
                     .ok_or_else(|| malformed(format!("root is not 32 bytes: {}", pair[1])))?;
                 Ok((proof, Some(root)))
             }
@@ -349,7 +349,7 @@ fn parse_account_value(value: &Value) -> AccountValue {
 
     AccountValue::Present {
         encoded: base64::engine::general_purpose::STANDARD.encode(&encoded),
-        program_owner: hex_string(&owner_bytes),
+        program_owner: crate::hex(&owner_bytes),
         balance,
         nonce,
         data: base64::engine::general_purpose::STANDARD.encode(&data),
@@ -379,7 +379,7 @@ fn parse_proof(value: &Value) -> Result<ProofValue, String> {
         .map(|node| {
             byte_array(node)
                 .filter(|bytes| bytes.len() == 32)
-                .map(|b| hex_string(&b))
+                .map(|b| crate::hex(&b))
         })
         .collect::<Option<Vec<String>>>()
         .ok_or("proof path nodes are not 32-byte arrays")?;
@@ -429,15 +429,6 @@ fn parse_commitment(input: &str) -> Result<[u8; 32], RpcError> {
             "expected 64 hex characters or base58 of 32 bytes".to_string(),
         )),
     }
-}
-
-fn hex_string(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
 }
 
 #[cfg(test)]
