@@ -686,7 +686,8 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> DynResult<()> {
     Ok(())
 }
 
-/// Block id LEZ v0.2.4+ gives its genesis block (the config no longer says).
+/// Block id the LEZ sequencer gives its genesis block (from v0.2.4 the
+/// config no longer says).
 const GENESIS_BLOCK_ID: u64 = 1;
 
 /// Produce the node's sequencer config: the pinned LEZ debug config with

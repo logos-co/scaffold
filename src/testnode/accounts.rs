@@ -272,7 +272,7 @@ fn parse_account_value(value: &Value) -> AccountValue {
         };
     };
 
-    let balance = match read_u128_field(object.get("balance")) {
+    let balance = match super::blocks::read_u128(object.get("balance")) {
         Some(balance) => balance,
         None => {
             return AccountValue::DecodeError {
@@ -281,7 +281,7 @@ fn parse_account_value(value: &Value) -> AccountValue {
             }
         }
     };
-    let nonce = match read_u128_field(object.get("nonce")) {
+    let nonce = match super::blocks::read_u128(object.get("nonce")) {
         Some(nonce) => nonce,
         None => {
             return AccountValue::DecodeError {
@@ -355,14 +355,6 @@ fn parse_account_value(value: &Value) -> AccountValue {
         data: base64::engine::general_purpose::STANDARD.encode(&data),
         data_len: data.len(),
     }
-}
-
-fn read_u128_field(value: Option<&Value>) -> Option<u128> {
-    let value = value?;
-    if let Some(number) = value.as_u64() {
-        return Some(u128::from(number));
-    }
-    serde_json::from_value::<u128>(value.clone()).ok()
 }
 
 /// `MembershipProof = (usize, Vec<[u8; 32]>)` on the wire: `[index, [path…]]`.
