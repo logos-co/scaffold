@@ -1179,14 +1179,6 @@ pub(crate) fn check_toml_value(key: &str, value: &str) -> DynResult<()> {
     Ok(())
 }
 
-// Convenience for callers who want to construct the canonical default
-// `[repos.lez]` / `[repos.spel]` / `[repos.basecamp]` / `[repos.lgpm]`
-// entries without duplicating the source/pin/build/attr defaults.
-//
-// These are intentionally defined here rather than in `model.rs` so that
-// `model.rs` stays free of constant references — the defaults live with
-// the file format that consumes them.
-
 /// The `scaffold.toml` that `init` and `new` write for a fresh project.
 pub(crate) fn default_config(framework_kind: &str) -> Config {
     use crate::constants::{DEFAULT_BASECAMP_PIN, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL};
@@ -1214,6 +1206,14 @@ pub(crate) fn default_config(framework_kind: &str) -> Config {
         run: RunConfig::default(),
     }
 }
+
+// Convenience for callers who want to construct the canonical default
+// `[repos.lez]` / `[repos.spel]` / `[repos.basecamp]` / `[repos.lgpm]`
+// entries without duplicating the source/pin/build/attr defaults.
+//
+// These are intentionally defined here rather than in `model.rs` so that
+// `model.rs` stays free of constant references — the defaults live with
+// the file format that consumes them.
 
 pub(crate) fn default_lez_repo(pin: &str) -> RepoRef {
     RepoRef {

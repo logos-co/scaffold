@@ -977,8 +977,6 @@ fn remove_file_if_exists(path: &Path, label: &str) -> DynResult<()> {
     Ok(())
 }
 
-/// Poll `pid` until it is no longer running (exited or zombie), or `timeout`
-/// elapses. Returns `true` if the process exited within the deadline.
 /// Poll `localnet_addr` until no listener is accepting, or `timeout` elapses.
 fn wait_for_port_free(localnet_addr: &str, timeout: Duration) -> Result<(), ()> {
     let deadline = Instant::now() + timeout;

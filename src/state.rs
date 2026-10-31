@@ -148,6 +148,31 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn write_text_atomic_replaces_in_place_without_following_a_planted_tmp() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join("state").join("run_deploy.json");
+        write_text_atomic(&path, "old").expect("first write");
+        let victim = tmp.path().join("victim.txt");
+        fs::write(&victim, "keep").expect("write victim");
+        // The fixed name the hand-rolled cache writers used to stage through.
+        let planted = path.with_file_name("run_deploy.json.tmp");
+        symlink(&victim, &planted).expect("plant tmp symlink");
+
+        write_text_atomic(&path, "new").expect("second write");
+
+        assert_eq!(fs::read_to_string(&path).expect("read"), "new");
+        assert_eq!(fs::read_to_string(&victim).expect("read victim"), "keep");
+        let mut left: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .expect("read dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["run_deploy.json", "run_deploy.json.tmp"]);
+    }
+
+    #[test]
     fn basecamp_state_roundtrips_pin_artifacts() {
         let tmp = tempdir().expect("tempdir");
         let path = tmp.path().join("basecamp.state");

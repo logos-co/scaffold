@@ -338,16 +338,8 @@ pub(crate) fn platform_variant_key(basecamp_repo: Option<&RepoRef>) -> Option<&'
     }
 }
 
-/// `Some(message)` when the binaries `basecamp.state` records were built for
-/// a different basecamp or `lgpm` pin than `scaffold.toml` now names — after a
-/// pin edit, or after a scaffold upgrade whose `setup` has not run yet.
-/// Installing with that `lgpm` or launching that app would silently run the
-/// old release under scaffold's assumptions about the new one.
-///
-/// Returns `(component, message)`; `component` is `"basecamp"` or `"lgpm"`,
-/// so doctor can name its row after the binary that is actually stale.
-/// The recorded `basecamp setup`, refusing when it is missing, its binaries
-/// are gone, or they were built for other pins.
+/// The state recorded by `basecamp setup`. Errors when it is missing, its
+/// binaries are gone, or they were built for other pins.
 fn load_setup_state(project: &Project) -> DynResult<BasecampState> {
     let state = read_basecamp_state(&project.root.join(BASECAMP_STATE_REL)).unwrap_or_default();
     if state.basecamp_bin.is_empty()
@@ -363,6 +355,14 @@ fn load_setup_state(project: &Project) -> DynResult<BasecampState> {
     Ok(state)
 }
 
+/// `Some(message)` when the binaries `basecamp.state` records were built for
+/// a different basecamp or `lgpm` pin than `scaffold.toml` now names — after a
+/// pin edit, or after a scaffold upgrade whose `setup` has not run yet.
+/// Installing with that `lgpm` or launching that app would silently run the
+/// old release under scaffold's assumptions about the new one.
+///
+/// Returns `(component, message)`; `component` is `"basecamp"` or `"lgpm"`,
+/// so doctor can name its row after the binary that is actually stale.
 fn stale_setup(project: &Project, state: &BasecampState) -> Option<(&'static str, String)> {
     // `setup` always writes both repos; without one (or with a blank pin, or
     // a state file from before that pin was recorded) there is nothing to be
@@ -1782,6 +1782,8 @@ fn linux_descendant_pids(root: u32) -> Vec<u32> {
     out
 }
 
+/// `pid_alive`, not `pid_running`: wait until the pid is reaped, not merely
+/// exited (a zombie still answers `kill -0`).
 fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -4003,18 +4005,6 @@ trait LgxFlakeProbe {
     ) -> DynResult<Vec<String>>;
 }
 
-/// Resolves the set of `.lgx` sources to install from explicit args and project auto-discovery.
-///
-/// Precedence:
-/// 1. Explicit `--path` / `--flake` — wins if supplied.
-/// 2. Project root `flake.nix` exposing `packages.<system>.<attr>` — build that attribute.
-/// 3. Sub-directories with a `flake.nix` exposing the same.
-/// 4. Project exposes only `.#<alt_attr>` — fail with a targeted hint pointing at it.
-/// 5. No matching sources found anywhere — fail with a generic hint.
-///
-/// `attr` selects which flake output to target (`"lgx"` for `install`, `"lgx-portable"`
-/// for `build-portable`). `alt_attr` is the variant reported in the fail-hint when only
-/// the other one is present.
 /// Auto-discover the project's own `.lgx` flakes, skipping scaffold's
 /// directories and the project-local cache root.
 fn discover_project_sources(
@@ -4031,6 +4021,18 @@ fn discover_project_sources(
     resolve_install_sources(&project.root, probe, &skip_subdirs, "lgx", "lgx-portable")
 }
 
+/// Resolves the set of `.lgx` sources to install from explicit args and project auto-discovery.
+///
+/// Precedence:
+/// 1. Explicit `--path` / `--flake` — wins if supplied.
+/// 2. Project root `flake.nix` exposing `packages.<system>.<attr>` — build that attribute.
+/// 3. Sub-directories with a `flake.nix` exposing the same.
+/// 4. Project exposes only `.#<alt_attr>` — fail with a targeted hint pointing at it.
+/// 5. No matching sources found anywhere — fail with a generic hint.
+///
+/// `attr` selects which flake output to target (`"lgx"` for `install`, `"lgx-portable"`
+/// for `build-portable`). `alt_attr` is the variant reported in the fail-hint when only
+/// the other one is present.
 fn resolve_install_sources(
     project_root: &Path,
     probe: &dyn LgxFlakeProbe,
