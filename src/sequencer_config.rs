@@ -1,5 +1,4 @@
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context};
@@ -47,21 +46,8 @@ where
         .with_context(|| format!("failed to create {}", dest_dir.display()))?;
     let dest_path = dest_dir.join(RUNTIME_SEQUENCER_CONFIG_FILE);
     let updated = serde_json::to_string_pretty(&doc).context("failed to serialize config")?;
-    let mut tmp = tempfile::NamedTempFile::new_in(dest_dir)
-        .with_context(|| format!("failed to create temp file in {}", dest_dir.display()))?;
-    let tmp_path = tmp.path().to_path_buf();
-    tmp.write_all(format!("{updated}\n").as_bytes())
-        .with_context(|| format!("failed to write {}", tmp_path.display()))?;
-    tmp.persist(&dest_path)
-        .map(|_| ())
-        .map_err(|err| err.error)
-        .with_context(|| {
-            format!(
-                "failed to replace {} with {}",
-                dest_path.display(),
-                tmp_path.display()
-            )
-        })?;
+    crate::state::write_text_atomic(&dest_path, &format!("{updated}\n"))
+        .with_context(|| format!("failed to write {}", dest_path.display()))?;
     Ok((dest_path, result))
 }
 

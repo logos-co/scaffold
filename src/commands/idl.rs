@@ -274,18 +274,8 @@ fn load_idl_state(project: &Project) -> Option<IdlBuildState> {
 }
 
 fn save_idl_state(project: &Project, state: &IdlBuildState) -> DynResult<()> {
-    let path = project.root.join(IDL_STATE_REL);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
     let text = serde_json::to_string_pretty(state).context("serialize idl_build.json")?;
-    // Atomic write: stage to a sibling tempfile, then rename. A SIGINT
-    // between write and rename leaves the prior cache intact rather than
-    // truncating it. Same parent dir keeps rename(2) atomic.
-    let tmp = path.with_file_name("idl_build.json.tmp");
-    fs::write(&tmp, &text).with_context(|| format!("write {}", tmp.display()))?;
-    fs::rename(&tmp, &path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
+    crate::state::write_text_atomic(&project.root.join(IDL_STATE_REL), &text)
 }
 
 fn parse_optional_project_path(args: &[String], usage_label: &str) -> DynResult<Option<PathBuf>> {
