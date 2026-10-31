@@ -286,7 +286,7 @@ pub(crate) fn release_triple() -> DynResult<&'static str> {
 /// of using the in-tree `ureq`-based HTTP client: ureq's bundled rustls trusts
 /// only the Mozilla CA set baked into `webpki-roots`, which fails on hosts
 /// behind a corporate-CA TLS-intercepting proxy (a common CI shape, and the
-/// shape several `lez-framework` early adopters reported). `curl` reads the
+/// shape several early framework adopters reported). `curl` reads the
 /// system trust store (and respects `CURL_CA_BUNDLE` / `SSL_CERT_FILE`), so
 /// it works on both vanilla machines and proxied environments.
 ///

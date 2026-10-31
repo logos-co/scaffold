@@ -82,10 +82,10 @@ fn require_lez_framework_project(project: Project) -> DynResult<Project> {
         return Ok(project);
     }
     bail!(
-        "`build client` is only supported for `spel` and `lez-framework` projects \
-         (current framework.kind = `{}`).\n\
-         Use `logos-scaffold build` for the framework-agnostic build, \
-         or set `framework.kind = \"spel\"` in scaffold.toml.",
+        "`build client` only applies to `spel` projects and legacy `lez-framework` projects; \
+         this one has framework.kind = `{}`.\n\
+         Use `logos-scaffold build` for the framework-agnostic build, or start a SPEL \
+         project with `logos-scaffold new <name> --template spel`.",
         project.config.framework.kind
     )
 }

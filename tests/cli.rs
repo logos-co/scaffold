@@ -5156,9 +5156,10 @@ fn build_idl_fails_loudly_on_default_framework() {
         .failure()
         .stderr(
             predicate::str::contains(
-                "`build idl` is only supported for `spel` and `lez-framework`",
+                "`build idl` only applies to `spel` projects and legacy `lez-framework` projects",
             )
-            .and(predicate::str::contains("framework.kind = `default`")),
+            .and(predicate::str::contains("framework.kind = `default`"))
+            .and(predicate::str::contains("--template spel")),
         );
 }
 
@@ -5177,9 +5178,10 @@ fn build_client_fails_loudly_on_default_framework() {
         .failure()
         .stderr(
             predicate::str::contains(
-                "`build client` is only supported for `spel` and `lez-framework`",
+                "`build client` only applies to `spel` projects and legacy `lez-framework` projects",
             )
-            .and(predicate::str::contains("framework.kind = `default`")),
+            .and(predicate::str::contains("framework.kind = `default`"))
+            .and(predicate::str::contains("--template spel")),
         );
 }
 

@@ -85,7 +85,7 @@ pub(crate) fn compute_program_hashes(project: &Project) -> DynResult<BTreeMap<St
     }
     let idl_dir = project.root.join(&project.config.framework.idl.path);
     let cfg_digest = config_digest(project);
-    // Both lez-framework and spel projects require an IDL file at deploy time.
+    // Both spel and legacy lez-framework projects require an IDL file at deploy time.
     let requires_idl = matches!(
         project.config.framework.kind.as_str(),
         FRAMEWORK_KIND_LEZ_FRAMEWORK | FRAMEWORK_KIND_SPEL
@@ -122,8 +122,9 @@ pub(crate) fn compute_program_hashes(project: &Project) -> DynResult<BTreeMap<St
             hasher.update(b"\x00idl\x00");
             hasher.update(&idl_bytes);
         } else if requires_idl {
-            // For spel and lez-framework projects, the IDL file is a documented
-            // build artifact (`<stem>.json` produced by `build idl`).
+            // For spel and legacy lez-framework projects, the IDL file is a
+            // documented build artifact (`spel.toml`'s IDL, or `<stem>.json`
+            // from `build idl`).
             // Missing it would mean we cache a partial digest and silently
             // skip deploys after later ABI-only edits. Bail loudly.
             anyhow::bail!(

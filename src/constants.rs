@@ -110,8 +110,11 @@ pub(crate) const WALLET_CONFIG_REL_PATHS: &[&str] =
     &[WALLET_CONFIG_NESTED_REL_PATH, WALLET_CONFIG_REL_PATH];
 pub(crate) const WALLET_BIN_REL_PATH: &str = "target/release/wallet";
 pub(crate) const FRAMEWORK_KIND_DEFAULT: &str = "default";
-/// Deprecated alias kept for backward compatibility with existing scaffold.toml files.
-/// New projects use `FRAMEWORK_KIND_SPEL` ("spel").
+/// `framework.kind` of projects made with the removed `lez-framework` template
+/// (scaffold ≤ 0.4.0). Kept so those projects still build through scaffold's
+/// own IDL/client pipeline. Nothing creates this kind any more: `new
+/// --template lez-framework` is a deprecated alias that writes
+/// `FRAMEWORK_KIND_SPEL` ("spel").
 pub(crate) const FRAMEWORK_KIND_LEZ_FRAMEWORK: &str = "lez-framework";
 pub(crate) const FRAMEWORK_KIND_SPEL: &str = "spel";
 pub(crate) const DEFAULT_FRAMEWORK_VERSION: &str = "0.1.0";

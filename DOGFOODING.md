@@ -1100,7 +1100,7 @@ cd "$SCRATCH_ROOT"
 "$SCAFFOLD_BIN" new dogfood-invalid-template --template nonexistent-template
 "$SCAFFOLD_BIN" new dogfood-spel-explicit --template spel
 ls -d dogfood-spel-explicit/spel.toml dogfood-spel-explicit/Makefile
-"$SCAFFOLD_BIN" new dogfood-lez-alias --template lez-framework   # deprecated alias: warns, same result
+"$SCAFFOLD_BIN" new dogfood-lez-alias --template lez-framework   # deprecated alias of spel: warns, same result
 "$SCAFFOLD_BIN" new dogfood-vendor --vendor-deps
 "$SCAFFOLD_BIN" new dogfood-cache --cache-root "$SCRATCH_ROOT/custom-cache"
 find "$SCRATCH_ROOT/custom-cache/repos/lez" -maxdepth 2 -mindepth 1 -type d | sort
@@ -1110,7 +1110,7 @@ grep -n "^\[wallet\]\|^home_dir\|^binary" dogfood-cache/scaffold.toml
 ### Expected Success Signals
 
 - Invalid `--template` name fails with a clear error listing the available templates (`default`, `spel`) and mentioning the deprecated `lez-framework` alias.
-- `--template spel` creates a project with the SPEL structure (same as L1). `--template lez-framework` still works, printing a deprecation warning and producing the same result.
+- `--template spel` creates a project with the SPEL structure (same as L1). `--template lez-framework` is only a deprecated alias (there is no separate template): it prints a deprecation warning and produces the same SPEL project.
 - `--vendor-deps` is accepted without error and creates a project that vendors the pinned LEZ repo under `.scaffold/repos/lez`.
 - `--cache-root` is honored and scaffold uses the specified directory for cache operations, with non-vendored LEZ clones isolated by pin under `<cache-root>/repos/lez/<pin>/`.
 - Generated `scaffold.toml` includes `[wallet].home_dir` and does not include a deprecated `wallet.binary` field.
