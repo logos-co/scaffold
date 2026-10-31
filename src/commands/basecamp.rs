@@ -1785,13 +1785,7 @@ fn linux_descendant_pids(root: u32) -> Vec<u32> {
 fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        // `kill -0` returns non-zero when the PID no longer exists (or we lack perms).
-        let status = Command::new("kill")
-            .arg("-0")
-            .arg(pid.to_string())
-            .stderr(std::process::Stdio::null())
-            .status();
-        if matches!(status, Ok(s) if !s.success()) || status.is_err() {
+        if !crate::process::pid_alive(pid) {
             return true;
         }
         thread::sleep(Duration::from_millis(100));

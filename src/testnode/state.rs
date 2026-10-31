@@ -36,6 +36,7 @@ use thiserror::Error;
 use crate::model::Project;
 use crate::DynResult;
 
+use super::copy_dir_recursive;
 use super::pins::{resolve_test_node_pins, PinOverrides};
 
 /// On-disk marker of a config-seeded state directory.
@@ -681,20 +682,6 @@ pub(crate) fn load_seed_from_state_dir(state_dir: &Path) -> DynResult<Option<Sta
         return Ok(None);
     }
     Ok(Some(StateSnapshot::from_file(&path)?))
-}
-
-fn copy_dir_recursive(src: &Path, dest: &Path) -> DynResult<()> {
-    fs::create_dir_all(dest)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let target = dest.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir_recursive(&entry.path(), &target)?;
-        } else {
-            fs::copy(entry.path(), &target)?;
-        }
-    }
-    Ok(())
 }
 
 /// The genesis config takes `{account_id, balance}` per public account and

@@ -714,6 +714,20 @@ pub(crate) fn pid_running(_pid: u32) -> bool {
     false
 }
 
+/// Poll until `pid` is gone (or a zombie); `false` if it outlives `timeout`.
+pub(crate) fn wait_for_pid_exit(pid: u32, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if !pid_running(pid) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 #[cfg(unix)]
 pub(crate) fn pid_command(pid: u32) -> Option<String> {
     let output = Command::new("ps")
