@@ -69,7 +69,7 @@ Full surface: [docs/commands.md](docs/commands.md).
 
 Every command needs these:
 
-- `git`, `rustc`, `cargo` (Rust 1.81 or newer)
+- `git`, `rustc`, `cargo` (Rust 1.85 or newer)
 - Unix process helpers: `lsof`, `ps`, `kill`
 - `pkg-config` and the PCSC development headers, which the LEZ wallet links
   against for keycard support. On Debian/Ubuntu:
