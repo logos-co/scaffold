@@ -4,13 +4,13 @@
 
 ### Functionality
 
-1. One public DevNet vertical slice: generate wallet, fund wallet, deploy contract, execute one transaction type, verify result.
+1. One public DevNet vertical slice: generate wallet, fund wallet, deploy contract, execute one transaction type, verify result. *(Not implemented; the slice exists for localnet only. See Revisions R1.)*
 2. Integrate wallet generation as part of the scaffold workflow for bootstrap and interaction flows.
-3. Support native token topup for wallet operations on local and DevNet environments.
+3. Support native token topup for wallet operations on local and DevNet environments. *(Localnet and test nodes only. See R1.)*
 4. Deploy command auto-discovers program binaries by matching program names across scaffold's deterministic `target/riscv-guest-docker/` output, the canonical workspace `target/riscv-guest/` layout, the sub-crate `methods/target/` compatibility layout, and `methods/guest/target/` (`cargo risczero build` / spel `make build`), so non-template projects deploy without `--program-path`. Deterministic `docker/` output ranks first only in the root the project kind owns (`target/riscv-guest-docker/` for `default`, `methods/guest/target/` for `spel`).
-5. Build command auto-compiles `methods/Cargo.toml` when present, so projects whose parent workspace excludes the Risc0 guest crate produce guest binaries via `lgs build` without a separate `cargo build --manifest-path methods/Cargo.toml`.
+5. Build command auto-compiles `methods/Cargo.toml` when present, so projects whose parent workspace excludes the Risc0 guest crate produce guest binaries via `lgs build` without a separate `cargo build --manifest-path methods/Cargo.toml`. *(This is now the `[build].guest = "local"` path. The default is the container build in #10, and spel projects build through `make build`. See R2.)*
 6. Deploy outputs the deployed program's on-chain ID (the risc0 image ID) for every successful submission, in both the human-readable output and the `--json` output, so users can hand the value to a client without rerunning a separate inspection tool. The value is computed locally from the submitted ELF; on-chain inclusion verification is future work and depends on LEZ exposing deploy receipts.
-7. Scaffold vendors the `spel` CLI per project — clones `logos-co/spel` to a project-local path, pinned via `[repos.spel]` in `scaffold.toml`, and builds it during `setup` — mirroring the LEZ vendoring pattern. `deploy` invokes the project-local binary; no global `spel` install is required. The default spel pin is selected so spel itself vendors the same LEZ commit scaffold pins; `doctor` enforces this alignment at runtime by inspecting `spel-cli/Cargo.toml` and warning if spel's vendored LEZ diverges from `DEFAULT_LEZ_PIN`.
+7. *(Location and pins revised. See R3.)* Scaffold vendors the `spel` CLI per project — clones `logos-co/spel` to a project-local path, pinned via `[repos.spel]` in `scaffold.toml`, and builds it during `setup` — mirroring the LEZ vendoring pattern. `deploy` invokes the project-local binary; no global `spel` install is required. The default spel pin is selected so spel itself vendors the same LEZ commit scaffold pins; `doctor` enforces this alignment at runtime by inspecting `spel-cli/Cargo.toml` and warning if spel's vendored LEZ diverges from `DEFAULT_LEZ_PIN`.
 8. `logos-scaffold spel -- <args...>` (and the `lgs spel -- <args...>` alias) proxies trailing arguments to the project-vendored `spel` binary, so any spel command (`inspect`, `pda`, `generate-idl`, etc.) runs against the project's pinned version without a global install. Exit codes are forwarded.
 9. `logos-scaffold deploy --json` output is a pure JSON object on stdout — no command-echo, no informational text — and absent values are omitted from the object rather than emitted as `null`. Consumers can pipe directly to `jq` and test field presence with `has(...)`. Subprocess command-echoes and progress messages stay off the JSON channel. Two shapes by code path: `--program-path … --json` emits a bare object `{"status":"submitted","program":...,"tx"?:...,"program_id"?:...}`; auto-discovery `--json` emits `{"deploys":[<entry>,...]}` with one entry per attempted program. Failed entries replace `program_id` with `error`. Auto-discovery exit code is non-zero when any entry failed; the JSON object is still emitted so consumers can inspect partial results.
 10. Guest programs can be built reproducibly. `[build].guest = "docker"` (the default; also `lgs build --guest docker`) compiles `methods/` guests with `cargo risczero build` inside the pinned `risczero/risc0-guest-builder:<tag>` container, so the same source produces the same ELF — and therefore the same `program_id` — on any machine or CI runner. This is the default. `[build].guest = "local"` (or `--guest local`) opts into the host-toolchain `embed_methods()` path, which is faster and needs no container runtime but is not bit-reproducible; `lgs doctor` reports the active strategy. `lgs deploy` prefers the deterministic artefact, and each `lgs build` clears the other mode's output, so the last build is always what deploy ships.
@@ -19,7 +19,7 @@
 
 1. Single command bootstrap with no manual project wiring required.
 2. Generated layout clearly separates contract code, client code, config, and deploy scripts.
-3. Deterministic wallet generation and .env handling for repeatability.
+3. Deterministic wallet generation and .env handling for repeatability. *(Superseded. See R4.)*
 4. Clear happy-path docs, reproducible setup, discoverable commands.
 5. CLI prints underlying commands for each step so users can drop down to lower-level tooling.
 
@@ -35,7 +35,7 @@
 ### Supportability
 
 1. Scaffold version and toolchain versions are explicit in generated output so projects remain buildable over time.
-2. Network configuration for local and DevNet deployment is .env based config.
+2. Network configuration for local and DevNet deployment is .env based config. *(Superseded. See R1.)*
 3. The scaffolded project includes command references for build, deploy, and interaction steps.
 4. `logos-scaffold doctor` reports the `spel` repo presence and pin status, mirroring the existing LEZ checks, so drift from `DEFAULT_SPEL` is surfaced before it bites at deploy time.
 5. `scaffold.toml` files predating the `[repos.spel]` section produce a targeted error from the config loader pointing at `logos-scaffold init` as the fix; `init` is safe to re-run and back-fills the missing section without overwriting customized fields.
@@ -54,12 +54,12 @@
 - Logos Core DevEx for overall developer journey alignment and terminology.
 - Logos Blockchain and Logos Execution Environment for functionality.
 - Wallet Module for interactions with Logos Execution Environment.
-- `logos-co/spel` CLI — vendored per project at a pinned commit (`DEFAULT_SPEL`, currently tag `v0.2.0-rc.5`); supplies the `spel program-id` output that `deploy` parses for the program ID.
+- `logos-co/spel` CLI — vendored per project at a pinned commit (`DEFAULT_SPEL`; was tag `v0.2.0-rc.5` when written, now `v0.7.0`, see R3); supplies the `spel program-id` output that `deploy` parses for the program ID.
 
 #### Runtime Dependencies
 
 - Local network runtime availability for local deploy and interaction workflows.
-- DevNet RPC endpoint availability and stable chain configuration.
+- DevNet RPC endpoint availability and stable chain configuration. *(Not applicable until DevNet support exists. See R1.)*
 - Deterministic local/DevNet account and chain configuration via environment files.
 
 #### Wallet Dependencies
@@ -80,7 +80,7 @@
 
 ### Usability
 
-1. The command produces a single human-readable output stream with numbered step headers and one-line summaries per phase. No JSON output flag — `--json` is reserved for `deploy`'s programmatic consumers.
+1. The command produces a single human-readable output stream with numbered step headers and one-line summaries per phase. No JSON output flag — `--json` is reserved for `deploy`'s programmatic consumers. *(`run` still has no `--json`, but `--json` is no longer deploy-only. See R5.)*
 2. The single-program shortcuts (`SCAFFOLD_PROGRAM_ID` / `SCAFFOLD_GUEST_BIN`) cover the most common dogfooding shape (one guest program per project) without leaking ambiguous values into multi-program projects — they're unset when the project has more than one deployable program.
 3. Hook log markers (`===> post_deploy[i/n]:` and `<=== post_deploy[i/n] OK`) frame each hook's stdout for grep-friendly log reading.
 
@@ -120,10 +120,10 @@
 ### Functionality
 
 1. Fetch and build a pinned basecamp (`nix build '.#app'`) and pinned `lgpm` as project-local artifacts, in the same pin-isolated cache layout used for LEZ.
-2. Pre-seed two isolated basecamp profiles (`alice`, `bob`) per project for p2p dogfooding.
+2. Pre-seed two isolated basecamp profiles (`alice`, `bob`) per project for p2p dogfooding. *(Custom profiles are also supported. See R7.)*
 3. Build and install the project's `.lgx` module(s) into one or both profiles via `lgpm`, with source resolution that follows the `.#lgx` flake-output convention used by existing modules.
 4. Launch basecamp for a named profile with clean-slate semantics: kill any prior process tree for that profile, scrub the profile directory, reinstall recorded `.lgx` sources, and `exec` basecamp with profile-scoped `XDG_*` environment.
-5. Set per-profile values for each module's documented port-override env vars on `launch` (names owned by each module), so multiple profiles can coexist without port collisions on the same machine.
+5. Set per-profile values for each module's documented port-override env vars on `launch` (names owned by each module), so multiple profiles can coexist without port collisions on the same machine. *(Not implemented. See R8.)*
 6. `basecamp build-portable` builds the project's `.#lgx-portable` flake outputs (the variant that loads cleanly into a release basecamp AppImage), orders them topologically by `metadata.json` dependencies so leaves load first, symlinks the results into `<project>/.scaffold/basecamp/portable/` with names carrying the load order, and prints those symlink paths. The wipe-and-recreate on every run keeps the staging dir idempotent.
 7. Source resolution for `build-portable` reuses the same auto-discovery + `--path` / `--flake` escape hatches as `install`, but targets `#lgx-portable` instead of `#lgx`.
 8. `scaffold.toml` gains one `[modules.<module_name>]` sub-section per captured module, with `flake` and `role` (`project` | `dependency`) fields. The collection of these sub-sections is the sole source of truth for the captured module set; `basecamp.state` holds only derived artefacts (pin outputs, binaries). Sub-section form fits scaffold's existing line-oriented TOML parser — no inline tables.
@@ -149,7 +149,7 @@
 7. For each `github:` flake where scaffold derives `module_name` from the repo slug, `basecamp modules` prints exactly one assumption note at capture time: the flake ref and the inferred `module_name`, with "edit `[modules]` in scaffold.toml if wrong." One-time UX cost, never repeats.
 8. `scaffold.toml` is human-editable at all times. `basecamp modules` is idempotent: if a key already exists in `[modules]`, its `module_name` and `role` are preserved (user intent wins over auto-derivation).
 9. Unresolved dep diagnostics are a fail-fast error at `basecamp modules` time — the dep name must resolve to an entry in `[modules]`, a `metadata.json` source flake-input pin, the scaffold default pin table, or the basecamp preinstall list, otherwise the command exits non-zero before writing any state. No warn-and-skip path for required deps; an `optional_dependencies` entry that resolves nowhere is skipped with a note, since basecamp loads the module without it.
-10. No migration path for the captured module set: the whole `basecamp` subcommand is unreleased. Users on earlier iterations re-run `basecamp modules` against a fresh scaffold.toml.
+10. No migration path for the captured module set: the whole `basecamp` subcommand is unreleased. Users on earlier iterations re-run `basecamp modules` against a fresh scaffold.toml. *(Superseded. See R9.)*
 
 ### Reliability
 
@@ -169,10 +169,10 @@
 
 ### Supportability
 
-1. `logos-scaffold doctor` gains a basecamp section when `.scaffold/basecamp/` exists, covering binary presence, profile integrity, and installed-module state.
+1. `logos-scaffold doctor` gains a basecamp section when `.scaffold/basecamp/` exists, covering binary presence, profile integrity, and installed-module state. *(These checks live in `basecamp doctor`. See R10.)*
 2. Basecamp and `lgpm` pinned commits are explicit in `scaffold.toml`, and the defaults move as a set: scaffold's default `lgpm` rev is the one the pinned basecamp release locks, because the app embeds that same package-manager library to read what `lgpm` installed. Scaffold supports one basecamp release at a time (currently 0.3.0): `setup` moves a project still on a retired *default* pin set (and captured default companion flakes) to the current one and says so; any pin that is not exactly one of scaffold's retired defaults is kept until the user edits both and re-runs `setup`. A deliberate pin to a retired default is moved too — scaffold cannot tell it from a left-behind one.
 3. `.scaffold/state/basecamp.state` is plain-text and line-oriented, matching existing scaffold state conventions.
-4. Dogfooding scenarios (`B1`–`B4` in `DOGFOODING.md`) cover setup, single-instance, multi-instance p2p, and clean-slate behaviors.
+4. Dogfooding scenarios (`B1`–`B4` in `DOGFOODING.md`) cover setup, single-instance, multi-instance p2p, and clean-slate behaviors. *(Now `B1`–`B7`. See R10.)*
 5. `build-portable`'s manual load-into-AppImage step is explicit: scaffold stages browsable symlinks under `.scaffold/basecamp/portable/` but does not know or auto-feed the AppImage's install dialog. The AppImage lifecycle is intentionally outside scaffold's scope — see ADR "AppImage Path is Outside Scaffold's Scope".
 6. Known limitation: multi-sub-flake projects must unify transitive `logos-module-builder` references via `inputs.<dep>.inputs.logos-module-builder.follows = "logos-module-builder"`. Without it, `install` can fail via the overridden sibling's lock even when a direct `nix build` succeeds. Documented fully in `docs/basecamp-module-requirements.md`; expected to become obsolete once upstream `logos-module-builder` scaffolding emits this `follows` automatically.
 7. Assumption notes from Usability 7 are printed to stderr (not the captured log), so pasting them into a bug report is straightforward.
@@ -205,3 +205,110 @@
 - `.#lgx` flake output on the project (or sub-flakes) — `.#lgx-portable`-only projects fail explicitly until they expose `.#lgx`.
 - `.#lgx-portable` flake output for any module the developer wants to test against a basecamp AppImage. Projects without it get a clear error from `build-portable`, not a silent miss.
 - Modules that bind sockets must honor external port override via env var (names chosen by each module) for multi-instance launch to be fully useful.
+
+## FURPS+ — Revisions (scaffold 0.4.1)
+
+The sections above describe requirements as they were written. This section records where the
+shipped product has moved away from them, and the requirements it has gained since. An item
+marked *(Superseded …)* or *(… See R#)* above is governed by the matching entry here.
+`DOGFOODING.md` and `docs/commands.md` are the operational detail.
+
+### Corrections
+
+- **R1. No DevNet target.** Scaffold targets project-local sequencers only: the `localnet`
+  developer sequencer and `test-node` instances. No DevNet profile, RPC configuration or
+  deploy path exists. The network configuration lives in `scaffold.toml` (`[localnet].port`)
+  and the wallet config under `[wallet].home_dir`, not in env files. The generated
+  `.env.local` carries only `RUST_LOG` and `RISC0_DEV_MODE`. The DevNet items in Functionality
+  1/3, Supportability 2 and the DevNet RPC runtime dependency remain open goals, not shipped
+  behavior.
+- **R2. Guest build producers.** `[build].guest = "docker"` (Functionality 10) is the default.
+  The host `cargo build --manifest-path methods/Cargo.toml` path of Functionality 5 runs only
+  under `[build].guest = "local"`. spel projects (`framework.kind = "spel"`) ignore
+  `[build].guest` and always build their guest through `make build` (`cargo risczero build`
+  in Docker).
+- **R3. spel location and pins.** By default spel is cache-managed, not project-local: it is
+  checked out at `<cache_root>/repos/spel/<pin>`, with `[repos.spel].path` left empty so
+  `scaffold.toml` stays portable. It is cloned into `.scaffold/repos/spel` only for
+  `--vendor-deps` projects or when `[repos.spel].path` is set. The current defaults are spel
+  `v0.7.0` and LEZ `v0.2.4`. The alignment rule (spel vendors the same LEZ that scaffold
+  pins, which `doctor` checks) still holds.
+- **R4. Default wallet seeding.** Seeding is deterministic only when the pinned LEZ debug
+  wallet config ships a preconfigured account. LEZ v0.2.x ships none, so `setup` runs the
+  wallet once to create its storage and adopts the first public account it lists. That is
+  freshly generated key material, protected by `LOGOS_SCAFFOLD_WALLET_PASSWORD`. From LEZ
+  v0.2.4 every wallet command needs a running sequencer, so with no localnet up seeding is
+  reported as deferred and completes on the next `run`, or on the next `setup`/`build` with
+  localnet up.
+- **R5. `--json` is not deploy-only.** Machine-readable output is available on `doctor`,
+  `localnet status`, `localnet logs`, `wallet list`, `wallet topup`, `basecamp doctor`,
+  `basecamp paths`, and every `test-node` subcommand, as well as `deploy`. `run` still has no
+  `--json`.
+- **R6. `lgs run` options.** In addition to Functionality 1–6 of `lgs run`:
+  - deploy is skipped when guest binaries, IDL, config and the sequencer instance are
+    unchanged (state in `.scaffold/state/run_deploy.json`);
+  - `--profile NAME` selects a `[run.profiles.<name>]` pipeline;
+  - `--reset` wipes sequencer state and the wallet and re-seeds before the run, and
+    `--no-reset` overrides a config default;
+  - `--watch` re-runs the pipeline on file changes, filtered by `[run.watch]` include/exclude
+    globs with a debounce;
+  - `--localnet-timeout` bounds the localnet start (default 120 s).
+- **R7. Custom basecamp profiles.** Besides `alice` and `bob`, any `[basecamp.profiles.<name>]`
+  whose name is a single safe path component launches the same way. Profiles can set
+  `env_file`, `runtime_dir`, `log_file` and an inline `env`. `[basecamp.env]` and
+  `[basecamp.env_append]` apply to every profile.
+- **R8. No per-module port overrides yet.** `basecamp launch` exports no module port-override
+  env vars, because no module has published names to set. `[basecamp].port_base` /
+  `port_stride` are parsed and round-tripped, but nothing uses them at launch. Isolation
+  between concurrent profiles comes from per-profile XDG dirs, `HOME`, `LOGOS_USER_DIR` and a
+  private runtime dir. A module-level port collision belongs to the owning module.
+- **R9. Basecamp migration exists.** `basecamp` has shipped. `init` migrates the pre-0.2.0
+  `[basecamp.modules.*]`, `[basecamp].pin`, `.source` and `.lgpm_flake` to `[modules.*]`,
+  `[repos.basecamp]` and `[repos.lgpm]`. `basecamp setup` moves projects off retired default
+  pin sets (ADR "Scaffold Supports One Basecamp Release").
+- **R10. Basecamp diagnostics and coverage.** Basecamp health checks are reported by
+  `basecamp doctor`, not by the top-level `doctor`. Dogfooding coverage is `B1`–`B7`. That
+  adds artefact builds by variant (`B5`), the standalone run loop (`B6`), and pin-set checks
+  that need no app build (`B7`).
+
+### Added requirements
+
+#### Functionality
+
+- **A1. Circuits are project configuration.** `scaffold.toml` `[circuits]` pins the
+  `logos-blockchain-circuits` release. `setup`, `build`, `build idl`, `localnet` and
+  test-node startup download it into `[circuits].install_dir` (default `.scaffold/circuits`)
+  on first need. `LOGOS_BLOCKCHAIN_CIRCUITS` overrides it with a local checkout. Ambient
+  `~/.logos-blockchain-circuits/` is not consulted.
+- **A2. Test nodes.** `test-node` runs isolated, short-lived sequencers for integration tests.
+  Each has its own port, config, database, log and runtime dir under
+  `.scaffold/test-nodes/<id>`. They follow the caller project's LEZ and circuits pins, and each
+  resolved value reports its origin. Caller-provided LEZ checkouts are validated, never
+  mutated. Test nodes offer typed reads with structured outcomes: transaction outcomes,
+  classified blocks, clock state, block-scoped account and proof reads, and exact-state
+  seeding. These are also available as `api::testnode`.
+- **A3. Localnet reset.** `localnet reset` stops the sequencer, clears chain state, restarts it
+  and verifies block production. It requires `--yes` unless `--dry-run` is passed.
+  `--reset-wallet` also deletes the project wallet.
+- **A4. Paced multi-program deploys.** `deploy` submits one program per sequencer block,
+  because the pinned LEZ panics on blocks whose inscription exceeds about 896 KiB. A stalled
+  head aborts the remaining submissions with a non-zero exit instead of batching them.
+  `LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS` raises the ceiling.
+- **A5. Verified prebuilt sequencer.** `setup --prebuilt` installs a downloaded
+  `sequencer_service` only if it matches the published `sequencer_service.sha256`. A missing
+  or unusable checksum falls back to a source build, and a mismatch is a hard error.
+- **A6. AI skills in every project.** `new`, `new --template spel` and `init` install the
+  canonical `lgs-cli`, `lez-template`, `spel-template` and `basecamp` skills into
+  `.claude/skills/` and `.cursor/rules/`, with an `AGENTS.md` index. They are
+  version-controlled. Re-running `init` refreshes them idempotently and touches only those
+  four names.
+- **A7. Library surface.** `logos_scaffold::api` exposes setup, localnet, wallet, deploy,
+  doctor, report and test-node operations against an explicit project root, with typed
+  results and categorized errors (`api::Error`).
+
+#### Usability
+
+- **A8.** `init --dry-run` previews an adoption or migration, and migrations write
+  `scaffold.toml.bak` unless `--no-backup` is passed.
+- **A9.** `completions <bash|zsh>` prints completion scripts for both binary names. Global
+  `-q`/`--quiet` (or `LOGOS_SCAFFOLD_QUIET=1`) suppresses echoed external commands.
