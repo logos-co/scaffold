@@ -37,8 +37,8 @@ localnet ready (sequencer pid=<pid>)
   program_id: <hex>
 
 Deployed programs:
-  lez_counter
-    Binary: <project>/target/riscv-guest/.../lez_counter.bin
+  my_app
+    Binary: <project>/methods/guest/target/riscv32im-risc0-zkvm-elf/docker/my_app.bin
 
 Sequencer: http://127.0.0.1:3040
 ```
@@ -235,10 +235,6 @@ against the result.
 See the [SPEL docs](https://github.com/logos-co/spel/tree/main/docs) for the
 framework itself, and `skills/spel-template/` here for the scaffold-side
 workflow.
-
-> `--template lez-framework` still works as a deprecated alias: `lez-framework`
-> was renamed to SPEL, it is not a separate framework. It now scaffolds a SPEL
-> project and prints a warning.
 
 ## Troubleshooting
 

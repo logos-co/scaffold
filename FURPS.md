@@ -110,7 +110,7 @@
 #### Internal Dependencies
 
 - `cmd_build_shortcut` for the build phase.
-- `build_idl_for_current_project` for IDL generation (no-op for non-lez-framework projects).
+- `build_idl_for_current_project` for IDL generation (SPEL projects generate their IDL inside `build`; only legacy `lez-framework` projects run it as a separate step, and `default` projects skip it).
 - `cmd_localnet` (start) for localnet lifecycle when no managed sequencer is already running.
 - `cmd_wallet_topup_inner` for the topup phase.
 - `cmd_deploy` for deploy submission and `extract_program_id` for image-ID extraction.
