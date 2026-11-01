@@ -38,11 +38,9 @@ pub(crate) const DEFAULT_SPEL: GitRef = GitRef {
 /// `logos-blockchain-{pol,poc,poq,zksign}` build script reads at compile time
 /// via `logos-blockchain-circuits-utils::circuits_dir()`.
 ///
-/// Pinned to the version LEZ v0.1.2's `flake.lock` resolves to (its
-/// `logos-blockchain-circuits` input is `d6cf41f…`, whose `flake.nix` declares
-/// `circuitsVersion = "0.4.1"`). A mismatched circuits release silently
-/// produces incompatible verifier keys, so bump this in lock-step with
-/// `DEFAULT_LB_PIN` / `DEFAULT_LEZ`.
+/// A mismatched circuits release silently produces incompatible verifier
+/// keys, so bump this in lock-step with `DEFAULT_LEZ` (match the
+/// `circuitsVersion` its `flake.lock` resolves to).
 ///
 /// Default for `[circuits].version`. Materialised on demand into the
 /// project's `[circuits].install_dir` (default `.scaffold/circuits`) by

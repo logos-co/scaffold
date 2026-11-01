@@ -39,6 +39,8 @@ use base64::Engine as _;
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::doctor_checks::one_line;
+
 /// Block id and timestamp a transaction executed against.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct BlockContext {
@@ -705,10 +707,6 @@ fn extract_jsonrpc_error(operation: &str, body: &Value) -> Option<RpcError> {
             .map(ToString::to_string)
             .unwrap_or_else(|| one_line(&error.to_string())),
     })
-}
-
-fn one_line(text: &str) -> String {
-    text.replace(['\n', '\r'], " ")
 }
 
 #[cfg(test)]

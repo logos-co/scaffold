@@ -1300,16 +1300,8 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                  `build idl` and `build client` only regenerate IDL/client code from source. \
                  Run `logos-scaffold build --guest <MODE>` on its own."
             ),
-            Some(BuildSubcommand::Idl(sub)) => cmd_idl(
-                &sub.project_path
-                    .map(|p| vec!["build".to_string(), p.to_string_lossy().to_string()])
-                    .unwrap_or_else(|| vec!["build".to_string()]),
-            ),
-            Some(BuildSubcommand::Client(sub)) => cmd_client(
-                &sub.project_path
-                    .map(|p| vec!["build".to_string(), p.to_string_lossy().to_string()])
-                    .unwrap_or_else(|| vec!["build".to_string()]),
-            ),
+            Some(BuildSubcommand::Idl(sub)) => cmd_idl(sub.project_path.as_deref()),
+            Some(BuildSubcommand::Client(sub)) => cmd_client(sub.project_path.as_deref()),
             None => cmd_build_shortcut(
                 args.project_path,
                 args.prebuilt,

@@ -5,21 +5,17 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context};
 
-use crate::config::{
-    default_basecamp_repo, default_lez_repo, default_lgpm_repo, default_spel_repo, serialize_config,
-};
+use crate::config::serialize_config;
 use crate::constants::{
-    DEFAULT_BASECAMP_PIN, DEFAULT_FRAMEWORK_IDL_PATH, DEFAULT_FRAMEWORK_IDL_SPEC,
-    DEFAULT_FRAMEWORK_VERSION, DEFAULT_LEZ, DEFAULT_LGPM_PIN, DEFAULT_SPEL, FRAMEWORK_KIND_DEFAULT,
-    FRAMEWORK_KIND_LEZ_FRAMEWORK, FRAMEWORK_KIND_SPEL, LEZ_SOURCE, SCAFFOLD_TOML_SCHEMA_VERSION,
-    SPEL_BIN_REL_PATH, SPEL_SOURCE,
+    DEFAULT_LEZ, DEFAULT_SPEL, FRAMEWORK_KIND_DEFAULT, FRAMEWORK_KIND_LEZ_FRAMEWORK,
+    FRAMEWORK_KIND_SPEL, SPEL_BIN_REL_PATH, SPEL_SOURCE,
 };
-use crate::model::{Config, FrameworkConfig, FrameworkIdlConfig, LocalnetConfig, RunConfig};
+use crate::model::Config;
 use crate::process::{apply_host_cc_overrides, run_checked};
 use crate::project::bootstrap_cache_root;
 use crate::repo::{sync_repo_to_pin_at_path_with_opts, RepoSyncOptions};
 use crate::state::write_text;
-use crate::template::copy::{copy_dir_contents, patch_tail_call_program_ids};
+use crate::template::copy::{copy_dir_recursive, patch_tail_call_program_ids};
 use crate::template::project::{apply_overlay, ensure_scaffold_in_gitignore, OverlayRenderContext};
 use crate::template::skills::apply_skills;
 use crate::DynResult;
@@ -311,14 +307,8 @@ fn cmd_new_default(
         to_cargo_crate_name(file_name)
     };
 
-    fs::create_dir_all(target.join(".scaffold/state"))?;
-    fs::create_dir_all(target.join(".scaffold/logs"))?;
-
-    let lez_source = cmd
-        .lez_path
-        .as_ref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| LEZ_SOURCE.to_string());
+    let cfg = build_scaffold_config(cmd, template_variant);
+    let lez_source = cfg.lez.source.clone();
 
     // First-run noise reduction: scaffold normally echoes every git
     // subprocess. Suppress the echo for the LEZ sync only.
@@ -358,65 +348,12 @@ fn cmd_new_default(
         }
     };
 
-    // spel is recorded in scaffold.toml here but actually cloned + built by
-    // `setup`. Persist `path` only for vendored projects (relative,
-    // project-local). Cache-managed projects leave it empty so scaffold.toml
-    // stays portable; `resolve_repo_path` derives the on-disk location from
-    // cache_root + pin at runtime.
-    let (lez_persisted_path, spel_persisted_path) = if cmd.vendor_deps {
-        (
-            ".scaffold/repos/lez".to_string(),
-            ".scaffold/repos/spel".to_string(),
-        )
-    } else {
-        (String::new(), String::new())
-    };
-
-    let mut lez = default_lez_repo(DEFAULT_LEZ.sha);
-    lez.source = lez_source;
-    lez.path = lez_persisted_path;
-    let mut spel = default_spel_repo(DEFAULT_SPEL.sha);
-    spel.path = spel_persisted_path;
-
-    let persisted_cache_root = match &cmd.cache_root {
-        Some(p) => p.display().to_string(),
-        None => String::new(),
-    };
-
-    let cfg = Config {
-        version: SCAFFOLD_TOML_SCHEMA_VERSION.to_string(),
-        cache_root: persisted_cache_root,
-        lez,
-        spel,
-        // Default scaffolded projects don't pin basecamp/lgpm — only
-        // projects building Logos modules need them. `lgs basecamp setup`
-        // is the entry point that backfills those sections, mirroring how
-        // `lgs init` backfills `[repos.spel]` for pre-spel projects.
-        basecamp_repo: Some(default_basecamp_repo(DEFAULT_BASECAMP_PIN)),
-        lgpm_repo: Some(default_lgpm_repo(DEFAULT_LGPM_PIN)),
-        wallet_home_dir: ".scaffold/wallet".to_string(),
-        circuits: crate::model::CircuitsConfig::default(),
-        framework: FrameworkConfig {
-            kind: template_variant.to_string(),
-            version: DEFAULT_FRAMEWORK_VERSION.to_string(),
-            idl: FrameworkIdlConfig {
-                spec: DEFAULT_FRAMEWORK_IDL_SPEC.to_string(),
-                path: DEFAULT_FRAMEWORK_IDL_PATH.to_string(),
-            },
-        },
-        build: crate::model::BuildConfig::default(),
-        localnet: LocalnetConfig::default(),
-        modules: std::collections::BTreeMap::new(),
-        basecamp: None,
-        run: RunConfig::default(),
-    };
-
     let template_root = lez_repo_path.join("examples/program_deployment");
     if !template_root.exists() {
         bail!("template not found at {}", template_root.display());
     }
 
-    copy_dir_contents(&template_root, target).context("failed to copy scaffold template")?;
+    copy_dir_recursive(&template_root, target).context("failed to copy scaffold template")?;
     if template_variant == FRAMEWORK_KIND_DEFAULT {
         patch_tail_call_program_ids(target)?;
     }
@@ -459,60 +396,24 @@ fn cmd_new_default(
 }
 
 fn build_scaffold_config(cmd: &NewCommand, framework_kind: &str) -> Config {
-    let (lez_persisted_path, spel_persisted_path) = if cmd.vendor_deps {
-        (
-            ".scaffold/repos/lez".to_string(),
-            ".scaffold/repos/spel".to_string(),
-        )
-    } else {
-        (String::new(), String::new())
-    };
-
-    let lez_source = cmd
-        .lez_path
-        .as_ref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| LEZ_SOURCE.to_string());
-
-    let mut lez = default_lez_repo(DEFAULT_LEZ.sha);
-    lez.source = lez_source;
-    lez.path = lez_persisted_path;
-    let mut spel = default_spel_repo(DEFAULT_SPEL.sha);
-    spel.path = spel_persisted_path;
-
-    // Persist only an explicitly requested cache root. Recording the derived
-    // bootstrap path here would bake a machine-specific absolute path
-    // (`/home/<user>/.cache/logos-scaffold`) into every committed
-    // scaffold.toml; left empty, `resolve_cache_root` derives it at runtime
-    // and the file stays portable. `cmd_new_default` does the same.
-    let persisted_cache_root = match &cmd.cache_root {
-        Some(p) => p.display().to_string(),
-        None => String::new(),
-    };
-
-    Config {
-        version: SCAFFOLD_TOML_SCHEMA_VERSION.to_string(),
-        cache_root: persisted_cache_root,
-        lez,
-        spel,
-        basecamp_repo: Some(default_basecamp_repo(DEFAULT_BASECAMP_PIN)),
-        lgpm_repo: Some(default_lgpm_repo(DEFAULT_LGPM_PIN)),
-        wallet_home_dir: ".scaffold/wallet".to_string(),
-        circuits: crate::model::CircuitsConfig::default(),
-        framework: FrameworkConfig {
-            kind: framework_kind.to_string(),
-            version: DEFAULT_FRAMEWORK_VERSION.to_string(),
-            idl: FrameworkIdlConfig {
-                spec: DEFAULT_FRAMEWORK_IDL_SPEC.to_string(),
-                path: DEFAULT_FRAMEWORK_IDL_PATH.to_string(),
-            },
-        },
-        build: crate::model::BuildConfig::default(),
-        localnet: LocalnetConfig::default(),
-        modules: std::collections::BTreeMap::new(),
-        basecamp: None,
-        run: RunConfig::default(),
+    let mut cfg = crate::config::default_config(framework_kind);
+    if let Some(p) = &cmd.lez_path {
+        cfg.lez.source = p.display().to_string();
     }
+    // spel is recorded here but cloned and built by `setup`. Vendored
+    // projects persist project-local paths; cache-managed ones leave `path`
+    // empty so `resolve_repo_path` derives it from cache_root + pin.
+    if cmd.vendor_deps {
+        cfg.lez.path = ".scaffold/repos/lez".to_string();
+        cfg.spel.path = ".scaffold/repos/spel".to_string();
+    }
+    // Persist only an explicitly requested cache root. The derived bootstrap
+    // path is machine-specific; left empty, `resolve_cache_root` derives it
+    // at runtime and scaffold.toml stays portable.
+    if let Some(p) = &cmd.cache_root {
+        cfg.cache_root = p.display().to_string();
+    }
+    cfg
 }
 
 pub(crate) fn to_cargo_crate_name(input: &str) -> String {

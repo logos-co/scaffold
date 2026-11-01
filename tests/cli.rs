@@ -24,7 +24,6 @@ use common::test_node::{
     TestNodeFixtures,
 };
 
-const TEST_PIN: &str = "767b5afd388c7981bcdf6f5b5c80159607e07e5b";
 const VALID_ACCOUNT_ID: &str = "6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV";
 const VALID_PUBLIC_ADDRESS: &str = "Public/6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV";
 const DEFAULT_WALLET_PASSWORD: &str = "logos-scaffold-v0";
@@ -32,8 +31,7 @@ const GUEST_BIN_REL_PATH: &str =
     "target/riscv-guest/example_program_deployment_methods/example_program_deployment_programs/riscv32im-risc0-zkvm-elf/release";
 
 /// Minimal valid `scaffold.toml` content for tests that only need the project
-/// context to exist (no basecamp section). Older tests in this file inline
-/// the same content; new tests should prefer this helper.
+/// context to exist (no basecamp section).
 const MINIMAL_SCAFFOLD_TOML: &str = r#"[scaffold]
 version = "0.2.0"
 cache_root = "cache"
@@ -3890,27 +3888,16 @@ fn write_scaffold_toml_with_localnet(
     localnet_port: Option<u16>,
     risc0_dev_mode: Option<bool>,
 ) {
-    let spel_path = project_root.join("spel");
-    // Schema 0.2.0: no url, no [basecamp] / [basecamp.modules.*],
-    // path is set on lez/spel for back-compat (tests need a literal path
-    // to a local stub repo).
-    let mut content = format!(
-        "[scaffold]\nversion = \"0.2.0\"\ncache_root = \"{}\"\n\n[repos.lez]\nsource = \"https://github.com/logos-blockchain/logos-execution-zone.git\"\npin = \"{}\"\npath = \"{}\"\n\n[repos.spel]\nsource = \"https://github.com/logos-co/spel.git\"\npin = \"{}\"\npath = \"{}\"\n\n[wallet]\nhome_dir = \".scaffold/wallet\"\n",
-        project_root.join("cache").display(),
-        TEST_PIN,
-        lez_path.display(),
-        TEST_PIN,
-        spel_path.display(),
-    );
-
+    common::test_node::write_scaffold_toml(project_root, lez_path);
     if let Some(port) = localnet_port {
         let risc0_dev_mode = risc0_dev_mode.unwrap_or(true);
+        let path = project_root.join("scaffold.toml");
+        let mut content = fs::read_to_string(&path).expect("read scaffold.toml");
         content.push_str(&format!(
             "\n[localnet]\nport = {port}\nrisc0_dev_mode = {risc0_dev_mode}\n"
         ));
+        fs::write(path, content).expect("write scaffold.toml");
     }
-
-    fs::write(project_root.join("scaffold.toml"), content).expect("write scaffold.toml");
 }
 
 fn unused_local_port() -> u16 {

@@ -75,10 +75,8 @@ pub(crate) fn write_basecamp_state(path: &Path, state: &BasecampState) -> DynRes
     check_state_value("basecamp_bin", &state.basecamp_bin)?;
     check_state_value("lgpm_bin", &state.lgpm_bin)?;
 
-    // Source lines are no longer part of the state file — the captured module
-    // set lives in `[modules.*]` in scaffold.toml (schema v0.2.0). Any
-    // residual `project_sources` / `dependencies` values on the struct are
-    // intentionally ignored here; the fields are removed in Phase 3.
+    // The captured module set lives in `[modules.*]` in scaffold.toml, not
+    // in this file.
     let mut content = String::new();
     if !state.pin.is_empty() {
         content.push_str(&format!("pin={}\n", state.pin));
@@ -148,6 +146,31 @@ pub(crate) fn prepare_wallet_home(lez_repo: &Path, wallet_home: &Path) -> DynRes
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn write_text_atomic_replaces_in_place_without_following_a_planted_tmp() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join("state").join("run_deploy.json");
+        write_text_atomic(&path, "old").expect("first write");
+        let victim = tmp.path().join("victim.txt");
+        fs::write(&victim, "keep").expect("write victim");
+        // The fixed name the hand-rolled cache writers used to stage through.
+        let planted = path.with_file_name("run_deploy.json.tmp");
+        symlink(&victim, &planted).expect("plant tmp symlink");
+
+        write_text_atomic(&path, "new").expect("second write");
+
+        assert_eq!(fs::read_to_string(&path).expect("read"), "new");
+        assert_eq!(fs::read_to_string(&victim).expect("read victim"), "keep");
+        let mut left: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .expect("read dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["run_deploy.json", "run_deploy.json.tmp"]);
+    }
 
     #[test]
     fn basecamp_state_roundtrips_pin_artifacts() {

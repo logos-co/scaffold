@@ -56,10 +56,8 @@ pub(crate) fn current_localnet_pid(project: &Project) -> Option<u32> {
 
 pub(crate) fn compute_program_hashes(project: &Project) -> DynResult<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
-    // `discover_deployable_programs` returns an empty Vec when the bin dir
-    // is missing, so we don't need to pre-check. Surfacing its errors
-    // (unreadable dir, etc.) is preferable to silently treating them as
-    // "no programs to hash".
+    // `discover_deployable_programs` errors when the bin dir is missing or
+    // unreadable; surfacing that beats silently hashing "no programs".
     let programs = discover_deployable_programs(&project.root)?;
     if programs.is_empty() {
         return Ok(out);
@@ -133,7 +131,7 @@ pub(crate) fn compute_program_hashes(project: &Project) -> DynResult<BTreeMap<St
                 project.root.join(RUN_DEPLOY_STATE_REL).display()
             );
         }
-        out.insert(stem, hex_encode(&hasher.finalize()));
+        out.insert(stem, crate::hex(&hasher.finalize()));
     }
     Ok(out)
 }
@@ -209,23 +207,8 @@ pub(crate) fn load_state(project: &Project) -> RunDeployState {
 }
 
 pub(crate) fn save_state(project: &Project, state: &RunDeployState) -> DynResult<()> {
-    let path = state_path(&project.root);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
-    let bytes = serde_json::to_vec_pretty(state).context("serialize run_deploy.json")?;
-    // Atomic write: stage to a sibling tempfile, then rename. A SIGINT
-    // between write and rename leaves the prior cache intact rather than
-    // truncating it. Same parent dir so rename(2) stays atomic across the
-    // same filesystem.
-    let tmp_name = match path.file_name().and_then(|n| n.to_str()) {
-        Some(n) => format!("{n}.tmp"),
-        None => return Err(anyhow::anyhow!("invalid state path: {}", path.display())),
-    };
-    let tmp = path.with_file_name(tmp_name);
-    std::fs::write(&tmp, &bytes).with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
+    let text = serde_json::to_string_pretty(state).context("serialize run_deploy.json")?;
+    crate::state::write_text_atomic(&state_path(&project.root), &text)
 }
 
 /// `true` → all known programs hashed, hashes match prior, AND the
@@ -253,15 +236,6 @@ pub(crate) fn deploy_can_be_skipped(
 
 fn state_path(project_root: &Path) -> std::path::PathBuf {
     project_root.join(RUN_DEPLOY_STATE_REL)
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
 }
 
 #[cfg(test)]
@@ -331,11 +305,6 @@ mod tests {
         let prior_empty = state_with(&[], Some(42));
         assert!(!deploy_can_be_skipped(&empty, Some(42), &prior_with));
         assert!(!deploy_can_be_skipped(&nonempty, Some(42), &prior_empty));
-    }
-
-    #[test]
-    fn hex_encode_is_lowercase_padded() {
-        assert_eq!(hex_encode(&[0x0a, 0xff, 0x00]), "0aff00");
     }
 
     #[test]

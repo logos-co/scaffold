@@ -151,7 +151,7 @@ impl TestNodeClient {
     /// transport failures.
     pub fn proof(&self, commitment: &str, at: ReadAt) -> Result<ProofRead, RpcError> {
         let bytes = parse_commitment(commitment)?;
-        let commitment_hex = hex_string(&bytes);
+        let commitment_hex = crate::hex(&bytes);
         let param: Vec<u64> = bytes.iter().map(|byte| u64::from(*byte)).collect();
 
         let (block_id, (proof, root)) =
@@ -192,7 +192,7 @@ impl TestNodeClient {
                 };
                 let root = byte_array(&pair[1])
                     .filter(|bytes| bytes.len() == 32)
-                    .map(|bytes| hex_string(&bytes))
+                    .map(|bytes| crate::hex(&bytes))
                     .ok_or_else(|| malformed(format!("root is not 32 bytes: {}", pair[1])))?;
                 Ok((proof, Some(root)))
             }
@@ -272,7 +272,7 @@ fn parse_account_value(value: &Value) -> AccountValue {
         };
     };
 
-    let balance = match read_u128_field(object.get("balance")) {
+    let balance = match super::blocks::read_u128(object.get("balance")) {
         Some(balance) => balance,
         None => {
             return AccountValue::DecodeError {
@@ -281,7 +281,7 @@ fn parse_account_value(value: &Value) -> AccountValue {
             }
         }
     };
-    let nonce = match read_u128_field(object.get("nonce")) {
+    let nonce = match super::blocks::read_u128(object.get("nonce")) {
         Some(nonce) => nonce,
         None => {
             return AccountValue::DecodeError {
@@ -349,20 +349,12 @@ fn parse_account_value(value: &Value) -> AccountValue {
 
     AccountValue::Present {
         encoded: base64::engine::general_purpose::STANDARD.encode(&encoded),
-        program_owner: hex_string(&owner_bytes),
+        program_owner: crate::hex(&owner_bytes),
         balance,
         nonce,
         data: base64::engine::general_purpose::STANDARD.encode(&data),
         data_len: data.len(),
     }
-}
-
-fn read_u128_field(value: Option<&Value>) -> Option<u128> {
-    let value = value?;
-    if let Some(number) = value.as_u64() {
-        return Some(u128::from(number));
-    }
-    serde_json::from_value::<u128>(value.clone()).ok()
 }
 
 /// `MembershipProof = (usize, Vec<[u8; 32]>)` on the wire: `[index, [path…]]`.
@@ -379,7 +371,7 @@ fn parse_proof(value: &Value) -> Result<ProofValue, String> {
         .map(|node| {
             byte_array(node)
                 .filter(|bytes| bytes.len() == 32)
-                .map(|b| hex_string(&b))
+                .map(|b| crate::hex(&b))
         })
         .collect::<Option<Vec<String>>>()
         .ok_or("proof path nodes are not 32-byte arrays")?;
@@ -429,15 +421,6 @@ fn parse_commitment(input: &str) -> Result<[u8; 32], RpcError> {
             "expected 64 hex characters or base58 of 32 bytes".to_string(),
         )),
     }
-}
-
-fn hex_string(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
 }
 
 #[cfg(test)]

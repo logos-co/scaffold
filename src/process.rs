@@ -656,7 +656,6 @@ pub(crate) fn spawn_to_log(cmd: &mut Command, log_path: &Path) -> DynResult<u32>
     Ok(child.id())
 }
 
-#[cfg(unix)]
 pub(crate) fn pid_alive(pid: u32) -> bool {
     Command::new("kill")
         .arg("-0")
@@ -668,12 +667,6 @@ pub(crate) fn pid_alive(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(not(unix))]
-pub(crate) fn pid_alive(_pid: u32) -> bool {
-    false
-}
-
-#[cfg(unix)]
 fn pid_is_zombie(pid: u32) -> bool {
     let output = Command::new("ps")
         .arg("-o")
@@ -699,22 +692,24 @@ fn pid_is_zombie(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(not(unix))]
-fn pid_is_zombie(_pid: u32) -> bool {
-    false
-}
-
-#[cfg(unix)]
 pub(crate) fn pid_running(pid: u32) -> bool {
     pid_alive(pid) && !pid_is_zombie(pid)
 }
 
-#[cfg(not(unix))]
-pub(crate) fn pid_running(_pid: u32) -> bool {
-    false
+/// Poll until `pid` is gone (or a zombie); `false` if it outlives `timeout`.
+pub(crate) fn wait_for_pid_exit(pid: u32, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if !pid_running(pid) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
-#[cfg(unix)]
 pub(crate) fn pid_command(pid: u32) -> Option<String> {
     let output = Command::new("ps")
         .arg("-o")
@@ -738,11 +733,6 @@ pub(crate) fn pid_command(pid: u32) -> Option<String> {
         .map(ToString::to_string)
 }
 
-#[cfg(not(unix))]
-pub(crate) fn pid_command(_pid: u32) -> Option<String> {
-    None
-}
-
 pub(crate) fn port_open(addr: &str) -> bool {
     let parsed: SocketAddr = match addr.parse() {
         Ok(v) => v,
@@ -751,7 +741,6 @@ pub(crate) fn port_open(addr: &str) -> bool {
     TcpStream::connect_timeout(&parsed, Duration::from_millis(500)).is_ok()
 }
 
-#[cfg(unix)]
 pub(crate) fn listener_pid(port: u16) -> Option<u32> {
     let output = Command::new("lsof")
         .arg("-nP")
@@ -771,11 +760,6 @@ pub(crate) fn listener_pid(port: u16) -> Option<u32> {
     stdout
         .lines()
         .find_map(|line| line.trim().parse::<u32>().ok())
-}
-
-#[cfg(not(unix))]
-pub(crate) fn listener_pid(_port: u16) -> Option<u32> {
-    None
 }
 
 pub(crate) fn which(binary: &str) -> Option<PathBuf> {
