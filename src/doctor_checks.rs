@@ -3,6 +3,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::circuits::{circuits_install_dir, version_eq};
+use crate::commands::build::{probe_within, ProbeOutcome, CONTAINER_INFO_TIMEOUT};
 use crate::constants::{DEFAULT_CIRCUITS_VERSION, DEFAULT_LEZ, LOGOS_BLOCKCHAIN_CIRCUITS_ENV};
 use crate::model::{BuildConfig, CheckRow, CheckStatus, CircuitsConfig};
 use crate::process::{port_open, which};
@@ -104,44 +105,80 @@ pub(crate) fn check_container_runtime() -> CheckRow {
     // through `cargo risczero build`, which needs the daemon, so a stopped
     // daemon otherwise gives a clean `doctor` and a failing `build`.
     let selected = docker.as_ref().or(podman.as_ref());
-    let daemon_ok = selected.is_none_or(|bin| daemon_responds(bin));
-    container_runtime_row(docker, podman, daemon_ok)
+    let outcome = selected.map_or(ProbeOutcome::Ok, |bin| daemon_probe(bin));
+    let remote_var = selected.and_then(|bin| remote_host_var(bin));
+    container_runtime_row(docker, podman, outcome, remote_var)
 }
 
-/// Does the runtime's daemon answer? `info` is the cheapest call that fails
-/// when the daemon is down but the client is installed.
-///
-/// Bounded like `docker_daemon_running`: a `DOCKER_HOST` pointing at an
-/// unreachable remote can hang `info` for minutes, so a probe that does not
-/// answer in time counts as down.
-fn daemon_responds(bin: &Path) -> bool {
-    daemon_responds_within(bin, crate::commands::build::DOCKER_INFO_TIMEOUT)
+fn is_docker(bin: &Path) -> bool {
+    bin.file_name().is_some_and(|name| name == "docker")
 }
 
-fn daemon_responds_within(bin: &Path, timeout: std::time::Duration) -> bool {
+/// How the runtime's daemon answered `info`. Docker shares the per-process
+/// probe with the `guest build` row, so a stuck runtime costs one timeout, not
+/// two, and the two rows cannot disagree. Anything else (podman) is probed here.
+fn daemon_probe(bin: &Path) -> ProbeOutcome {
+    if is_docker(bin) {
+        crate::commands::build::docker_daemon_probe()
+    } else {
+        daemon_probe_within(bin, CONTAINER_INFO_TIMEOUT)
+    }
+}
+
+fn daemon_probe_within(bin: &Path, timeout: std::time::Duration) -> ProbeOutcome {
     let mut cmd = std::process::Command::new(bin);
     cmd.arg("info");
-    crate::commands::build::succeeds_within(cmd, timeout)
+    probe_within(cmd, timeout)
+}
+
+/// Name of the environment variable that points this runtime at a remote
+/// daemon, if it is set. Only the name is ever reported: the value can carry
+/// credentials, and `lgs report` output gets pasted into issues.
+fn remote_host_var(bin: &Path) -> Option<&'static str> {
+    let name = if is_docker(bin) {
+        "DOCKER_HOST"
+    } else {
+        "CONTAINER_HOST"
+    };
+    std::env::var_os(name)
+        .filter(|v| !v.is_empty())
+        .map(|_| name)
 }
 
 fn container_runtime_row(
     docker: Option<PathBuf>,
     podman: Option<PathBuf>,
-    daemon_ok: bool,
+    outcome: ProbeOutcome,
+    remote_var: Option<&str>,
 ) -> CheckRow {
     if let Some(path) = docker.as_ref().or(podman.as_ref()) {
-        if !daemon_ok {
+        if outcome != ProbeOutcome::Ok {
             let name = if docker.is_some() { "docker" } else { "podman" };
+            let detail = if outcome == ProbeOutcome::TimedOut {
+                format!(
+                    "found {name} at {} but `{name} info` did not answer within {}s; guest builds will fail",
+                    path.display(),
+                    CONTAINER_INFO_TIMEOUT.as_secs()
+                )
+            } else {
+                format!(
+                    "found {name} at {} but its daemon is not responding; guest builds will fail",
+                    path.display()
+                )
+            };
+            let remediation = match remote_var {
+                Some(var) => format!(
+                    "`{var}` is set, so {name} talks to a remote daemon that is down or unreachable: fix that connection, or unset `{var}` to use the local daemon, then re-run `logos-scaffold doctor`"
+                ),
+                None => format!(
+                    "Start the {name} daemon (e.g. `sudo systemctl start {name}`) and re-run `logos-scaffold doctor`"
+                ),
+            };
             return CheckRow {
                 status: CheckStatus::Warn,
                 name: "container runtime".to_string(),
-                detail: format!(
-                    "found {name} at {} but its daemon is not responding; guest builds will fail",
-                    path.display()
-                ),
-                remediation: Some(format!(
-                    "Start the {name} daemon (e.g. `sudo systemctl start {name}`) and re-run `logos-scaffold doctor`"
-                )),
+                detail,
+                remediation: Some(remediation),
             };
         }
     }
@@ -535,6 +572,7 @@ pub(crate) fn one_line(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::commands::build::ProbeOutcome;
     use std::path::PathBuf;
 
     use crate::constants::DEFAULT_CIRCUITS_VERSION;
@@ -641,20 +679,23 @@ mod tests {
     }
 
     #[test]
-    fn daemon_responds_reports_exit_status_and_gives_up_on_a_hung_probe() {
+    fn daemon_probe_within_tells_a_hung_probe_from_a_failing_one() {
         use std::time::{Duration, Instant};
 
         let probe =
-            |bin: &str, timeout| super::daemon_responds_within(std::path::Path::new(bin), timeout);
+            |bin: &str, timeout| super::daemon_probe_within(std::path::Path::new(bin), timeout);
         let long = Duration::from_secs(5);
-        assert!(probe("true", long));
-        assert!(!probe("false", long));
-        assert!(!probe("/nonexistent/docker", long));
+        assert_eq!(probe("true", long), ProbeOutcome::Ok);
+        assert_eq!(probe("false", long), ProbeOutcome::Failed);
+        assert_eq!(probe("/nonexistent/docker", long), ProbeOutcome::Failed);
 
         // `yes` never exits (it repeats its argument), standing in for a
         // `docker info` that hangs on an unreachable DOCKER_HOST.
         let started = Instant::now();
-        assert!(!probe("yes", Duration::from_millis(200)));
+        assert_eq!(
+            probe("yes", Duration::from_millis(200)),
+            ProbeOutcome::TimedOut
+        );
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "a hung probe must be cut off at the timeout"
@@ -662,11 +703,47 @@ mod tests {
     }
 
     #[test]
+    fn container_runtime_row_reports_a_timeout_and_names_the_remote_host_var() {
+        let row = container_runtime_row(
+            Some(PathBuf::from("/usr/bin/docker")),
+            None,
+            ProbeOutcome::TimedOut,
+            Some("DOCKER_HOST"),
+        );
+        assert!(matches!(row.status, crate::model::CheckStatus::Warn));
+        assert!(
+            row.detail.contains("did not answer within"),
+            "{}",
+            row.detail
+        );
+        let fix = row.remediation.as_deref().unwrap();
+        assert!(fix.contains("DOCKER_HOST"), "{fix}");
+        assert!(
+            !fix.contains("systemctl"),
+            "a local start cannot fix a remote daemon: {fix}"
+        );
+    }
+
+    #[test]
+    fn container_runtime_row_keeps_the_local_fix_when_no_remote_host_is_set() {
+        let row = container_runtime_row(
+            Some(PathBuf::from("/usr/bin/docker")),
+            None,
+            ProbeOutcome::Failed,
+            None,
+        );
+        assert!(row.detail.contains("not responding"), "{}", row.detail);
+        let fix = row.remediation.as_deref().unwrap();
+        assert!(fix.contains("systemctl start docker"), "{fix}");
+    }
+
+    #[test]
     fn container_runtime_row_prefers_docker() {
         let row = container_runtime_row(
             Some(PathBuf::from("/usr/local/bin/docker")),
             Some(PathBuf::from("/usr/local/bin/podman")),
-            true,
+            ProbeOutcome::Ok,
+            None,
         );
         assert_eq!(row.status, CheckStatus::Pass);
         assert!(row.detail.contains("docker"));
@@ -674,7 +751,12 @@ mod tests {
 
     #[test]
     fn container_runtime_row_passes_with_podman_when_docker_missing() {
-        let row = container_runtime_row(None, Some(PathBuf::from("/usr/local/bin/podman")), true);
+        let row = container_runtime_row(
+            None,
+            Some(PathBuf::from("/usr/local/bin/podman")),
+            ProbeOutcome::Ok,
+            None,
+        );
         assert_eq!(row.status, CheckStatus::Pass);
         assert!(row.detail.contains("podman"));
     }
@@ -683,7 +765,12 @@ mod tests {
     /// `doctor` followed by a failing spel guest build.
     #[test]
     fn container_runtime_row_warns_when_daemon_is_down() {
-        let row = container_runtime_row(Some(PathBuf::from("/usr/bin/docker")), None, false);
+        let row = container_runtime_row(
+            Some(PathBuf::from("/usr/bin/docker")),
+            None,
+            ProbeOutcome::Failed,
+            None,
+        );
         assert_eq!(row.status, CheckStatus::Warn);
         assert!(row.detail.contains("daemon is not responding"), "{row:?}");
         assert!(row.remediation.is_some(), "{row:?}");
@@ -691,7 +778,7 @@ mod tests {
 
     #[test]
     fn container_runtime_row_warns_when_missing() {
-        let row = container_runtime_row(None, None, true);
+        let row = container_runtime_row(None, None, ProbeOutcome::Ok, None);
         assert_eq!(row.status, CheckStatus::Warn);
         assert!(row.detail.contains("neither docker nor podman"));
         assert!(row.remediation.is_some());
