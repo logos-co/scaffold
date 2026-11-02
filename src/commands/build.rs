@@ -446,11 +446,11 @@ pub(crate) fn docker_daemon_running() -> bool {
     succeeds_within(cmd, DOCKER_INFO_TIMEOUT)
 }
 
-const DOCKER_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const DOCKER_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Run `cmd` with stdio detached; `true` only if it exits successfully within
 /// `timeout`. A command still running at the deadline is killed and reaped.
-fn succeeds_within(mut cmd: Command, timeout: std::time::Duration) -> bool {
+pub(crate) fn succeeds_within(mut cmd: Command, timeout: std::time::Duration) -> bool {
     let Ok(mut child) = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())

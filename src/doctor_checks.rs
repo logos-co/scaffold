@@ -110,14 +110,18 @@ pub(crate) fn check_container_runtime() -> CheckRow {
 
 /// Does the runtime's daemon answer? `info` is the cheapest call that fails
 /// when the daemon is down but the client is installed.
+///
+/// Bounded like `docker_daemon_running`: a `DOCKER_HOST` pointing at an
+/// unreachable remote can hang `info` for minutes, so a probe that does not
+/// answer in time counts as down.
 fn daemon_responds(bin: &Path) -> bool {
-    std::process::Command::new(bin)
-        .arg("info")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    daemon_responds_within(bin, crate::commands::build::DOCKER_INFO_TIMEOUT)
+}
+
+fn daemon_responds_within(bin: &Path, timeout: std::time::Duration) -> bool {
+    let mut cmd = std::process::Command::new(bin);
+    cmd.arg("info");
+    crate::commands::build::succeeds_within(cmd, timeout)
 }
 
 fn container_runtime_row(
@@ -633,6 +637,27 @@ mod tests {
             guest_build_row(&local, &[], false).status,
             CheckStatus::Pass,
             "local mode never needs the daemon"
+        );
+    }
+
+    #[test]
+    fn daemon_responds_reports_exit_status_and_gives_up_on_a_hung_probe() {
+        use std::time::{Duration, Instant};
+
+        let probe =
+            |bin: &str, timeout| super::daemon_responds_within(std::path::Path::new(bin), timeout);
+        let long = Duration::from_secs(5);
+        assert!(probe("true", long));
+        assert!(!probe("false", long));
+        assert!(!probe("/nonexistent/docker", long));
+
+        // `yes` never exits (it repeats its argument), standing in for a
+        // `docker info` that hangs on an unreachable DOCKER_HOST.
+        let started = Instant::now();
+        assert!(!probe("yes", Duration::from_millis(200)));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a hung probe must be cut off at the timeout"
         );
     }
 
