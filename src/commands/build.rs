@@ -451,17 +451,14 @@ pub(crate) enum ProbeOutcome {
 /// and `doctor` is what people run when things are already wrong.
 pub(crate) const CONTAINER_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Probe `docker info` once per process and share the answer. `doctor`'s
-/// container-runtime row, its `guest build` row and `lgs build`'s preflight all
-/// ask the same question, so a stuck runtime costs one timeout instead of one
-/// per row, and the rows cannot disagree.
+/// Probe `docker info` right now. Deliberately not cached: the daemon can come
+/// and go while a process is alive (`lgs run --watch`, a `setup` that runs for
+/// minutes before a build, a library caller that outlives one command), so
+/// every caller that needs the current answer asks again.
 pub(crate) fn docker_daemon_probe() -> ProbeOutcome {
-    static RESULT: std::sync::OnceLock<ProbeOutcome> = std::sync::OnceLock::new();
-    *RESULT.get_or_init(|| {
-        let mut cmd = Command::new("docker");
-        cmd.arg("info");
-        probe_within(cmd, CONTAINER_INFO_TIMEOUT)
-    })
+    let mut cmd = Command::new("docker");
+    cmd.arg("info");
+    probe_within(cmd, CONTAINER_INFO_TIMEOUT)
 }
 
 /// Whether `docker info` succeeds, i.e. a daemon is up and reachable.
@@ -500,12 +497,6 @@ pub(crate) fn probe_within(mut cmd: Command, timeout: std::time::Duration) -> Pr
             }
         }
     }
-}
-
-/// `true` only if `cmd` exits successfully within `timeout`.
-#[cfg(test)]
-fn succeeds_within(cmd: Command, timeout: std::time::Duration) -> bool {
-    probe_within(cmd, timeout) == ProbeOutcome::Ok
 }
 
 /// Drop the deterministic artefact tree so a later `lgs deploy` cannot ship
@@ -564,32 +555,6 @@ mod tests {
             super::ProbeOutcome::TimedOut
         );
         assert!(started.elapsed() < Duration::from_secs(5));
-    }
-
-    #[test]
-    fn succeeds_within_reports_exit_status_and_kills_a_hung_probe() {
-        use std::time::{Duration, Instant};
-        assert!(succeeds_within(
-            Command::new("true"),
-            Duration::from_secs(5)
-        ));
-        assert!(!succeeds_within(
-            Command::new("false"),
-            Duration::from_secs(5)
-        ));
-        assert!(!succeeds_within(
-            Command::new("/nonexistent/docker"),
-            Duration::from_secs(5)
-        ));
-
-        let mut hung = Command::new("sleep");
-        hung.arg("30");
-        let started = Instant::now();
-        assert!(!succeeds_within(hung, Duration::from_millis(200)));
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "a hung probe must be cut off at the timeout"
-        );
     }
 
     fn write_methods_manifest(root: &Path, body: &str) -> PathBuf {

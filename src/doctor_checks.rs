@@ -98,7 +98,12 @@ pub(crate) fn check_cargo_risczero() -> CheckRow {
     }
 }
 
-pub(crate) fn check_container_runtime() -> CheckRow {
+/// The container runtime row, plus how `docker info` answered when docker is the
+/// selected runtime (`None` otherwise). `doctor` hands that answer to
+/// [`check_guest_build`], so one run waits out at most one timeout and the two
+/// rows agree. It is passed down as a value and never stored: a later `doctor`
+/// run, or any other caller, probes again.
+pub(crate) fn check_container_runtime() -> (CheckRow, Option<ProbeOutcome>) {
     let docker = which("docker");
     let podman = which("podman");
     // A binary on PATH is not a working runtime. Every spel guest build goes
@@ -107,22 +112,19 @@ pub(crate) fn check_container_runtime() -> CheckRow {
     let selected = docker.as_ref().or(podman.as_ref());
     let outcome = selected.map_or(ProbeOutcome::Ok, |bin| daemon_probe(bin));
     let remote_var = selected.and_then(|bin| remote_host_var(bin));
-    container_runtime_row(docker, podman, outcome, remote_var)
+    let docker_outcome = docker.is_some().then_some(outcome);
+    let row = container_runtime_row(docker, podman, outcome, remote_var);
+    (row, docker_outcome)
 }
 
 fn is_docker(bin: &Path) -> bool {
     bin.file_name().is_some_and(|name| name == "docker")
 }
 
-/// How the runtime's daemon answered `info`. Docker shares the per-process
-/// probe with the `guest build` row, so a stuck runtime costs one timeout, not
-/// two, and the two rows cannot disagree. Anything else (podman) is probed here.
+/// How the runtime's daemon answered `info`, probed at the exact path `which`
+/// found, so the row and the probe talk about the same binary.
 fn daemon_probe(bin: &Path) -> ProbeOutcome {
-    if is_docker(bin) {
-        crate::commands::build::docker_daemon_probe()
-    } else {
-        daemon_probe_within(bin, CONTAINER_INFO_TIMEOUT)
-    }
+    daemon_probe_within(bin, CONTAINER_INFO_TIMEOUT)
 }
 
 fn daemon_probe_within(bin: &Path, timeout: std::time::Duration) -> ProbeOutcome {
@@ -211,22 +213,43 @@ fn container_runtime_row(
 /// toolchain that mode needs is actually present. `docker` is the default, so
 /// a project that cannot run it is a FAIL, not a WARN: `lgs build` will
 /// refuse, and the fix is a one-line install (or an explicit `local` opt-out).
-pub(crate) fn check_guest_build(build: &BuildConfig) -> CheckRow {
+pub(crate) fn check_guest_build(
+    build: &BuildConfig,
+    docker_probe: Option<ProbeOutcome>,
+) -> CheckRow {
     let missing: Vec<&str> = ["cargo-risczero", "docker"]
         .into_iter()
         .filter(|tool| which(tool).is_none())
         .collect();
-    // Same probe `lgs build` runs before its first container step. Only
-    // worth running when the tools are there and the mode needs them.
-    let daemon_running = !build.guest.is_deterministic()
-        || !missing.is_empty()
-        || crate::commands::build::docker_daemon_running();
-    guest_build_row(build, &missing, daemon_running)
+    let outcome = guest_probe_outcome(
+        build.guest.is_deterministic(),
+        &missing,
+        docker_probe,
+        crate::commands::build::docker_daemon_probe,
+    );
+    guest_build_row(build, &missing, outcome)
+}
+
+/// The `docker info` answer the `guest build` row reports. It is only worth
+/// asking when the mode needs docker and the tools are there. `doctor` has
+/// usually asked already for the container runtime row, so it passes that
+/// answer down instead of waiting out a second timeout. Nothing is remembered
+/// between calls: with no answer passed in, this asks again.
+fn guest_probe_outcome(
+    deterministic: bool,
+    missing: &[&str],
+    docker_probe: Option<ProbeOutcome>,
+    ask: impl FnOnce() -> ProbeOutcome,
+) -> ProbeOutcome {
+    if !deterministic || !missing.is_empty() {
+        return ProbeOutcome::Ok;
+    }
+    docker_probe.unwrap_or_else(ask)
 }
 
 /// Split from [`check_guest_build`] so the row shape is testable without
 /// depending on what happens to be installed on the test machine.
-fn guest_build_row(build: &BuildConfig, missing: &[&str], daemon_running: bool) -> CheckRow {
+fn guest_build_row(build: &BuildConfig, missing: &[&str], outcome: ProbeOutcome) -> CheckRow {
     if !build.guest.is_deterministic() {
         return CheckRow {
             status: CheckStatus::Pass,
@@ -242,14 +265,21 @@ fn guest_build_row(build: &BuildConfig, missing: &[&str], daemon_running: bool) 
     // The pinned tag is reported on both branches: it is the value that makes
     // `program_id` reproducible, so it belongs in the diagnostic whether or
     // not this machine can currently run the build.
-    if missing.is_empty() && !daemon_running {
+    if missing.is_empty() && outcome != ProbeOutcome::Ok {
         CheckRow {
             status: CheckStatus::Fail,
             name: "guest build".to_string(),
             detail: format!(
-                "docker (risczero/risc0-guest-builder:{}) — Docker daemon not running \
-                 (`docker info` failed)",
-                build.risc0_docker_tag
+                "docker (risczero/risc0-guest-builder:{}) — {}",
+                build.risc0_docker_tag,
+                if outcome == ProbeOutcome::TimedOut {
+                    format!(
+                        "`docker info` did not answer within {}s",
+                        CONTAINER_INFO_TIMEOUT.as_secs()
+                    )
+                } else {
+                    "Docker daemon not running (`docker info` failed)".to_string()
+                }
             ),
             remediation: Some(
                 "Start Docker, or set [build].guest = \"local\" in scaffold.toml \
@@ -594,7 +624,7 @@ mod tests {
                 ..BuildConfig::default()
             },
             &[],
-            true,
+            ProbeOutcome::Ok,
         );
         assert_eq!(row.status, CheckStatus::Pass);
         assert!(row.detail.starts_with("local"), "got: {}", row.detail);
@@ -611,7 +641,7 @@ mod tests {
             guest: GuestBuildMode::Docker,
             risc0_docker_tag: "r0.1.91.1".to_string(),
         };
-        let row = guest_build_row(&build, &[], true);
+        let row = guest_build_row(&build, &[], ProbeOutcome::Ok);
         assert_eq!(row.status, CheckStatus::Pass);
         assert!(
             row.detail.contains("risc0-guest-builder:r0.1.91.1"),
@@ -629,7 +659,7 @@ mod tests {
             guest: GuestBuildMode::Docker,
             ..BuildConfig::default()
         };
-        let row = guest_build_row(&build, &["cargo-risczero", "docker"], true);
+        let row = guest_build_row(&build, &["cargo-risczero", "docker"], ProbeOutcome::Ok);
         assert_eq!(row.status, CheckStatus::Fail);
         assert!(row.detail.contains("cargo-risczero and docker"));
         // The pin is reported even when the build cannot run — see the
@@ -653,7 +683,7 @@ mod tests {
             guest: GuestBuildMode::Docker,
             ..BuildConfig::default()
         };
-        let row = guest_build_row(&build, &[], false);
+        let row = guest_build_row(&build, &[], ProbeOutcome::Failed);
         assert_eq!(row.status, CheckStatus::Fail);
         assert!(
             row.detail.contains("daemon not running"),
@@ -672,7 +702,7 @@ mod tests {
             ..BuildConfig::default()
         };
         assert_eq!(
-            guest_build_row(&local, &[], false).status,
+            guest_build_row(&local, &[], ProbeOutcome::Failed).status,
             CheckStatus::Pass,
             "local mode never needs the daemon"
         );
@@ -735,6 +765,49 @@ mod tests {
         assert!(row.detail.contains("not responding"), "{}", row.detail);
         let fix = row.remediation.as_deref().unwrap();
         assert!(fix.contains("systemctl start docker"), "{fix}");
+    }
+
+    #[test]
+    fn guest_build_row_names_a_timeout_instead_of_a_stopped_daemon() {
+        let build = BuildConfig {
+            guest: GuestBuildMode::Docker,
+            ..BuildConfig::default()
+        };
+        let row = guest_build_row(&build, &[], ProbeOutcome::TimedOut);
+        assert!(matches!(row.status, crate::model::CheckStatus::Fail));
+        assert!(
+            row.detail.contains("did not answer within"),
+            "{}",
+            row.detail
+        );
+        assert!(!row.detail.contains("not running"), "{}", row.detail);
+    }
+
+    #[test]
+    fn guest_probe_outcome_uses_the_answer_passed_down_and_never_remembers_one() {
+        let asked = std::cell::Cell::new(0u32);
+        let ask = || {
+            asked.set(asked.get() + 1);
+            ProbeOutcome::Ok
+        };
+        let outcome = super::guest_probe_outcome;
+
+        // `doctor` already asked for the runtime row: reuse that answer.
+        assert_eq!(
+            outcome(true, &[], Some(ProbeOutcome::TimedOut), ask),
+            ProbeOutcome::TimedOut
+        );
+        assert_eq!(asked.get(), 0);
+
+        // Nothing passed down: ask, and ask again on every call.
+        assert_eq!(outcome(true, &[], None, ask), ProbeOutcome::Ok);
+        assert_eq!(outcome(true, &[], None, ask), ProbeOutcome::Ok);
+        assert_eq!(asked.get(), 2);
+
+        // Local guest builds and missing tools never need the daemon.
+        assert_eq!(outcome(false, &[], None, ask), ProbeOutcome::Ok);
+        assert_eq!(outcome(true, &["docker"], None, ask), ProbeOutcome::Ok);
+        assert_eq!(asked.get(), 2);
     }
 
     #[test]
