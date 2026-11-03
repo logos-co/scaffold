@@ -89,7 +89,8 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
     rows.push(check_binary("lsof", true));
     rows.push(check_binary("ps", true));
     rows.push(check_binary("kill", true));
-    rows.push(check_container_runtime());
+    let (runtime_row, docker_probe) = check_container_runtime();
+    rows.push(runtime_row);
     rows.push(check_pcsc_library());
     rows.push(check_binary("nix", false));
     // `[build].guest` and scaffold's pinned builder image only govern the
@@ -97,7 +98,7 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
     // build` regardless, and get their own `cargo-risczero` row below, so this
     // row would describe a build that never happens.
     if project.config.framework.kind != FRAMEWORK_KIND_SPEL {
-        rows.push(check_guest_build(&project.config.build));
+        rows.push(check_guest_build(&project.config.build, docker_probe));
     }
     rows.push(check_logos_blockchain_circuits(
         &project.root,
