@@ -227,7 +227,8 @@ pub(crate) fn check_guest_build(
         docker_probe,
         crate::commands::build::docker_daemon_probe,
     );
-    guest_build_row(build, &missing, outcome)
+    let remote_var = remote_host_var(Path::new("docker"));
+    guest_build_row(build, &missing, outcome, remote_var)
 }
 
 /// The `docker info` answer the `guest build` row reports. It is only worth
@@ -249,7 +250,12 @@ fn guest_probe_outcome(
 
 /// Split from [`check_guest_build`] so the row shape is testable without
 /// depending on what happens to be installed on the test machine.
-fn guest_build_row(build: &BuildConfig, missing: &[&str], outcome: ProbeOutcome) -> CheckRow {
+fn guest_build_row(
+    build: &BuildConfig,
+    missing: &[&str],
+    outcome: ProbeOutcome,
+    remote_var: Option<&str>,
+) -> CheckRow {
     if !build.guest.is_deterministic() {
         return CheckRow {
             status: CheckStatus::Pass,
@@ -281,11 +287,16 @@ fn guest_build_row(build: &BuildConfig, missing: &[&str], outcome: ProbeOutcome)
                     "Docker daemon not running (`docker info` failed)".to_string()
                 }
             ),
-            remediation: Some(
-                "Start Docker, or set [build].guest = \"local\" in scaffold.toml \
-                 (non-reproducible program_id)"
+            remediation: Some(match remote_var {
+                Some(var) => format!(
+                    "`{var}` is set, so docker talks to a remote daemon that is down or unreachable: \
+                     fix that connection, or unset `{var}` to use the local daemon. Or set \
+                     [build].guest = \"local\" in scaffold.toml (non-reproducible program_id)"
+                ),
+                None => "Start Docker, or set [build].guest = \"local\" in scaffold.toml \
+                         (non-reproducible program_id)"
                     .to_string(),
-            ),
+            }),
         }
     } else if missing.is_empty() {
         CheckRow {
@@ -625,6 +636,7 @@ mod tests {
             },
             &[],
             ProbeOutcome::Ok,
+            None,
         );
         assert_eq!(row.status, CheckStatus::Pass);
         assert!(row.detail.starts_with("local"), "got: {}", row.detail);
@@ -641,7 +653,7 @@ mod tests {
             guest: GuestBuildMode::Docker,
             risc0_docker_tag: "r0.1.91.1".to_string(),
         };
-        let row = guest_build_row(&build, &[], ProbeOutcome::Ok);
+        let row = guest_build_row(&build, &[], ProbeOutcome::Ok, None);
         assert_eq!(row.status, CheckStatus::Pass);
         assert!(
             row.detail.contains("risc0-guest-builder:r0.1.91.1"),
@@ -659,7 +671,12 @@ mod tests {
             guest: GuestBuildMode::Docker,
             ..BuildConfig::default()
         };
-        let row = guest_build_row(&build, &["cargo-risczero", "docker"], ProbeOutcome::Ok);
+        let row = guest_build_row(
+            &build,
+            &["cargo-risczero", "docker"],
+            ProbeOutcome::Ok,
+            None,
+        );
         assert_eq!(row.status, CheckStatus::Fail);
         assert!(row.detail.contains("cargo-risczero and docker"));
         // The pin is reported even when the build cannot run — see the
@@ -683,7 +700,7 @@ mod tests {
             guest: GuestBuildMode::Docker,
             ..BuildConfig::default()
         };
-        let row = guest_build_row(&build, &[], ProbeOutcome::Failed);
+        let row = guest_build_row(&build, &[], ProbeOutcome::Failed, None);
         assert_eq!(row.status, CheckStatus::Fail);
         assert!(
             row.detail.contains("daemon not running"),
@@ -702,7 +719,7 @@ mod tests {
             ..BuildConfig::default()
         };
         assert_eq!(
-            guest_build_row(&local, &[], ProbeOutcome::Failed).status,
+            guest_build_row(&local, &[], ProbeOutcome::Failed, None).status,
             CheckStatus::Pass,
             "local mode never needs the daemon"
         );
@@ -773,7 +790,7 @@ mod tests {
             guest: GuestBuildMode::Docker,
             ..BuildConfig::default()
         };
-        let row = guest_build_row(&build, &[], ProbeOutcome::TimedOut);
+        let row = guest_build_row(&build, &[], ProbeOutcome::TimedOut, None);
         assert!(matches!(row.status, crate::model::CheckStatus::Fail));
         assert!(
             row.detail.contains("did not answer within"),
@@ -781,6 +798,29 @@ mod tests {
             row.detail
         );
         assert!(!row.detail.contains("not running"), "{}", row.detail);
+    }
+
+    #[test]
+    fn guest_build_row_names_the_remote_host_var_instead_of_starting_docker() {
+        let build = BuildConfig {
+            guest: GuestBuildMode::Docker,
+            ..BuildConfig::default()
+        };
+        let row = guest_build_row(&build, &[], ProbeOutcome::TimedOut, Some("DOCKER_HOST"));
+        let fix = row.remediation.as_deref().unwrap();
+        assert!(fix.contains("DOCKER_HOST"), "{fix}");
+        assert!(!fix.contains("Start Docker"), "{fix}");
+        assert!(
+            fix.contains("[build].guest"),
+            "the local-build alternative stays: {fix}"
+        );
+
+        let local = guest_build_row(&build, &[], ProbeOutcome::Failed, None);
+        assert!(local
+            .remediation
+            .as_deref()
+            .unwrap()
+            .contains("Start Docker"));
     }
 
     #[test]

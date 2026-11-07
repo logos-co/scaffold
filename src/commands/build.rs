@@ -456,9 +456,20 @@ pub(crate) const CONTAINER_INFO_TIMEOUT: std::time::Duration = std::time::Durati
 /// minutes before a build, a library caller that outlives one command), so
 /// every caller that needs the current answer asks again.
 pub(crate) fn docker_daemon_probe() -> ProbeOutcome {
-    let mut cmd = Command::new("docker");
-    cmd.arg("info");
-    probe_within(cmd, CONTAINER_INFO_TIMEOUT)
+    probe_info(
+        std::path::Path::new("docker"),
+        &["info"],
+        CONTAINER_INFO_TIMEOUT,
+    )
+}
+
+/// Run `bin args` as a bounded probe. It is the whole body of
+/// [`docker_daemon_probe`], split out so a test can point the same code at a
+/// command whose answer it controls.
+fn probe_info(bin: &std::path::Path, args: &[&str], timeout: std::time::Duration) -> ProbeOutcome {
+    let mut cmd = Command::new(bin);
+    cmd.args(args);
+    probe_within(cmd, timeout)
 }
 
 /// Whether `docker info` succeeds, i.e. a daemon is up and reachable.
@@ -529,6 +540,29 @@ mod tests {
     use tempfile::tempdir;
 
     const DOCKER_TAG: &str = "r0.0.0.0";
+
+    #[test]
+    fn probe_info_answers_for_the_daemon_as_it_is_now() {
+        // `sh -c '[ -f <flag> ]'` stands in for `docker info`: the "daemon" is up
+        // while the flag file exists. Nothing may be remembered between calls.
+        let dir = tempdir().unwrap();
+        let flag = dir.path().join("up");
+        let check = format!("[ -f '{}' ]", flag.display());
+        let probe = || {
+            super::probe_info(
+                std::path::Path::new("sh"),
+                &["-c", check.as_str()],
+                std::time::Duration::from_secs(5),
+            )
+        };
+        assert_eq!(probe(), super::ProbeOutcome::Failed);
+        std::fs::write(&flag, "").unwrap();
+        assert_eq!(probe(), super::ProbeOutcome::Ok);
+        std::fs::remove_file(&flag).unwrap();
+        assert_eq!(probe(), super::ProbeOutcome::Failed);
+        std::fs::write(&flag, "").unwrap();
+        assert_eq!(probe(), super::ProbeOutcome::Ok);
+    }
 
     #[test]
     fn probe_within_tells_a_timeout_from_a_failure() {
