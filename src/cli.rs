@@ -8,8 +8,8 @@ use crate::cli_help::{
     EXAMPLES_BUILD, EXAMPLES_COMPLETIONS, EXAMPLES_CREATE, EXAMPLES_DEPLOY, EXAMPLES_DOCTOR,
     EXAMPLES_INIT, EXAMPLES_LOCALNET_LOGS, EXAMPLES_LOCALNET_RESET, EXAMPLES_LOCALNET_START,
     EXAMPLES_LOCALNET_STATUS, EXAMPLES_LOCALNET_STOP, EXAMPLES_REPORT, EXAMPLES_ROOT,
-    EXAMPLES_SETUP, EXAMPLES_WALLET, EXAMPLES_WALLET_DEFAULT_SET, EXAMPLES_WALLET_LIST,
-    EXAMPLES_WALLET_TOPUP,
+    EXAMPLES_SETUP, EXAMPLES_TUI, EXAMPLES_WALLET, EXAMPLES_WALLET_DEFAULT_SET,
+    EXAMPLES_WALLET_LIST, EXAMPLES_WALLET_TOPUP,
 };
 use crate::commands::basecamp::{cmd_basecamp, BasecampAction};
 use crate::commands::build::cmd_build_shortcut;
@@ -128,6 +128,11 @@ enum Commands {
     Run(RunArgs),
     #[command(about = "Collect a sanitized diagnostics archive for issue reporting")]
     Report(ReportArgs),
+    #[command(
+        about = "Open a terminal dashboard: localnet, wallet, programs, and one-key build/run/deploy",
+        after_long_help = EXAMPLES_TUI
+    )]
+    Tui,
     #[command(
         about = "Print a shell completion script to stdout",
         long_about = "Print a shell completion script to stdout.\n\n\
@@ -1603,6 +1608,7 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
             })
         }
         Some(Commands::Report(args)) => cmd_report(args.out, args.tail),
+        Some(Commands::Tui) => crate::tui::cmd_tui(),
         Some(Commands::Completions(args)) => {
             let shell = match args.shell {
                 CompletionsShell::Bash => clap_complete::Shell::Bash,

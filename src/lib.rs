@@ -20,6 +20,7 @@ pub(crate) mod sequencer_config;
 pub(crate) mod state;
 pub(crate) mod template;
 pub(crate) mod testnode;
+pub(crate) mod tui;
 
 /// Lowercase hex, two digits per byte.
 pub(crate) fn hex(bytes: &[u8]) -> String {

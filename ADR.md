@@ -646,3 +646,50 @@ does by rebuilding and diffing its committed `artifacts/`. Without it, the pinne
 could drift or a future risc0 release could reintroduce nondeterminism and nothing
 would notice — the unit tests only pin the invocation, and Template E2E exercises the
 host-toolchain path (`--guest local`).
+
+## `lgs tui` Drives Child `lgs` Processes
+
+Working on a project means juggling the inner loop across terminals: one for
+`lgs run`, one tailing the sequencer log, one for `localnet status` and
+`wallet` checks, with the state that answers "is my latest build deployed?"
+buried in `.scaffold/state/`. LEZ developers already reach for a dashboard
+for this (jzaki's `prog-tui` in `jz-progs` drives a bare LEZ checkout the
+same way). `lgs tui` is that dashboard for a scaffold project.
+
+Decisions:
+
+- **A subcommand of the same binary**, not a separate crate. The dashboard
+  reads `.scaffold/state`, the run cache and the discovery rules directly,
+  so a separate release would drift from the formats it reads.
+- **Status in process, actions out of process.** Status comes from the same
+  functions `localnet status`, `deploy` discovery and the `run` deploy cache
+  use, polled on a background thread. Every action spawns
+  `current_exe() <args>` in the project root and streams its stdout/stderr
+  into the Output pane. The `cmd_*` functions print to stdout and block, so
+  calling them in process would corrupt the screen or need a second,
+  output-capturing implementation of each command; a child process gives
+  exactly the CLI's behaviour and output for free. The cost is a process
+  spawn per action, which is nothing next to a build.
+- **One job at a time**, like one terminal: two commands never race on the
+  same project state. Each job runs in its own session: with no controlling
+  terminal, a tool that writes to `/dev/tty` (risc0's guest build does)
+  cannot draw over the screen, and as group leader `x` (and quitting) stops
+  cargo, docker and the rest of its tree. `localnet start`
+  daemonizes the sequencer into its own session, so the localnet outlives
+  the dashboard exactly as it outlives a shell.
+- **Scope is the inner loop**: `run`, `run --watch`, `build`, `deploy`,
+  `localnet start/stop/reset`, `wallet topup`, `doctor`, and the sequencer
+  log. Not `basecamp` (launches desktop apps), `test-node` (for test
+  harnesses), or the `wallet --`/`spel --` passthroughs (arbitrary
+  arguments belong in a shell). Destructive `localnet reset` asks first and
+  never takes the wallet with it.
+- **"Deployed" means what `lgs run`'s cache means**: the recorded build hash
+  matches and the sequencer is the one deployed to. Nothing else records a
+  deploy, so a bare `lgs deploy` (`d`) does not set it; the pane title says
+  "deployed by last run" for that reason.
+- **No machine-readable mode.** It refuses to start without a terminal;
+  scripts and agents use the commands it wraps.
+
+Tradeoff: `ratatui` (with its `crossterm` backend) becomes a dependency of
+every install. Pinned to 0.29, the last release within the crate's
+`rust-version`.

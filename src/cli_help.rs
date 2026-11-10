@@ -136,6 +136,13 @@ pub(crate) const EXAMPLES_DOCTOR: &str = r"Examples:
   logos-scaffold doctor
   logos-scaffold doctor --json";
 
+pub(crate) const EXAMPLES_TUI: &str = r"Run it from inside a project. Every key runs the matching `lgs` command
+(r = `lgs run`, b = `lgs build`, d = `lgs deploy <selected>`, ...) and shows
+its output; the bottom line lists the keys.
+
+Examples:
+  lgs tui";
+
 pub(crate) const EXAMPLES_REPORT: &str = r"Examples:
   logos-scaffold report
   logos-scaffold report --out /tmp/diag.tar.gz

@@ -153,6 +153,12 @@ logos-scaffold basecamp docs
 
 Project contract for modules: [basecamp-module-requirements.md](./basecamp-module-requirements.md).
 
+## Dashboard
+
+```bash
+logos-scaffold tui
+```
+
 ## Diagnostics
 
 ```bash
@@ -193,6 +199,7 @@ logos-scaffold help
 - `basecamp paths <profile>` prints the resolved per-profile path manifest: XDG dirs, the per-profile `home` (exported as `HOME`), runtime dir, module and plugin dirs, and the log file. `--json` for machine-readable output.
 - `basecamp docs` prints the embedded copy of [basecamp-module-requirements.md](./basecamp-module-requirements.md), so the project contract is available offline and at the pinned version.
 - `basecamp doctor` emits a basecamp-specific health report: the resolved basecamp/`lgpm` pin set (warning when one of the pair is at scaffold's default and the other isn't — the two are read as one set — or when basecamp is still on a retired scaffold default, which `basecamp setup` upgrades), captured modules summary (each entry's flake ref, parsed tag/commit annotation for github refs, and any API headers already installed in alice's profile), manifest variant check per seeded profile (flags modules whose `main` is missing the current-platform `-dev` key — the freeze-on-first-click failure mode), dep-pin drift (captured `role = "dependency"` rev vs. scaffold default), and auto-discovery drift (project sources discoverable today but absent from the captured set). `--json` for machine-readable output.
+- `tui` opens a terminal dashboard for the project: localnet state and block height, the default wallet, each guest program with the build `deploy` would ship (`docker`, `release` or `debug`) and whether the last `run` deployed exactly that build to the running localnet, plus an Output pane. Each key runs the matching command as a child `lgs` process in the project root and streams its output into the pane: `r` `run`, `w` `run --watch`, `b` `build`, `d` `deploy <selected program>`, `s` `localnet start` (or `stop` when scaffold's sequencer is running), `R` `localnet reset --yes` (after a y/n confirmation; the wallet is kept), `t` `wallet topup`, `c` `doctor`. One job runs at a time; `x` stops it and everything it started, except a localnet, which keeps running after the dashboard exits, as it does after `localnet start`. `l` switches the pane to the tail of `.scaffold/logs/sequencer.log`. It refuses to start without an interactive terminal; scripts and agents use the commands it wraps.
 - `doctor` prints actionable checks and next steps; `--json` is for CI/machine parsing.
 - `report` creates a `.tar.gz` diagnostics bundle for GitHub issues using strict allowlist collection with redaction and explicit skip reporting.
 - `completions <shell>` prints a shell completion script to stdout. Supported shells: `bash`, `zsh`. The generated script covers both `lgs` and `logos-scaffold`.
