@@ -94,7 +94,7 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
             lines.push(Line::from(vec![
                 label("Wallet"),
                 match &status.wallet {
-                    Some(address) => address.clone().into(),
+                    Some(address) => middle_ellipsis(address, 36).into(),
                     None => "no default yet (`lgs run` sets one)".dark_gray(),
                 },
             ]));
@@ -206,6 +206,21 @@ fn draw_output(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(text).block(block), area);
 }
 
+/// `text` cut to `max` chars by dropping its middle, so both ends of an
+/// address stay recognisable.
+fn middle_ellipsis(text: &str, max: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max {
+        return text.to_string();
+    }
+    let head = (max - 1) / 2;
+    let tail = max - 1 - head;
+    let mut out: String = chars[..head].iter().collect();
+    out.push('…');
+    out.extend(&chars[chars.len() - tail..]);
+    out
+}
+
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let width = width.min(area.width);
     let height = height.min(area.height);
@@ -238,6 +253,14 @@ mod tests {
             .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn long_addresses_keep_both_ends() {
+        assert_eq!(middle_ellipsis("Public/abc", 36), "Public/abc");
+        let cut = middle_ellipsis("Public/J8zRSzGerW9WMiho1YaqvAwDjqiJ5QuKNNE96e4qjDvz", 36);
+        assert_eq!(cut.chars().count(), 36);
+        assert!(cut.starts_with("Public/J8zR") && cut.ends_with("qjDvz") && cut.contains('…'));
     }
 
     #[test]
