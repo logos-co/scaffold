@@ -20,6 +20,11 @@ use super::status::Snapshot;
 /// Job output kept for the Output pane; older lines are dropped.
 const OUTPUT_CAP: usize = 5_000;
 
+/// The start-up λ stays at least this long, so it is seen rather than
+/// flashed, and until the first status arrives, up to [`SPLASH_MAX`].
+pub(crate) const SPLASH_MIN: Duration = Duration::from_millis(1400);
+const SPLASH_MAX: Duration = Duration::from_secs(3);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
     Run,
@@ -89,6 +94,8 @@ pub(crate) struct App {
     pub(crate) scroll: usize,
     pub(crate) selected: usize,
     pub(crate) modal: Modal,
+    /// When the start-up λ was first shown; `None` once it is gone.
+    pub(crate) splash: Option<Instant>,
     pub(crate) quit: bool,
     lines_tx: Sender<String>,
     lines_rx: Receiver<String>,
@@ -108,6 +115,7 @@ impl App {
             scroll: 0,
             selected: 0,
             modal: Modal::None,
+            splash: None,
             quit: false,
             lines_tx,
             lines_rx,
@@ -129,8 +137,19 @@ impl App {
         }
     }
 
+    /// Whether something on screen moves, so the loop redraws often.
+    pub(crate) fn animating(&self) -> bool {
+        self.splash.is_some() || self.job.is_some()
+    }
+
     /// Pull in job output and notice a job that has exited.
     pub(crate) fn tick(&mut self) {
+        if let Some(shown) = self.splash {
+            let elapsed = shown.elapsed();
+            if elapsed >= SPLASH_MAX || (elapsed >= SPLASH_MIN && self.status.is_some()) {
+                self.splash = None;
+            }
+        }
         // A job is done once it has exited and its output is all in, so the
         // summary line comes last. A daemon left holding its pipes (none of
         // the wrapped commands leave one) gets a second, not forever.
@@ -159,6 +178,10 @@ impl App {
     pub(crate) fn handle_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.request_quit();
+            return;
+        }
+        // Any key skips the start-up λ, and does nothing else.
+        if self.splash.take().is_some() {
             return;
         }
         match std::mem::replace(&mut self.modal, Modal::None) {
@@ -398,6 +421,20 @@ mod tests {
         app.tick();
         assert_eq!(app.last_result, Some(("lgs build: exit 0".into(), true)));
         assert!(app.output.contains(&"build".to_string()));
+    }
+
+    #[test]
+    fn splash_waits_for_status_and_any_key_skips_it() {
+        let mut app = App::new(PathBuf::from("/nonexistent"), PathBuf::from("/bin/true"));
+        app.splash = Some(Instant::now() - SPLASH_MIN);
+        app.tick();
+        assert!(app.splash.is_some(), "no status yet, so it stays");
+        app.handle_key(key(KeyCode::Char('q')));
+        assert!(app.splash.is_none());
+        assert!(!app.quit, "the key that skips it does nothing else");
+        app.splash = Some(Instant::now() - SPLASH_MAX);
+        app.tick();
+        assert!(app.splash.is_none(), "it gives up waiting");
     }
 
     #[test]
