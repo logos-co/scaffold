@@ -819,6 +819,9 @@ tmux send-keys -t d9 q; sleep 1
 - `R` and `q` during a job ask first; any key but `y` cancels.
 - The dashboard opens on the large λ and replaces it within three seconds. At 120×32 a small λ sits in the top-right corner; it changes shape between captures while a job runs (it spins) and is still when idle. Below 120 columns or 30 rows it is absent and the panes are unchanged.
 - After `q`, the localnet is still running; the non-terminal invocation exits non-zero with `needs an interactive terminal`.
+- The `l` pane shows the sequencer log as plain text: no `[2m`/`[0m` fragments, no shifted timestamps (`20266-11-…`), and no part of an earlier line left in the tail of a shorter one. risc0 writes ANSI colour codes into `sequencer.log`, so this only shows up against a real sequencer.
+- A line longer than the Output pane wraps onto the next row instead of ending at the border. For example, a `[build].guest = "docker"` error keeps its whole `cargo install cargo-risczero` remediation. PgUp reaches the first line of a long, wrapped output.
+- The Job line stays visible in every localnet state, including a `foreign listener` or `stale state` hint together with a long deploy label (`lgs deploy hello_world_with_authorization`). The Status pane grows taller to fit, rather than dropping the line.
 
 ### Failure Signals / Common Pitfalls
 

@@ -884,6 +884,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "toml_edit",
+ "unicode-width 0.2.0",
  "ureq",
  "walkdir",
 ]

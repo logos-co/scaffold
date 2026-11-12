@@ -2,6 +2,7 @@
 //! invocation, so the TUI does exactly what the same command does on the
 //! command line, and its output is that command's output.
 
+use std::cell::Cell;
 use std::io::{BufRead, BufReader, Read};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -90,8 +91,12 @@ pub(crate) struct App {
     pub(crate) last_result: Option<(String, bool)>,
     pub(crate) output: Vec<String>,
     pub(crate) view: View,
-    /// Lines scrolled up from the bottom of the Output pane; 0 follows it.
+    /// Rows scrolled up from the bottom of the Output pane; 0 follows it.
     pub(crate) scroll: usize,
+    /// How far the Output pane can scroll, as of the last frame. Only the
+    /// drawing code knows the pane's size and so how many rows its lines wrap
+    /// to; it records the bound here so `PgUp` stops at the top.
+    pub(crate) max_scroll: Cell<usize>,
     pub(crate) selected: usize,
     pub(crate) modal: Modal,
     /// When the start-up λ was first shown; `None` once it is gone.
@@ -113,6 +118,7 @@ impl App {
             output: Vec::new(),
             view: View::Job,
             scroll: 0,
+            max_scroll: Cell::new(0),
             selected: 0,
             modal: Modal::None,
             splash: None,
@@ -202,7 +208,7 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => {
                 self.selected = (self.selected + 1).min(self.programs().len().saturating_sub(1))
             }
-            KeyCode::PageUp => self.scroll = (self.scroll + 10).min(self.view_lines().len()),
+            KeyCode::PageUp => self.scroll = (self.scroll + 10).min(self.max_scroll.get()),
             KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(10),
             KeyCode::End => self.scroll = 0,
             KeyCode::Char('l') => {

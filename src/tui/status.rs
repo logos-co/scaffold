@@ -64,10 +64,21 @@ fn collect(project: &Project) -> Snapshot {
         wallet: read_default_wallet_address(&project.root).ok().flatten(),
         programs: programs(project).map_err(|err| format!("{err:#}")),
         sequencer_log: localnet_logs_for_project(project, SEQUENCER_LOG_TAIL)
-            .map(|report| report.lines)
+            .map(|report| clean_log(&report.lines))
             .unwrap_or_default(),
         localnet,
     }
+}
+
+/// Log lines as a terminal would show them. risc0's tracing layer writes ANSI
+/// colour codes into `sequencer.log`; drawn raw, the escape bytes take a cell
+/// each in ratatui's buffer but none on the real terminal, which then drifts
+/// out of step with what ratatui thinks is on screen (shifted, spliced lines).
+fn clean_log(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| super::app::clean_line(line.as_bytes()))
+        .collect()
 }
 
 fn programs(project: &Project) -> crate::DynResult<Vec<ProgramRow>> {
@@ -105,6 +116,15 @@ fn build_kind(path: &Path) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sequencer_log_loses_its_ansi_colour_codes() {
+        let raw = "\x1b[2m2026-11-10T03:33:12.873453Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mrisc0_zkvm::host::server::exec::executor\x1b[0m\x1b[2m:\x1b[0m execution time: 9.886085ms";
+        assert_eq!(
+            super::clean_log(&[raw.to_string()]),
+            ["2026-11-10T03:33:12.873453Z  INFO risc0_zkvm::host::server::exec::executor: execution time: 9.886085ms"]
+        );
+    }
+
     use super::*;
 
     #[test]

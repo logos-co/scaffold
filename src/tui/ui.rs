@@ -1,4 +1,5 @@
-//! Drawing. Reads [`App`], never changes it.
+//! Drawing. Reads [`App`] and changes nothing but `App::max_scroll`, the
+//! one fact only a drawn frame knows.
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -19,15 +20,24 @@ const KEYS: &str = "r run · w run --watch · b build · d deploy selected · \
 const BADGE_MIN_WIDTH: u16 = 120;
 const BADGE_MIN_HEIGHT: u16 = 30;
 const BADGE_WIDTH: u16 = 16;
+const STATUS_WIDTH: u16 = 48;
+/// Status and Programs panes are at least this tall, borders included.
+const TOP_MIN_HEIGHT: u16 = 7;
 
 pub(crate) fn draw(frame: &mut Frame, app: &App) {
     if let Some(shown) = app.splash {
         draw_splash(frame, shown.elapsed().as_secs_f32());
         return;
     }
+    // The top row grows with what the Status pane wraps to, so no row (the
+    // Job line above all) is ever pushed out by a hint or a long label.
+    let status = status_paragraph(app);
+    let top_height = u16::try_from(status.line_count(STATUS_WIDTH - 2))
+        .unwrap_or(u16::MAX)
+        .max(TOP_MIN_HEIGHT);
     let [header, top, output, footer] = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(7),
+        Constraint::Length(top_height),
         Constraint::Min(5),
         Constraint::Length(2),
     ])
@@ -42,13 +52,13 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
     );
     let area = frame.area();
     let badge = area.width >= BADGE_MIN_WIDTH && area.height >= BADGE_MIN_HEIGHT;
-    let [status, programs, corner] = Layout::horizontal([
-        Constraint::Length(48),
+    let [status_area, programs, corner] = Layout::horizontal([
+        Constraint::Length(STATUS_WIDTH),
         Constraint::Min(30),
         Constraint::Length(if badge { BADGE_WIDTH } else { 0 }),
     ])
     .areas(top);
-    draw_status(frame, status, app);
+    frame.render_widget(status, status_area);
     draw_programs(frame, programs, app);
     if badge {
         // Still when idle; spins while a job runs.
@@ -134,9 +144,9 @@ fn draw_splash(frame: &mut Frame, seconds: f32) {
     frame.render_widget(Paragraph::new(caption[1]).centered().dark_gray(), hint);
 }
 
-fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
+fn status_paragraph(app: &App) -> Paragraph<'static> {
     let label = |text: &str| Span::from(format!("{text:<10}")).dark_gray();
-    let mut lines = Vec::new();
+    let mut lines: Vec<Line<'static>> = Vec::new();
     match &app.status {
         None => lines.push(Line::from("reading project status…").dark_gray()),
         Some(status) => {
@@ -178,12 +188,11 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
     lines.push(Line::from(vec![label("Job"), job_line(app)]));
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: true })
-            .block(Block::bordered().title(" Status ")),
-        area,
-    );
+    // `trim: false`: the label padding is what lines `block N` up under the
+    // localnet state; trimming would push it flush against the border.
+    Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(Block::bordered().title(" Status "))
 }
 
 fn job_line(app: &App) -> Span<'static> {
@@ -248,28 +257,9 @@ fn draw_output(frame: &mut Frame, area: Rect, app: &App) {
         View::SequencerLog => " Sequencer log (.scaffold/logs/sequencer.log) ",
     };
     let lines = app.view_lines();
-    let height = usize::from(area.height.saturating_sub(2));
-    let end = lines
-        .len()
-        .saturating_sub(app.scroll.min(lines.len().saturating_sub(height)));
-    let start = end.saturating_sub(height);
     let mut block = Block::bordered().title(title);
-    if end < lines.len() {
-        block = block.title_bottom(format!(" {} more below · End follows ", lines.len() - end));
-    }
-    let text: Vec<Line> = lines[start..end]
-        .iter()
-        .map(|line| {
-            if line.starts_with("── ") || line.starts_with("$ ") {
-                Line::from(line.as_str()).cyan()
-            } else if line.starts_with("error") {
-                Line::from(line.as_str()).red()
-            } else {
-                Line::from(line.as_str())
-            }
-        })
-        .collect();
     if lines.is_empty() && app.view == View::Job {
+        app.max_scroll.set(0);
         frame.render_widget(
             Paragraph::new(
                 "Press r for `lgs run`: build, start localnet, top up the wallet, deploy.",
@@ -280,7 +270,54 @@ fn draw_output(frame: &mut Frame, area: Rect, app: &App) {
         );
         return;
     }
-    frame.render_widget(Paragraph::new(text).block(block), area);
+    // Wrap at the pane width the way a terminal would, so a long error keeps
+    // its remediation on the next row instead of being cut off. Scrolling then
+    // counts rendered rows, not source lines.
+    let width = usize::from(area.width.saturating_sub(2)).max(1);
+    let rows: Vec<Line> = lines
+        .iter()
+        .flat_map(|line| {
+            let style = if line.starts_with("── ") || line.starts_with("$ ") {
+                Style::new().cyan()
+            } else if line.starts_with("error") {
+                Style::new().red()
+            } else {
+                Style::new()
+            };
+            wrap_chars(line, width)
+                .into_iter()
+                .map(move |row| Line::styled(row, style))
+        })
+        .collect();
+    let height = usize::from(area.height.saturating_sub(2));
+    let max_scroll = rows.len().saturating_sub(height);
+    app.max_scroll.set(max_scroll);
+    let end = rows.len() - app.scroll.min(max_scroll);
+    let start = end.saturating_sub(height);
+    if end < rows.len() {
+        block = block.title_bottom(format!(" {} more below · End follows ", rows.len() - end));
+    }
+    frame.render_widget(Paragraph::new(rows[start..end].to_vec()).block(block), area);
+}
+
+/// `line` split into rows of at most `width` columns, breaking anywhere, as a
+/// terminal does. An empty line is one empty row.
+fn wrap_chars(line: &str, width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    let mut used = 0;
+    for c in line.chars() {
+        let w = c.width().unwrap_or(0);
+        if used + w > width && !row.is_empty() {
+            rows.push(std::mem::take(&mut row));
+            used = 0;
+        }
+        row.push(c);
+        used += w;
+    }
+    rows.push(row);
+    rows
 }
 
 /// `text` cut to `max` chars by dropping its middle, so both ends of an
@@ -404,7 +441,8 @@ mod tests {
         for expected in [
             "/work/my-app",
             "● running  pid 4242",
-            "block 17",
+            // Aligned under the localnet state, not flush with the border.
+            "│          block 17",
             "Public/abc",
             "hello_world  docker    ✓ deployed",
             "counter      not built",
@@ -416,5 +454,118 @@ mod tests {
                 "missing {expected:?} in\n{screen}"
             );
         }
+    }
+
+    fn snapshot(ownership: LocalnetOwnership, remediation: Vec<String>) -> Snapshot {
+        Snapshot {
+            localnet: LocalnetStatusReport {
+                tracked_pid: None,
+                tracked_running: false,
+                listener_present: true,
+                listener_pid: Some(1107),
+                ownership,
+                ready: true,
+                log_path: String::new(),
+                remediation,
+            },
+            block: Some(34),
+            wallet: None,
+            programs: Ok(Vec::new()),
+            sequencer_log: Vec::new(),
+        }
+    }
+
+    /// A two-row remediation hint plus a long deploy label used to push the
+    /// Job line out of a fixed-height Status pane.
+    #[test]
+    fn job_line_survives_a_hint_and_a_long_label() {
+        let mut app = App::new(PathBuf::from("/work/my-app"), PathBuf::from("lgs"));
+        app.status = Some(snapshot(
+            LocalnetOwnership::Foreign,
+            vec![
+                "Stop the external listener on 127.0.0.1:3040 or choose a clean environment".into(),
+            ],
+        ));
+        app.last_result = Some((
+            "lgs deploy hello_world_with_authorization: exit 0".into(),
+            true,
+        ));
+        let screen = render(&app);
+        for expected in [
+            "foreign listener",
+            "choose a clean environment",
+            "Job",
+            "exit 0",
+        ] {
+            assert!(
+                screen.contains(expected),
+                "missing {expected:?} in\n{screen}"
+            );
+        }
+    }
+
+    /// Long output lines wrap instead of being cut at the pane edge.
+    #[test]
+    fn long_output_lines_wrap() {
+        let mut app = App::new(PathBuf::from("/work/my-app"), PathBuf::from("lgs"));
+        let tail = "or `cargo install cargo-risczero` END-OF-LINE";
+        app.output.push(format!(
+            "Install it with `rzup install cargo-risczero` {}{tail}",
+            "x".repeat(80)
+        ));
+        let screen = render(&app);
+        assert!(screen.contains("END-OF-LINE"), "{screen}");
+    }
+
+    /// Scrolling counts wrapped rows, so PgUp reaches the first line even when
+    /// the lines wrap to more rows than there are lines.
+    #[test]
+    fn page_up_reaches_the_top_of_wrapped_output() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = App::new(PathBuf::from("/work/my-app"), PathBuf::from("lgs"));
+        app.output.push("FIRST-LINE".into());
+        for i in 0..20 {
+            app.output.push(format!("{i:02} {}", "w".repeat(250)));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        for _ in 0..20 {
+            terminal.draw(|frame| draw(frame, &app)).unwrap();
+            app.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        }
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(screen.contains("FIRST-LINE"), "{screen}");
+    }
+
+    /// A shorter line drawn over a longer one leaves nothing of it behind.
+    #[test]
+    fn a_shorter_line_leaves_no_remnant_of_a_longer_one() {
+        let mut app = App::new(PathBuf::from("/work/my-app"), PathBuf::from("lgs"));
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        app.output.push(format!("short{}", "REMNANT".repeat(10)));
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        app.output = vec!["short".into()];
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(!screen.contains("REMNANT"), "{screen}");
+    }
+
+    #[test]
+    fn wrap_chars_breaks_at_the_width() {
+        assert_eq!(wrap_chars("", 4), [""]);
+        assert_eq!(wrap_chars("abcdefghij", 4), ["abcd", "efgh", "ij"]);
+        assert_eq!(wrap_chars("  ab", 4), ["  ab"]);
     }
 }
