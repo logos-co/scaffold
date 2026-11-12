@@ -791,7 +791,8 @@ From the generated project root, start with localnet stopped:
 "$SCAFFOLD_BIN" localnet stop
 tmux new-session -d -s d9 -x 120 -y 32 "$SCAFFOLD_BIN" tui
 cap() { sleep "${1:-2}"; tmux capture-pane -p -t d9; }
-cap                                   # stopped localnet, programs, empty Output hint
+cap 0.5                               # start-up: a large λ and `L O G O S   S C A F F O L D`
+cap                                   # stopped localnet, programs, empty Output hint, λ top right
 tmux send-keys -t d9 r; cap 5         # `lgs run` starts; Job line shows it with a timer
 # wait for `── lgs run: exit 0 ──` in the Output pane (minutes on a cold build)
 cap                                   # localnet running + block height, wallet, ✓ deployed
@@ -816,6 +817,7 @@ tmux send-keys -t d9 q; sleep 1
 - After the first `r`, every program shows `docker` (or `release` under `[build].guest = "local"`) and `✓ deployed`, and the block height advances between captures. After `R`, the `✓` marks clear (new chain) and the next `r` deploys again.
 - A key pressed while a job runs prints `… is still running; x stops it` and starts nothing. `x` ends the job with `: stopped` or a non-zero exit, and no `cargo`/`docker` process from it remains (`pgrep -f 'cargo build'`).
 - `R` and `q` during a job ask first; any key but `y` cancels.
+- The dashboard opens on the large λ and replaces it within three seconds. At 120×32 a small λ sits in the top-right corner; it changes shape between captures while a job runs (it spins) and is still when idle. Below 120 columns or 30 rows it is absent and the panes are unchanged.
 - After `q`, the localnet is still running; the non-terminal invocation exits non-zero with `needs an interactive terminal`.
 
 ### Failure Signals / Common Pitfalls

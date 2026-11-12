@@ -2,6 +2,7 @@
 //! process; actions run as child `lgs` commands (see [`app`]).
 
 mod app;
+mod lambda;
 mod status;
 mod ui;
 
@@ -23,6 +24,7 @@ pub(crate) fn cmd_tui() -> DynResult<()> {
         bail!("`lgs tui` needs an interactive terminal; run the commands it wraps directly instead (see `lgs --help`)");
     }
     let mut app = App::new(project.root.clone(), std::env::current_exe()?);
+    app.splash = Some(std::time::Instant::now());
     let (status_tx, status_rx) = channel();
     status::spawn_poller(project.root, status_tx);
 
@@ -35,7 +37,9 @@ pub(crate) fn cmd_tui() -> DynResult<()> {
             }
             app.tick();
             terminal.draw(|frame| ui::draw(frame, &app))?;
-            if event::poll(Duration::from_millis(100))? {
+            // ~25 fps while the λ moves, 10 otherwise.
+            let wait = if app.animating() { 40 } else { 100 };
+            if event::poll(Duration::from_millis(wait))? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind == KeyEventKind::Press {
                         app.handle_key(key);

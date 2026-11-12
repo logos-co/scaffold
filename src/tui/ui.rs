@@ -8,13 +8,23 @@ use ratatui::Frame;
 
 use crate::model::LocalnetOwnership;
 
-use super::app::{App, Modal, View};
+use super::app::{App, Modal, View, SPLASH_MIN};
+use super::lambda::Lambda;
 
 const KEYS: &str = "r run · w run --watch · b build · d deploy selected · \
                     s localnet start/stop · R reset · t topup · c doctor · l output/sequencer log · \
                     x stop job · PgUp/PgDn scroll · q quit";
 
+/// The corner λ needs this much room, so it never crowds the panes.
+const BADGE_MIN_WIDTH: u16 = 120;
+const BADGE_MIN_HEIGHT: u16 = 30;
+const BADGE_WIDTH: u16 = 16;
+
 pub(crate) fn draw(frame: &mut Frame, app: &App) {
+    if let Some(shown) = app.splash {
+        draw_splash(frame, shown.elapsed().as_secs_f32());
+        return;
+    }
     let [header, top, output, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(7),
@@ -30,10 +40,24 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
         ]),
         header,
     );
-    let [status, programs] =
-        Layout::horizontal([Constraint::Length(48), Constraint::Min(30)]).areas(top);
+    let area = frame.area();
+    let badge = area.width >= BADGE_MIN_WIDTH && area.height >= BADGE_MIN_HEIGHT;
+    let [status, programs, corner] = Layout::horizontal([
+        Constraint::Length(48),
+        Constraint::Min(30),
+        Constraint::Length(if badge { BADGE_WIDTH } else { 0 }),
+    ])
+    .areas(top);
     draw_status(frame, status, app);
     draw_programs(frame, programs, app);
+    if badge {
+        // Still when idle; spins while a job runs.
+        let lambda = match &app.job {
+            Some(job) => Lambda::spinning(job.started.elapsed()),
+            None => Lambda::still(),
+        };
+        frame.render_widget(lambda, corner.inner(ratatui::layout::Margin::new(1, 0)));
+    }
     draw_output(frame, output, app);
     frame.render_widget(
         Paragraph::new(KEYS).dark_gray().wrap(Wrap { trim: true }),
@@ -55,6 +79,59 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
             area,
         );
     }
+}
+
+/// The start-up screen: a large λ drawn in from the top left, then a light
+/// passing over it, with the product name underneath.
+fn draw_splash(frame: &mut Frame, seconds: f32) {
+    let area = frame.area();
+    let caption = ["L O G O S   S C A F F O L D", "loading project…"];
+    let rows = area.height.saturating_sub(6).min(18);
+    if rows < 4 {
+        frame.render_widget(
+            Paragraph::new(caption[0]).centered().bold(),
+            centered(area, area.width, 1),
+        );
+        return;
+    }
+    let cols = (rows * 2).min(area.width);
+    let block = centered(area, cols, rows + 3);
+    let [glyph, _, name, hint] = Layout::vertical([
+        Constraint::Length(rows),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(Rect {
+        x: area.x,
+        width: area.width,
+        ..block
+    });
+    let reveal_for = SPLASH_MIN.as_secs_f32() * 0.45;
+    let shine_from = reveal_for + 0.1;
+    let shine = (seconds - shine_from) / 0.6;
+    frame.render_widget(
+        Lambda {
+            angle: 0.0,
+            reveal: seconds / reveal_for,
+            shine: (0.0..1.3).contains(&shine).then_some(shine * 1.3 - 0.15),
+        },
+        Rect {
+            x: block.x,
+            width: cols,
+            ..glyph
+        },
+    );
+    let fade = ((seconds - reveal_for * 0.6) / 0.4).clamp(0.0, 1.0);
+    let grey = (90.0 + 140.0 * fade) as u8;
+    frame.render_widget(
+        Paragraph::new(caption[0])
+            .centered()
+            .bold()
+            .fg(Color::Rgb(grey, grey, grey)),
+        name,
+    );
+    frame.render_widget(Paragraph::new(caption[1]).centered().dark_gray(), hint);
 }
 
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
@@ -244,7 +321,11 @@ mod tests {
     use crate::tui::status::{ProgramRow, Snapshot};
 
     fn render(app: &App) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        render_at(app, 100, 24)
+    }
+
+    fn render_at(app: &App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| draw(frame, app)).unwrap();
         let buffer = terminal.backend().buffer();
         buffer
@@ -253,6 +334,31 @@ mod tests {
             .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn splash_shows_a_large_lambda_and_the_name() {
+        let mut app = App::new(PathBuf::from("/work/my-app"), PathBuf::from("lgs"));
+        app.splash = Some(std::time::Instant::now() - SPLASH_MIN);
+        let screen = render_at(&app, 100, 30);
+        assert!(screen.contains("L O G O S   S C A F F O L D"), "{screen}");
+        assert!(screen.contains('█'), "{screen}");
+        assert!(!screen.contains("r run"), "the dashboard waits: {screen}");
+        // Too small for a glyph: just the name.
+        let screen = render_at(&app, 40, 8);
+        assert!(
+            screen.contains("L O G O S") && !screen.contains('█'),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn corner_lambda_only_on_big_screens() {
+        let app = App::new(PathBuf::from("/work/my-app"), PathBuf::from("lgs"));
+        let quadrant = |screen: &str| screen.contains(['█', '▟', '▙', '▛', '▜']);
+        assert!(!quadrant(&render_at(&app, 100, 24)));
+        assert!(!quadrant(&render_at(&app, 160, 24)), "too short");
+        assert!(quadrant(&render_at(&app, 160, 40)));
     }
 
     #[test]
