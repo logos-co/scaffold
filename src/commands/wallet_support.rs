@@ -399,10 +399,15 @@ pub(crate) fn sequencer_connectivity_failure_with_probe(
         }
     }
 
-    let mentions_timeout = ["timeout", "timed out"]
+    // From LEZ v0.2.4 every wallet command first elects a sequencer leader and
+    // reports a dead sequencer as `Failed to find leader`, with no address or
+    // transport wording. Like a bare timeout, that is only a hint: corroborate
+    // it against `sequencer_addr` so a leader failure with the sequencer up
+    // keeps the raw wallet error.
+    let mentions_timeout_or_leader = ["timeout", "timed out", "failed to find leader"]
         .iter()
         .any(|needle| lower.contains(needle));
-    if !mentions_timeout {
+    if !mentions_timeout_or_leader {
         return false;
     }
     !probe(sequencer_addr)
@@ -753,6 +758,26 @@ mod tests {
             wallet_config_sequencer_addr(&cfg).as_deref(),
             Some("http://10.255.255.1:3040")
         );
+    }
+
+    /// LEZ v0.2.4's wallet reports a dead sequencer only as
+    /// `Failed to find leader` — no address, no transport wording. It must
+    /// reach the reachability hint when the probe agrees the sequencer is down,
+    /// and stay a plain wallet error when the probe finds it up.
+    #[test]
+    fn leader_election_failure_is_connectivity_only_when_probe_agrees() {
+        let text = "Error: Failed to find leader";
+        let addr = "http://127.0.0.1:3999";
+        assert!(sequencer_connectivity_failure_with_probe(
+            text,
+            addr,
+            |_| false
+        ));
+        assert!(!sequencer_connectivity_failure_with_probe(
+            text,
+            addr,
+            |_| true
+        ));
     }
 
     #[test]
