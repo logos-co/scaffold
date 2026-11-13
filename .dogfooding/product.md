@@ -35,8 +35,8 @@ capabilities are exposed as a typed Rust library under `logos_scaffold::api`.
 - AI skills shipped into every project: `skills/` → `.claude/skills/`, `.cursor/rules/`,
   `AGENTS.md`.
 - Rust API: `src/api/` (`Project`, `api::testnode::{TestNode, TestNodeClient}`, `api::Error`).
-- Global: `-q/--quiet` (or `LOGOS_SCAFFOLD_QUIET`), `--version`, and `help` (a hidden alias of
-  `--help`).
+- Global: `-q/--quiet` (or `LOGOS_SCAFFOLD_QUIET`), `--version`, and `help [COMMAND]...` (a hidden alias of
+  `[COMMAND]... --help`; a bare `lgs` prints the same text).
 - Hidden `self-test` subcommand: test-only, not a user surface.
 
 ## How to build and run

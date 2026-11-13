@@ -50,8 +50,9 @@ Related: [Diagnostics](diagnostics.md), [Project creation](project-creation.md).
 ## CLI-001 — Help and version
 
 ### Expected
-`--help` and `help` print the same usage listing all top-level commands. `--version` prints
-the version and exits 0. Most subcommands' `--help` ends with an `Examples:` block of
+`--help`, `help` and a bare invocation print the same usage listing all top-level commands.
+`help <command>` prints exactly what `<command> --help` prints, and an unknown command fails
+like any unknown subcommand. `--version` prints the version and exits 0. Most subcommands' `--help` ends with an `Examples:` block of
 copy-paste commands (see CLI-007 for the ones that do not).
 
 ### Preconditions
@@ -60,9 +61,13 @@ None.
 ### Steps
 1. `"$SCAFFOLD_BIN" --help; "$SCAFFOLD_BIN" help; "$SCAFFOLD_BIN" --version`
 2. `"$SCAFFOLD_BIN" deploy --help; lgs --version`
+3. `diff <("$SCAFFOLD_BIN" help deploy) <("$SCAFFOLD_BIN" deploy --help); "$SCAFFOLD_BIN" help test-node start | head -3; "$SCAFFOLD_BIN" help nope; echo "exit=$?"`
+4. `diff <("$SCAFFOLD_BIN" --help) <("$SCAFFOLD_BIN")`
 
 ### Success criteria
-- All exit 0, and `help` matches `--help`.
+- All exit 0, and `help` matches `--help` (`diff` prints nothing, trailing newline included).
+- Step 3's `diff` prints nothing, `help test-node start` shows `Usage: logos-scaffold test-node start`,
+  and `help nope` exits non-zero with `unrecognized subcommand 'nope'`. Step 4's `diff` prints nothing.
 - `--version` matches `Cargo.toml`, and `lgs` prints the same version.
 
 ## CLI-002 — Unknown command gives a corrective hint

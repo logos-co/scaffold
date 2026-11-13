@@ -4406,6 +4406,46 @@ fn logos_scaffold_help_usage_line_shows_logos_scaffold() {
 }
 
 #[test]
+fn help_subcommand_prints_the_same_text_as_the_help_flag() {
+    let run = |args: &[&str]| {
+        let out = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+            .args(args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        String::from_utf8(out).expect("utf8 help")
+    };
+
+    let long = run(&["--help"]);
+    assert!(long.contains("Examples:"), "--help lists examples");
+    assert_eq!(run(&["help"]), long, "`help` must equal `--help`");
+    assert_eq!(run(&[]), long, "a bare invocation must equal `--help`");
+    assert_eq!(
+        run(&["help", "deploy"]),
+        run(&["deploy", "--help"]),
+        "`help <command>` must equal `<command> --help`"
+    );
+    assert_eq!(
+        run(&["help", "test-node", "start"]),
+        run(&["test-node", "start", "--help"]),
+        "`help` follows nested subcommands"
+    );
+}
+
+#[test]
+fn help_subcommand_rejects_an_unknown_command() {
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .args(["help", "nonexistent-command"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "unrecognized subcommand 'nonexistent-command'",
+        ));
+}
+
+#[test]
 fn lgs_help_subcommand_uses_invoked_bin_name() {
     Command::new(assert_cmd::cargo::cargo_bin!("lgs"))
         .arg("help")
