@@ -64,11 +64,15 @@ BUILD-001.
 ### Steps
 1. `"$SCAFFOLD_BIN" doctor`
 2. Set `[circuits].version` to a wrong value, run `"$SCAFFOLD_BIN" doctor`, then restore it.
+3. Set `[circuits].install_dir` to an empty directory, run `"$SCAFFOLD_BIN" doctor`, then restore
+   it.
 
 ### Success criteria
 - Every non-PASS row has an actionable next step.
 - The `guest build` row mentions `risczero/risc0-guest-builder:<tag>`.
 - Step 2 shows a circuits warning or error that names the configured install dir.
+- Step 3 reports `missing configured circuits release at <that dir>` with the remediation
+  `Run \`logos-scaffold setup\``.
 
 ## DIAG-002 — doctor JSON output
 
@@ -144,9 +148,13 @@ None.
 ## DIAG-006 — doctor checks the wallet's sequencer address in either config shape
 
 ### Expected
-The `wallet network config` row passes when the address the wallet will use points at
-`127.0.0.1` or `localhost` on `[localnet].port`. Otherwise it warns, and the detail names the
-address it found. The remediation names the key the config's own shape uses:
+The `wallet network config` row passes when the address the wallet will use is a loopback
+host (`127.0.0.1`, `localhost` or `::1`) on exactly `[localnet].port`; `127.0.0.1:30400` does
+not pass for port 3040. Otherwise it warns, and the detail names the address it found, or says
+`wallet config names no sequencer address`. A missing config warns with `Run
+\`logos-scaffold setup\``. An unparseable one warns that it could not be parsed, with the
+remediation to fix the JSON by hand or delete the file and run `logos-scaffold setup`
+(`setup` never overwrites an existing config). The remediation names the key the config's own shape uses:
 `sequencers[0].sequencer_addr` for a LEZ v0.2.4 config, top-level `sequencer_addr` for an older
 one. A top-level `sequencer_addr` added next to a `sequencers` list does not change the
 verdict, because the v0.2.4 wallet never reads it.
@@ -158,10 +166,18 @@ BUILD-001. Back up `.scaffold/wallet/wallet_config.json` first.
 1. `"$SCAFFOLD_BIN" doctor | grep -A1 'wallet network config'`
 2. Set `sequencers[0].sequencer_addr` to `http://10.255.255.1:3040` and repeat step 1.
 3. Also add a top-level `"sequencer_addr": "http://127.0.0.1:3040"` and repeat step 1.
-4. Restore the config.
+4. Set `sequencers[0].sequencer_addr` to `http://127.0.0.1:30400` and repeat step 1.
+5. Replace the file with the pre-v0.2.4 shape `{"sequencer_addr": "http://10.0.0.1:3040"}` and
+   repeat step 1.
+6. Truncate the file to `{ "sequencers": [ ` and repeat step 1.
+7. Restore the config.
 
 ### Success criteria
 - Step 1 is PASS on a fresh setup.
 - Steps 2 and 3 are WARN, naming `http://10.255.255.1:3040`. Their remediation reads
   `Set sequencers[0].sequencer_addr in .scaffold/wallet/wallet_config.json to
   http://127.0.0.1:<port>`. A PASS in step 3 is the regression.
+- Step 4 is WARN (no prefix match on the port).
+- Step 5 is WARN with the remediation naming the top-level `sequencer_addr`.
+- Step 6 is WARN, `could not parse`, with the fix-or-delete remediation; plain `setup` alone
+  would not repair it.

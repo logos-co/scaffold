@@ -102,6 +102,8 @@ DEPLOY-001.
 
 ### Success criteria
 - Exactly one `OK  hello_world submitted` line, plus a `program_id:`.
+- It ends with the `Summary:` block: `Succeeded: 1`, `Failed: 0` and a `hello_world: submitted`
+  result line.
 
 ## DEPLOY-003 — Deploy an explicit binary with JSON output
 
@@ -119,6 +121,7 @@ DEPLOY-001.
 3. `"$SCAFFOLD_BIN" deploy --program-path "$BIN" --json | jq -e '.status and .program and (has("tx")|not)'`
 
 ### Success criteria
+- Step 2 prints a human-readable `OK` line naming `$BIN`.
 - Step 3 parses and the `jq -e` check exits 0. `program_id` is present once `setup` has built
   spel.
 

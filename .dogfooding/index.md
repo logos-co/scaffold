@@ -1,8 +1,8 @@
 ---
 dogfooding: 1
 repo: github.com/logos-co/scaffold
-commit: 0525e99cbe79316143cd2f179157cf1ec5e33133
-updated: 2026-11-12
+commit: 73a986576902cc5259b52bd0bdab329d1d37965e
+updated: 2026-11-13
 ---
 
 # logos-scaffold — dogfooding context
@@ -19,20 +19,20 @@ at the repo root. It is canonical for commands and evidence, and the two change 
 | Feature | Surface | P0 | P1 | P2 |
 |---|---|---|---|---|
 | [Project creation](features/project-creation.md) | cli | 1 | 2 | 5 |
-| [Setup and build](features/setup-and-build.md) | cli | 2 | 3 | 1 |
+| [Setup and build](features/setup-and-build.md) | cli | 2 | 4 | 1 |
 | [Localnet](features/localnet.md) | cli | 1 | 3 | 3 |
 | [Deploy](features/deploy.md) | cli | 1 | 3 | 4 |
-| [Run pipeline](features/run-pipeline.md) | cli | 1 | 2 | 6 |
+| [Run pipeline](features/run-pipeline.md) | cli | 1 | 2 | 7 |
 | [Wallet](features/wallet.md) | cli | 0 | 3 | 5 |
 | [Terminal dashboard](features/tui.md) | cli | 0 | 5 | 5 |
 | [Example runners](features/example-runners.md) | cli | 0 | 3 | 2 |
 | [spel template](features/spel-template.md) | cli | 0 | 4 | 2 |
 | [Diagnostics](features/diagnostics.md) | cli | 0 | 3 | 3 |
-| [CLI basics](features/cli-basics.md) | cli | 0 | 2 | 4 |
+| [CLI basics](features/cli-basics.md) | cli | 0 | 2 | 5 |
 | [AI skills](features/ai-skills.md) | cli | 0 | 0 | 3 |
 | [Test-node lifecycle](features/test-node-lifecycle.md) | cli | 0 | 4 | 3 |
 | [Test-node RPC](features/test-node-rpc.md) | cli | 0 | 5 | 3 |
-| [Basecamp setup](features/basecamp-setup.md) | cli | 0 | 3 | 4 |
+| [Basecamp setup](features/basecamp-setup.md) | cli | 0 | 3 | 5 |
 | [Basecamp modules](features/basecamp-modules.md) | cli | 0 | 3 | 5 |
 | [Basecamp launch](features/basecamp-launch.md) | cli | 0 | 3 | 5 |
 | [Rust API](features/rust-api.md) | api | 0 | 1 | 2 |
@@ -56,5 +56,8 @@ here: they go in `runs/`, which is gitignored.
   scenarios that depend on it are reported as blocked.
 - `commit` above is the product commit this context was last fully reconciled against. Move it
   only after reviewing every change since then.
+- Which scenarios to rerun after a change is in `DOGFOODING.md` "Minimum Rerun Guidance". It
+  names runbook sections; use the scenarios whose `source:` cites them (for example, a change
+  under `src/tui/` reruns D9, which is the [tui](features/tui.md) feature).
 - Frontmatter: one key per line. Lists are inline (`[A-001, B-002]`) or one `- A-001` line per
   item. No other YAML.

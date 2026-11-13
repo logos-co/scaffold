@@ -82,7 +82,9 @@ account owns it, and a later write by another program is rejected with
 2. Poll `"$SCAFFOLD_BIN" wallet -- account get --account-id Public/<B-base58>`.
 
 ### Success criteria
-- Exit 0, and B's `data` is the hex of `dogfood-test-message`.
+- Exit 0 with a `submitted transaction: tx_hash=…` line and a `verification hint:` line
+  pointing at `wallet account get`.
+- B's `data` is the hex of `dogfood-test-message`.
 
 ### Notes
 A runner can exit 0 while execution was rejected. Check the sequencer log for `failed
@@ -99,9 +101,12 @@ DEPLOY-001.
 
 ### Steps
 1. `cargo run --bin run_hello_world -- not-base58!; echo "exit=$?"`
+2. `"$SCAFFOLD_BIN" localnet stop; cargo run --bin run_hello_world -- <A-base58>; echo "exit=$?"`,
+   then `"$SCAFFOLD_BIN" localnet start`.
 
 ### Success criteria
 - Non-zero exit with a readable error, and no `panicked at` / `unwrap()` backtrace.
+- Step 2 exits non-zero with a connection error; record its exact text.
 
 ## RUNNER-004 — A private runner's write is visible after sync-private
 

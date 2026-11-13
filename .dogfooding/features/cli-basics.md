@@ -33,6 +33,11 @@ scenarios:
     priority: P2
     provenance: documented
     source: docs/commands.md
+  - id: CLI-007
+    title: Every top-level command answers --help
+    priority: P2
+    provenance: documented
+    source: DOGFOODING.md E1
 retired: []
 ---
 
@@ -46,7 +51,8 @@ Related: [Diagnostics](diagnostics.md), [Project creation](project-creation.md).
 
 ### Expected
 `--help` and `help` print the same usage listing all top-level commands. `--version` prints
-the version and exits 0. Each subcommand's `--help` includes copy-paste examples.
+the version and exits 0. Most subcommands' `--help` ends with an `Examples:` block of
+copy-paste commands (see CLI-007 for the ones that do not).
 
 ### Preconditions
 None.
@@ -78,7 +84,8 @@ None.
 ### Expected
 Outside a project, `build`, `deploy`, `doctor`, `localnet status` and `wallet list` each fail
 with the scaffold message `This command must be run inside a logos-scaffold project`,
-followed by a next step naming `logos-scaffold create <name>`. None of them shows a raw
+followed by a next step naming `logos-scaffold create <name>` (the name follows argv[0], so
+`lgs` prints `lgs create <name>`) and `Searched from <cwd>.` None of them shows a raw
 file-not-found error.
 
 ### Preconditions
@@ -137,3 +144,23 @@ A project with BUILD-001 done.
 
 ### Success criteria
 - Step 1 prints a positive count. Steps 2 and 3 print `0`. Run step 2 once without the pipe and confirm `setup complete` still prints.
+
+## CLI-007 — Every top-level command answers --help
+
+### Expected
+Every top-level command accepts `--help`, prints usage and exits 0 without touching the
+filesystem, including `spel --help`, which scaffold intercepts before the passthrough. At
+this revision `localnet`, `test-node`, `basecamp` and `run` have no `Examples:` block in
+their `--help` (their subcommands may). Every other visible command has one, or examples in
+its long description (`spel`).
+
+### Preconditions
+An empty temporary directory.
+
+### Steps
+1. `cd "$(mktemp -d)"; for c in create new init setup build deploy localnet test-node wallet spel basecamp doctor run report tui completions; do "$SCAFFOLD_BIN" $c --help > /tmp/h.txt; echo "$c exit=$? examples=$(grep -c '^Examples' /tmp/h.txt)"; done; ls -A`
+
+### Success criteria
+- Every command exits 0, and `ls -A` prints nothing.
+- `examples=0` appears only for `localnet`, `test-node`, `basecamp` and `run`. Any other
+  command without examples, or a change to that list, is a finding to record.

@@ -101,9 +101,11 @@ LOCALNET-001.
 
 ### Steps
 1. `"$SCAFFOLD_BIN" localnet logs --tail 200`
+2. `"$SCAFFOLD_BIN" localnet logs --tail 20 --json | jq .`
 
 ### Success criteria
 - Prints recent log lines (or `<no log output yet>` right after a failed start).
+- Step 2 is valid JSON holding at most 20 lines.
 
 ## LOCALNET-004 — Stop localnet
 
@@ -152,11 +154,13 @@ LOCALNET-001, in a scratch project.
 1. `"$SCAFFOLD_BIN" localnet reset; echo "exit=$?"`
 2. `"$SCAFFOLD_BIN" localnet reset --dry-run`
 3. `"$SCAFFOLD_BIN" localnet reset --yes`
+4. `"$SCAFFOLD_BIN" localnet reset --yes --verify-timeout-sec 120`
 
 ### Success criteria
 - Step 1 exits non-zero and asks for `--yes` or `--dry-run`.
 - Step 2 changes nothing.
-- Step 3 exits 0 with a verified, running localnet, and previously deployed programs are gone.
+- Steps 3 and 4 exit 0 with a verified, running localnet, and previously deployed programs are
+  gone. Step 4 accepts the custom verification bound.
 
 ### Notes
 `--reset-wallet` is irrecoverable. Use it only in a scratch project.
@@ -174,7 +178,10 @@ BUILD-001. A foreign listener on the port, e.g. `python3 -m http.server 3040`.
 ### Steps
 1. `"$SCAFFOLD_BIN" localnet start; echo "exit=$?"`
 2. `"$SCAFFOLD_BIN" localnet status`
+3. Still with the foreign listener: `"$SCAFFOLD_BIN" run --localnet-timeout 5; echo "exit=$?"`
 
 ### Success criteria
 - Step 1 fails and names both follow-up commands.
 - Step 2 identifies a foreign listener and its PID.
+- Step 3 fails at the localnet step the same way as step 1 (`run --localnet-timeout` bounds the
+  same start wait as `localnet start --timeout-sec`) and does not deploy anything.

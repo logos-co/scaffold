@@ -119,8 +119,12 @@ TUI-001.
    takes minutes on a cold build.
 2. `tmux send-keys -t d9 t; cap 20` and `tmux send-keys -t d9 c; cap 10`.
 3. `tmux send-keys -t d9 j d; cap 20` (deploy the second program).
+4. `tmux send-keys -t d9 s; cap 5; "$SCAFFOLD_BIN" localnet status`, then
+   `tmux send-keys -t d9 s; cap 10; "$SCAFFOLD_BIN" localnet status`.
 
 ### Success criteria
+- Step 4: the first `s` runs `lgs localnet stop` and both the Status pane and `localnet status`
+  show it stopped; the second runs `lgs localnet start` and both show it running again.
 - Every job is framed by its `$ lgs <args>` and `── lgs <args>: exit <code> ──` lines, and
   no output follows the exit line.
 - While a job runs, the Job line shows its label and a live timer.
@@ -140,11 +144,14 @@ TUI-002 step 1.
 1. `cap; cap 5`. Compare the block heights.
 2. `tmux send-keys -t d9 r; cap 30`
 3. `tmux send-keys -t d9 R; cap 1; tmux send-keys -t d9 y; cap 30`
+4. `tmux send-keys -t d9 r`, then poll `cap` until `── lgs run: exit 0 ──`.
 
 ### Success criteria
-- Step 1: every program shows `✓ deployed` and the height grows.
+- Step 1: every program shows its build kind (`docker`, or `release` under
+  `[build].guest = "local"`) and `✓ deployed`, and the height grows.
 - Step 2: the `✓` marks stay.
 - Step 3: the marks are gone and the Wallet line still shows the same address.
+- Step 4 deploys again (no `Deploy skipped`), and the `✓` marks return.
 
 ## TUI-004 — One job at a time, and x stops its whole process tree
 
@@ -158,16 +165,20 @@ TUI-002.
 
 ### Steps
 1. `tmux send-keys -t d9 b; cap 3; tmux send-keys -t d9 c; cap 1`
-2. `tmux send-keys -t d9 x; cap 3; pgrep -f 'cargo build'`
+2. `tmux send-keys -t d9 x; cap 3; pgrep -f 'cargo build'; "$SCAFFOLD_BIN" localnet status`
 
 ### Success criteria
 - Step 1 shows the still-running message and no `$ lgs doctor` line.
-- Step 2 shows the build's exit line, and `pgrep` finds nothing.
+- Step 2 shows the build's exit line, `pgrep` finds nothing, and the localnet is still
+  running: `x` reaches the job's process group, never the daemonized sequencer.
 
 ## TUI-005 — Reset and quit-with-a-job ask first
 
 ### Expected
-`R`, and `q` while a job runs, open a confirmation. Only `y` confirms. Any other key cancels.
+`R`, and `q` (or `Esc`) while a job runs, open a confirmation. `y` or `Enter` confirms; any
+other key cancels. The box's footer reads ` y yes · any other key no `, which leaves out
+`Enter`, so treat an accidental `Enter` confirmation as expected, not a bug in this
+scenario.
 
 ### Preconditions
 TUI-001.
@@ -175,6 +186,7 @@ TUI-001.
 ### Steps
 1. `tmux send-keys -t d9 R; cap 1; tmux send-keys -t d9 n; cap 1`
 2. Start a job (`b`), then `tmux send-keys -t d9 q; cap 1; tmux send-keys -t d9 n; cap 1`
+3. With the job still running, `tmux send-keys -t d9 Escape; cap 1; tmux send-keys -t d9 n; cap 1`
 
 ### Success criteria
 - Each step shows a Confirm box, and after `n` nothing was reset and the dashboard is still
@@ -212,10 +224,13 @@ TUI-001.
 ### Steps
 1. In a new session, `cap 0.5`, then `cap`.
 2. Start a job and `cap 1; cap 1`.
+3. `tmux resize-window -t d9 -x 119 -y 32; cap 1`, then `tmux resize-window -t d9 -x 120 -y 29; cap 1`.
 
 ### Success criteria
 - Step 1 shows the large λ, then the dashboard with the corner λ.
 - Step 2's two captures show different corner shapes.
+- In both step 3 captures the corner λ is gone, and the Status, Programs and Output panes are
+  laid out as before.
 
 ## TUI-008 — Sequencer log pane shows plain text
 

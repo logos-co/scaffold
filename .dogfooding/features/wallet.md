@@ -26,7 +26,7 @@ scenarios:
     priority: P2
     provenance: documented
     source: DOGFOODING.md D4
-    depends_on: [BUILD-001]
+    depends_on: [WALLET-001]
   - id: WALLET-005
     title: Passthrough uses the project wallet home
     priority: P1
@@ -44,13 +44,13 @@ scenarios:
     priority: P2
     provenance: documented
     source: DOGFOODING.md D4
-    depends_on: [BUILD-001]
+    depends_on: [WALLET-001]
   - id: WALLET-008
     title: Topup follows the wallet's configured sequencer
     priority: P2
     provenance: documented
     source: DOGFOODING.md D4
-    depends_on: [BUILD-001]
+    depends_on: [WALLET-001]
 retired: []
 ---
 
@@ -76,10 +76,13 @@ BUILD-001 and LOCALNET-001. Re-run `setup` once if seeding was deferred.
 ### Steps
 1. `"$SCAFFOLD_BIN" wallet topup`
 2. `grep default_address .scaffold/state/wallet.state`
+3. `"$SCAFFOLD_BIN" wallet -- account list`
 
 ### Success criteria
 - Exit 0, and no "no destination configured" message.
 - Step 2 prints an address that appears in `wallet list`.
+- In step 3 that address is on a `/ `-prefixed (stored account) line. Seeding adopts only
+  those; an address matching a `Preconfigured …` line is worth reporting.
 
 ## WALLET-002 — List wallet accounts
 
@@ -92,9 +95,11 @@ BUILD-001 and LOCALNET-001.
 ### Steps
 1. `"$SCAFFOLD_BIN" wallet list`
 2. `"$SCAFFOLD_BIN" wallet list --long`
+3. `"$SCAFFOLD_BIN" wallet list --json | jq .`
 
 ### Success criteria
 - At least the default `Public/<id>` account is listed.
+- Step 3 is valid JSON on stdout with no command echoes, listing the same accounts.
 
 ## WALLET-003 — Set the project default address
 
@@ -108,9 +113,10 @@ WALLET-002. Take an address from its output.
 ### Steps
 1. `"$SCAFFOLD_BIN" wallet default set Public/<id>`
 2. `grep default_address .scaffold/state/wallet.state`
+3. Repeat with `"$SCAFFOLD_BIN" wallet default set --address Public/<other-id>` and step 2.
 
 ### Success criteria
-- The state file holds the new address.
+- After each form, the state file holds the address just set.
 
 ## WALLET-004 — Topup dry run renders the command
 
@@ -118,13 +124,16 @@ WALLET-002. Take an address from its output.
 `wallet topup --dry-run` prints the faucet claim command it would run and changes nothing.
 
 ### Preconditions
-BUILD-001.
+WALLET-001 (dry run still resolves the default address first).
 
 ### Steps
 1. `"$SCAFFOLD_BIN" wallet topup --dry-run`
+2. `"$SCAFFOLD_BIN" wallet topup --dry-run --json | jq .`
 
 ### Success criteria
 - The output shows a `pinata claim` command line, and no transaction is submitted.
+- Step 2 is a single JSON object on stdout with no `$ <cmd>` echoes, naming the destination
+  and the `network`.
 
 ## WALLET-005 — Passthrough uses the project wallet home
 
@@ -139,10 +148,16 @@ BUILD-001 and LOCALNET-001.
 1. `"$SCAFFOLD_BIN" wallet -- check-health`
 2. `"$SCAFFOLD_BIN" wallet -- account list`
 3. `ls .scaffold/wallet`
+4. `"$SCAFFOLD_BIN" wallet account list; echo "exit=$?"` (no `--`)
+5. Temporarily rename `<lez>/target/release/wallet`, run `"$SCAFFOLD_BIN" wallet list; echo "exit=$?"`,
+   then restore it.
 
 ### Success criteria
-- Both commands exit 0, and step 2 lists the project's accounts, not a `~/.lee/wallet` set.
+- Steps 1 and 2 exit 0, and step 2 lists the project's accounts, not a `~/.lee/wallet` set.
 - `.scaffold/wallet` holds account storage, not only `wallet_config.json`.
+- Step 4 is rejected by argument parsing; nothing is forwarded to the wallet.
+- Step 5 fails with `missing wallet binary at <lez>/target/release/wallet. Run
+  \`logos-scaffold setup\`.`, and works without any `wallet` on PATH.
 
 ### Notes
 A lone `wallet_config.json` after a wallet command means storage silently went to
@@ -171,7 +186,7 @@ Wallet-facing commands use `LOGOS_SCAFFOLD_WALLET_PASSWORD` instead of the local
 when it is set.
 
 ### Preconditions
-BUILD-001.
+WALLET-001.
 
 ### Steps
 1. `LOGOS_SCAFFOLD_WALLET_PASSWORD=custom-pw "$SCAFFOLD_BIN" wallet topup --dry-run`
@@ -191,7 +206,8 @@ down, topup maps that to the sequencer-unavailable hint naming the configured ad
 the sequencer up, the wallet error stays as it is.
 
 ### Preconditions
-BUILD-001. Back up `.scaffold/wallet/wallet_config.json` first.
+WALLET-001 (topup needs a default address before it reaches the network). Back up
+`.scaffold/wallet/wallet_config.json` first.
 
 ### Steps
 1. Set `sequencers[0].sequencer_addr` in `.scaffold/wallet/wallet_config.json` to
@@ -202,5 +218,11 @@ BUILD-001. Back up `.scaffold/wallet/wallet_config.json` first.
 
 ### Success criteria
 - Step 2's `planned network:` line names `http://127.0.0.1:3999`.
-- Step 3 exits non-zero and ends with `sequencer appears unavailable at http://127.0.0.1:3999`.
-  A bare `Failed to find leader` followed by an account-verification hint is the regression.
+- Step 3 exits non-zero, and its output contains
+  `sequencer appears unavailable at http://127.0.0.1:3999` (the hint goes on with two more
+  lines). A bare `Failed to find leader` followed by an account-verification hint is the
+  regression.
+
+### Notes
+Unlike `deploy`, topup has no reachability preflight, so against an unrouted address it first
+waits out the wallet's own timeout (about a minute). Don't treat that delay as a failure.

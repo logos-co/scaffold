@@ -128,18 +128,31 @@ None.
 ## CREATE-005 — Custom cache root keeps checkouts pin-isolated
 
 ### Expected
-`--cache-root DIR` is honoured, and non-vendored LEZ lands in `DIR/repos/lez/<pin>/`.
-Different pins never share a checkout.
+`--cache-root DIR` is honoured and written to `scaffold.toml`, and non-vendored LEZ lands in
+`DIR/repos/lez/<pin>/`. Different pins never share a checkout: a second project on the same
+cache root with a different `[repos.lez].pin` gets its own `DIR/repos/lez/<other-pin>/`, and
+the first checkout keeps its HEAD.
 
 ### Preconditions
-None.
+None. Step 3 needs an older LEZ commit SHA to pin (for example the commit of an earlier
+release tag).
 
 ### Steps
 1. `"$SCAFFOLD_BIN" new dogfood-cache --cache-root "$SCRATCH_ROOT/custom-cache"`
 2. `find "$SCRATCH_ROOT/custom-cache/repos/lez" -mindepth 1 -maxdepth 2 -type d`
+3. `"$SCAFFOLD_BIN" new dogfood-cache2 --cache-root "$SCRATCH_ROOT/custom-cache"`, set
+   `[repos.lez].pin` in `dogfood-cache2/scaffold.toml` to the older SHA, then
+   `( cd dogfood-cache2 && "$SCAFFOLD_BIN" setup )`.
+4. `for d in "$SCRATCH_ROOT"/custom-cache/repos/lez/*/; do echo "$d $(git -C "$d" rev-parse HEAD)"; done`
 
 ### Success criteria
 - A directory named after the pin exists under the custom cache root.
+- After step 4 there are two pin directories, each at its own pin. The first one's HEAD is
+  unchanged.
+
+### Notes
+Step 3 clones and builds a second LEZ (about 10 minutes). Only the clone matters here, so a
+build failure on the older pin does not fail this scenario.
 
 ## CREATE-006 — Non-default LEZ source gets its own checkout
 
@@ -147,8 +160,8 @@ None.
 `--lez-path <checkout>` (legacy alias `--lssa-path`) clones into
 `<cache>/repos/lez/<pin>-src-<hash>/`. It leaves the default-source `<pin>/` checkout and its
 `target/` alone. `test-node pins --json` in that project reports the same `<pin>-src-<hash>`
-directory with `ownership: managed_cache`. A path that does not exist fails with an error
-naming that path.
+directory with `checkout_ownership: managed_cache`. A path that does not exist fails with an
+error naming that path.
 
 ### Preconditions
 A real LEZ checkout on disk. Skip this scenario if none is available.
@@ -156,7 +169,7 @@ A real LEZ checkout on disk. Skip this scenario if none is available.
 ### Steps
 1. `"$SCAFFOLD_BIN" new dogfood-lezpath --lez-path /abs/path/to/lez`
 2. `( cd dogfood-lezpath && "$SCAFFOLD_BIN" setup )`
-3. `"$SCAFFOLD_BIN" test-node pins --project dogfood-lezpath --json | jq '.lez_checkout, .ownership'`
+3. `"$SCAFFOLD_BIN" test-node pins --project dogfood-lezpath --json | jq '.lez_checkout, .checkout_ownership'`
 4. `"$SCAFFOLD_BIN" new dogfood-badpath --lez-path /does/not/exist`
 
 ### Success criteria

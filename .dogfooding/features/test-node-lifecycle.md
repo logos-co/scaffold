@@ -64,7 +64,10 @@ validate against a real sequencer, never a stub. Related:
 `test-node pins` (and `--json`) reports the LEZ source/ref, resolved commit, checkout path,
 ownership (`managed_cache` or `caller_provided`), sequencer binary path and circuits
 version/path, each with its origin. For projects with `[circuits]`, the circuits version
-matches the project config.
+matches the project config. `pins` is read-only. `--lez-ref <ref>` overrides the ref
+(`lez_ref_origin: cli_override`) and points `lez_checkout` at the managed cache directory
+`<cache_root>/repos/lez/<ref>`, without cloning anything. `lez_resolved_commit` stays `null`
+until that checkout exists.
 
 ### Preconditions
 CREATE-001.
@@ -72,10 +75,16 @@ CREATE-001.
 ### Steps
 1. `"$SCAFFOLD_BIN" test-node pins --project "$P"`
 2. `"$SCAFFOLD_BIN" test-node pins --project "$P" --json | jq .`
+3. `"$SCAFFOLD_BIN" test-node pins --project "$P" --lez-ref dogfood-unused-ref --json | jq '{lez_ref, lez_ref_origin, lez_checkout, checkout_ownership, lez_resolved_commit}'`,
+   then `ls <lez_checkout>; echo "exit=$?"`.
 
 ### Success criteria
 - The JSON parses, includes `lez_checkout`, and the circuits version equals
   `[circuits].version`.
+- Step 3 reports `lez_ref: dogfood-unused-ref`, `lez_ref_origin: cli_override`,
+  `checkout_ownership: managed_cache`, a `lez_checkout` ending in
+  `/repos/lez/dogfood-unused-ref` and `lez_resolved_commit: null`. That directory does not
+  exist.
 
 ## TNODE-002 — Prepare and check test-node prerequisites
 
@@ -86,22 +95,33 @@ ready`. `--json` reports the checkout, commit, binary and circuits paths. `test-
 reports pin drift, checkout presence/commit/cleanliness, sequencer binary, circuits and
 platform support as separate checks. It exits non-zero only when a real prerequisite is
 missing. A missing binary or missing circuits produces an error pointing at `test-node
-prepare`, not a panic.
+prepare`, not a panic. `prepare --cache-root DIR` puts the managed LEZ checkout under
+`DIR/repos/lez/<ref>` instead of the project's cache root, and `prepare --lez-ref <ref>`
+builds that ref, with `--json` reporting the matching `checkout` and `lez_commit`. Circuits
+still go to the project's configured install dir.
 
 ### Preconditions
 TNODE-001 and r0vm provisioned (see `DOGFOODING.md` "Provisioning").
 
 ### Steps
 1. `"$SCAFFOLD_BIN" test-node doctor --project "$P"` (before prepare, if fresh)
-2. `"$SCAFFOLD_BIN" test-node prepare --project "$P" --json`
+2. `PJ=$("$SCAFFOLD_BIN" test-node prepare --project "$P" --json); echo "$PJ"`
 3. `"$SCAFFOLD_BIN" test-node doctor --project "$P" --json | jq .ok`
+4. `PIN=$(echo "$PJ" | jq -r .lez_commit)`, then
+   `"$SCAFFOLD_BIN" test-node prepare --project "$P" --cache-root "$SCRATCH_ROOT/tn-cache" --lez-ref "$PIN" --json | jq '{checkout, checkout_ownership, lez_commit}'`
 
 ### Success criteria
 - Step 1 names `test-node prepare` for anything missing.
 - Step 2 exits 0. Step 3 prints `true`.
+- Step 4 exits 0 with `checkout` equal to `$SCRATCH_ROOT/tn-cache/repos/lez/$PIN`,
+  `checkout_ownership: managed_cache` and `lez_commit` equal to `$PIN`. The checkout from
+  step 2 is untouched.
 
 ### Notes
-The sequencer build takes about 6 minutes. Run it in the background.
+The sequencer build takes about 6 minutes, and step 4 builds a second copy. Run them in the
+background. `start` and `run` do not take these overrides: they always use the project's own
+LEZ checkout (whatever `[repos.lez]` resolves to), so a binary built by step 4 is never used
+by a node.
 
 ## TNODE-003 — Start, inspect and stop an isolated node
 
@@ -121,9 +141,13 @@ TNODE-002.
 2. `NODE=$(echo "$SJ" | jq -r .state_dir | xargs basename); "$SCAFFOLD_BIN" test-node status --node "$NODE" --project "$P" --json`
 3. `"$SCAFFOLD_BIN" test-node stop --node "$NODE" --project "$P"; ls "$P/.scaffold/test-nodes"`
 4. `"$SCAFFOLD_BIN" test-node status --node "$NODE" --project "$P" --json; echo "exit=$?"`
+5. `"$SCAFFOLD_BIN" test-node pins --project "$P" --json | jq -r '.lez_checkout, .circuits_path'`, then
+   `git -C <lez_checkout> status --short` and `ls <circuits_path>`.
 
 ### Success criteria
 - Every listed field is present, and the port is not 3040.
+- Step 5: the LEZ checkout has no new or modified files from the node, and the configured
+  circuits install exists (start materialises it if it was missing).
 - Status is healthy while running. After stop, the node dir is gone and status exits
   non-zero.
 
@@ -142,9 +166,12 @@ TNODE-002.
 1. `"$SCAFFOLD_BIN" test-node run --project "$P" --serial -- sh -c 'echo "rpc=$LGS_TEST_NODE_RPC_URL port=$LGS_TEST_NODE_PORT"'`
 2. `"$SCAFFOLD_BIN" test-node run --project "$P" -- sh -c 'exit 7'; echo "exit=$?"`
 3. `pgrep -fl sequencer_service`
+4. `for i in 1 2 3; do "$SCAFFOLD_BIN" test-node run --project "$P" --parallel 2 -- sh -c 'echo $LGS_TEST_NODE_PORT; sleep 5' & done; wait`
 
 ### Success criteria
 - Step 1 prints a real URL and port. Step 2 prints `exit=7`.
+- Step 4 prints three distinct ports and all three runs exit 0. With `--parallel 2`, the third
+  node starts only after one of the first two has stopped.
 - Step 3 shows no leftover node from these runs.
 
 ## TNODE-005 — Explicit port already in use fails fast
@@ -172,7 +199,7 @@ resets, cleans or force-checks it out. A dirty or mismatched checkout is reporte
 A local LEZ clone at the pinned commit.
 
 ### Steps
-1. `"$SCAFFOLD_BIN" test-node pins --project "$P" --lez-source /path/to/lez --json | jq .ownership`
+1. `"$SCAFFOLD_BIN" test-node pins --project "$P" --lez-source /path/to/lez --json | jq .checkout_ownership`
 2. `touch /path/to/lez/DIRTY && "$SCAFFOLD_BIN" test-node prepare --project "$P" --lez-source /path/to/lez; echo "exit=$?"`
 3. `git -C /path/to/lez status --short; git -C /path/to/lez rev-parse HEAD`
 
@@ -195,6 +222,8 @@ TNODE-002.
 2. `grep -E 'block_create_timeout|retry_pending_blocks_timeout' "$(echo "$SJ" | jq -r .config_path)"`
 3. `"$SCAFFOLD_BIN" test-node start --project "$P" --block-create-timeout-ms 0; echo "exit=$?"`
 4. Stop the node from step 1.
+5. `"$SCAFFOLD_BIN" test-node run --project "$P" --block-create-timeout-ms 500 -- sh -c 'grep block_create_timeout "$LGS_TEST_NODE_CONFIG_PATH"'`
 
 ### Success criteria
 - Step 2 shows `500ms` for both keys. Step 3 is rejected.
+- Step 5 shows `500ms` too: `run` takes the same flags.

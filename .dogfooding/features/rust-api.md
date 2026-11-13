@@ -19,6 +19,7 @@ scenarios:
     priority: P2
     provenance: documented
     source: DOGFOODING.md A1
+    depends_on: [API-001, BUILD-001]
 retired: []
 ---
 
@@ -48,11 +49,17 @@ repo.
    `p.localnet_rpc_url()`, `p.paths()?.sequencer_binary`, `paths.cache_root` /
    `paths.cache_root_source` and `p.localnet_status().ready`.
 2. Run it with `cargo run` from a different directory (for example `/`).
+3. Add `let d = Project::discover("<abs project>/src/bin")?; assert_eq!(d.root(), p.root());`
+   and `match Project::discover(std::env::temp_dir().join("lgs-empty")) { Err(Error::Config { message }) => println!("discover: {message}"), other => panic!("{other:?}") }`
+   (create that empty dir first), then `cargo run` again.
 
 ### Success criteria
 - Paths resolve under the project or cache, matching `test-node pins` and
   `localnet status --json`.
 - The output is the same whatever directory you run it from.
+- `discover` from a subdirectory finds the same root as `open`. From a directory with no
+  `scaffold.toml` above it, it returns `Config` with
+  `no scaffold.toml found in <dir> or any parent directory`.
 
 ## API-002 — API docs build and doctests pass
 
@@ -72,15 +79,25 @@ The repo checkout.
 ## API-003 — Errors are categorized
 
 ### Expected
-Errors are `api::Error::{Config, MissingTool, RepoState, Process, Timeout, Transport, Command,
-Other}`. Opening a directory without `scaffold.toml` gives `Config`. Failed external commands
-carry a structured `CommandFailed` with the rendered command, exit code and captured output.
+Errors are `api::Error::{Config, BlockTimingValidation, MissingTool, RepoState, Process,
+Timeout, Transport, Command, Other}` (`#[non_exhaustive]`). Opening a directory without
+`scaffold.toml` gives `Config`. A test-node block timing override outside 1 to 3,600,000 ms
+gives `BlockTimingValidation`. A failed external command gives `Command(CommandFailed)` with
+the rendered `command`, `label`, `exit_code`, `stdout`, `stderr` and `log_path`. `stdout` and
+`stderr` are empty when the output was streamed to the terminal rather than captured.
 
 ### Preconditions
-The scratch crate from API-001.
+The scratch crate from API-001, and the CREATE-001 project after BUILD-001 (so the wallet
+binary and wallet home exist).
 
 ### Steps
 1. `match Project::open("/tmp") { Err(e @ Error::Config { .. }) => println!("ok: {e}"), other => panic!("{other:?}") }`
+2. `match p.wallet_passthrough(&["no-such-subcommand".to_string()]) { Err(Error::Command(f)) => println!("cmd={} exit={:?} label={}", f.command, f.exit_code, f.label), other => panic!("{other:?}") }`
+3. With `use logos_scaffold::api::testnode::{BlockTimingOverrides, TestNode, TestNodeConfig};`:
+   `match TestNode::start_with_block_timing(&p, &TestNodeConfig::default(), BlockTimingOverrides::new().with_block_create_timeout_ms(0)) { Err(Error::BlockTimingValidation { source }) => println!("timing: {}", source.field()), other => panic!("{other:?}") }`
 
 ### Success criteria
-- It prints `ok:` with a readable message.
+- Step 1 prints `ok:` with a readable message.
+- Step 2 prints a `command` that ends in `wallet no-such-subcommand`, a non-zero
+  `exit_code` and the label `wallet passthrough command`.
+- Step 3 prints `timing: block_create_timeout_ms` and starts no node.

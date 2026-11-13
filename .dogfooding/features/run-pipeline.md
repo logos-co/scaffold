@@ -7,7 +7,7 @@ scenarios:
     title: Bare run takes a fresh project to deployed programs
     priority: P0
     provenance: documented
-    source: README.md
+    source: DOGFOODING.md D7
     depends_on: [CREATE-001]
   - id: RUN-002
     title: Re-run reuses localnet and skips an unchanged deploy
@@ -19,7 +19,7 @@ scenarios:
     title: Post-deploy hooks get the documented environment
     priority: P1
     provenance: documented
-    source: docs/configuration.md
+    source: DOGFOODING.md D7
     depends_on: [RUN-001]
   - id: RUN-004
     title: Override or skip hooks from the command line
@@ -57,6 +57,12 @@ scenarios:
     provenance: documented
     source: DOGFOODING.md D7
     depends_on: [RUN-001]
+  - id: RUN-010
+    title: Hooks get the program id and guest path on a single-program project
+    priority: P2
+    provenance: documented
+    source: DOGFOODING.md D7
+    depends_on: [RUN-003]
 retired: []
 ---
 
@@ -74,7 +80,8 @@ header (`[n/N]`). Steps never renumber: a skipped step keeps its slot and says w
 In a freshly created project with no `[run]` section, `lgs run` prints `[1/5] Building...`,
 `[2/5] Building IDL...`, `[3/5] Ensuring localnet...` (then `localnet ready (sequencer
 pid=…)`), `[4/5] Topping up wallet...` and `[5/5] Deploying programs...` with `program_id:`
-lines. It ends with a `Deployed programs:` summary and `Sequencer: http://127.0.0.1:3040`.
+lines. It ends with a `Deployed programs:` summary and a `Sequencer:` line naming the wallet's
+target (`http://127.0.0.1:3040` with the LEZ debug config on the default port; see RUN-009).
 It seeds the default wallet once localnet is up if `setup` deferred it. It also works from a
 subdirectory and anchors at the project root.
 
@@ -143,6 +150,10 @@ RUN-001.
 ### Success criteria
 - `pwd` prints the project root, and every variable is non-empty. `nssa` equals `lee`.
   `topup` and `deploy` are `0` or `1` and match the headers printed in the same run.
+- After RUN-002 nothing changed, so step 2's deploy is dedup-skipped
+  (`Deploy skipped (… unchanged …)`). The hooks still run, and `deploy=1`.
+- `seq` is `http://127.0.0.1:<[localnet].port>`, even if the wallet config names another
+  address (see RUN-009).
 - The default template has several programs, so `SCAFFOLD_PROGRAM_ID` and
   `SCAFFOLD_GUEST_BIN` print `unset`.
 - Step 3 exits non-zero with `post-deploy hook exited with status 3`.
@@ -164,7 +175,7 @@ RUN-003 (with `[run].post_deploy` configured).
 
 ### Success criteria
 - Step 1 runs only `echo override`.
-- Step 2 runs no hooks.
+- Step 2 runs no hooks and ends with the `Deployed programs:` summary and `Sequencer:` line.
 - Step 3 exits non-zero with `cannot be used with` and does no build work.
 
 ## RUN-005 — Profile with deploy disabled
@@ -265,8 +276,29 @@ post-deploy hook's `SEQUENCER_URL` stays `http://127.0.0.1:<[localnet].port>`, a
 RUN-001.
 
 ### Steps
-1. `"$SCAFFOLD_BIN" run 2>&1 | grep '^Sequencer:'`
+1. `"$SCAFFOLD_BIN" run --no-post-deploy 2>&1 | grep '^Sequencer:'` (the summary prints only
+   when no hooks run)
 2. `jq -r '.sequencers[0].sequencer_addr // .sequencer_addr' .scaffold/wallet/wallet_config.json`
 
 ### Success criteria
 - Step 1's address equals step 2's.
+
+## RUN-010 — Hooks get the program id and guest path on a single-program project
+
+### Expected
+When the project has exactly one guest program, hooks also see `SCAFFOLD_PROGRAM_ID` (the
+deployed program's risc0 image ID) and `SCAFFOLD_GUEST_BIN` (the absolute path to its guest
+binary). Unset on a single-program project with the vendored `spel` built is the regression.
+A missing `spel` binary shows as `program_id: unavailable` in the deploy summary.
+
+### Preconditions
+RUN-003, in a copy of the project with every program but `hello_world` removed from
+`methods/guest/src/bin/`.
+
+### Steps
+1. `"$SCAFFOLD_BIN" run --post-deploy 'echo pid=${SCAFFOLD_PROGRAM_ID:-unset} bin=${SCAFFOLD_GUEST_BIN:-unset}'`
+2. `"$SCAFFOLD_BIN" deploy hello_world --json | jq -r '.deploys[0].program_id'`
+
+### Success criteria
+- `pid` is a 64-hex image ID equal to step 2's `program_id`.
+- `bin` is an absolute path to an existing `hello_world.bin`.

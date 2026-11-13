@@ -84,7 +84,7 @@ TNODE-003 running, with `TN_URL` set to its `rpc_url`.
 
 ### Steps
 1. `"$SCAFFOLD_BIN" test-node blocks head --url "$TN_URL" --json`
-2. `"$SCAFFOLD_BIN" test-node blocks range --url "$TN_URL" --from 0 --to 3 --json`
+2. `"$SCAFFOLD_BIN" test-node blocks range --url "$TN_URL" --from 1 --to 3 --json` (genesis is block 1, and a range with a missing block fails as a whole)
 3. `"$SCAFFOLD_BIN" test-node blocks wait --url "$TN_URL" --after 1 --count 1 --json`
 4. `"$SCAFFOLD_BIN" test-node clock read --url "$TN_URL" --json`
 5. `"$SCAFFOLD_BIN" test-node clock wait-stable --url "$TN_URL" --samples 2 --json`
@@ -103,7 +103,11 @@ TNODE-003 running, with `TN_URL` set to its `rpc_url`.
 `transport_error` or `wire_mismatch`. It exits non-zero for anything but `committed`.
 Transport failures are never reported as rejections, and a stateful rejection needs
 multi-block observation plus a chain scan. `tx submit` returns a hash or a structured
-stateless rejection. `tx wait --hash` honours `--after-block`.
+stateless rejection, and exits non-zero unless the status is `submitted`. `tx wait --hash`
+honours `--after-block`. `--encoding` is `borsh-base64` (the default: base64 text, trimmed)
+or `borsh` (raw bytes). The same bytes give the same outcome in either encoding. A
+`borsh-base64` file that is not base64 fails locally with `invalid base64 transaction
+encoding` before any RPC.
 
 ### Preconditions
 TNODE-003 running and a transaction file. Any base64 borsh blob works for the negative path.
@@ -111,10 +115,17 @@ TNODE-003 running and a transaction file. Any base64 borsh blob works for the ne
 ### Steps
 1. `echo AAAA > /tmp/bad.b64 && "$SCAFFOLD_BIN" test-node tx submit-and-wait --url "$TN_URL" --file /tmp/bad.b64 --json; echo "exit=$?"`
 2. `"$SCAFFOLD_BIN" test-node tx submit-and-wait --url http://127.0.0.1:1 --file /tmp/bad.b64 --json; echo "exit=$?"`
+3. `base64 -d /tmp/bad.b64 > /tmp/bad.bin && "$SCAFFOLD_BIN" test-node tx submit-and-wait --url "$TN_URL" --file /tmp/bad.bin --encoding borsh --json; echo "exit=$?"`
+4. `"$SCAFFOLD_BIN" test-node tx submit --url "$TN_URL" --file /tmp/bad.bin --encoding borsh --json; echo "exit=$?"`
+5. `echo '!!!' > /tmp/notb64.txt && "$SCAFFOLD_BIN" test-node tx submit --url "$TN_URL" --file /tmp/notb64.txt --json; echo "exit=$?"`
 
 ### Success criteria
 - Step 1 prints one `rejected` (stateless) or `wire_mismatch` object and exits non-zero.
 - Step 2 prints `transport_error`, not `rejected`, and exits non-zero.
+- Step 3 gives the same outcome kind as step 1 and exits non-zero.
+- Step 4 prints one object whose `status` is `rejected` (or `submitted` if the node takes it
+  into its mempool) and exits non-zero unless `submitted`.
+- Step 5 exits non-zero with `invalid base64 transaction encoding` and prints no JSON.
 
 ## TRPC-003 — Block-scoped account and proof reads
 
@@ -137,7 +148,9 @@ v0.2.4 the seeded account itself reads `missing`).
 
 ### Success criteria
 - Every read has a `block_id`, and batch entries share one `block_id`.
-- Step 3 fails locally as invalid. Step 4 returns `proof: null`.
+- Step 1 reports `state: present` with base64 bytes and decoded balance, nonce, owner and
+  data. In step 2 the never-written id reads `state: missing`.
+- Step 3 fails locally as invalid, before any RPC. Step 4 returns `proof: null`.
 
 ## TRPC-004 — Snapshot accounts to a file
 
@@ -165,7 +178,8 @@ LEZ commit, format version and account counts. `start --state` builds genesis fr
 the snapshot, with none of the debug config's sample accounts. On LEZ v0.2.4 each seeded public
 balance becomes a `supply_account` genesis action that credits the account's **vault PDA**,
 not the account. `state seed` warns about that, and `account get` on the account itself reads
-`missing`. The sequencer's built-in testnet state is always present and is not a leak. v0.2.4
+`missing`. The debug config's `supply_bridge_account` entry stays, and the sequencer's built-in
+testnet state is always present; neither is a leak. v0.2.4
 also rejects non-empty `private_accounts`. `state export` writes named public balances from a
 running node.
 
@@ -184,11 +198,13 @@ TNODE-002.
 6. Repeat step 5 for the vault of a debug-config sample account the seed left out (for example
    `2RHZhw9h534Zr3eq2RGhQete2Hh667foECzXPmSkGni2` →
    `Ey6P7CkwXHLskqFjQzU8C1kTwb54TkZfhzv9wUijb3Wc`).
+7. `"$SCAFFOLD_BIN" test-node state export --url "$TN_URL" --account-id <vault> --output /tmp/export.json --json; jq . /tmp/export.json`
 
 ### Success criteria
 - Step 3 warns that the balance is credited to the vault PDA.
 - Step 5 reports `state: present` with `balance: 4242`.
 - Step 6 reports `missing`. That proves the seed replaced the sample accounts.
+- Step 7 writes a snapshot naming `<vault>` with balance 4242.
 
 ## TRPC-006 — Bad snapshots are rejected up front
 
@@ -204,10 +220,21 @@ TNODE-001.
 ### Steps
 1. `echo '{"format":"bogus/1"}' > bad.json && "$SCAFFOLD_BIN" test-node state seed --project "$P" --input bad.json; echo "exit=$?"`
 2. Seed a snapshot whose public account has `"nonce": 3`.
+3. On a LEZ v0.2.4 pin, seed a snapshot with a non-empty `private_accounts` list.
+4. Seed a snapshot whose `lez_commit` is not the project's resolved LEZ commit.
+5. `echo '{"format":"lgs-state-snapshot/1","public_accounts":[{"account_id":"not-base58!!","balance":1}]}' > bad-id.json && "$SCAFFOLD_BIN" test-node state seed --project "$P" --input bad-id.json; echo "exit=$?"`
 
 ### Success criteria
 - Step 1 fails with `format mismatch`. Step 2 fails with `storage schema mismatch` naming
-  `nonce`.
+  `nonce`. Step 3 fails with `storage schema mismatch`. Step 4 fails with `lez pin mismatch`.
+- Step 5 fails with `account decode error` and `is not base58`.
+- Every step exits non-zero, and no node is started.
+
+### Notes
+`state seed` creates its output dir (`--output`, or
+`.scaffold/test-nodes/seeds/seed-<ts>-<pid>`) before it validates the snapshot, so each
+rejected seed currently leaves an empty dir behind. Record that as a finding rather than a
+failure.
 
 ## TRPC-007 — A real wallet transaction is observed as committed
 
@@ -224,12 +251,20 @@ Localnet stopped, so port 3040 is free.
 1. `SJ=$("$SCAFFOLD_BIN" test-node start --project "$P" --port 3040 --json); URL=$(echo "$SJ" | jq -r .rpc_url)`
 2. `HEAD0=$("$SCAFFOLD_BIN" test-node blocks head --url "$URL" --json | jq -r .block_id)`
 3. `( cd "$P" && "$SCAFFOLD_BIN" wallet topup )`
-4. `"$SCAFFOLD_BIN" test-node blocks wait --url "$URL" --after "$HEAD0" --count 6 --timeout-sec 90 --json | jq -c '.blocks[] | select(.has_user_transactions)'`
-5. Stop the node.
+4. `"$SCAFFOLD_BIN" test-node blocks wait --url "$URL" --after "$HEAD0" --count 6 --timeout-sec 90 --json > /tmp/blocks.json`,
+   then `jq -c '.blocks[] | select(.has_user_transactions)' /tmp/blocks.json` and
+   `jq '[.blocks[].fully_parsed] | all' /tmp/blocks.json`.
+5. Take a user tx hash from step 4 (`.transactions[] | select(.is_clock | not) | .hash`) and run
+   `"$SCAFFOLD_BIN" test-node tx wait --url "$URL" --hash <hash> --after-block "$HEAD0" --json`.
+6. `"$SCAFFOLD_BIN" test-node stop --node <id>`, then check that `.scaffold/test-nodes/<id>` is gone.
 
 ### Success criteria
 - `topup` exits 0. At least one block has 2 transactions, including a non-clock public tx,
-  and every block reports `fully_parsed: true`.
+  and the `all` check over every block (clock-only blocks included) prints `true`.
+- Step 5 prints a `committed` object with that block's `block_id` and `timestamp`, and exits 0.
+- Step 6 leaves no runtime dir behind.
+- If `topup` instead prints a sequencer-unreachable hint, the node is not on `[localnet] port`:
+  that hint must name the configured port, not a hardcoded `:3040`.
 
 ### Notes
 If blocks keep coming but no user tx lands, r0vm is probably missing or the wrong version.

@@ -21,10 +21,12 @@ capabilities are exposed as a typed Rust library under `logos_scaffold::api`.
   `src/commands/`. Reference: `docs/commands.md`, `docs/configuration.md`.
 - Project creation and adoption: `new`/`create`, `init`. Templates: `templates/default`
   (bare LEZ), and `--template spel`, which delegates to the pinned `spel init`.
-- Toolchain and build: `setup [--prebuilt]`, `build [--guest local|docker]`, `build idl`,
-  `build client`.
+- Toolchain and build: `setup [--prebuilt]`, `build [project-path] [--prebuilt]
+  [--guest local|docker]`, `build idl [project-path]`, `build client [project-path]`.
 - Local sequencer: `localnet start|stop|status|logs|reset`.
 - Deploy and the inner loop: `deploy`, `run` (profiles, hooks, `--watch`, `--reset`).
+- Terminal dashboard over the inner loop: `tui` (status in process; every action key runs the
+  matching CLI command as a child process).
 - Wallet: `wallet list|topup|default set`, `wallet -- <raw wallet args>`.
 - spel passthrough: `spel -- <raw spel args>`.
 - Diagnostics: `doctor [--json]`, `report`, `completions <bash|zsh>`.
@@ -33,6 +35,8 @@ capabilities are exposed as a typed Rust library under `logos_scaffold::api`.
 - AI skills shipped into every project: `skills/` → `.claude/skills/`, `.cursor/rules/`,
   `AGENTS.md`.
 - Rust API: `src/api/` (`Project`, `api::testnode::{TestNode, TestNodeClient}`, `api::Error`).
+- Global: `-q/--quiet` (or `LOGOS_SCAFFOLD_QUIET`), `--version`, and `help` (a hidden alias of
+  `--help`).
 - Hidden `self-test` subcommand: test-only, not a user surface.
 
 ## How to build and run
@@ -57,9 +61,11 @@ Toolchain per area:
   guest has no local mode. On such a host, run SPEL-002 and the scenarios that depend on it
   (`L1`'s build and `L4` in `DOGFOODING.md`) on a Docker-capable host, such as a
   GitHub-hosted runner, rather than reporting them blocked.
+- **Guest compilation (`build`; the D- and L-series):** the risc0 Rust toolchain
+  (`DOGFOODING.md` provisioning step 2b), and for the spel template also the risc0 C++
+  toolchain.
 - **Real sequencer (localnet, deploy, run, test-node):** `r0vm` at the exact risc0 version in
-  the pinned LEZ `Cargo.lock`, the risc0 Rust toolchain, and for the spel template also the
-  risc0 C++ toolchain. Follow "Provisioning the Real LEZ Sequencer Toolchain" in
+  the pinned LEZ `Cargo.lock`. Follow "Provisioning the Real LEZ Sequencer Toolchain" in
   `DOGFOODING.md`, which includes curl fallbacks for TLS-intercepting proxies.
 - **Basecamp:** Nix with flakes, unrestricted GitHub access for Nix, at least 5 GB free RAM
   to evaluate the basecamp flake, and a graphical session (Xvfb works for launch). You also
