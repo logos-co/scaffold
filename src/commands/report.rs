@@ -123,13 +123,7 @@ where
 }
 
 fn non_empty_env_value(raw: Option<String>) -> Option<String> {
-    raw.and_then(|value| {
-        if value.trim().is_empty() {
-            None
-        } else {
-            Some(value)
-        }
-    })
+    raw.filter(|value| !value.trim().is_empty())
 }
 
 fn collect_report_artifacts(
@@ -1215,9 +1209,7 @@ fn redact_url_credentials(line: &str) -> (String, usize) {
         let end = url_token_len(after_scheme);
 
         let url_slice = &after_scheme[..end];
-        let authority_end = url_slice
-            .find(|c: char| matches!(c, '/' | '?' | '#'))
-            .unwrap_or(url_slice.len());
+        let authority_end = url_slice.find(['/', '?', '#']).unwrap_or(url_slice.len());
         let authority = &url_slice[..authority_end];
         let path_and_query = &url_slice[authority_end..];
 

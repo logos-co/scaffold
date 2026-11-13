@@ -237,6 +237,145 @@ fn seed_default_wallet_by_initializing(
     Ok(Some(write_default_wallet_address(project_root, &address)?))
 }
 
+fn try_download_prebuilt(lez: &Path, pin: &str) -> crate::DynResult<bool> {
+    let arch = if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        eprintln!(
+            "warning: --prebuilt not supported on this architecture, falling back to source build"
+        );
+        return Ok(false);
+    };
+    let os = if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        eprintln!("warning: --prebuilt not supported on this OS, falling back to source build");
+        return Ok(false);
+    };
+    let commit = &pin[..8.min(pin.len())];
+    let tag = format!("lssa-prebuilt-{commit}-{arch}-{os}");
+    println!("Checking for prebuilt binaries (tag: {tag})...");
+    let url = format!(
+        "https://github.com/logos-co/logos-scaffold/releases/download/{tag}/sequencer_service"
+    );
+    let bin_dir = lez.join("target/release");
+    std::fs::create_dir_all(&bin_dir)?;
+    let dest = bin_dir.join("sequencer_service");
+    match ureq::get(&url).call() {
+        Ok(resp) => {
+            let bytes = read_capped(resp.into_reader(), PREBUILT_MAX_BYTES, "sequencer_service")?;
+
+            // Fail closed: install only a binary whose published checksum
+            // matches. Whoever can serve the binary can also serve a 404, an
+            // empty body or a reset for the `.sha256`, so none of those may
+            // skip verification.
+            let sha_url = format!("{url}.sha256");
+            let checksum = match ureq::get(&sha_url).call() {
+                Ok(sha_resp) => PublishedChecksum::Body(read_capped(
+                    sha_resp.into_reader(),
+                    CHECKSUM_MAX_BYTES,
+                    "sequencer_service.sha256",
+                )?),
+                Err(ureq::Error::Status(404, _)) => PublishedChecksum::NotPublished,
+                Err(e) => PublishedChecksum::FetchFailed(e.to_string()),
+            };
+            let Some(actual) = verify_prebuilt_checksum(&bytes, &checksum)? else {
+                return Ok(false);
+            };
+            println!("SHA256 verified: {actual}");
+
+            std::fs::write(&dest, &bytes)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
+            }
+            println!("prebuilt sequencer_service downloaded successfully");
+            Ok(true)
+        }
+        Err(ureq::Error::Status(404, _)) => {
+            println!("no prebuilt published yet for tag {tag}, falling back to source build");
+            Ok(false)
+        }
+        Err(e) => {
+            eprintln!("warning: --prebuilt download failed ({e}), falling back to source build");
+            Ok(false)
+        }
+    }
+}
+
+/// Upper bound on a downloaded prebuilt binary; far above any real
+/// `sequencer_service`, low enough that a hostile server can't exhaust memory.
+const PREBUILT_MAX_BYTES: u64 = 1 << 30;
+/// A `.sha256` file is one hex digest, optionally followed by a file name.
+const CHECKSUM_MAX_BYTES: u64 = 4096;
+
+fn read_capped(reader: impl std::io::Read, cap: u64, what: &str) -> crate::DynResult<Vec<u8>> {
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut reader.take(cap + 1), &mut bytes)?;
+    if bytes.len() as u64 > cap {
+        anyhow::bail!("prebuilt {what} download exceeds {cap} bytes; refusing it");
+    }
+    Ok(bytes)
+}
+
+/// What fetching `<binary>.sha256` produced.
+enum PublishedChecksum {
+    Body(Vec<u8>),
+    NotPublished,
+    FetchFailed(String),
+}
+
+/// `Ok(Some(digest))` when `bytes` match the published checksum. `Ok(None)`
+/// (with a warning) when there is no usable checksum: the binary is not
+/// installed and the caller builds from source. `Err` on a mismatch, which
+/// means the download is not what the release published.
+fn verify_prebuilt_checksum(
+    bytes: &[u8],
+    checksum: &PublishedChecksum,
+) -> crate::DynResult<Option<String>> {
+    let body = match checksum {
+        PublishedChecksum::Body(body) => body,
+        PublishedChecksum::NotPublished => {
+            eprintln!(
+                "warning: prebuilt sequencer_service has no published .sha256; \
+                 not installing an unverified binary, falling back to source build"
+            );
+            return Ok(None);
+        }
+        PublishedChecksum::FetchFailed(err) => {
+            eprintln!(
+                "warning: could not fetch the prebuilt sequencer_service .sha256 ({err}); \
+                 not installing an unverified binary, falling back to source build"
+            );
+            return Ok(None);
+        }
+    };
+    let expected = String::from_utf8_lossy(body)
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
+        eprintln!(
+            "warning: published .sha256 for prebuilt sequencer_service is not a SHA-256 digest; \
+             not installing an unverified binary, falling back to source build"
+        );
+        return Ok(None);
+    }
+    let actual = sha256_hex(bytes);
+    if actual != expected {
+        anyhow::bail!(
+            "SHA256 mismatch for prebuilt sequencer_service: expected {expected}, got {actual}"
+        );
+    }
+    Ok(Some(actual))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -497,143 +636,4 @@ mod tests {
         assert!(url.contains("lssa-prebuilt-35d8df0d"));
         assert!(url.contains("sequencer_service"));
     }
-}
-
-fn try_download_prebuilt(lez: &Path, pin: &str) -> crate::DynResult<bool> {
-    let arch = if cfg!(target_arch = "x86_64") {
-        "x86_64"
-    } else if cfg!(target_arch = "aarch64") {
-        "aarch64"
-    } else {
-        eprintln!(
-            "warning: --prebuilt not supported on this architecture, falling back to source build"
-        );
-        return Ok(false);
-    };
-    let os = if cfg!(target_os = "linux") {
-        "linux"
-    } else if cfg!(target_os = "macos") {
-        "macos"
-    } else {
-        eprintln!("warning: --prebuilt not supported on this OS, falling back to source build");
-        return Ok(false);
-    };
-    let commit = &pin[..8.min(pin.len())];
-    let tag = format!("lssa-prebuilt-{commit}-{arch}-{os}");
-    println!("Checking for prebuilt binaries (tag: {tag})...");
-    let url = format!(
-        "https://github.com/logos-co/logos-scaffold/releases/download/{tag}/sequencer_service"
-    );
-    let bin_dir = lez.join("target/release");
-    std::fs::create_dir_all(&bin_dir)?;
-    let dest = bin_dir.join("sequencer_service");
-    match ureq::get(&url).call() {
-        Ok(resp) => {
-            let bytes = read_capped(resp.into_reader(), PREBUILT_MAX_BYTES, "sequencer_service")?;
-
-            // Fail closed: install only a binary whose published checksum
-            // matches. Whoever can serve the binary can also serve a 404, an
-            // empty body or a reset for the `.sha256`, so none of those may
-            // skip verification.
-            let sha_url = format!("{url}.sha256");
-            let checksum = match ureq::get(&sha_url).call() {
-                Ok(sha_resp) => PublishedChecksum::Body(read_capped(
-                    sha_resp.into_reader(),
-                    CHECKSUM_MAX_BYTES,
-                    "sequencer_service.sha256",
-                )?),
-                Err(ureq::Error::Status(404, _)) => PublishedChecksum::NotPublished,
-                Err(e) => PublishedChecksum::FetchFailed(e.to_string()),
-            };
-            let Some(actual) = verify_prebuilt_checksum(&bytes, &checksum)? else {
-                return Ok(false);
-            };
-            println!("SHA256 verified: {actual}");
-
-            std::fs::write(&dest, &bytes)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
-            }
-            println!("prebuilt sequencer_service downloaded successfully");
-            Ok(true)
-        }
-        Err(ureq::Error::Status(404, _)) => {
-            println!("no prebuilt published yet for tag {tag}, falling back to source build");
-            Ok(false)
-        }
-        Err(e) => {
-            eprintln!("warning: --prebuilt download failed ({e}), falling back to source build");
-            Ok(false)
-        }
-    }
-}
-
-/// Upper bound on a downloaded prebuilt binary; far above any real
-/// `sequencer_service`, low enough that a hostile server can't exhaust memory.
-const PREBUILT_MAX_BYTES: u64 = 1 << 30;
-/// A `.sha256` file is one hex digest, optionally followed by a file name.
-const CHECKSUM_MAX_BYTES: u64 = 4096;
-
-fn read_capped(reader: impl std::io::Read, cap: u64, what: &str) -> crate::DynResult<Vec<u8>> {
-    let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut reader.take(cap + 1), &mut bytes)?;
-    if bytes.len() as u64 > cap {
-        anyhow::bail!("prebuilt {what} download exceeds {cap} bytes; refusing it");
-    }
-    Ok(bytes)
-}
-
-/// What fetching `<binary>.sha256` produced.
-enum PublishedChecksum {
-    Body(Vec<u8>),
-    NotPublished,
-    FetchFailed(String),
-}
-
-/// `Ok(Some(digest))` when `bytes` match the published checksum. `Ok(None)`
-/// (with a warning) when there is no usable checksum: the binary is not
-/// installed and the caller builds from source. `Err` on a mismatch, which
-/// means the download is not what the release published.
-fn verify_prebuilt_checksum(
-    bytes: &[u8],
-    checksum: &PublishedChecksum,
-) -> crate::DynResult<Option<String>> {
-    let body = match checksum {
-        PublishedChecksum::Body(body) => body,
-        PublishedChecksum::NotPublished => {
-            eprintln!(
-                "warning: prebuilt sequencer_service has no published .sha256; \
-                 not installing an unverified binary, falling back to source build"
-            );
-            return Ok(None);
-        }
-        PublishedChecksum::FetchFailed(err) => {
-            eprintln!(
-                "warning: could not fetch the prebuilt sequencer_service .sha256 ({err}); \
-                 not installing an unverified binary, falling back to source build"
-            );
-            return Ok(None);
-        }
-    };
-    let expected = String::from_utf8_lossy(body)
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
-        eprintln!(
-            "warning: published .sha256 for prebuilt sequencer_service is not a SHA-256 digest; \
-             not installing an unverified binary, falling back to source build"
-        );
-        return Ok(None);
-    }
-    let actual = sha256_hex(bytes);
-    if actual != expected {
-        anyhow::bail!(
-            "SHA256 mismatch for prebuilt sequencer_service: expected {expected}, got {actual}"
-        );
-    }
-    Ok(Some(actual))
 }

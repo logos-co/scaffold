@@ -182,10 +182,12 @@ pub(crate) fn localnet_reset_for_project(
         &ctx.state_path,
         &ctx.log_path,
         &ctx.localnet_addr,
-        false,
-        true,
-        reset_wallet,
-        verify_timeout_sec,
+        ResetOptions {
+            dry_run: false,
+            yes: true,
+            reset_wallet,
+            verify_timeout_sec,
+        },
     )
 }
 
@@ -235,10 +237,12 @@ fn cmd_localnet_in_project(project: &Project, action: LocalnetAction) -> DynResu
                 &ctx.state_path,
                 &ctx.log_path,
                 &ctx.localnet_addr,
-                dry_run,
-                yes,
-                reset_wallet,
-                verify_timeout_sec,
+                ResetOptions {
+                    dry_run,
+                    yes,
+                    reset_wallet,
+                    verify_timeout_sec,
+                },
             )
         }
     }
@@ -753,11 +757,15 @@ fn cmd_localnet_reset_dry_run(
     state_path: &Path,
     log_path: &Path,
     localnet_addr: &str,
-    localnet_port: u16,
-    reset_wallet: bool,
-    verify_timeout_sec: u64,
+    opts: ResetOptions,
     sequencer_bin: &Path,
 ) -> DynResult<()> {
+    let localnet_port = project.config.localnet.port;
+    let ResetOptions {
+        reset_wallet,
+        verify_timeout_sec,
+        ..
+    } = opts;
     // `lez` and `sequencer_bin` come out of the cache-root resolver, which can
     // return either an absolute path (env override, explicit absolute
     // `[repos.lez].path`, or scaffold default cache layer) or a path relative
@@ -849,17 +857,32 @@ fn cmd_localnet_reset_dry_run(
     Ok(())
 }
 
+/// How `localnet reset` runs. `dry_run` prints the plan and touches nothing;
+/// otherwise `yes` must be set, because the reset is destructive.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ResetOptions {
+    pub(crate) dry_run: bool,
+    pub(crate) yes: bool,
+    /// Also delete the project wallet (keypairs are unrecoverable).
+    pub(crate) reset_wallet: bool,
+    /// How long to wait for block production after the restart.
+    pub(crate) verify_timeout_sec: u64,
+}
+
 pub(crate) fn cmd_localnet_reset(
     project: &Project,
     lez: &Path,
     state_path: &Path,
     log_path: &Path,
     localnet_addr: &str,
-    dry_run: bool,
-    yes: bool,
-    reset_wallet: bool,
-    verify_timeout_sec: u64,
+    opts: ResetOptions,
 ) -> DynResult<()> {
+    let ResetOptions {
+        dry_run,
+        yes,
+        reset_wallet,
+        verify_timeout_sec,
+    } = opts;
     let localnet_port = project.config.localnet.port;
 
     let sequencer_bin = lez.join(SEQUENCER_BIN_REL_PATH);
@@ -870,9 +893,7 @@ pub(crate) fn cmd_localnet_reset(
             state_path,
             log_path,
             localnet_addr,
-            localnet_port,
-            reset_wallet,
-            verify_timeout_sec,
+            opts,
             &sequencer_bin,
         );
     }

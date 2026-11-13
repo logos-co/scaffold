@@ -13,6 +13,7 @@ use crate::commands::deploy::{
 use crate::commands::idl::{build_idl_for_current_project, IDL_STATE_REL};
 use crate::commands::localnet::{
     build_localnet_status_for_project, cmd_localnet, cmd_localnet_reset, LocalnetAction,
+    ResetOptions,
 };
 use crate::commands::run_state::{
     compute_program_hashes, current_localnet_pid, deploy_can_be_skipped, load_state, save_state,
@@ -85,7 +86,7 @@ pub(crate) fn run_for_project(project: &Project, inv: RunInvocation) -> DynResul
     // `build_idl_for_current_project`, etc.) would build/deploy from whichever
     // subdirectory the user invoked `lgs run` in.
     run_in_project_dir(Some(&project.root), || {
-        run_pipeline_once(&project, &params)?;
+        run_pipeline_once(project, &params)?;
 
         if inv.watch {
             // Subsequent iterations share the same hook/profile selection but
@@ -98,7 +99,7 @@ pub(crate) fn run_for_project(project: &Project, inv: RunInvocation) -> DynResul
                 .watch_debounce_ms
                 .or(project.config.run.watch.debounce_ms)
                 .unwrap_or(WATCH_DEBOUNCE_MS);
-            watch_loop(&project, &params, debounce_ms)?;
+            watch_loop(project, &params, debounce_ms)?;
         }
 
         Ok(())
@@ -319,10 +320,15 @@ fn reset_for_run(project: &Project, verify_timeout_sec: u64) -> DynResult<()> {
         &state_path,
         &log_path,
         &localnet_addr,
-        false, // dry_run — actually perform the reset
-        true,  // yes — non-interactive; run is the user-initiated action that authorizes it
-        true,  // reset_wallet — full wipe; reseed_after_wipe re-seeds below
-        verify_timeout_sec,
+        ResetOptions {
+            // Actually perform the reset.
+            dry_run: false,
+            // Non-interactive; `run` is the user-initiated action that authorizes it.
+            yes: true,
+            // Full wipe; `reseed_after_wipe` re-seeds below.
+            reset_wallet: true,
+            verify_timeout_sec,
+        },
     )?;
     // The wipe deleted the wallet directory and state file; the next pipeline
     // step (topup) would fail without a re-seed. Recover by calling the same

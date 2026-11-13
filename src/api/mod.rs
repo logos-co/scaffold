@@ -86,6 +86,13 @@
 //! }
 //! ```
 
+#![expect(
+    clippy::result_large_err,
+    reason = "api::Error carries CommandFailed (~150 bytes) by value. Boxing it would change the \
+              public `Error::Command` payload type, and these calls spawn processes and talk to \
+              a sequencer, so the larger Err is never on a hot path."
+)]
+
 mod error;
 pub mod testnode;
 

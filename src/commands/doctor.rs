@@ -79,18 +79,18 @@ fn cmd_doctor_inner(as_json: bool) -> DynResult<()> {
 
 pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> {
     let lez = resolve_repo_path(project, &project.config.lez, "lez")?;
-    let spel = resolve_repo_path(&project, &project.config.spel, "spel")?;
+    let spel = resolve_repo_path(project, &project.config.spel, "spel")?;
     let wallet_home = project.root.join(&project.config.wallet_home_dir);
     let localnet_state_path = project.root.join(".scaffold/state/localnet.state");
 
-    let mut rows = Vec::new();
-
-    rows.push(check_binary("git", true));
-    rows.push(check_binary("rustc", true));
-    rows.push(check_binary("cargo", true));
-    rows.push(check_binary("lsof", true));
-    rows.push(check_binary("ps", true));
-    rows.push(check_binary("kill", true));
+    let mut rows = vec![
+        check_binary("git", true),
+        check_binary("rustc", true),
+        check_binary("cargo", true),
+        check_binary("lsof", true),
+        check_binary("ps", true),
+        check_binary("kill", true),
+    ];
     let (runtime_row, docker_probe) = check_container_runtime();
     rows.push(runtime_row);
     rows.push(check_pcsc_library());
@@ -176,7 +176,7 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
         rows.push(check_cargo_risczero());
     }
 
-    let (resolved_cache_root, cache_root_source) = resolve_cache_root(&project)?;
+    let (resolved_cache_root, cache_root_source) = resolve_cache_root(project)?;
     rows.push(CheckRow {
         status: CheckStatus::Pass,
         name: "cache root".to_string(),
