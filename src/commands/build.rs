@@ -529,7 +529,7 @@ fn remove_dir_if_present(dir: &Path) -> DynResult<()> {
     match std::fs::remove_dir_all(dir) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(anyhow!("failed to remove {}: {err}", dir.display()).into()),
+        Err(err) => Err(anyhow!("failed to remove {}: {err}", dir.display())),
     }
 }
 

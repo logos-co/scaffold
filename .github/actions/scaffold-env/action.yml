@@ -1,0 +1,136 @@
+name: Scaffold E2E environment
+description: >
+  Shared bootstrap for the heavy workflows (template-e2e, guest-reproducibility):
+  Rust + cargo cache, the scaffold bootstrap cache, the system
+  packages LEZ needs, a release build of the CLI, the pinned circuits release,
+  and the Risc Zero toolchain.
+
+inputs:
+  cargo-risczero-version:
+    description: >
+      cargo-risczero version to install. Keep in step with the version
+      `doctor` recommends (src/doctor_checks.rs) and the risc0-build version
+      the templates depend on.
+    default: "3.0.5"
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    # Only master writes cargo caches. PR-scoped caches can't be read by any
+    # other PR, and they push master's entries out of the 10 GB budget.
+    - name: Cache cargo artifacts
+      uses: Swatinem/rust-cache@v2
+      with:
+        save-if: ${{ github.ref == 'refs/heads/master' }}
+
+    # The bootstrap cache holds:
+    #   ~/.cache/logos-scaffold — the cloned lez/spel repos and their target/.
+    #   ~/.logos-blockchain-circuits — the circuits release scaffold provisions.
+    #   ~/.cache/logos/blockchain — the circuits release the
+    #     logos-blockchain-circuits-*-sys crates download for themselves (their
+    #     `prebuilt` feature; a different version from the one above) and
+    #     declare as `rerun-if-changed`. Without it, every run re-downloads it,
+    #     those build scripts rerun, and everything above them in LEZ and spel
+    #     recompiles despite the warm target/ dirs (~3 min per job). The fresh
+    #     unpack also leaves directory mtimes newer than the first cargo
+    #     invocation's fingerprint, so `build` recompiles the sequencer a
+    #     second time.
+    # Keyed on constants.rs, so a pin or circuits-version bump starts from
+    # scratch while same-pin runs stay warm.
+    # Unlike the cargo cache this one saves from PRs too: it only saves on a
+    # miss, which in a PR means a pin bump, and that PR's later pushes need it.
+    # The master runs of template-e2e warm it for everyone else after merge.
+    - name: Cache scaffold bootstrap (repos + circuits)
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/logos-scaffold
+          ~/.logos-blockchain-circuits
+          ~/.cache/logos/blockchain
+        key: scaffold-bootstrap-${{ runner.os }}-${{ hashFiles('src/constants.rs') }}
+
+    # The LEZ wallet links against libpcsclite (keycard support), so `setup`
+    # cannot build it on a bare runner: `Could not find a PCSC library`.
+    - name: Install system dependencies
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y pkgconf libpcsclite-dev
+
+    - name: Build scaffold CLI
+      shell: bash
+      run: cargo build --release --locked --bin logos-scaffold
+
+    # The LEZ standalone build chain (logos-blockchain-{pol,poc,poq,zksign})
+    # reads circuit keys at compile time. setup's preflight requires the
+    # release on disk, so fetch the version pinned in constants.rs and export
+    # LOGOS_BLOCKCHAIN_CIRCUITS for every subsequent step.
+    - name: Fetch logos-blockchain-circuits release
+      shell: bash
+      run: |
+        set -euo pipefail
+        ver="$(sed -n 's/.*DEFAULT_CIRCUITS_VERSION: &str = "\([^"]*\)".*/\1/p' src/constants.rs)"
+        if [ -z "$ver" ]; then echo "::error::could not parse DEFAULT_CIRCUITS_VERSION"; exit 1; fi
+        dest="$HOME/.logos-blockchain-circuits"
+        if [ -f "$dest/pol/verification_key.json" ]; then
+          echo "circuits already cached at $dest"
+        else
+          url="https://github.com/logos-blockchain/logos-blockchain-circuits/releases/download/v${ver}/logos-blockchain-circuits-v${ver}-linux-x86_64.tar.gz"
+          echo "downloading $url"
+          mkdir -p "$dest"
+          curl -fL --retry 3 -o "$RUNNER_TEMP/circuits.tar.gz" "$url"
+          tar -xzf "$RUNNER_TEMP/circuits.tar.gz" -C "$dest" --strip-components=1
+        fi
+        echo "LOGOS_BLOCKCHAIN_CIRCUITS=$dest" >> "$GITHUB_ENV"
+
+    # Three rzup components, all required:
+    #   rust — the rendered project's methods crate cross-compiles its guest
+    #     (`embed_methods()`) on the host, even with `[build].guest = "docker"`.
+    #   cpp — guest deps that compile C sources (e.g. `ring` in the spel
+    #     guest). Without it risc0-build points CC at a sentinel path
+    #     (/no_risc0_cpp_toolchain_installed_run_rzup_install_cpp) and the
+    #     guest build dies in cc-rs compiler detection.
+    #   cargo-risczero — the `cargo risczero build` subcommand (spel's
+    #     `make build`, and `lgs build --guest docker`). NOT pulled in by
+    #     `rzup install rust`.
+    # rzup resolves each component through the GitHub releases API, which is
+    # rate-limited per source IP for unauthenticated callers; rzup reads
+    # GITHUB_TOKEN for exactly this reason, and the loop rides out the
+    # remaining flakes.
+    - name: Install Risc Zero toolchain
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        CARGO_RISCZERO_VERSION: ${{ inputs.cargo-risczero-version }}
+      run: |
+        set -euo pipefail
+        curl -fsSL --retry 3 --retry-delay 2 \
+          https://risczero.com/install -o "$RUNNER_TEMP/rzup-install.sh"
+        bash "$RUNNER_TEMP/rzup-install.sh"
+        echo "$HOME/.risc0/bin" >> "$GITHUB_PATH"
+        rzup="$HOME/.risc0/bin/rzup"
+        installed=false
+        for attempt in 1 2 3; do
+          if "$rzup" install rust \
+            && "$rzup" install cpp \
+            && "$rzup" install cargo-risczero "$CARGO_RISCZERO_VERSION"; then
+            installed=true
+            break
+          fi
+          echo "rzup attempt $attempt failed; retrying in 30s"
+          sleep 30
+        done
+        if [ "$installed" != true ]; then
+          echo "::error::rzup install did not succeed after 3 attempts"
+          exit 1
+        fi
+        # Fail here, with the component name, rather than inside scaffold's
+        # preflight several minutes later.
+        export PATH="$HOME/.risc0/bin:$PATH"
+        command -v cargo-risczero >/dev/null || {
+          echo "::error::cargo-risczero not on PATH after rzup install"
+          ls -la "$HOME/.risc0/bin" || true
+          exit 1
+        }
+        cargo risczero --version

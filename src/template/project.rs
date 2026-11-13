@@ -243,7 +243,8 @@ mod tests {
         // `circuits::ensure_circuits_for_project` (which exports
         // `LOGOS_BLOCKCHAIN_CIRCUITS` and bypasses the version check inside
         // every `logos-blockchain` rev's circuits-utils crate).
-        for variant in ["default"] {
+        {
+            let variant = "default";
             let target = mk_temp_dir(&format!("no-self-patch-{variant}"));
             let ctx = OverlayRenderContext {
                 crate_name: "my-app",
