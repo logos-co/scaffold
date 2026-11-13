@@ -176,9 +176,7 @@ TUI-002.
 
 ### Expected
 `R`, and `q` (or `Esc`) while a job runs, open a confirmation. `y` or `Enter` confirms; any
-other key cancels. The box's footer reads ` y yes · any other key no `, which leaves out
-`Enter`, so treat an accidental `Enter` confirmation as expected, not a bug in this
-scenario.
+other key cancels, and the box's footer says so: ` y / Enter yes · any other key no `.
 
 ### Preconditions
 TUI-001.
@@ -189,8 +187,8 @@ TUI-001.
 3. With the job still running, `tmux send-keys -t d9 Escape; cap 1; tmux send-keys -t d9 n; cap 1`
 
 ### Success criteria
-- Each step shows a Confirm box, and after `n` nothing was reset and the dashboard is still
-  open.
+- Each step shows a Confirm box whose footer names both `y` and `Enter`, and after `n`
+  nothing was reset and the dashboard is still open.
 
 ## TUI-006 — Localnet outlives the dashboard; no terminal is refused
 

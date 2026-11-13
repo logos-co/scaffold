@@ -218,23 +218,20 @@ account decode errors. All of these exit non-zero before any node starts.
 TNODE-001.
 
 ### Steps
-1. `echo '{"format":"bogus/1"}' > bad.json && "$SCAFFOLD_BIN" test-node state seed --project "$P" --input bad.json; echo "exit=$?"`
+1. `echo '{"format":"bogus/1"}' > bad.json && "$SCAFFOLD_BIN" test-node state seed --project "$P" --input bad.json --output ./rejected; echo "exit=$?"`
 2. Seed a snapshot whose public account has `"nonce": 3`.
 3. On a LEZ v0.2.4 pin, seed a snapshot with a non-empty `private_accounts` list.
 4. Seed a snapshot whose `lez_commit` is not the project's resolved LEZ commit.
 5. `echo '{"format":"lgs-state-snapshot/1","public_accounts":[{"account_id":"not-base58!!","balance":1}]}' > bad-id.json && "$SCAFFOLD_BIN" test-node state seed --project "$P" --input bad-id.json; echo "exit=$?"`
+6. `ls -d ./rejected "$P"/.scaffold/test-nodes/seeds/seed-* 2>&1`
 
 ### Success criteria
 - Step 1 fails with `format mismatch`. Step 2 fails with `storage schema mismatch` naming
   `nonce`. Step 3 fails with `storage schema mismatch`. Step 4 fails with `lez pin mismatch`.
 - Step 5 fails with `account decode error` and `is not base58`.
 - Every step exits non-zero, and no node is started.
-
-### Notes
-`state seed` creates its output dir (`--output`, or
-`.scaffold/test-nodes/seeds/seed-<ts>-<pid>`) before it validates the snapshot, so each
-rejected seed currently leaves an empty dir behind. Record that as a finding rather than a
-failure.
+- Step 6 finds neither `./rejected` nor any `seeds/seed-*` dir: a rejected seed is validated
+  before anything is created. An existing `--output` dir is never removed.
 
 ## TRPC-007 — A real wallet transaction is observed as committed
 
