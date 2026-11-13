@@ -148,21 +148,31 @@ Docker daemon stopped (or `cargo-risczero` removed from `PATH`).
 ## BUILD-004 — Deterministic guest build is byte-reproducible
 
 ### Expected
-Two docker-mode builds of unchanged source, the second from a clean artefact tree, produce
-byte-identical `.bin` files.
+Two docker-mode builds of unchanged source, the second from a clean artefact tree and an
+empty container build cache, produce byte-identical `.bin` files.
 
 ### Preconditions
 BUILD-002.
 
 ### Steps
 1. `D=target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker; shasum -a 256 $D/*.bin > /tmp/first.sha`
-2. `rm -rf target/riscv-guest-docker && "$SCAFFOLD_BIN" build`
-3. `shasum -a 256 -c /tmp/first.sha`
+2. `rm -rf target/riscv-guest-docker && docker builder prune -af`
+3. `"$SCAFFOLD_BIN" build 2>&1 | tee /tmp/second.log`
+4. `grep -E '^#[0-9]+ CACHED' /tmp/second.log; shasum -a 256 -c /tmp/first.sha`
 
 ### Success criteria
-- Every line of step 3 reports `OK`.
+- Step 4's `grep` prints nothing: no build step of the second build came from cache.
+- Every `shasum` line of step 4 reports `OK`.
 
 ### Notes
+Step 2's prune is what makes this a rebuild. `cargo risczero build` runs `docker build`, and
+deleting the output tree alone lets BuildKit replay every step from cache and re-export the
+first build's ELFs, so the digests match without proving anything. A run that shows
+`CACHED` steps has not tested reproducibility; report it as not run, not as passed. The
+prune clears the host's whole BuildKit cache, not just this project's, but leaves pulled
+images in place. On Podman, clear its build cache with the equivalent command and apply the
+same `CACHED` check.
+
 CI also runs this (`.github/workflows/guest-reproducibility.yml`). A comparison across
 machines is only meaningful with the same `Cargo.lock`.
 The container builds `--locked`, and cargo picks dependency versions from the host toolchain
