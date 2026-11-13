@@ -37,7 +37,7 @@ environment variables pre-set:
 
 | Variable | Value |
 |---|---|
-| `SEQUENCER_URL` | `http://127.0.0.1:<port>` (from `scaffold.toml`) |
+| `SEQUENCER_URL` | `http://127.0.0.1:<port>` (from `scaffold.toml`). This can differ from the address the wallet, and so `deploy`, targets: that comes from `.scaffold/wallet/wallet_config.json` (`sequencers[0].sequencer_addr` from LEZ v0.2.4), which is also what `run`'s `Sequencer:` summary line shows. They agree unless the wallet config names another address |
 | `NSSA_WALLET_HOME_DIR` | Absolute path to project wallet directory (name read by LEZ up to v0.1.2) |
 | `LEE_WALLET_HOME_DIR` | Same path under the name LEZ v0.2.0 reads. Both are always set, so a hook that execs the wallet binary works on either pin |
 | `SCAFFOLD_PROJECT_ROOT` | Absolute path to project root |

@@ -460,7 +460,7 @@ fn sequencer_authority(sequencer_addr: &str) -> &str {
 
 /// Extract the port from a resolved sequencer URL so `http://127.0.0.1:3040/rpc`
 /// yields `3040`.
-fn sequencer_port(sequencer_addr: &str) -> Option<String> {
+pub(crate) fn sequencer_port(sequencer_addr: &str) -> Option<String> {
     let (_, port) = sequencer_authority(sequencer_addr).rsplit_once(':')?;
     if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
@@ -474,7 +474,7 @@ fn sequencer_port(sequencer_addr: &str) -> Option<String> {
 /// under the hardcoded `127.0.0.1`/`localhost` aliases, so it is only sound
 /// when the configured host is itself one of those — a remote sequencer that
 /// merely shares the port must fall through to the probe instead.
-fn sequencer_host_is_loopback(sequencer_addr: &str) -> bool {
+pub(crate) fn sequencer_host_is_loopback(sequencer_addr: &str) -> bool {
     let authority = sequencer_authority(sequencer_addr);
     // Drop any `userinfo@`, then the `:port`, leaving the bare host.
     let host_port = authority
