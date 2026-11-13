@@ -32,6 +32,12 @@ scenarios:
     priority: P2
     provenance: documented
     source: docs/commands.md
+  - id: DIAG-006
+    title: doctor checks the wallet's sequencer address in either config shape
+    priority: P2
+    provenance: documented
+    source: DOGFOODING.md D2
+    depends_on: [BUILD-001]
 retired: []
 ---
 
@@ -50,8 +56,7 @@ scripts. Related: [Setup and build](setup-and-build.md), [Localnet](localnet.md)
 the configured circuits install (its `VERSION` against `[circuits].version`, plus drift from
 the LEZ pin's expected release), the spel pin and its LEZ alignment, and a `guest build` row
 naming the mode and the risc0 builder tag. In docker mode the row is a FAIL when
-`cargo-risczero`, `docker` or the daemon is missing. The daemon check finishes within 10
-seconds even if `DOCKER_HOST` is unreachable.
+`cargo-risczero`, `docker` or the daemon is missing.
 
 ### Preconditions
 BUILD-001.
@@ -135,3 +140,28 @@ None.
 
 ### Success criteria
 - Both exit 0, the output is a script, and both binary names appear.
+
+## DIAG-006 — doctor checks the wallet's sequencer address in either config shape
+
+### Expected
+The `wallet network config` row passes when the address the wallet will use points at
+`127.0.0.1` or `localhost` on `[localnet].port`. Otherwise it warns, and the detail names the
+address it found. The remediation names the key the config's own shape uses:
+`sequencers[0].sequencer_addr` for a LEZ v0.2.4 config, top-level `sequencer_addr` for an older
+one. A top-level `sequencer_addr` added next to a `sequencers` list does not change the
+verdict, because the v0.2.4 wallet never reads it.
+
+### Preconditions
+BUILD-001. Back up `.scaffold/wallet/wallet_config.json` first.
+
+### Steps
+1. `"$SCAFFOLD_BIN" doctor | grep -A1 'wallet network config'`
+2. Set `sequencers[0].sequencer_addr` to `http://10.255.255.1:3040` and repeat step 1.
+3. Also add a top-level `"sequencer_addr": "http://127.0.0.1:3040"` and repeat step 1.
+4. Restore the config.
+
+### Success criteria
+- Step 1 is PASS on a fresh setup.
+- Steps 2 and 3 are WARN, naming `http://10.255.255.1:3040`. Their remediation reads
+  `Set sequencers[0].sequencer_addr in .scaffold/wallet/wallet_config.json to
+  http://127.0.0.1:<port>`. A PASS in step 3 is the regression.

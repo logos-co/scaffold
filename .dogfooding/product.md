@@ -40,7 +40,7 @@ Do this from a fresh clone. `DOGFOODING.md` is the detailed runbook and these sc
 reference its sections.
 
 ```bash
-export REPO_ROOT=/abs/path/to/logos-scaffold
+export REPO_ROOT=/abs/path/to/scaffold   # a checkout of github.com/logos-co/scaffold
 export SCRATCH_ROOT=/abs/path/to/dogfood-runs     # outside the repo
 cd "$REPO_ROOT" && cargo build
 export SCAFFOLD_BIN="$REPO_ROOT/target/debug/logos-scaffold"   # or use lgs
@@ -48,12 +48,15 @@ mkdir -p "$SCRATCH_ROOT"
 ```
 
 Toolchain per area:
-- **All areas:** Unix (Linux or macOS), `git`, `rustc`/`cargo` ≥ 1.81, `lsof`, `ps`, `kill`,
+- **All areas:** Unix (Linux or macOS), `git`, `rustc`/`cargo` ≥ 1.85, `lsof`, `ps`, `kill`,
   and `curl` (circuits download). Linux also needs `pkg-config` plus the PCSC headers
   (`libpcsclite-dev`), because the LEZ wallet links against libpcsclite.
 - **Guest builds (default `docker` mode):** a running Docker or Podman daemon and
   `cargo-risczero` (`rzup install cargo-risczero 3.0.5`). Without Docker, use
-  `build --guest local` or `[build].guest = "local"`, and say so in the report.
+  `build --guest local` or `[build].guest = "local"`, and say so in the report. The spel
+  guest has no local mode. On such a host, run SPEL-002 and the scenarios that depend on it
+  (`L1`'s build and `L4` in `DOGFOODING.md`) on a Docker-capable host, such as a
+  GitHub-hosted runner, rather than reporting them blocked.
 - **Real sequencer (localnet, deploy, run, test-node):** `r0vm` at the exact risc0 version in
   the pinned LEZ `Cargo.lock`, the risc0 Rust toolchain, and for the spel template also the
   risc0 C++ toolchain. Follow "Provisioning the Real LEZ Sequencer Toolchain" in

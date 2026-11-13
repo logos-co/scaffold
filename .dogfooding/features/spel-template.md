@@ -78,7 +78,9 @@ None (the spel CLI is built during this step). On Linux, the PCSC headers are in
 `setup`, `localnet start` and `doctor` behave as they do for the default template, and
 `doctor` reports zero FAIL. `build` runs `make build` (the Docker guest build, whatever
 `[build].guest` says) and then IDL generation, leaving `<name>-idl.json` at the project
-root. `build --guest local` prints a note that spel always builds in Docker.
+root. `build --guest local` prints `Note: --guest local does not apply to spel projects` and
+still builds in Docker, so a host without Docker cannot run this scenario. Run it on a
+Docker-capable host (a GitHub-hosted runner works) instead of reporting it blocked.
 
 ### Preconditions
 SPEL-001, Docker, `cargo-risczero` 3.0.5, and the risc0 C++ toolchain.

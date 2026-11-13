@@ -51,6 +51,12 @@ scenarios:
     provenance: documented
     source: docs/configuration.md
     depends_on: [RUN-001]
+  - id: RUN-009
+    title: Run summary names the wallet's sequencer
+    priority: P2
+    provenance: documented
+    source: DOGFOODING.md D7
+    depends_on: [RUN-001]
 retired: []
 ---
 
@@ -245,3 +251,22 @@ RUN-001.
 - The README touch triggers nothing, and the guest edit triggers exactly one new pipeline
   run.
 - Step 4 is rejected because `--watch` is missing.
+
+## RUN-009 — Run summary names the wallet's sequencer
+
+### Expected
+The `Sequencer:` line at the end of `run`'s deploy summary names the address the wallet
+targets, which is the one deploy used. It is the same address in either wallet config shape,
+and falls back to `127.0.0.1:<[localnet].port>` only when the wallet config names none. The
+post-deploy hook's `SEQUENCER_URL` stays `http://127.0.0.1:<[localnet].port>`, as
+`docs/configuration.md` documents.
+
+### Preconditions
+RUN-001.
+
+### Steps
+1. `"$SCAFFOLD_BIN" run 2>&1 | grep '^Sequencer:'`
+2. `jq -r '.sequencers[0].sequencer_addr // .sequencer_addr' .scaffold/wallet/wallet_config.json`
+
+### Success criteria
+- Step 1's address equals step 2's.

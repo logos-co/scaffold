@@ -62,8 +62,14 @@ cargo test
   documents them and must be updated in the same change.
 - `README.md` is the front door. Keep it short and keep install and first-run
   above the fold. Reference material belongs in `docs/`.
-- `DOGFOODING.md` is the canonical runbook. Update it whenever first-class
-  commands, templates, or supported workflows change.
+- `DOGFOODING.md` is the canonical runbook: provisioning, exact commands,
+  evidence and execution notes. `.dogfooding/features/` is the structured index
+  of the same scenarios (IDs, priority, dependencies, success criteria), each
+  citing where it comes from in `source:`, usually a runbook section. When either changes, change the other
+  in the same PR. A new or changed runbook scenario updates or adds the matching
+  spec scenario, and a spec edit is reflected in the runbook section it cites.
+  Update both whenever first-class commands, templates, or supported workflows
+  change.
 - `ADR.md` records architecture decisions and `FURPS.md` records requirements.
   Add to them rather than rewriting history.
 
@@ -84,6 +90,8 @@ cargo test
 `.dogfooding/` specifies the product behavior to check when dogfooding this repo. Its format
 is described in `.dogfooding/index.md`. When you change product behavior (a feature, CLI, API,
 UI flow, or the docs describing them), check whether the affected scenarios in
-`.dogfooding/features/` still hold. Propose the edits to the user (add, change, or retire, per
+`.dogfooding/features/` still hold, together with the `DOGFOODING.md` sections they cite (see
+"Documentation rules"). Propose the edits to the user (add, change, or retire, per
 scenario ID), and change the files only after they agree. Use the `update-dogfooding` skill
-if you have it.
+if you have it. After a full reconciliation, move `commit:` in `.dogfooding/index.md` to the
+commit reviewed.

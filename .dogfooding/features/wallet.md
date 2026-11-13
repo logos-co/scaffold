@@ -45,6 +45,12 @@ scenarios:
     provenance: documented
     source: DOGFOODING.md D4
     depends_on: [BUILD-001]
+  - id: WALLET-008
+    title: Topup follows the wallet's configured sequencer
+    priority: P2
+    provenance: documented
+    source: DOGFOODING.md D4
+    depends_on: [BUILD-001]
 retired: []
 ---
 
@@ -173,3 +179,28 @@ BUILD-001.
 ### Success criteria
 - The command honours the override, either by showing it in the rendered command or by
   behaving differently from the default. Record which.
+
+## WALLET-008 — Topup follows the wallet's configured sequencer
+
+### Expected
+`wallet topup` targets the sequencer the wallet config names: `sequencers[0].sequencer_addr`
+from LEZ v0.2.4, or the top-level `sequencer_addr` before that. It falls back to
+`127.0.0.1:<[localnet].port>` only when the config names none. From v0.2.4 the wallet reports
+a dead sequencer only as `Failed to find leader`. When an RPC probe confirms the sequencer is
+down, topup maps that to the sequencer-unavailable hint naming the configured address. With
+the sequencer up, the wallet error stays as it is.
+
+### Preconditions
+BUILD-001. Back up `.scaffold/wallet/wallet_config.json` first.
+
+### Steps
+1. Set `sequencers[0].sequencer_addr` in `.scaffold/wallet/wallet_config.json` to
+   `http://127.0.0.1:3999` (a closed port).
+2. `"$SCAFFOLD_BIN" wallet topup --dry-run`
+3. `"$SCAFFOLD_BIN" wallet topup; echo "exit=$?"`
+4. Restore the config.
+
+### Success criteria
+- Step 2's `planned network:` line names `http://127.0.0.1:3999`.
+- Step 3 exits non-zero and ends with `sequencer appears unavailable at http://127.0.0.1:3999`.
+  A bare `Failed to find leader` followed by an account-verification hint is the regression.

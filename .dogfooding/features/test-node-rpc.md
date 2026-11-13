@@ -68,7 +68,10 @@ borsh parsers meet genuine sequencer bytes. Related:
 
 ### Expected
 `blocks head`/`range` report each block's real `block_id` and `timestamp` and classify it.
-Genesis is the only zero-transaction block. Post-genesis blocks with no user activity are
+Genesis is block 1. Up to LEZ v0.2.3 it has no transactions. From v0.2.4 (the default pin) it
+carries the genesis setup transactions ending in a `clock(0)` initialisation, and is still
+classified as genesis, with `has_clock_transaction: false` and
+`has_user_transactions: false`. Post-genesis blocks with no user activity are
 clock-only: `transaction_count: 1`, the single tx has `is_clock: true`, `kind: "public"`, and
 `fully_parsed: true`. Blocks with user transactions list hashes. `blocks wait --after N
 --count K` returns K blocks after N. `clock read` decodes all three
@@ -87,7 +90,9 @@ TNODE-003 running, with `TN_URL` set to its `rpc_url`.
 5. `"$SCAFFOLD_BIN" test-node clock wait-stable --url "$TN_URL" --samples 2 --json`
 
 ### Success criteria
-- Genesis has 0 transactions, and later blocks are clock-only with `fully_parsed: true`.
+- Block 1 is classified as genesis (0 transactions before LEZ v0.2.4; on v0.2.4 its setup
+  transactions with `has_clock_transaction: false` and `has_user_transactions: false`), and
+  later blocks are clock-only with `fully_parsed: true`.
 - All three clock accounts decode, and `/0000001`'s `block_id` is close to the head.
 
 ## TRPC-002 — Transactions end in one definitive outcome
@@ -121,7 +126,8 @@ data), `missing` or `decode_error`, together with the `block_id` it was read at.
 local error before any RPC) and transport failure.
 
 ### Preconditions
-TNODE-003 running. A known account (for example the seeded one from TRPC-005).
+TNODE-003 running. A known account, for example the vault PDA that TRPC-005 seeds (on LEZ
+v0.2.4 the seeded account itself reads `missing`).
 
 ### Steps
 1. `"$SCAFFOLD_BIN" test-node account get --url "$TN_URL" --account-id <id> --json`
@@ -156,8 +162,12 @@ TNODE-003 running.
 or a rocksdb dir), the state format version (`nssa-v03`), the LEZ ref/commit and the seedable
 fields. `state seed` validates the snapshot, writes a state dir and reports the seed kind,
 LEZ commit, format version and account counts. `start --state` builds genesis from exactly
-the snapshot, with no default testnet accounts or wallets. `state export` writes named public
-balances from a running node.
+the snapshot, with none of the debug config's sample accounts. On LEZ v0.2.4 each seeded public
+balance becomes a `supply_account` genesis action that credits the account's **vault PDA**,
+not the account. `state seed` warns about that, and `account get` on the account itself reads
+`missing`. The sequencer's built-in testnet state is always present and is not a leak. v0.2.4
+also rejects non-empty `private_accounts`. `state export` writes named public balances from a
+running node.
 
 ### Preconditions
 TNODE-002.
@@ -167,11 +177,18 @@ TNODE-002.
 2. Write `seed.json`: `{"format":"lgs-state-snapshot/1","public_accounts":[{"account_id":"<base58>","balance":4242}],"private_accounts":[]}`
 3. `"$SCAFFOLD_BIN" test-node state seed --project "$P" --input seed.json --output ./seeded --json`
 4. `SJ=$("$SCAFFOLD_BIN" test-node start --project "$P" --state ./seeded --json); TN_URL=$(echo "$SJ" | jq -r .rpc_url)`
-5. `"$SCAFFOLD_BIN" test-node account get --url "$TN_URL" --account-id <base58> --json`
+5. `"$SCAFFOLD_BIN" test-node account get --url "$TN_URL" --account-id <vault> --json`, where
+   `<vault>` is the account's vault PDA. Derive it as `DOGFOODING.md` T3 describes. For the
+   debug config's `CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r` it is
+   `G1u9gmu1Gb8PG59zHZYNL5WdJNNtBKEN4U5qUdx2y6sG`.
+6. Repeat step 5 for the vault of a debug-config sample account the seed left out (for example
+   `2RHZhw9h534Zr3eq2RGhQete2Hh667foECzXPmSkGni2` →
+   `Ey6P7CkwXHLskqFjQzU8C1kTwb54TkZfhzv9wUijb3Wc`).
 
 ### Success criteria
+- Step 3 warns that the balance is credited to the vault PDA.
 - Step 5 reports `state: present` with `balance: 4242`.
-- No account outside the snapshot is present at genesis.
+- Step 6 reports `missing`. That proves the seed replaced the sample accounts.
 
 ## TRPC-006 — Bad snapshots are rejected up front
 

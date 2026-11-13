@@ -299,6 +299,7 @@ If the scenario begins with localnet stopped, run `"$SCAFFOLD_BIN" localnet star
 - `doctor` returns actionable next steps rather than only raw failures.
 - `doctor` validates the configured circuits install path, checks the top-level `VERSION` file against `[circuits].version`, and warns when project config drifts from the LEZ pin's expected circuits release.
 - `doctor --json` returns parseable JSON with at least `status`, `summary`, `checks`, and `next_steps`.
+- `doctor`'s `wallet network config` row judges the address the wallet will use. With `sequencers[0].sequencer_addr` in `.scaffold/wallet/wallet_config.json` pointed away from `127.0.0.1:<[localnet].port>`, it warns, names that address, and its remediation names `sequencers[0].sequencer_addr` (top-level `sequencer_addr` for a pre-v0.2.4 config). Adding a top-level `sequencer_addr` next to the list must not turn it into a PASS, because the v0.2.4 wallet never reads that key.
 - `localnet logs --tail 200` returns useful recent log lines when logs exist.
 - `localnet stop` succeeds cleanly and subsequent status reflects the stopped state.
 - The sequencer survives shell/tmux closure: after `localnet start`, detaching the terminal or tmux session should not kill the sequencer. Verify with `localnet status` from a new shell — `running=true` confirms daemon behavior.
@@ -567,6 +568,7 @@ The first runner (`run_hello_world`) submits a basic public transaction; once co
 The private runners (`run_hello_world_private`, `run_hello_world_with_move_function write-private` / `move-data-public-to-private`, `run_hello_world_through_tail_call_private`) write an account whose state the chain holds only as an encrypted commitment. The wallet keeps its own decrypted copy, so the check is a sync followed by a local read:
 
 ```bash
+export NSSA_WALLET_HOME_DIR="$PWD/.scaffold/wallet" LEE_WALLET_HOME_DIR="$PWD/.scaffold/wallet"   # direct `cargo run` needs it; see the notes below
 "$SCAFFOLD_BIN" wallet -- account new private   # <private-id>; a fresh one per runner, as for public accounts
 RISC0_DEV_MODE=1 cargo run --bin run_hello_world_private -- <private-id>
 "$SCAFFOLD_BIN" wallet -- account sync-private
@@ -648,7 +650,7 @@ post_deploy = ["echo 'topup skipped:' $SCAFFOLD_TOPUP_SKIPPED"]
 
 ### Expected Success Signals
 
-- The first `run` (no hooks configured) prints a numbered step header for each phase (`[1/5] Building...` through `[5/5] Deploying...`) and ends with a deployed-programs summary.
+- The first `run` (no hooks configured) prints a numbered step header for each phase (`[1/5] Building...` through `[5/5] Deploying...`) and ends with a deployed-programs summary. Its `Sequencer:` line names the address the wallet targets (`sequencers[0].sequencer_addr`, or the top-level key before LEZ v0.2.4), which is the one deploy used. The hooks' `SEQUENCER_URL` stays the `[localnet].port` URL.
 - A second `run` reuses the running localnet (`localnet already running (sequencer pid=...)`) instead of starting a new sequencer, and — when guest binaries, IDL, config, and sequencer are all unchanged — replaces `[5/N] Deploying...` with `[5/N] Deploy skipped (guest binaries + IDL + config + sequencer unchanged; pass --reset ...)`. Post-deploy hooks still fire after a dedup-skipped deploy. Use `--reset` (or delete `.scaffold/state/run_deploy.json`) when the scenario needs to force a real re-deploy.
 - After adding the `[run]` block, `run` reports `[6/6] Running N post-deploy hook(s)` and each hook prints a non-empty value for its env var. `cwd` for each hook is the project root (verifiable with a `pwd` hook). For a single-program project, `$SCAFFOLD_PROGRAM_ID` is the deployed program's risc0 image ID and `$SCAFFOLD_GUEST_BIN` is the absolute path to the guest binary.
 - `--post-deploy "echo override"` ignores `[run].post_deploy` and runs only the override.

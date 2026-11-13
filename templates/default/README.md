@@ -69,7 +69,11 @@ Use `logos-scaffold wallet -- account new public` and `logos-scaffold wallet -- 
 
 ## Run All Example Binaries
 
+The runners open the project wallet directly, so export its home first. `logos-scaffold wallet` sets it for you, but `cargo run` does not. LEZ reads `NSSA_WALLET_HOME_DIR` up to v0.1.2 and `LEE_WALLET_HOME_DIR` from v0.2.0. Without either, a runner fails with `failed to initialize wallet from environment`, or reads an unrelated `~/.lee/wallet`.
+
 ```bash
+export NSSA_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet" LEE_WALLET_HOME_DIR="$(pwd)/.scaffold/wallet"
+
 cargo run --bin run_hello_world -- $PUBLIC_HELLO_ACCOUNT_ID
 
 cargo run --bin run_hello_world_private -- $PRIVATE_HELLO_ACCOUNT_ID

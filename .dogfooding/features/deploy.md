@@ -156,21 +156,30 @@ BUILD-002.
 ## DEPLOY-006 — Unreachable sequencer fails fast with a hint
 
 ### Expected
-Before submitting, `deploy` probes the sequencer over RPC (`getLastBlockId`). With nothing
-listening (refused) and with an unrouted address (blackholed), it fails in about a second
-with a sequencer-unavailable hint. It never falls through to a vague wallet error or a long
-hang.
+Before submitting, `deploy` probes the sequencer over RPC (`getLastBlockId`) at the address
+the wallet itself targets. That is `sequencers[0].sequencer_addr` in the wallet config from
+LEZ v0.2.4, or the top-level `sequencer_addr` before that. With nothing listening (refused)
+and with an unrouted address (blackholed), it fails in about a second with a
+sequencer-unavailable hint naming that address. It never falls through to a vague wallet
+error or a long hang.
 
 ### Preconditions
 BUILD-002.
 
 ### Steps
 1. `"$SCAFFOLD_BIN" localnet stop; "$SCAFFOLD_BIN" deploy; echo "exit=$?"`
-2. Point the project's sequencer address at `10.255.255.1:3040` (wallet config
-   `sequencer_addr`), run `time "$SCAFFOLD_BIN" deploy`, then restore the address.
+2. Check that `curl -m 3 http://10.255.255.1:3040` times out rather than reporting
+   `Connection refused`. A sandboxed container often refuses it at once, which makes step 3's
+   timing pass for the wrong reason, so note it in the report if it does.
+3. In `.scaffold/wallet/wallet_config.json` set `sequencers[0].sequencer_addr` (top-level
+   `sequencer_addr` before LEZ v0.2.4) to `http://10.255.255.1:3040`, run
+   `time "$SCAFFOLD_BIN" deploy`, then restore the address.
 
 ### Success criteria
-- Both runs exit non-zero with the sequencer-unavailable hint, step 2 in a few seconds.
+- Both runs exit non-zero with the sequencer-unavailable hint, step 3 in a few seconds.
+- Step 3's hint names `http://10.255.255.1:3040`. A hint naming
+  `127.0.0.1:<[localnet].port>` means scaffold probed the default port instead of the
+  wallet's target.
 - No `reachability probe failed …; continuing` line appears.
 
 ## DEPLOY-007 — Stale docker artefacts outside the owned root are ignored

@@ -77,8 +77,9 @@ None.
 
 ### Expected
 Outside a project, `build`, `deploy`, `doctor`, `localnet status` and `wallet list` each fail
-with a scaffold message like `Not a logos-scaffold project … Run logos-scaffold create
-<name>`, not a raw file-not-found error.
+with the scaffold message `This command must be run inside a logos-scaffold project`,
+followed by a next step naming `logos-scaffold create <name>`. None of them shows a raw
+file-not-found error.
 
 ### Preconditions
 An empty temporary directory.
@@ -87,7 +88,8 @@ An empty temporary directory.
 1. `cd "$(mktemp -d)"; for c in build deploy doctor "localnet status" "wallet list"; do "$SCAFFOLD_BIN" $c; echo "exit=$?"; done`
 
 ### Success criteria
-- Every command exits non-zero with the "not a logos-scaffold project" message.
+- Every command exits non-zero with `must be run inside a logos-scaffold project` and the
+  `logos-scaffold create <name>` next step.
 
 ## CLI-004 — Help flags have no side effects
 
