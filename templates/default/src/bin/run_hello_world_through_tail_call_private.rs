@@ -60,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
         hex::encode(response.0)
     );
     println!("verification hint: wallet account sync-private");
+    println!("verification hint: wallet account get --account-id Private/{account_id}");
 
     Ok(())
 }

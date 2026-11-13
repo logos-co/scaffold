@@ -287,6 +287,19 @@ cargo run --bin run_hello_world_through_tail_call_private -- <private_account_id
 cargo run --bin run_hello_world_with_authorization_through_tail_call_with_pda
 ```
 
+Each runner prints `verification hint:` lines with the wallet commands that
+show its write. A public account is read with
+`lgs wallet -- account get --account-id Public/<id>`. A private account is
+read from the wallet's own decrypted copy, so sync first:
+
+```bash
+lgs wallet -- account sync-private
+lgs wallet -- account get --account-id Private/<id>
+```
+
+After `run_hello_world_private`, `data` is the hex of `Hola mundo!`. The
+generated project's `README.md` describes the checks in full.
+
 To point at custom binaries:
 
 ```bash
