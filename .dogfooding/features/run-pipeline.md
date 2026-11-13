@@ -7,37 +7,37 @@ scenarios:
     title: Bare run takes a fresh project to deployed programs
     priority: P0
     provenance: documented
-    source: DOGFOODING.md D7
+    source: DOGFOODING.md@740e5e9 D7
     depends_on: [CREATE-001]
   - id: RUN-002
     title: Re-run reuses localnet and skips an unchanged deploy
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D7
+    source: DOGFOODING.md@740e5e9 D7
     depends_on: [RUN-001]
   - id: RUN-003
     title: Post-deploy hooks get the documented environment
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D7
+    source: DOGFOODING.md@740e5e9 D7
     depends_on: [RUN-001]
   - id: RUN-004
     title: Override or skip hooks from the command line
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D7
+    source: DOGFOODING.md@740e5e9 D7
     depends_on: [RUN-003]
   - id: RUN-005
     title: Profile with deploy disabled
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D7
+    source: DOGFOODING.md@740e5e9 D7
     depends_on: [RUN-001]
   - id: RUN-006
     title: Profile with topup disabled
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D7
+    source: DOGFOODING.md@740e5e9 D7
     depends_on: [RUN-001]
   - id: RUN-007
     title: Reset before the run
@@ -55,13 +55,13 @@ scenarios:
     title: Run summary names the wallet's sequencer
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D7
+    source: DOGFOODING.md@740e5e9 D7
     depends_on: [RUN-001]
   - id: RUN-010
     title: Hooks get the program id and guest path on a single-program project
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D7
+    source: DOGFOODING.md@740e5e9 D7
     depends_on: [RUN-003]
 retired: []
 ---
@@ -117,6 +117,9 @@ RUN-001 with localnet still running.
 ### Success criteria
 - The PID is the same before and after, and the `Deploy skipped (… unchanged …)` header
   appears.
+
+### Notes
+To force a real re-deploy, pass `--reset` or delete `.scaffold/state/run_deploy.json`.
 
 ## RUN-003 — Post-deploy hooks get the documented environment
 

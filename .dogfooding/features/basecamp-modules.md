@@ -7,31 +7,31 @@ scenarios:
     title: Capture project modules into scaffold.toml
     priority: P1
     provenance: documented
-    source: DOGFOODING.md B2
+    source: DOGFOODING.md@740e5e9 B2
     depends_on: [BCSETUP-001]
   - id: BCMOD-002
     title: Declared dependencies resolve or fail fast
     priority: P1
     provenance: documented
-    source: DOGFOODING.md B2
+    source: DOGFOODING.md@740e5e9 B2
     depends_on: [BCMOD-001]
   - id: BCMOD-003
     title: Install captured modules into both profiles
     priority: P1
     provenance: documented
-    source: DOGFOODING.md B2
+    source: DOGFOODING.md@740e5e9 B2
     depends_on: [BCMOD-001]
   - id: BCMOD-004
     title: A flake with only lgx-portable fails explicitly
     priority: P2
     provenance: documented
-    source: DOGFOODING.md B2
+    source: DOGFOODING.md@740e5e9 B2
     depends_on: [BCSETUP-001]
   - id: BCMOD-005
     title: Build module artefacts by variant
     priority: P2
     provenance: documented
-    source: DOGFOODING.md B5
+    source: DOGFOODING.md@740e5e9 B5
     depends_on: [BCMOD-001]
   - id: BCMOD-006
     title: build-portable stages ordered symlinks
@@ -43,13 +43,13 @@ scenarios:
     title: Run or develop a captured module standalone
     priority: P2
     provenance: documented
-    source: DOGFOODING.md B6
+    source: DOGFOODING.md@740e5e9 B6
     depends_on: [BCMOD-001]
   - id: BCMOD-008
     title: Prebuilt lgx modules are rejected by run
     priority: P2
     provenance: documented
-    source: DOGFOODING.md B6
+    source: DOGFOODING.md@740e5e9 B6
     depends_on: [BCMOD-001]
 retired: []
 ---
@@ -102,6 +102,15 @@ declares `<input>.url = "path:../<sibling>"` (for example `templates/minimal-mod
 - Step 6 exits 0 and writes exactly the two given sources as `role = "project"`:
   `flake = "path:./<sub>#lgx"` and `flake = "/abs/prebuilt.lgx"`, plus any declared
   dependencies.
+
+### Notes
+Only `path:../<sibling>` inputs are rewritten; `path:./sub`, `github:` and `git+` inputs pass
+through. The parser reads `flake.nix` line by line, so a multi-line input declaration can be
+missed: record the `flake.nix` excerpt if a sibling override is not applied. An unresolved
+transitive `logos-module-builder` input surfaces as Nix's own error (`nix eval <ref> failed
+(…): <stderr>` plus the `logos-scaffold basecamp docs` pointer), never as `no .lgx sources
+found`. Do not re-run `basecamp modules` after a hand edit without recording the state
+before it.
 
 ## BCMOD-002 — Declared dependencies resolve or fail fast
 

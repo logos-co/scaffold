@@ -7,25 +7,25 @@ scenarios:
     title: doctor gives actionable checks
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D2
+    source: DOGFOODING.md@740e5e9 D2
     depends_on: [BUILD-001]
   - id: DIAG-002
     title: doctor JSON output
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D2
+    source: DOGFOODING.md@740e5e9 D2
     depends_on: [BUILD-001]
   - id: DIAG-003
     title: report produces a support bundle
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D5
+    source: DOGFOODING.md@740e5e9 D5
     depends_on: [BUILD-001]
   - id: DIAG-004
     title: report never includes wallet secrets
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D5
+    source: DOGFOODING.md@740e5e9 D5
     depends_on: [DIAG-003]
   - id: DIAG-005
     title: Shell completions
@@ -36,7 +36,7 @@ scenarios:
     title: doctor checks the wallet's sequencer address in either config shape
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D2
+    source: DOGFOODING.md@740e5e9 D2
     depends_on: [BUILD-001]
 retired: []
 ---

@@ -20,7 +20,7 @@ Generic "this would be nice" does not count.
 
 <!--
 - What friction did you (or the user you represent) hit?
-- Which `logos-scaffold` command or DOGFOODING scenario (D1–L4) surfaced it?
+- Which `logos-scaffold` command or dogfooding scenario (an ID from `.dogfooding/features/`, e.g. `DEPLOY-003`) surfaced it?
 - What did you try before this fix?
 -->
 
@@ -31,13 +31,13 @@ Generic "this would be nice" does not count.
 ## Verification
 
 <!--
-- Which DOGFOODING scenarios did you rerun? List the IDs (D1, D2, L1, …).
+- Which dogfooding scenarios did you rerun? List the IDs (`CREATE-001`, `RUN-002`, …). See "What to rerun after a change" in `.dogfooding/index.md`.
 - Tests added or updated.
 -->
 
 ## Checklist
 
 - [ ] CI is green
-- [ ] Relevant DOGFOODING scenarios rerun (listed above)
-- [ ] Docs updated (`README.md`, `DOGFOODING.md` and the matching `.dogfooding/features/` scenarios, plus `docs/commands.md` for a command or flag change and `docs/configuration.md` for `[run]` config changes) if user-facing behavior changed
+- [ ] Relevant dogfooding scenarios rerun (listed above)
+- [ ] Docs updated (`README.md` and the matching `.dogfooding/features/` scenarios, plus `docs/commands.md` for a command or flag change and `docs/configuration.md` for `[run]` config changes) if user-facing behavior changed
 - [ ] I have read [CONTRIBUTING.md](/CONTRIBUTING.md) and this PR fits within the weekly contribution cap

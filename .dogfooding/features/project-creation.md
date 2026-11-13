@@ -7,32 +7,32 @@ scenarios:
     title: Create a default-template project
     priority: P0
     provenance: documented
-    source: DOGFOODING.md D1
+    source: DOGFOODING.md@740e5e9 D1
   - id: CREATE-002
     title: create is an alias of new
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D1
+    source: DOGFOODING.md@740e5e9 D1
   - id: CREATE-003
     title: Invalid template name is rejected
     priority: P2
     provenance: documented
-    source: DOGFOODING.md E2
+    source: DOGFOODING.md@740e5e9 E2
   - id: CREATE-004
     title: Vendor dependencies into the project
     priority: P2
     provenance: documented
-    source: DOGFOODING.md E2
+    source: DOGFOODING.md@740e5e9 E2
   - id: CREATE-005
     title: Custom cache root keeps checkouts pin-isolated
     priority: P2
     provenance: documented
-    source: DOGFOODING.md E2
+    source: DOGFOODING.md@740e5e9 E2
   - id: CREATE-006
     title: Non-default LEZ source gets its own checkout
     priority: P2
     provenance: documented
-    source: DOGFOODING.md E2
+    source: DOGFOODING.md@740e5e9 E2
   - id: CREATE-007
     title: Adopt an existing directory with init
     priority: P1

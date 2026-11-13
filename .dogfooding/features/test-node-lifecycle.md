@@ -7,43 +7,43 @@ scenarios:
     title: Report the caller project's pins
     priority: P1
     provenance: documented
-    source: DOGFOODING.md T1
+    source: DOGFOODING.md@740e5e9 T1
     depends_on: [CREATE-001]
   - id: TNODE-002
     title: Prepare and check test-node prerequisites
     priority: P1
     provenance: documented
-    source: DOGFOODING.md T1
+    source: DOGFOODING.md@740e5e9 T1
     depends_on: [TNODE-001]
   - id: TNODE-003
     title: Start, inspect and stop an isolated node
     priority: P1
     provenance: documented
-    source: DOGFOODING.md T1
+    source: DOGFOODING.md@740e5e9 T1
     depends_on: [TNODE-002]
   - id: TNODE-004
     title: Wrap a command with a throwaway node
     priority: P1
     provenance: documented
-    source: DOGFOODING.md T1
+    source: DOGFOODING.md@740e5e9 T1
     depends_on: [TNODE-002]
   - id: TNODE-005
     title: Explicit port already in use fails fast
     priority: P2
     provenance: documented
-    source: DOGFOODING.md T1
+    source: DOGFOODING.md@740e5e9 T1
     depends_on: [TNODE-002]
   - id: TNODE-006
     title: Caller-provided LEZ checkout is never mutated
     priority: P2
     provenance: documented
-    source: DOGFOODING.md T1
+    source: DOGFOODING.md@740e5e9 T1
     depends_on: [CREATE-001]
   - id: TNODE-007
     title: Block timing overrides
     priority: P2
     provenance: documented
-    source: DOGFOODING.md T1
+    source: DOGFOODING.md@740e5e9 T1
     depends_on: [TNODE-002]
 retired: []
 ---
@@ -101,7 +101,7 @@ builds that ref, with `--json` reporting the matching `checkout` and `lez_commit
 still go to the project's configured install dir.
 
 ### Preconditions
-TNODE-001 and r0vm provisioned (see `DOGFOODING.md` "Provisioning").
+TNODE-001 and r0vm provisioned (see "Toolchain" in [product.md](../product.md)).
 
 ### Steps
 1. `"$SCAFFOLD_BIN" test-node doctor --project "$P"` (before prepare, if fresh)
@@ -128,7 +128,8 @@ by a node.
 ### Expected
 `test-node start --json` prints `rpc_url`, `pid`, `state_dir`, `config_path`, `log_path`,
 `genesis_block_id` and `block_height`. The default `--port 0` picks a free port, and the
-`block_id` rises within seconds. `status --node <id> --json` reports `healthy` and the RPC
+`block_id` rises within seconds. `--work-dir DIR` uses `DIR` as the node's runtime directory
+instead of `.scaffold/test-nodes/<id>`. `status --node <id> --json` reports `healthy` and the RPC
 URL, and exits non-zero when unhealthy. `stop --node <id>` stops only that node and removes
 its state unless `--preserve-work-dir` is passed. The node never uses the localnet port and
 never writes into the LEZ checkout.
@@ -143,6 +144,8 @@ TNODE-002.
 4. `"$SCAFFOLD_BIN" test-node status --node "$NODE" --project "$P" --json; echo "exit=$?"`
 5. `"$SCAFFOLD_BIN" test-node pins --project "$P" --json | jq -r '.lez_checkout, .circuits_path'`, then
    `git -C <lez_checkout> status --short` and `ls <circuits_path>`.
+6. `"$SCAFFOLD_BIN" test-node start --project "$P" --work-dir "$SCRATCH_ROOT/tn-work" --json | jq -r .state_dir`,
+   then `"$SCAFFOLD_BIN" test-node stop --node "$SCRATCH_ROOT/tn-work" --project "$P"`.
 
 ### Success criteria
 - Every listed field is present, and the port is not 3040.
@@ -150,6 +153,10 @@ TNODE-002.
   circuits install exists (start materialises it if it was missing).
 - Status is healthy while running. After stop, the node dir is gone and status exits
   non-zero.
+- Step 6 prints `$SCRATCH_ROOT/tn-work`, and `stop` accepts that path as `--node`.
+### Notes
+Nodes are meant to be thrown away: use a fresh one per scenario. Pass `--preserve-work-dir`
+only to inspect a node's database or log afterwards.
 
 ## TNODE-004 — Wrap a command with a throwaway node
 
@@ -227,3 +234,6 @@ TNODE-002.
 ### Success criteria
 - Step 2 shows `500ms` for both keys. Step 3 is rejected.
 - Step 5 shows `500ms` too: `run` takes the same flags.
+### Notes
+Values near or below the stable-read sample cadence can keep `clock wait-stable` and
+block-scoped account reads from converging.

@@ -16,7 +16,7 @@ Generic cleanups, cosmetic refactors, and "this would be nice" PRs from contribu
 | [AGENTS.md](./AGENTS.md) | Repo orientation for AI coding agents |
 | [FURPS.md](./FURPS.md) | Functional and non-functional requirements |
 | [ADR.md](./ADR.md) | Architecture decision records |
-| [DOGFOODING.md](./DOGFOODING.md) | Canonical validation runbook (`D1`-`L4`) |
+| [.dogfooding/](./.dogfooding/index.md) | Dogfooding specification: scenarios per feature, environment setup |
 | [docs/commands.md](./docs/commands.md) | Full CLI surface and command semantics |
 | [docs/configuration.md](./docs/configuration.md) | `[run]` profiles, hooks, watch mode |
 | [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) | Community standards |
@@ -33,15 +33,15 @@ You should have:
 
 Plus:
 
-- Rerun the relevant [DOGFOODING](./DOGFOODING.md#minimum-rerun-guidance-for-future-changes) scenarios (`D1`–`L4`).
+- Rerun the relevant [dogfooding scenarios](./.dogfooding/index.md#what-to-rerun-after-a-change).
 - Read the PR template and fill in every section.
 
 ## What Makes a High-Quality PR
 
 - **Scoped.** One concern per PR. No drive-by refactors.
 - **Green CI.**
-- **Verified.** Applicable DOGFOODING scenarios rerun. See [DOGFOODING.md](./DOGFOODING.md) — "Minimum Rerun Guidance for Future Changes".
-- **Documented.** If the change affects user-facing behavior, update `README.md` and `DOGFOODING.md` in the same PR. If it changes a command or a flag, update [`docs/commands.md`](./docs/commands.md) too; if it changes `[run]` config, update [`docs/configuration.md`](./docs/configuration.md).
+- **Verified.** Applicable dogfooding scenarios rerun. See [.dogfooding/index.md](./.dogfooding/index.md) — "What to rerun after a change".
+- **Documented.** If the change affects user-facing behavior, update `README.md` and the matching scenarios in `.dogfooding/features/` in the same PR. If it changes a command or a flag, update [`docs/commands.md`](./docs/commands.md) too; if it changes `[run]` config, update [`docs/configuration.md`](./docs/configuration.md).
 
 ## LLM-Assisted PRs
 
@@ -99,15 +99,24 @@ cargo fmt --check
 - Generated projects are separate workspaces created by `logos-scaffold new`.
 - Validate scaffold changes by creating a fresh project and running scaffold commands inside it.
 
-## DOGFOODING Validation
+## Dogfooding Validation
 
-Use [DOGFOODING.md](./DOGFOODING.md) as the canonical validation guide for scaffold DX.
+Use [.dogfooding/](./.dogfooding/index.md) as the canonical validation guide for scaffold DX.
+[product.md](./.dogfooding/product.md) explains how to set up the environment, and each file
+in `features/` lists the scenarios for one feature, with stable IDs such as `DEPLOY-003`.
 
 At minimum:
 
-- Onboarding, project creation, setup, localnet, or build changes: rerun `D1` and `D2`.
-- Deploy, wallet, or diagnostics changes: rerun the affected `D3` to `D5` scenarios.
-- LEZ template or generated-artifact changes: rerun `L1` to `L4`.
+- Onboarding, project creation, setup, localnet, or build changes: rerun the P0 scenarios
+  (`CREATE-001`, `BUILD-001`, `BUILD-002`, `LOCALNET-001`, `DEPLOY-001`, `RUN-001`) and the
+  [Localnet](./.dogfooding/features/localnet.md) feature.
+- Deploy, wallet, or diagnostics changes: rerun the affected scenarios in
+  [Deploy](./.dogfooding/features/deploy.md), [Wallet](./.dogfooding/features/wallet.md) and
+  [Diagnostics](./.dogfooding/features/diagnostics.md).
+- spel template or generated-artifact changes: rerun
+  [spel template](./.dogfooding/features/spel-template.md).
+
+The full mapping is in [.dogfooding/index.md](./.dogfooding/index.md#what-to-rerun-after-a-change).
 
 ```bash
 cargo build

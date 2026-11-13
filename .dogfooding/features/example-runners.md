@@ -7,31 +7,31 @@ scenarios:
     title: run_hello_world writes the greeting on chain
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D6
+    source: DOGFOODING.md@740e5e9 D6
     depends_on: [DEPLOY-001, WALLET-005]
   - id: RUNNER-002
     title: run_hello_world_with_move_function writes a custom message
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D6
+    source: DOGFOODING.md@740e5e9 D6
     depends_on: [DEPLOY-001, WALLET-005]
   - id: RUNNER-003
     title: Bad runner input fails with a clear error
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D6
+    source: DOGFOODING.md@740e5e9 D6
     depends_on: [DEPLOY-001]
   - id: RUNNER-004
     title: A private runner's write is visible after sync-private
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D6
+    source: DOGFOODING.md@740e5e9 D6
     depends_on: [DEPLOY-001, WALLET-005]
   - id: RUNNER-005
     title: Tail-call runner lands its greeting with build-synced callee ids
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D6
+    source: DOGFOODING.md@740e5e9 D6
     depends_on: [DEPLOY-001, WALLET-005]
 retired: []
 ---
@@ -65,6 +65,11 @@ DEPLOY-001 and a fresh account: `"$SCAFFOLD_BIN" wallet -- account new public` (
 ### Notes
 Export both wallet-home names. With only `NSSA_…`, a v0.2.x wallet silently uses
 `~/.lee/wallet`.
+The runner takes the bare base58 id. `wallet account get` needs the full `Public/<base58>`
+form; the bare id fails with `Unsupported privacy kind`. Reads lag block production (the
+default localnet block interval is 15 seconds), so poll before recording a failure. A
+pre-v0.2.0 LEZ pin given only `LEE_…` has no wallet home at all and fails loudly in
+`WalletCore::from_env()`.
 
 ## RUNNER-002 — run_hello_world_with_move_function writes a custom message
 
@@ -136,6 +141,10 @@ The chain holds only a commitment for P; `account get` on a `Private/` ID reads 
 local copy, which only `sync-private` updates. `Account is Uninitialized` right after the
 runner means the block had not landed when you synced, not a failure. `RISC0_DEV_MODE=1`
 matches the localnet's dev-mode proving; without it the host builds a real proof.
+The other private paths (`run_hello_world_with_move_function write-private` and
+`move-data-public-to-private`, `run_hello_world_through_tail_call_private`) are checked the
+same way. Use a fresh private account per runner. Unchanged state after several blocks is a
+finding.
 
 ## RUNNER-005 — Tail-call runner lands its greeting with build-synced callee ids
 

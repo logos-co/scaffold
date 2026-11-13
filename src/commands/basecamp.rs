@@ -162,7 +162,7 @@ fn cmd_basecamp_docs() -> DynResult<()> {
 /// Bail before any nix invocation if `nix` isn't on PATH. Without this,
 /// `run_logged` surfaces `os error 2` from the spawn failure with no
 /// signal that the missing executable is `nix` — a documented UX
-/// regression in DOGFOODING.md B1.
+/// regression (dogfooding scenario BCSETUP-008).
 fn ensure_nix_present() -> DynResult<()> {
     if crate::process::which("nix").is_none() {
         bail!(
@@ -1163,8 +1163,8 @@ fn resolve_profile_runtime_dir(
     // Unix socket in the profile's temp dir, and nix refuses to copy a socket
     // ("file ... has an unsupported type"), so an in-project temp root made
     // every `basecamp install` / `basecamp launch` after the first launch fail
-    // — and made concurrent alice/bob launches (B3) fail against each other's
-    // live sockets, which no amount of scrubbing can fix.
+    // — and made concurrent alice/bob launches (BCLAUNCH-002) fail against each
+    // other's live sockets, which no amount of scrubbing can fix.
     //
     // The project-root hash keeps two checkouts from sharing a temp root, and
     // the whole path stays far below the macOS `sun_path == 104` budget that

@@ -7,36 +7,36 @@ scenarios:
     title: Create a spel project with pinned versions
     priority: P1
     provenance: documented
-    source: DOGFOODING.md L1
+    source: DOGFOODING.md@740e5e9 L1
   - id: SPEL-002
     title: Set up and build a spel project
     priority: P1
     provenance: documented
-    source: DOGFOODING.md L1
+    source: DOGFOODING.md@740e5e9 L1
     depends_on: [SPEL-001]
   - id: SPEL-003
     title: Regenerate the IDL
     priority: P1
     provenance: documented
-    source: DOGFOODING.md L2
+    source: DOGFOODING.md@740e5e9 L2
     depends_on: [SPEL-001]
   - id: SPEL-004
     title: Generate client and FFI bindings
     priority: P2
     provenance: documented
-    source: DOGFOODING.md L3
+    source: DOGFOODING.md@740e5e9 L3
     depends_on: [SPEL-002]
   - id: SPEL-005
     title: Deploy and invoke instructions through spel
     priority: P1
     provenance: documented
-    source: DOGFOODING.md L4
+    source: DOGFOODING.md@740e5e9 L4
     depends_on: [SPEL-002]
   - id: SPEL-006
     title: Vendored spel project
     priority: P2
     provenance: documented
-    source: DOGFOODING.md L1
+    source: DOGFOODING.md@740e5e9 L1
 retired: []
 ---
 
@@ -71,6 +71,11 @@ None (the spel CLI is built during this step). On Linux, the PCSC headers are in
 - Exit 0, and the pins are printed.
 - All listed paths exist, and `spel-framework` uses `tag = …`, not `branch`.
 - No `Directory '<name>' already exists` error appears.
+
+### Notes
+`branch = "main"` in the generated manifests means the pin flags did not reach `spel init`.
+Its parser stops at the first non-flag argument, so the flags must come before the project
+name (logos-co/spel#286).
 
 ## SPEL-002 — Set up and build a spel project
 
@@ -124,6 +129,11 @@ SPEL-001 with a working build environment.
 - Step 3 recreates the IDL file from `/`.
 - Step 4 exits non-zero with `` `--guest` applies to `logos-scaffold build` ``.
 
+### Notes
+A later step failing with `expected IDL file …/idl/<stem>.json is missing` means something
+still resolves the IDL by the old `<idl-dir>/<stem>.json` convention instead of `spel.toml`.
+`Skipping IDL build for framework kind …` means the command ran in a non-spel project.
+
 ## SPEL-004 — Generate client and FFI bindings
 
 ### Expected
@@ -147,6 +157,11 @@ SPEL-002 (`setup` has built `spel-client-gen`).
 - In step 1 the `Generating IDL via` line comes before the `$ make ffi-gen` echo.
 - All three files exist, and the echoed generator path is inside the scaffold cache.
 - Step 3 regenerates the same three files from `/`.
+
+### Notes
+`no such command: ffi-gen` means something invoked `spel ffi-gen`, which does not exist:
+generation is the separate `spel-client-gen` binary. `vendored spel-client-gen binary not
+found` means `setup` has not built it.
 
 ## SPEL-005 — Deploy and invoke instructions through spel
 

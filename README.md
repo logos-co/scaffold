@@ -314,7 +314,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) first. It states who this project
 prioritizes and what a PR needs before review. Contributors will also want
 [AGENTS.md](AGENTS.md), the [FURPS+ requirements](FURPS.md), the
 [architecture decision records](ADR.md), and the
-[dogfooding runbook](DOGFOODING.md).
+[dogfooding specification](.dogfooding/index.md).
 
 Report a bug with `lgs report`, which builds a redacted diagnostics bundle to
 attach to the issue.

@@ -166,16 +166,17 @@ lgs basecamp doctor --json
 
 `lgs deploy --json` is structured on both paths, with a different shape each: `--program-path` emits the bare object, the discovery path (`deploy` / `deploy <name>`) wraps one object per attempted program in `{"deploys":[…]}`. Absent values are omitted rather than emitted as `null`, so test presence with `has("tx")` / `has("program_id")` instead of branching on null — `tx` is always absent at the current LEZ pin, which exposes no deploy receipt. Discovery-path exit code is non-zero if any entry failed, and the object is still emitted so partial results stay inspectable.
 
-## DOGFOODING Cross-Reference
+## Dogfooding Cross-Reference
 
-The canonical scenarios in `DOGFOODING.md`:
+The canonical scenarios live in the scaffold repository under `.dogfooding/features/`, one file per feature, with stable IDs:
 
-- **D1–D6** — default template (bootstrap, localnet/doctor, deploy variants, wallet, report, runner interaction).
-- **L1–L4** — SPEL template (bootstrap, IDL regen, client regen, deploy + counter).
-- **E1–E2** — CLI surface (help/version/error quality, advanced `new` flags).
-- **B1–B6** — basecamp (setup, modules+install+paths+launch, p2p, clean-slate, variant builds, standalone run).
+- **`CREATE`, `BUILD`, `LOCALNET`, `DEPLOY`, `RUN`, `WALLET`, `RUNNER`, `DIAG`, `TUI`** — default template (creation, setup and build, localnet, deploy variants, the `run` pipeline, wallet, runner interaction, doctor/report, dashboard).
+- **`SPEL`** — SPEL template (bootstrap, IDL regen, client regen, deploy + instructions).
+- **`CLI`, `SKILLS`** — CLI surface (help/version/error quality) and the AI skills shipped into projects.
+- **`TNODE`, `TRPC`, `API`** — test nodes, their RPC subcommands, and the Rust API.
+- **`BCSETUP`, `BCMOD`, `BCLAUNCH`** — basecamp (setup, modules + install + builds + run, launch + p2p + clean-slate).
 
-When reproducing a failure, name the matching scenario in the bug report.
+When reproducing a failure, name the matching scenario ID (for example `DEPLOY-006`) in the bug report.
 
 ## Key Rules
 

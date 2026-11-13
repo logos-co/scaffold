@@ -7,49 +7,49 @@ scenarios:
     title: Launch one profile with isolated state
     priority: P1
     provenance: documented
-    source: DOGFOODING.md B2
+    source: DOGFOODING.md@740e5e9 B2
     depends_on: [BCMOD-003]
   - id: BCLAUNCH-002
     title: Two profiles interact peer to peer
     priority: P1
     provenance: documented
-    source: DOGFOODING.md B3
+    source: DOGFOODING.md@740e5e9 B3
     depends_on: [BCLAUNCH-001]
   - id: BCLAUNCH-003
     title: Relaunch scrubs profile state
     priority: P1
     provenance: documented
-    source: DOGFOODING.md B4
+    source: DOGFOODING.md@740e5e9 B4
     depends_on: [BCLAUNCH-001]
   - id: BCLAUNCH-004
     title: Relaunch replaces the running instance
     priority: P2
     provenance: documented
-    source: DOGFOODING.md B4
+    source: DOGFOODING.md@740e5e9 B4
     depends_on: [BCLAUNCH-001]
   - id: BCLAUNCH-005
     title: paths resolves profile paths without side effects
     priority: P2
     provenance: documented
-    source: DOGFOODING.md B2
+    source: DOGFOODING.md@740e5e9 B2
     depends_on: [BCSETUP-001]
   - id: BCLAUNCH-006
     title: Custom profiles with env, runtime and log settings
     priority: P2
     provenance: documented
-    source: DOGFOODING.md B2
+    source: DOGFOODING.md@740e5e9 B2
     depends_on: [BCMOD-003]
   - id: BCLAUNCH-007
     title: Unsafe input is refused before any filesystem work
     priority: P2
     provenance: documented
-    source: DOGFOODING.md B4
+    source: DOGFOODING.md@740e5e9 B4
     depends_on: [BCSETUP-001]
   - id: BCLAUNCH-008
     title: Runtime dir is private and outside the project
     priority: P2
     provenance: documented
-    source: DOGFOODING.md B2
+    source: DOGFOODING.md@740e5e9 B2
     depends_on: [BCLAUNCH-001]
 retired: []
 ---
@@ -118,6 +118,12 @@ Scaffold exports no per-module port overrides (the registry is empty), and
 collision is the owning module's bug. A module that binds a fixed port needs a distinct
 value per profile under `[basecamp.profiles.<name>.env]`. If the module has no p2p wiring yet, record that
 as a gap, not a pass.
+Use two terminals so the logs stay separate. On macOS, both windows showing only basecamp's
+bundled modules, with logs naming a base directory under the shared `~/Library/Application
+Support/Logos/LogosBasecamp[Dev]`, means the app is not reading the per-profile module root:
+check that `LOGOS_USER_DIR` is present, absolute and distinct per profile. If one window
+crashes, save its logs from `.scaffold/basecamp/profiles/<name>/` before relaunching.
+Launching the same profile twice in parallel is not supported.
 
 ## BCLAUNCH-003 — Relaunch scrubs profile state
 
@@ -157,6 +163,12 @@ BCLAUNCH-001 running.
 
 ### Success criteria
 - Step 3 shows only the new PID (the one in `launch.state`) for this profile.
+
+### Notes
+The Linux entry points are launcher scripts, so the kernel reports the hidden binary's name:
+`.LogosBasecamp` for the dev build and `.LogosBasecamp.` for the portable bundle (cut to 15
+bytes); the macOS bundle reports `LogosBasecamp`. A surviving process under any of those names
+is the regression, and a silent one: the kill is skipped rather than failing.
 
 ## BCLAUNCH-005 — paths resolves profile paths without side effects
 

@@ -1265,9 +1265,9 @@ mod tests {
         //
         // The two skip flags belong here even though dedicated tests cover
         // their *values* (`hook_receives_topup_skipped_env_for_multiprogram_run`
-        // and friends). README, FURPS, the ADR and DOGFOODING D7 all document
-        // them as always set / never absent — D7 calls an unset one the
-        // regression by itself — so the one test whose stated job is the
+        // and friends). README, FURPS, the ADR and dogfooding scenario RUN-003
+        // all document them as always set / never absent — an unset one is
+        // the regression by itself — so the one test whose stated job is the
         // contract *as a whole* has to enumerate them, or it drifts from the
         // contract while every individual behavior stays guarded.
         let temp = tempfile::tempdir().expect("tempdir");

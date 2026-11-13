@@ -7,17 +7,17 @@ scenarios:
     title: New projects ship the four AI skills
     priority: P2
     provenance: documented
-    source: DOGFOODING.md E3
+    source: DOGFOODING.md@740e5e9 E3
   - id: SKILLS-002
     title: init installs skills and re-runs idempotently
     priority: P2
     provenance: documented
-    source: DOGFOODING.md E3
+    source: DOGFOODING.md@740e5e9 E3
   - id: SKILLS-003
     title: init leaves team-owned skills alone
     priority: P2
     provenance: documented
-    source: DOGFOODING.md E3
+    source: DOGFOODING.md@740e5e9 E3
     depends_on: [SKILLS-002]
 retired: []
 ---
@@ -37,8 +37,9 @@ Default and spel projects both contain exactly the four `.claude/skills/<name>/S
 files, each byte-identical to `skills/<name>/SKILL.md` in the repo. They also contain the
 same four `.cursor/rules/<name>.mdc` files: frontmatter with `description:` and
 `alwaysApply: false`, no `name:`, and a body identical to SKILL.md. `AGENTS.md` has one table
-row per skill, sorted by name, of the form ``| [`<name>`](.claude/skills/<name>/SKILL.md) |
-<description> |``, where the description comes from the SKILL.md frontmatter. `.gitignore`
+row per skill, sorted by name. The first cell is the skill name as a link to
+`.claude/skills/<name>/SKILL.md`, and the second is the description from the SKILL.md
+frontmatter. `.gitignore`
 does not exclude `.claude/`, `.cursor/` or `AGENTS.md`.
 
 ### Preconditions
@@ -49,7 +50,7 @@ None (no setup or network needed beyond creation).
 2. `find dogfood-skills-*/.claude/skills dogfood-skills-*/.cursor/rules -type f | sort`
 3. `diff dogfood-skills-default/.claude/skills/lgs-cli/SKILL.md "$REPO_ROOT/skills/lgs-cli/SKILL.md"`
 4. `head -5 dogfood-skills-default/.cursor/rules/lgs-cli.mdc; cat dogfood-skills-default/.gitignore`
-5. `for p in dogfood-skills-default dogfood-skills-spel; do grep '](\.claude/skills/' "$p/AGENTS.md"; ( cd "$p" && grep -o '(\.claude/skills/[^)]*)' AGENTS.md | tr -d '()' | xargs ls ); done`
+5. `for p in dogfood-skills-default dogfood-skills-spel; do grep -F '(.claude/skills/' "$p/AGENTS.md"; ( cd "$p" && grep -o '(\.claude/skills/[^)]*)' AGENTS.md | tr -d '()' | xargs ls ); done`
 
 ### Success criteria
 - There are four SKILL.md files and four .mdc files per project, and the diff is empty.

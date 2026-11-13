@@ -1714,7 +1714,7 @@ fn wallet_topup_dry_run_planned_network_uses_localnet_port_without_wallet_sequen
 
 /// LEZ v0.2.4 nests the wallet's sequencer address. Scaffold must follow it
 /// rather than fall back to `[localnet] port`, or every probe and hint names
-/// the wrong host (the D3/D4 regression).
+/// the wrong host (the DEPLOY-006/WALLET-008 regression).
 #[test]
 fn wallet_topup_dry_run_planned_network_follows_nested_v024_sequencer_addr() {
     let temp = tempdir().expect("tempdir");

@@ -172,7 +172,7 @@
 1. `logos-scaffold doctor` gains a basecamp section when `.scaffold/basecamp/` exists, covering binary presence, profile integrity, and installed-module state. *(These checks live in `basecamp doctor`. See R10.)*
 2. Basecamp and `lgpm` pinned commits are explicit in `scaffold.toml`, and the defaults move as a set: scaffold's default `lgpm` rev is the one the pinned basecamp release locks, because the app embeds that same package-manager library to read what `lgpm` installed. Scaffold supports one basecamp release at a time (currently 0.3.0): `setup` moves a project still on a retired *default* pin set (and captured default companion flakes) to the current one and says so; any pin that is not exactly one of scaffold's retired defaults is kept until the user edits both and re-runs `setup`. A deliberate pin to a retired default is moved too — scaffold cannot tell it from a left-behind one.
 3. `.scaffold/state/basecamp.state` is plain-text and line-oriented, matching existing scaffold state conventions.
-4. Dogfooding scenarios (`B1`–`B4` in `DOGFOODING.md`) cover setup, single-instance, multi-instance p2p, and clean-slate behaviors. *(Now `B1`–`B7`. See R10.)*
+4. Dogfooding scenarios (`B1`–`B4` in `DOGFOODING.md`) cover setup, single-instance, multi-instance p2p, and clean-slate behaviors. *(Now the `BCSETUP`, `BCMOD` and `BCLAUNCH` scenarios in `.dogfooding/features/`. See R10.)*
 5. `build-portable`'s manual load-into-AppImage step is explicit: scaffold stages browsable symlinks under `.scaffold/basecamp/portable/` but does not know or auto-feed the AppImage's install dialog. The AppImage lifecycle is intentionally outside scaffold's scope — see ADR "AppImage Path is Outside Scaffold's Scope".
 6. Known limitation: multi-sub-flake projects must unify transitive `logos-module-builder` references via `inputs.<dep>.inputs.logos-module-builder.follows = "logos-module-builder"`. Without it, `install` can fail via the overridden sibling's lock even when a direct `nix build` succeeds. Documented fully in `docs/basecamp-module-requirements.md`; expected to become obsolete once upstream `logos-module-builder` scaffolding emits this `follows` automatically.
 7. Assumption notes from Usability 7 are printed to stderr (not the captured log), so pasting them into a bug report is straightforward.
@@ -211,7 +211,7 @@
 The sections above describe requirements as they were written. This section records where the
 shipped product has moved away from them, and the requirements it has gained since. An item
 marked *(Superseded …)* or *(… See R#)* above is governed by the matching entry here.
-`DOGFOODING.md` and `docs/commands.md` are the operational detail.
+`.dogfooding/` and `docs/commands.md` are the operational detail.
 
 ### Corrections
 
@@ -270,9 +270,10 @@ marked *(Superseded …)* or *(… See R#)* above is governed by the matching en
   `[repos.basecamp]` and `[repos.lgpm]`. `basecamp setup` moves projects off retired default
   pin sets (ADR "Scaffold Supports One Basecamp Release").
 - **R10. Basecamp diagnostics and coverage.** Basecamp health checks are reported by
-  `basecamp doctor`, not by the top-level `doctor`. Dogfooding coverage is `B1`–`B7`. That
-  adds artefact builds by variant (`B5`), the standalone run loop (`B6`), and pin-set checks
-  that need no app build (`B7`).
+  `basecamp doctor`, not by the top-level `doctor`. Dogfooding coverage is the `BCSETUP`,
+  `BCMOD` and `BCLAUNCH` scenarios in `.dogfooding/features/`. That adds artefact builds by
+  variant (`BCMOD-005`, `BCMOD-006`), the standalone run loop (`BCMOD-007`, `BCMOD-008`), and
+  pin-set checks that need no app build (`BCSETUP-007`).
 
 ### Added requirements
 

@@ -16,7 +16,7 @@ This skill activates whenever **any** of these is true:
 - `[modules.*]` entries already exist in `scaffold.toml`.
 - `.scaffold/basecamp/profiles/` already exists (basecamp setup has been run in this project before).
 
-Basecamp activates **independently** of `lez-template` / `spel-template`. A project can be both a templated LEZ project and a basecamp-hosted module project; both skills then apply. Basecamp can also stand alone in an external module project with no LEZ template at all (the canonical case in DOGFOODING B-series — `tictactoe` and similar).
+Basecamp activates **independently** of `lez-template` / `spel-template`. A project can be both a templated LEZ project and a basecamp-hosted module project; both skills then apply. Basecamp can also stand alone in an external module project with no LEZ template at all (the canonical case in the basecamp dogfooding scenarios — `tictactoe` and similar).
 
 The canonical compatibility doc — including the full `[modules]` schema and dependency-resolution rules — is `docs/basecamp-module-requirements.md`, mirrored to consumers via `lgs basecamp docs`. Treat it as the source of truth and reference it instead of duplicating its contents.
 
@@ -94,9 +94,9 @@ Basecamp state is **always project-local** under `<project>/.scaffold/basecamp/`
 | `.scaffold/state/basecamp.state` | Pinned basecamp + lgpm binary paths; pin-derived metadata. |
 | `.scaffold/logs/<ts>-setup-*.log`, `<ts>-install.log` | Build logs. |
 
-Each `launch` also sets `LOGOS_PROFILE=<name>` for child processes. The two-instance dogfooding flow (B3) relies on this isolation: `alice` and `bob` running in parallel see independent identity keys, message history, and storage.
+Each `launch` also sets `LOGOS_PROFILE=<name>` for child processes. The two-instance dogfooding flow (`BCLAUNCH-002`) relies on this isolation: `alice` and `bob` running in parallel see independent identity keys, message history, and storage.
 
-## Clean-Slate Semantics (B4 Guard)
+## Clean-Slate Semantics (BCLAUNCH-003 Guard)
 
 `lgs basecamp launch alice`:
 
@@ -109,7 +109,7 @@ The scrub is the point — every launch is clean-slate. The blast radius is the 
 
 **Empty `[modules]` + `launch`** intentionally **bails before scrubbing**. The empty-install + scrubbed-profile combo would leave the profile with zero modules — capture modules first via `lgs basecamp modules`.
 
-## Two-Instance P2P Dogfooding (B3)
+## Two-Instance P2P Dogfooding (BCLAUNCH-002)
 
 The canonical basecamp use case. Two terminals, both rooted at the module project:
 
@@ -125,7 +125,7 @@ Each window opens against its own `.scaffold/basecamp/profiles/{alice,bob}/`, wi
 
 If two windows open but share identity keys / message history, that is a clean-slate regression — capture it. A non-module port collision (Qt remote objects, etc.) is an upstream finding against the colliding component, not something to patch around in scaffold. Running two `launch alice` invocations in parallel is undefined in v1.
 
-## `build` / `build-portable` (B5)
+## `build` / `build-portable` (BCMOD-005, BCMOD-006)
 
 `build` creates `#lgx`, `#lgx-portable`, or both variants without installing them; it defaults to both and can target one captured project module with `--module`. `build-portable` is the back-compatible alias for `build --variant lgx-portable`. Portable artefacts can be hand-loaded via the AppImage's "install lgx" file picker rather than installed into scaffold-managed profiles.
 
@@ -158,18 +158,15 @@ Silent fallback from `#lgx-portable` to `#lgx` is a contract violation — the v
 - `--print-output` flag on `install` (or `LOGOS_SCAFFOLD_PRINT_OUTPUT=1` env) — stream nix output directly to the terminal instead of writing to a log file. Useful for CI where you want the full transcript in stdout.
 - `lgs report --tail 500` (general scaffold report) — bundles relevant `.scaffold/logs/` and state for issue reports. Always inspect the archive (`tar -tzf <path>`) before sharing publicly.
 
-## DOGFOODING Cross-Reference
+## Dogfooding Cross-Reference
 
-Canonical scenarios in `DOGFOODING.md`:
+Canonical scenarios live in the scaffold repository under `.dogfooding/features/`:
 
-- **B1** — basecamp + lgpm setup and idempotent re-run.
-- **B2** — module capture, install, resolved paths, and single-instance launch (`alice`).
-- **B3** — two-instance p2p (`alice` + `bob` parallel terminals).
-- **B4** — clean-slate scrub semantics on relaunch; empty-`[modules]` bail guard.
-- **B5** — `build` variant selection and `build-portable` AppImage artefacts.
-- **B6** — captured-module standalone run loop.
+- **`BCSETUP`** (`basecamp-setup.md`) — basecamp + lgpm setup, idempotent re-run, pin-set checks, `basecamp doctor`.
+- **`BCMOD`** (`basecamp-modules.md`) — module capture, dependency resolution, install, `build` variant selection and `build-portable` artefacts, captured-module standalone run loop.
+- **`BCLAUNCH`** (`basecamp-launch.md`) — single-instance launch (`alice`), resolved paths, two-instance p2p (`alice` + `bob` parallel terminals), clean-slate scrub semantics on relaunch, empty-`[modules]` bail guard.
 
-When reproducing a basecamp failure, name the matching scenario.
+When reproducing a basecamp failure, name the matching scenario ID (for example `BCLAUNCH-003`).
 
 ## Key Rules
 
