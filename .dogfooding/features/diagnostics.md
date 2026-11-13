@@ -56,7 +56,11 @@ scripts. Related: [Setup and build](setup-and-build.md), [Localnet](localnet.md)
 the configured circuits install (its `VERSION` against `[circuits].version`, plus drift from
 the LEZ pin's expected release), the spel pin and its LEZ alignment, and a `guest build` row
 naming the mode and the risc0 builder tag. In docker mode the row is a FAIL when
-`cargo-risczero`, `docker` or the daemon is missing.
+`cargo-risczero`, `docker` or the daemon is missing. The `docker info` probe is bounded: a
+container runtime that does not answer costs at most one 10s timeout, and both the
+`container runtime` (WARN) and `guest build` (FAIL) rows say it `did not answer within 10s`.
+When `DOCKER_HOST` (or `CONTAINER_HOST` for podman) is set, the remediation names that variable,
+never its value, and says to fix the remote connection or unset it.
 
 ### Preconditions
 BUILD-001.
@@ -66,6 +70,9 @@ BUILD-001.
 2. Set `[circuits].version` to a wrong value, run `"$SCAFFOLD_BIN" doctor`, then restore it.
 3. Set `[circuits].install_dir` to an empty directory, run `"$SCAFFOLD_BIN" doctor`, then restore
    it.
+4. `time DOCKER_HOST=tcp://10.255.255.1:2375 "$SCAFFOLD_BIN" doctor | grep -A1 -E 'container runtime|guest build'`
+   (first check that `curl -m 3 http://10.255.255.1:2375` times out rather than being refused;
+   a refused connection fails fast and does not exercise the bound)
 
 ### Success criteria
 - Every non-PASS row has an actionable next step.
@@ -73,6 +80,10 @@ BUILD-001.
 - Step 2 shows a circuits warning or error that names the configured install dir.
 - Step 3 reports `missing configured circuits release at <that dir>` with the remediation
   `Run \`logos-scaffold setup\``.
+- Step 4 finishes in well under 30s (one probe timeout, not one per row). `container runtime`
+  is WARN with `` `docker info` did not answer within 10s``, and `guest build` is FAIL with
+  `` `docker info` did not answer within 10s``. Both remediations name `DOCKER_HOST` and neither
+  prints `10.255.255.1`. A `doctor` that hangs is the regression.
 
 ## DIAG-002 — doctor JSON output
 
@@ -104,10 +115,13 @@ BUILD-001, ideally after a localnet start or a build.
 1. `"$SCAFFOLD_BIN" report --tail 200`
 2. `"$SCAFFOLD_BIN" report --out "$PWD/artifacts/support-report.tar.gz"`
 3. `tar -tzf "$PWD/artifacts/support-report.tar.gz" | sort`
+4. `time DOCKER_HOST=tcp://10.255.255.1:2375 "$SCAFFOLD_BIN" report --out /tmp/r.tar.gz`
 
 ### Success criteria
 - Both archives exist, the inspect warning is printed, and every file listed above is in the
   archive.
+- Step 4 completes in well under 30s: `report` embeds doctor's output, so it inherits the
+  bounded runtime probe and never blocks on an unreachable daemon.
 
 ### Notes
 Never upload an archive without listing its contents and asking the user.

@@ -1,7 +1,7 @@
 ---
 dogfooding: 1
 repo: github.com/logos-co/scaffold
-commit: 73a986576902cc5259b52bd0bdab329d1d37965e
+commit: fc70f4500a2d924fd3b6dc0ea4e3d98d1001459b
 updated: 2026-11-13
 ---
 

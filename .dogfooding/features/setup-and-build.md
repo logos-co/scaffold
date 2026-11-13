@@ -131,7 +131,8 @@ Docker daemon stopped (or `cargo-risczero` removed from `PATH`).
 - The message names the missing piece and mentions `guest = "local"`.
 - Step 2 agrees with step 1: a `FAIL | guest build | docker (risczero/risc0-guest-builder:<tag>)`
   row ending in `… not found on PATH`, or, with both tools present and the daemon down,
-  `Docker daemon not running (\`docker info\` failed)`. A PASS row next to a refusing `build`
+  `Docker daemon not running (\`docker info\` failed)` (`\`docker info\` did not answer within
+  10s` when the daemon hangs instead of refusing). A PASS row next to a refusing `build`
   is the regression.
 
 ## BUILD-004 — Deterministic guest build is byte-reproducible
