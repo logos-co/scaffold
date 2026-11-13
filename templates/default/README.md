@@ -102,7 +102,14 @@ logos-scaffold wallet -- account sync-private
 cargo run --bin run_hello_world_with_authorization_through_tail_call_with_pda
 ```
 
-Each runner prints the submitted transaction hash (`tx_hash=...`) and a copy-pasteable `wallet account get` verification hint on success.
+Each runner prints the submitted transaction hash (`tx_hash=...`) and, on success, one or more `verification hint:` lines naming the wallet commands to run next (as `logos-scaffold wallet -- <command>`).
+
+## Check the Result
+
+A write lands with the next block, so if an account has not changed yet, wait a few seconds and check again. `<id>` below is the base58 part of the account ID.
+
+- **Public account:** `logos-scaffold wallet -- account get --account-id Public/<id>` reads the account from the sequencer. After `run_hello_world`, `data` is the hex of `Hola mundo!` and `program_owner` is the hello_world program ID (the wallet prints it in base58; `logos-scaffold deploy` prints the same ID in hex).
+- **Private account:** the chain stores only an encrypted commitment, so the wallet keeps its own decrypted copy of each private account. `logos-scaffold wallet -- account sync-private` scans the blocks produced since the last sync and applies the updates addressed to your private accounts. Then `logos-scaffold wallet -- account get --account-id Private/<id>` prints that copy. Success looks the same as for a public account: after `run_hello_world_private`, `data` is the hex of `Hola mundo!` and `program_owner` is the hello_world program ID. If `account get` still prints `Account is Uninitialized` (or the old data), the block had not landed when you synced: run both commands again.
 
 ## Optional Program Path Overrides
 

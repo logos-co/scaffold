@@ -21,6 +21,12 @@ scenarios:
     provenance: documented
     source: DOGFOODING.md D6
     depends_on: [DEPLOY-001]
+  - id: RUNNER-004
+    title: A private runner's write is visible after sync-private
+    priority: P1
+    provenance: documented
+    source: DOGFOODING.md D6
+    depends_on: [DEPLOY-001, WALLET-005]
 retired: []
 ---
 
@@ -90,3 +96,32 @@ DEPLOY-001.
 
 ### Success criteria
 - Non-zero exit with a readable error, and no `panicked at` / `unwrap()` backtrace.
+
+## RUNNER-004 — A private runner's write is visible after sync-private
+
+### Expected
+`run_hello_world_private <P>` exits 0 and prints `tx_hash=…` and two hints:
+`wallet account sync-private` and `wallet account get --account-id Private/<P>`. After the
+block lands, `account sync-private` followed by that `account get` shows the wallet's
+decrypted copy of P with `data` = hex of `Hola mundo!` and the hello_world `program_owner`.
+
+### Preconditions
+DEPLOY-001 and a fresh private account: `"$SCAFFOLD_BIN" wallet -- account new private`
+(call it P).
+
+### Steps
+1. Export both wallet-home names, as in RUNNER-001.
+2. `RISC0_DEV_MODE=1 cargo run --bin run_hello_world_private -- <P-base58>`
+3. `"$SCAFFOLD_BIN" wallet -- account sync-private`, then
+   `"$SCAFFOLD_BIN" wallet -- account get --account-id Private/<P-base58>`. Repeat both for up
+   to about 30 seconds.
+
+### Success criteria
+- The runner exits 0 and prints both hints.
+- After a sync, P's `data` decodes to `Hola mundo!` and `program_owner` is non-null.
+
+### Notes
+The chain holds only a commitment for P; `account get` on a `Private/` ID reads the wallet's
+local copy, which only `sync-private` updates. `Account is Uninitialized` right after the
+runner means the block had not landed when you synced, not a failure. `RISC0_DEV_MODE=1`
+matches the localnet's dev-mode proving; without it the host builds a real proof.

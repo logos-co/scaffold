@@ -135,9 +135,18 @@ cargo run --bin run_hello_world_with_authorization_through_tail_call_with_pda
 Each runner prints, on success:
 
 ```
-submitted transaction: status=<...> tx_hash=<...>
-verification hint: lgs wallet -- account get --account-id <id>
+submitted transaction: tx_hash=<...>
+verification hint: wallet account get --account-id Public/<id>
 ```
+
+Runners that write a private account print two hints instead:
+
+```
+verification hint: wallet account sync-private
+verification hint: wallet account get --account-id Private/<id>
+```
+
+Run each hint as `lgs wallet -- <hint>`. A private account's state lives only in the wallet's decrypted copy: `sync-private` scans new blocks and applies the updates addressed to the wallet, then `account get --account-id Private/<id>` shows the new `data` and `program_owner`, just like a public read. `Account is Uninitialized` (or unchanged data) after a sync means the block had not landed yet; sync and read again.
 
 Optional path overrides for custom builds:
 

@@ -115,6 +115,7 @@ async fn main() -> anyhow::Result<()> {
                 hex::encode(response.0)
             );
             println!("verification hint: wallet account sync-private");
+            println!("verification hint: wallet account get --account-id Private/{account_id}");
         }
         Command::MoveDataPublicToPublic { from, to } => {
             let instruction: Instruction = (MOVE_DATA_FUNCTION_ID, vec![]);
@@ -181,7 +182,9 @@ async fn main() -> anyhow::Result<()> {
                 "submitted transaction: tx_hash={}",
                 hex::encode(response.0)
             );
+            println!("verification hint: wallet account get --account-id Public/{from}");
             println!("verification hint: wallet account sync-private");
+            println!("verification hint: wallet account get --account-id Private/{to}");
         }
     };
 

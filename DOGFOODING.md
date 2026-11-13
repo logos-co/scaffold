@@ -562,6 +562,22 @@ The first runner (`run_hello_world`) submits a basic public transaction; once co
 - Use the fresh public account created in the preconditions rather than reusing accounts from other scenarios. This avoids confusion about pre-existing state.
 - If additional runners are available (e.g., `run_hello_world_private`, `run_hello_world_through_tail_call`), exercising them is valuable but not required for this scenario. The tail-call runners need their callee ids to match the build: `build` rewrites `HELLO_WORLD_PROGRAM_ID_HEX` in `simple_tail_call.rs` and `HELLO_WORLD_WITH_AUTHORIZATION_PROGRAM_ID_HEX` in `tail_call_with_pda.rs` and rebuilds once, printing `Updated … program id …`. A later `build` that prints it again, or a sequencer-log `Unknown program` rejection for a tail-call transaction, is a regression. `run_hello_world_through_tail_call` signs its transaction; on a fresh account it must land `Hello from tail call` (an unsigned one is rejected with `ClaimedUnauthorizedAccount`).
 
+### Private-account check (optional)
+
+The private runners (`run_hello_world_private`, `run_hello_world_with_move_function write-private` / `move-data-public-to-private`, `run_hello_world_through_tail_call_private`) write an account whose state the chain holds only as an encrypted commitment. The wallet keeps its own decrypted copy, so the check is a sync followed by a local read:
+
+```bash
+"$SCAFFOLD_BIN" wallet -- account new private   # <private-id>; a fresh one per runner, as for public accounts
+RISC0_DEV_MODE=1 cargo run --bin run_hello_world_private -- <private-id>
+"$SCAFFOLD_BIN" wallet -- account sync-private
+"$SCAFFOLD_BIN" wallet -- account get --account-id Private/<private-id>
+```
+
+- The runner prints two hints: `wallet account sync-private` and `wallet account get --account-id Private/<private-id>`.
+- `sync-private` prints the latest block and the blocks it scanned. Afterwards `account get` shows `data` = hex(`Hola mundo!`) and the hello_world `program_owner`, the same shape as a public read.
+- `Account is Uninitialized` after a sync means the block had not landed yet; sync and read again before recording a failure. Unchanged state after several blocks is a finding.
+- `RISC0_DEV_MODE=1` matches the localnet's `risc0_dev_mode = true`; without it the runner generates a real proof on the host, which takes far longer and much more memory.
+
 ## D7. `run` Pipeline and Post-Deploy Hooks
 
 ### Goal

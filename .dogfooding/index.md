@@ -23,7 +23,7 @@ at the repo root.
 | [Deploy](features/deploy.md) | cli | 1 | 3 | 4 |
 | [Run pipeline](features/run-pipeline.md) | cli | 1 | 2 | 5 |
 | [Wallet](features/wallet.md) | cli | 0 | 3 | 4 |
-| [Example runners](features/example-runners.md) | cli | 0 | 2 | 1 |
+| [Example runners](features/example-runners.md) | cli | 0 | 3 | 1 |
 | [spel template](features/spel-template.md) | cli | 0 | 4 | 2 |
 | [Diagnostics](features/diagnostics.md) | cli | 0 | 3 | 2 |
 | [CLI basics](features/cli-basics.md) | cli | 0 | 2 | 4 |
