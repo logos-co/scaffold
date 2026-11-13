@@ -121,7 +121,7 @@ lgs basecamp launch alice
 lgs basecamp launch bob
 ```
 
-Each window opens against its own `.scaffold/basecamp/profiles/{alice,bob}/`, with `LOGOS_PROFILE` set respectively. Per-profile port-override env vars are set on `launch` to avoid collision on Qt remote-objects and similar non-module ports. A p2p interaction (chat, delivery, storage) triggered from `alice` should be observable in `bob` within the module's expected latency.
+Each window opens against its own `.scaffold/basecamp/profiles/{alice,bob}/`, with `LOGOS_PROFILE` set respectively. `launch` sets no module port variables: if a module binds a fixed port, give each profile its own value under `[basecamp.profiles.<name>.env]` (e.g. `LOGOS_STORAGE_API_PORT`). `[basecamp].port_base` / `port_stride` are reserved and unused. A p2p interaction (chat, delivery, storage) triggered from `alice` should be observable in `bob` within the module's expected latency.
 
 If two windows open but share identity keys / message history, that is a clean-slate regression — capture it. A non-module port collision (Qt remote objects, etc.) is an upstream finding against the colliding component, not something to patch around in scaffold. Running two `launch alice` invocations in parallel is undefined in v1.
 

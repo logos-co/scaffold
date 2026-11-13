@@ -180,8 +180,9 @@ pub(crate) struct Config {
     /// `[modules.<name>]` — top-level Logos module catalog (was
     /// `[basecamp.modules.<name>]` pre-consolidation).
     pub(crate) modules: std::collections::BTreeMap<String, ModuleEntry>,
-    /// `[basecamp]` — runtime config only (port_base, port_stride). Pin and
-    /// source moved to `[repos.basecamp]`; modules moved to `[modules.*]`.
+    /// `[basecamp]` — launch runtime config (env, env_append, profiles, and
+    /// the reserved port_base/port_stride). Pin and source moved to
+    /// `[repos.basecamp]`; modules moved to `[modules.*]`.
     pub(crate) basecamp: Option<BasecampConfig>,
     /// `[run]` — `lgs run` pipeline config (post-deploy hooks).
     pub(crate) run: RunConfig,
@@ -213,6 +214,9 @@ pub(crate) struct ModuleEntry {
 /// `[modules.*]`.
 #[derive(Clone, Debug)]
 pub(crate) struct BasecampConfig {
+    /// `[basecamp].port_base` / `port_stride` — reserved. Parsed and kept on
+    /// rewrite so existing scaffold.toml files stay valid, but nothing reads
+    /// them: `launch` assigns no module ports (logos-co/scaffold#291).
     pub(crate) port_base: u16,
     pub(crate) port_stride: u16,
     /// `[basecamp.env]` — plain env vars injected into every profile's launch

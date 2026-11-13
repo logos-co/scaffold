@@ -404,8 +404,8 @@ into three orthogonal namespaces:
   / `build-portable`, but they're not basecamp's property — a future
   test harness or alternative loader can pick them up the same way.
 - **`[<feature>]`** — runtime config per feature: `[scaffold]`,
-  `[wallet]`, `[framework]`, `[localnet]`, `[basecamp]` (port
-  allocation only).
+  `[wallet]`, `[framework]`, `[localnet]`, `[basecamp]` (launch env
+  and profiles; `port_base` / `port_stride` are reserved and unused).
 
 Earlier schemas (pre-0.2.0) mixed all three: `[basecamp]` carried
 pin / source / lgpm_flake / modules together with port_base, and

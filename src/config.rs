@@ -13,7 +13,7 @@
 //!   in 0.2.0.
 //! - `[<feature>]` — runtime config per feature: `[scaffold]`, `[wallet]`,
 //!   `[framework]`, `[build]`, `[localnet]`, `[circuits]`, `[basecamp]`
-//!   (port allocation only).
+//!   (launch env and profiles; `port_base` / `port_stride` are reserved).
 //!
 //! Pre-0.2.0 configs (with `[basecamp].pin` / `.source` / `.lgpm_flake`,
 //! `[basecamp.modules.*]`, or `[repos.{lez,spel}].url`) are rejected by

@@ -259,9 +259,12 @@ marked *(Superseded …)* or *(… See R#)* above is governed by the matching en
   `[basecamp.env_append]` apply to every profile.
 - **R8. No per-module port overrides yet.** `basecamp launch` exports no module port-override
   env vars, because no module has published names to set. `[basecamp].port_base` /
-  `port_stride` are parsed and round-tripped, but nothing uses them at launch. Isolation
-  between concurrent profiles comes from per-profile XDG dirs, `HOME`, `LOGOS_USER_DIR` and a
-  private runtime dir. A module-level port collision belongs to the owning module.
+  `port_stride` are reserved: they are parsed and round-tripped so existing files stay
+  valid, `init` does not write them, and nothing uses them at launch. Until a module
+  publishes override names, a project gives each profile its own port through
+  `[basecamp.profiles.<name>.env]`. Isolation between concurrent profiles comes from
+  per-profile XDG dirs, `HOME`, `LOGOS_USER_DIR` and a private runtime dir. A module-level
+  port collision belongs to the owning module.
 - **R9. Basecamp migration exists.** `basecamp` has shipped. `init` migrates the pre-0.2.0
   `[basecamp.modules.*]`, `[basecamp].pin`, `.source` and `.lgpm_flake` to `[modules.*]`,
   `[repos.basecamp]` and `[repos.lgpm]`. `basecamp setup` moves projects off retired default

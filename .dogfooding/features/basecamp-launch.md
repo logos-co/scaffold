@@ -107,8 +107,10 @@ BCLAUNCH-001, a module with a p2p surface, and two terminals.
 - The interaction propagates in both directions. The real `~/.logos_storage` is unchanged.
 
 ### Notes
-Scaffold exports no per-module port overrides (the registry is empty), so a module-level
-port collision is the owning module's bug. If the module has no p2p wiring yet, record that
+Scaffold exports no per-module port overrides (the registry is empty), and
+`[basecamp].port_base` / `port_stride` are reserved and unused, so a module-level port
+collision is the owning module's bug. A module that binds a fixed port needs a distinct
+value per profile under `[basecamp.profiles.<name>.env]`. If the module has no p2p wiring yet, record that
 as a gap, not a pass.
 
 ## BCLAUNCH-003 — Relaunch scrubs profile state
