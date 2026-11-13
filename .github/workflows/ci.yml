@@ -1,12 +1,25 @@
 name: CI
 
 on:
+  # Branch pushes are covered by `pull_request`; running on every push too
+  # doubled the runs (and the saved caches) for every in-repo PR.
   push:
+    branches: [master]
   pull_request:
+
+permissions:
+  contents: read
+
+# A newer push to the same PR supersedes the in-flight run. master runs are
+# never cancelled, so every merge gets a result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -17,14 +30,46 @@ jobs:
         with:
           components: rustfmt
 
+      # Only master writes the cache; PRs restore master's.
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Check formatting
         run: cargo fmt --check
 
-      - name: Build check
-        run: cargo check
-
+      # --locked: a stale Cargo.lock fails here instead of at `cargo publish
+      # --locked` in publish-crate.yml.
       - name: Run tests
-        run: cargo test
+        run: cargo test --locked
+
+  # Cargo.toml declares `rust-version`; prove the crate still builds on it.
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: |
+          set -euo pipefail
+          v="$(sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml)"
+          if [ -z "$v" ]; then echo "::error::no rust-version in Cargo.toml"; exit 1; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Rust ${{ steps.msrv.outputs.version }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Build check on MSRV
+        run: cargo check --locked

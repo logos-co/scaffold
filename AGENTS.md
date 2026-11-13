@@ -46,15 +46,18 @@ demand. Speculative refactors are likely to be closed.
 
 ## Checks
 
-CI runs exactly these three, in this order:
+CI runs these on every PR:
 
 ```bash
 cargo fmt --check
-cargo check
-cargo test
+cargo test --locked
+cargo +1.85 check --locked   # the `rust-version` in Cargo.toml
 ```
 
-`.github/workflows/ci.yml` is authoritative. Run all three before opening a PR.
+`.github/workflows/ci.yml` is authoritative. Run them before opening a PR.
+Changes to templates, pins, or the `new`/`setup`/`build`/`doctor` paths also
+trigger the heavier `template-e2e.yml` and `guest-reproducibility.yml`; see
+their `paths:` filters.
 
 ## Documentation rules
 
