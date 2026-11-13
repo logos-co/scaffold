@@ -7,61 +7,61 @@ scenarios:
     title: Dashboard status agrees with the CLI
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D9
+    source: DOGFOODING.md@740e5e9 D9
     depends_on: [BUILD-001]
   - id: TUI-002
     title: Each key runs the command it names
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D9
+    source: DOGFOODING.md@740e5e9 D9
     depends_on: [TUI-001]
   - id: TUI-003
     title: First run marks programs deployed; reset clears the marks
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D9
+    source: DOGFOODING.md@740e5e9 D9
     depends_on: [TUI-002]
   - id: TUI-004
     title: One job at a time, and x stops its whole process tree
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D9
+    source: DOGFOODING.md@740e5e9 D9
     depends_on: [TUI-002]
   - id: TUI-005
     title: Reset and quit-with-a-job ask first
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D9
+    source: DOGFOODING.md@740e5e9 D9
     depends_on: [TUI-001]
   - id: TUI-006
     title: Localnet outlives the dashboard; no terminal is refused
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D9
+    source: DOGFOODING.md@740e5e9 D9
     depends_on: [TUI-003]
   - id: TUI-007
     title: Start-up and corner λ
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D9
+    source: DOGFOODING.md@740e5e9 D9
     depends_on: [TUI-001]
   - id: TUI-008
     title: Sequencer log pane shows plain text
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D9
+    source: DOGFOODING.md@740e5e9 D9
     depends_on: [TUI-003]
   - id: TUI-009
     title: Long output wraps and scrolls to the top
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D9
+    source: DOGFOODING.md@740e5e9 D9
     depends_on: [TUI-002]
   - id: TUI-010
     title: Job line stays visible with a hint and a long label
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D9
+    source: DOGFOODING.md@740e5e9 D9
     depends_on: [TUI-002]
 retired: []
 ---
@@ -77,7 +77,7 @@ time, each in its own session. Related: [Run pipeline](run-pipeline.md),
 [Localnet](localnet.md), [Deploy](deploy.md), [Wallet](wallet.md).
 
 All steps run from the project root, with the dashboard driven through `tmux` so its screen
-can be captured:
+can be captured. Use at least 100 columns; narrower terminals truncate program names.
 
 ```bash
 tmux new-session -d -s d9 -x 120 -y 32 "$SCAFFOLD_BIN" tui

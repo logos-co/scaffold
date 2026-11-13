@@ -7,49 +7,49 @@ scenarios:
     title: Top up the default wallet without an address
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D1
+    source: DOGFOODING.md@740e5e9 D1
     depends_on: [BUILD-001, LOCALNET-001]
   - id: WALLET-002
     title: List wallet accounts
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D4
+    source: DOGFOODING.md@740e5e9 D4
     depends_on: [BUILD-001, LOCALNET-001]
   - id: WALLET-003
     title: Set the project default address
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D4
+    source: DOGFOODING.md@740e5e9 D4
     depends_on: [WALLET-002]
   - id: WALLET-004
     title: Topup dry run renders the command
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D4
+    source: DOGFOODING.md@740e5e9 D4
     depends_on: [WALLET-001]
   - id: WALLET-005
     title: Passthrough uses the project wallet home
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D4
+    source: DOGFOODING.md@740e5e9 D4
     depends_on: [BUILD-001, LOCALNET-001]
   - id: WALLET-006
     title: Invalid or conflicting addresses are rejected
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D4
+    source: DOGFOODING.md@740e5e9 D4
     depends_on: [BUILD-001]
   - id: WALLET-007
     title: Wallet password override
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D4
+    source: DOGFOODING.md@740e5e9 D4
     depends_on: [WALLET-001]
   - id: WALLET-008
     title: Topup follows the wallet's configured sequencer
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D4
+    source: DOGFOODING.md@740e5e9 D4
     depends_on: [WALLET-001]
 retired: []
 ---
@@ -226,3 +226,5 @@ WALLET-001 (topup needs a default address before it reaches the network). Back u
 ### Notes
 Unlike `deploy`, topup has no reachability preflight, so against an unrouted address it first
 waits out the wallet's own timeout (about a minute). Don't treat that delay as a failure.
+As in DEPLOY-006, the probe only checks that something answered, so a foreign process on the
+configured port suppresses the hint.

@@ -7,18 +7,18 @@ scenarios:
     title: Open a project and read its paths and status
     priority: P1
     provenance: documented
-    source: DOGFOODING.md A1
+    source: DOGFOODING.md@740e5e9 A1
     depends_on: [CREATE-001]
   - id: API-002
     title: API docs build and doctests pass
     priority: P2
     provenance: documented
-    source: DOGFOODING.md A1
+    source: DOGFOODING.md@740e5e9 A1
   - id: API-003
     title: Errors are categorized
     priority: P2
     provenance: documented
-    source: DOGFOODING.md A1
+    source: DOGFOODING.md@740e5e9 A1
     depends_on: [API-001, BUILD-001]
 retired: []
 ---
@@ -75,6 +75,10 @@ The repo checkout.
 
 ### Success criteria
 - Both exit 0, and the `api` module has doc pages.
+
+### Notes
+A failing `api` doctest means a documented example drifted from the surface. Fix the example
+or the doc; do not delete the test.
 
 ## API-003 — Errors are categorized
 

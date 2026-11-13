@@ -69,8 +69,8 @@ mod tests {
     }
 
     /// `Command::env` overrides the inherited value, so an ambient
-    /// `NSSA_WALLET_HOME_DIR`/`LEE_WALLET_HOME_DIR` pointing elsewhere (DOGFOODING
-    /// D6 tells dogfooders to export both) can no longer leave spel on another
+    /// `NSSA_WALLET_HOME_DIR`/`LEE_WALLET_HOME_DIR` pointing elsewhere (dogfooding
+    /// scenario RUNNER-001 tells dogfooders to export both) can no longer leave spel on another
     /// project's wallet — or, with only the legacy name set, on `~/.lee/wallet`.
     #[test]
     fn spel_always_gets_the_project_wallet() {

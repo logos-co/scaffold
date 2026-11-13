@@ -7,49 +7,49 @@ scenarios:
     title: Read and classify blocks and clock state
     priority: P1
     provenance: documented
-    source: DOGFOODING.md T2
+    source: DOGFOODING.md@740e5e9 T2
     depends_on: [TNODE-003]
   - id: TRPC-002
     title: Transactions end in one definitive outcome
     priority: P1
     provenance: documented
-    source: DOGFOODING.md T2
+    source: DOGFOODING.md@740e5e9 T2
     depends_on: [TNODE-003]
   - id: TRPC-003
     title: Block-scoped account and proof reads
     priority: P1
     provenance: documented
-    source: DOGFOODING.md T2
+    source: DOGFOODING.md@740e5e9 T2
     depends_on: [TNODE-003]
   - id: TRPC-004
     title: Snapshot accounts to a file
     priority: P2
     provenance: documented
-    source: DOGFOODING.md T2
+    source: DOGFOODING.md@740e5e9 T2
     depends_on: [TNODE-003]
   - id: TRPC-005
     title: Start a node from exactly a seeded state
     priority: P1
     provenance: documented
-    source: DOGFOODING.md T3
+    source: DOGFOODING.md@740e5e9 T3
     depends_on: [TNODE-002]
   - id: TRPC-006
     title: Bad snapshots are rejected up front
     priority: P2
     provenance: documented
-    source: DOGFOODING.md T3
+    source: DOGFOODING.md@740e5e9 T3
     depends_on: [TNODE-001]
   - id: TRPC-007
     title: A real wallet transaction is observed as committed
     priority: P1
     provenance: documented
-    source: DOGFOODING.md T4
+    source: DOGFOODING.md@740e5e9 T4
     depends_on: [TNODE-002, BUILD-001]
   - id: TRPC-008
     title: Committed transactions are found after a database restart
     priority: P2
     provenance: documented
-    source: DOGFOODING.md T3
+    source: DOGFOODING.md@740e5e9 T3
     depends_on: [TRPC-005]
 retired: []
 ---
@@ -192,8 +192,9 @@ TNODE-002.
 3. `"$SCAFFOLD_BIN" test-node state seed --project "$P" --input seed.json --output ./seeded --json`
 4. `SJ=$("$SCAFFOLD_BIN" test-node start --project "$P" --state ./seeded --json); TN_URL=$(echo "$SJ" | jq -r .rpc_url)`
 5. `"$SCAFFOLD_BIN" test-node account get --url "$TN_URL" --account-id <vault> --json`, where
-   `<vault>` is the account's vault PDA. Derive it as `DOGFOODING.md` T3 describes. For the
-   debug config's `CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r` it is
+   `<vault>` is the account's vault PDA: the public PDA of the vault program with seed
+   `sha256("/LEZ/v0.3/VaultSeed/00000000000/" ‖ account_id)`. The vault program id is the
+   `vault_program_id` inside any genesis `supply_account` transaction. For the debug config's `CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r` it is
    `G1u9gmu1Gb8PG59zHZYNL5WdJNNtBKEN4U5qUdx2y6sG`.
 6. Repeat step 5 for the vault of a debug-config sample account the seed left out (for example
    `2RHZhw9h534Zr3eq2RGhQete2Hh667foECzXPmSkGni2` →
@@ -205,6 +206,13 @@ TNODE-002.
 - Step 5 reports `state: present` with `balance: 4242`.
 - Step 6 reports `missing`. That proves the seed replaced the sample accounts.
 - Step 7 writes a snapshot naming `<vault>` with balance 4242.
+### Notes
+Pins up to LEZ v0.2.3 seed through `initial_public_accounts` / `initial_private_accounts`
+instead, with no default accounts. A `start` that fails with ``error:
+sequencer_config.json has no numeric `genesis_id` `` means scaffold read a v0.2.4 config the
+older way. A state dir holding a node's preserved `rocksdb/` resumes from it
+verbatim; that is the full-fidelity path, while the JSON snapshot carries balances only.
+`state export` covers public balances only, because the pinned RPC exposes nothing else.
 
 ## TRPC-006 — Bad snapshots are rejected up front
 
@@ -265,6 +273,10 @@ Localnet stopped, so port 3040 is free.
 
 ### Notes
 If blocks keep coming but no user tx lands, r0vm is probably missing or the wrong version.
+The wallet talks to the `sequencer_addr` in its config, so start the node on that port or
+point the config at the node. A user-tx block classified as clock-only, or `fully_parsed:
+false` on a plain public or deploy tx, is a wire-format regression: this is the only scenario
+that checks the block parser against a really executed transaction.
 
 ## TRPC-008 — Committed transactions are found after a database restart
 

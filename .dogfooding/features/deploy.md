@@ -7,49 +7,49 @@ scenarios:
     title: Deploy all discovered programs
     priority: P0
     provenance: documented
-    source: DOGFOODING.md D1
+    source: DOGFOODING.md@740e5e9 D1
     depends_on: [BUILD-002, LOCALNET-001]
   - id: DEPLOY-002
     title: Deploy one program by name
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D3
+    source: DOGFOODING.md@740e5e9 D3
     depends_on: [DEPLOY-001]
   - id: DEPLOY-003
     title: Deploy an explicit binary with JSON output
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D3
+    source: DOGFOODING.md@740e5e9 D3
     depends_on: [DEPLOY-001]
   - id: DEPLOY-004
     title: Discovery deploy with JSON output
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D3
+    source: DOGFOODING.md@740e5e9 D3
     depends_on: [DEPLOY-001]
   - id: DEPLOY-005
     title: Unknown program name lists available programs
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D3
+    source: DOGFOODING.md@740e5e9 D3
     depends_on: [BUILD-002]
   - id: DEPLOY-006
     title: Unreachable sequencer fails fast with a hint
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D3
+    source: DOGFOODING.md@740e5e9 D3
     depends_on: [BUILD-002]
   - id: DEPLOY-007
     title: Stale docker artefacts outside the owned root are ignored
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D8
+    source: DOGFOODING.md@740e5e9 D8
     depends_on: [DEPLOY-001]
   - id: DEPLOY-008
     title: Missing binaries name every search root
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D3
+    source: DOGFOODING.md@740e5e9 D3
     depends_on: [LOCALNET-001]
 retired: []
 ---
@@ -88,6 +88,10 @@ BUILD-002 and LOCALNET-001.
 Pacing exists because the pinned LEZ panics on blocks over about 896 KiB. Expect roughly 15
 seconds per extra program. A stalled head aborts with `deploy pacing aborted …` and a
 non-zero exit.
+After an aborted pacing run, re-run `deploy` for the remaining programs once the sequencer
+recovers, or raise `LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS` for slow block intervals. A
+deploy that continues unpaced and crashes localnet is the regression. If the upstream block
+cap is lifted and pacing becomes dead weight, record that too.
 
 ## DEPLOY-002 — Deploy one program by name
 
@@ -185,6 +189,11 @@ BUILD-002.
   wallet's target.
 - No `reachability probe failed …; continuing` line appears.
 
+### Notes
+The probe tells "refused or unreachable" from "something answered". It does not verify that
+the responder is this project's sequencer, so a foreign process on the configured port still
+suppresses the hint.
+
 ## DEPLOY-007 — Stale docker artefacts outside the owned root are ignored
 
 ### Expected
@@ -204,6 +213,13 @@ DEPLOY-001.
 ### Success criteria
 - The echoed `wallet deploy-program` path is under `target/riscv-guest-docker` (or
   `release/`), and the `note: ignoring` line appears.
+
+### Notes
+`lgs build` never clears `methods/guest/target`, so a planted or left-over ELF there would win
+every later deploy if it were ranked. On a host that cannot build containers, check the
+ranking the other way round as well: copy a `release/` `.bin` into
+`target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/` and confirm that `deploy` echoes
+the `docker/` path.
 
 ## DEPLOY-008 — Missing binaries name every search root
 

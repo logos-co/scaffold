@@ -7,31 +7,31 @@ scenarios:
     title: Start localnet and wait until ready
     priority: P0
     provenance: documented
-    source: DOGFOODING.md D1
+    source: DOGFOODING.md@740e5e9 D1
     depends_on: [BUILD-001]
   - id: LOCALNET-002
     title: Status in human and JSON form
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D2
+    source: DOGFOODING.md@740e5e9 D2
     depends_on: [LOCALNET-001]
   - id: LOCALNET-003
     title: Tail localnet logs
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D2
+    source: DOGFOODING.md@740e5e9 D2
     depends_on: [LOCALNET-001]
   - id: LOCALNET-004
     title: Stop localnet
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D2
+    source: DOGFOODING.md@740e5e9 D2
     depends_on: [LOCALNET-001]
   - id: LOCALNET-005
     title: Localnet survives terminal closure
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D2
+    source: DOGFOODING.md@740e5e9 D2
     depends_on: [LOCALNET-001]
   - id: LOCALNET-006
     title: Reset chain state
@@ -43,7 +43,7 @@ scenarios:
     title: Start failure points at the next diagnostic step
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D2
+    source: DOGFOODING.md@740e5e9 D2
     depends_on: [BUILD-001]
 retired: []
 ---

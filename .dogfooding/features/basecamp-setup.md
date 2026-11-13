@@ -7,46 +7,46 @@ scenarios:
     title: basecamp setup builds the pin set and seeds profiles
     priority: P1
     provenance: documented
-    source: DOGFOODING.md B1
+    source: DOGFOODING.md@740e5e9 B1
   - id: BCSETUP-002
     title: Re-running setup on an unchanged pin skips the build
     priority: P1
     provenance: documented
-    source: DOGFOODING.md B1
+    source: DOGFOODING.md@740e5e9 B1
     depends_on: [BCSETUP-001]
   - id: BCSETUP-003
     title: basecamp doctor confirms setup
     priority: P1
     provenance: documented
-    source: DOGFOODING.md B1
+    source: DOGFOODING.md@740e5e9 B1
     depends_on: [BCSETUP-001]
   - id: BCSETUP-004
     title: Retired default pins are moved forward
     priority: P2
     provenance: documented
-    source: DOGFOODING.md B1
+    source: DOGFOODING.md@740e5e9 B1
     depends_on: [BCSETUP-001]
   - id: BCSETUP-005
     title: Pin edits without setup are refused
     priority: P2
     provenance: documented
-    source: DOGFOODING.md B1
+    source: DOGFOODING.md@740e5e9 B1
     depends_on: [BCSETUP-001]
   - id: BCSETUP-006
     title: Module contract docs and help are available offline
     priority: P2
     provenance: documented
-    source: DOGFOODING.md B1
+    source: DOGFOODING.md@740e5e9 B1
   - id: BCSETUP-007
     title: lgpm pin set and lgx contract hold without an app build
     priority: P2
     provenance: documented
-    source: DOGFOODING.md B7
+    source: DOGFOODING.md@740e5e9 B7
   - id: BCSETUP-008
     title: Without Nix or before setup, basecamp commands give a one-line hint
     priority: P2
     provenance: documented
-    source: DOGFOODING.md B1
+    source: DOGFOODING.md@740e5e9 B1
 retired: []
 ---
 
@@ -93,7 +93,7 @@ module project (`$MODULE_PROJECT`) built with `logos-module-builder` 0.3.0. Run
 
 ### Notes
 On a host with too little RAM, realise the CI-built `#app` store path and link it as
-described in `DOGFOODING.md` B1, then record that mode. BCSETUP-007 is that low-memory
+described under "Basecamp environment" in [product.md](../product.md), then record that mode. BCSETUP-007 is that low-memory
 fallback (it still needs Nix with GitHub access). If Nix cannot reach GitHub at all, run
 BCSETUP-006 and BCSETUP-008 only and report the blocker. Step 4 assumes the dev `#app` attr,
 whose entry point is `bin/LogosBasecamp`. On another attr (a macOS `.app` or an AppImage)
@@ -247,14 +247,31 @@ Nix with GitHub access and `$MODULE_PROJECT`. No basecamp build needed. Step 4 n
 module with an icon. Step 5 needs any basecamp `#app` output on hand (`$APP`).
 
 ### Steps
-1. Follow the commands in `DOGFOODING.md` B7, steps 1–4.
+1. Build both lgpm attrs, build and inspect the `.lgx`, install it, then try the two
+   negative installs:
+   ```bash
+   cd "$MODULE_PROJECT"
+   LGPM=$(grep -A2 '^\[repos.lgpm\]' scaffold.toml | sed -n 's/^pin = "\(.*\)"/\1/p')
+   nix build "github:logos-co/logos-package-manager/$LGPM#cli"          --out-link /tmp/lgpm-dev
+   nix build "github:logos-co/logos-package-manager/$LGPM#cli-portable" --out-link /tmp/lgpm-portable
+   nix build .#lgx --out-link /tmp/mod-lgx
+   X=$(mktemp -d) && tar xzf /tmp/mod-lgx/*.lgx -C "$X" && jq '.hashes.root, .name' "$X/manifest.json" && ls "$X/variants"
+   mkdir -p /tmp/p/modules /tmp/p/plugins
+   /tmp/lgpm-dev/bin/lgpm --modules-dir /tmp/p/modules --ui-plugins-dir /tmp/p/plugins \
+     install --file /tmp/mod-lgx/*.lgx
+   # (a) delete `hashes` from "$X/manifest.json", repack as the Notes say, install with lgpm-dev
+   # (b) install the unmodified dev .lgx with the portable lgpm:
+   /tmp/lgpm-portable/bin/lgpm --modules-dir /tmp/p/modules --ui-plugins-dir /tmp/p/plugins \
+     install --file /tmp/mod-lgx/*.lgx
+   ```
 2. Copy the project `.lgx` contents, set `"name": ""` in `manifest.json`, repack and install
    it with the dev lgpm.
 3. `nix build github:logos-co/logos-package-manager/202af6fa0f0f4493bc59c8a609dff9326f78a18d#cli --out-link /tmp/lgpm-old`
 4. Install a 0.3.x UI module `.lgx` that has an icon with `/tmp/lgpm-old/bin/lgpm`, using the
-   same argument shape as B7 step 3.
-5. `ls -a "$APP"/bin && head -c 2 "$APP"/bin/LogosBasecamp`, then run the launcher and the
-   hidden binary as in `DOGFOODING.md` B7 step 5.
+   same argument shape as the real install in step 1.
+5. `ls -a "$APP"/bin && head -c 2 "$APP"/bin/LogosBasecamp`, then start each entry point with
+   `env -i HOME=/tmp PATH=/usr/bin:/bin QT_QPA_PLATFORM=offscreen "$APP"/bin/<entry>`, once
+   with `LogosBasecamp` and once with `.LogosBasecamp`, and compare their logs.
 
 ### Success criteria
 - Both lgpm attrs build, the real install exits 0, and both negative installs fail with the
@@ -268,7 +285,11 @@ module with an icon. Step 5 needs any basecamp `#app` output on hand (`$APP`).
 
 ### Notes
 Repack the negative-test packages with `tar czf out.lgx manifest.json variants`. A
-`./`-prefixed archive fails for an unrelated reason. A bare `SIGKILL` while evaluating is out
+`./`-prefixed archive fails for an unrelated reason. On x86_64 Linux the variant error reads
+`platform: linux-x86_64 (package provides: linux-amd64-dev)`; lgpm treats the two spellings
+as aliases, so that is still the stack mismatch. A `.lgx` with no `hashes.root` was built by
+older module tooling, which is the module's pin to fix. An `lgpm` pin that does not build at
+all means the default pin set is wrong: stop and fix `DEFAULT_LGPM_PIN` first. A bare `SIGKILL` while evaluating is out
 of memory, not a broken pin. The mapping from these raw strings to `basecamp install` hints
 needs a set-up project on a mismatched pin pair. `setup` moves a retired lgpm pin forward, so
 that pair is hard to reach from the CLI. Two unit tests in `src/commands/basecamp.rs` cover

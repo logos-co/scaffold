@@ -7,43 +7,43 @@ scenarios:
     title: setup builds the project-local toolchain
     priority: P0
     provenance: documented
-    source: DOGFOODING.md D1
+    source: DOGFOODING.md@740e5e9 D1
     depends_on: [CREATE-001]
   - id: BUILD-002
     title: Default build produces deterministic guest binaries
     priority: P0
     provenance: documented
-    source: DOGFOODING.md D8
+    source: DOGFOODING.md@740e5e9 D8
     depends_on: [BUILD-001]
   - id: BUILD-003
     title: Missing Docker toolchain fails fast with an escape hatch
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D8
+    source: DOGFOODING.md@740e5e9 D8
     depends_on: [CREATE-001]
   - id: BUILD-004
     title: Deterministic guest build is byte-reproducible
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D8
+    source: DOGFOODING.md@740e5e9 D8
     depends_on: [BUILD-002]
   - id: BUILD-005
     title: Local guest build opt-out
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D8
+    source: DOGFOODING.md@740e5e9 D8
     depends_on: [BUILD-001]
   - id: BUILD-006
     title: setup --prebuilt installs only a verified sequencer
     priority: P2
     provenance: documented
-    source: DOGFOODING.md D1
+    source: DOGFOODING.md@740e5e9 D1
     depends_on: [CREATE-001]
   - id: BUILD-007
     title: Docker and local builds give different, recorded program ids
     priority: P1
     provenance: documented
-    source: DOGFOODING.md D8
+    source: DOGFOODING.md@740e5e9 D8
     depends_on: [BUILD-004, BUILD-005, LOCALNET-001]
 retired: []
 ---
@@ -111,6 +111,16 @@ BUILD-001, a running Docker daemon, and `cargo-risczero` on `PATH`.
 ### Notes
 The first run pulls about 1.7 GB of image and takes several minutes. Slowness is not a
 failure.
+`Cargo.lock not found in path …/methods/guest/Cargo.lock` on stderr is expected and not fatal:
+risc0 looks next to the guest manifest, and scaffold projects keep one lockfile at the
+workspace root. A fatal lockfile error is different. The container builds `--locked`, so a
+stale root `Cargo.lock` fails the build; re-run a plain `build` and report it if that does not
+clear it. An MSRV error naming `rustc 1.88.0-dev` means the build used risc0's default image
+rather than scaffold's pinned tag (`RISC0_DOCKER_CONTAINER_TAG` did not reach `cargo
+risczero`); through `lgs build` that is a regression. A build that succeeds but leaves only
+extension-less ELFs and no `.bin` means risc0's output layout moved: capture `ls -R
+target/riscv-guest-docker`. risc0 excludes only `.git`, `target`, `node_modules` and `tmp`
+from the Docker build context, so a large directory in the project root slows the build.
 
 ## BUILD-003 — Missing Docker toolchain fails fast with an escape hatch
 
@@ -138,23 +148,39 @@ Docker daemon stopped (or `cargo-risczero` removed from `PATH`).
 ## BUILD-004 — Deterministic guest build is byte-reproducible
 
 ### Expected
-Two docker-mode builds of unchanged source, the second from a clean artefact tree, produce
-byte-identical `.bin` files.
+Two docker-mode builds of unchanged source, the second from a clean artefact tree and an
+empty container build cache, produce byte-identical `.bin` files.
 
 ### Preconditions
 BUILD-002.
 
 ### Steps
 1. `D=target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker; shasum -a 256 $D/*.bin > /tmp/first.sha`
-2. `rm -rf target/riscv-guest-docker && "$SCAFFOLD_BIN" build`
-3. `shasum -a 256 -c /tmp/first.sha`
+2. `rm -rf target/riscv-guest-docker && docker builder prune -af`
+3. `"$SCAFFOLD_BIN" build 2>&1 | tee /tmp/second.log`
+4. `grep -E '^#[0-9]+ CACHED' /tmp/second.log; shasum -a 256 -c /tmp/first.sha`
 
 ### Success criteria
-- Every line of step 3 reports `OK`.
+- Step 4's `grep` prints nothing: no build step of the second build came from cache.
+- Every `shasum` line of step 4 reports `OK`.
 
 ### Notes
-CI also runs this (`.github/workflows/guest-reproducibility.yml`). A comparison across
-machines is only meaningful with the same `Cargo.lock`.
+Step 2's prune is what makes this a rebuild. `cargo risczero build` runs `docker build`, and
+deleting the output tree alone lets BuildKit replay every step from cache and re-export the
+first build's ELFs, so the digests match without proving anything. A run that shows
+`CACHED` steps has not tested reproducibility; report it as not run, not as passed. The
+prune clears the host's whole BuildKit cache, not just this project's, but leaves pulled
+images in place. On Podman, clear its build cache with the equivalent command and apply the
+same `CACHED` check.
+
+CI also runs this in `.github/workflows/guest-reproducibility.yml`: path-gated to the build,
+setup and template code, plus a weekly run and manual dispatch. It renders a project, builds
+the guests through the container twice with the BuildKit cache cleared in between, and diffs
+the digests. Run the steps by hand when changing the pinned tag or when a host disagrees
+with CI. A comparison across machines is only meaningful with the same `Cargo.lock`.
+The container builds `--locked`, and cargo picks dependency versions from the host toolchain
+when it writes the lockfile. Two machines that each generated their own lockfile legitimately
+get different `program_id`s, so copy the lockfile across before concluding anything.
 
 ## BUILD-005 — Local guest build opt-out
 
@@ -224,3 +250,6 @@ BUILD-004 and BUILD-005 on the same project, and localnet up (LOCALNET-001).
 
 ### Notes
 Only compare across machines with the same `Cargo.lock` (see BUILD-004).
+The same `program_id` in both modes usually means `deploy` picked the same artefact twice.
+`--json` does not carry the binary path: run one `deploy <program>` without `--json` in each
+mode and read the echoed `wallet deploy-program <path>` line.

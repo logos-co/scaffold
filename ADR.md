@@ -169,8 +169,8 @@ turns the validation failure into a hint naming the rebuild instead.
 
 Cost: a basecamp bump is never a one-line change, and the pins cannot be updated
 by a dependency bot that treats each repo separately. That is the honest shape of
-the dependency, and `DOGFOODING.md` re-opens the whole `B` series when any member
-of the set changes.
+the dependency, and the dogfooding spec (`.dogfooding/index.md`) re-opens every
+basecamp scenario when any member of the set changes.
 
 ## Scaffold Supports One Basecamp Release
 

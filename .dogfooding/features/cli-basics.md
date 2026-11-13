@@ -7,27 +7,27 @@ scenarios:
     title: Help and version
     priority: P1
     provenance: documented
-    source: DOGFOODING.md E1
+    source: DOGFOODING.md@740e5e9 E1
   - id: CLI-002
     title: Unknown command gives a corrective hint
     priority: P2
     provenance: documented
-    source: DOGFOODING.md E1
+    source: DOGFOODING.md@740e5e9 E1
   - id: CLI-003
     title: Project commands outside a project fail clearly
     priority: P1
     provenance: documented
-    source: DOGFOODING.md E1
+    source: DOGFOODING.md@740e5e9 E1
   - id: CLI-004
     title: Help flags have no side effects
     priority: P2
     provenance: documented
-    source: DOGFOODING.md E1
+    source: DOGFOODING.md@740e5e9 E1
   - id: CLI-005
     title: Removed setup flag is rejected
     priority: P2
     provenance: documented
-    source: DOGFOODING.md E1
+    source: DOGFOODING.md@740e5e9 E1
   - id: CLI-006
     title: Quiet mode suppresses command echoes
     priority: P2
@@ -37,7 +37,7 @@ scenarios:
     title: Every top-level command answers --help
     priority: P2
     provenance: documented
-    source: DOGFOODING.md E1
+    source: DOGFOODING.md@740e5e9 E1
 retired: []
 ---
 
