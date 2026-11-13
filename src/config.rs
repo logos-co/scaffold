@@ -282,14 +282,15 @@ impl OldSchemaMarkers {
 /// every variant we detect here, so the user-facing error in
 /// `detect_old_schema` does not enumerate them.
 pub(crate) fn detect_old_schema_markers(doc: &DocumentMut, version: &str) -> OldSchemaMarkers {
-    let mut m = OldSchemaMarkers::default();
-
     // Old version stamp. Other version mismatches (prerelease tags, hand-edits)
     // are caught downstream in `parse_config` with a more specific "this build
     // expects X" message; `init`'s migrator bumps the version regardless of
     // origin.
-    m.version_stale = version != SCAFFOLD_TOML_SCHEMA_VERSION
-        && (version.starts_with("0.1.") || version == "0.1" || version == "0.0");
+    let mut m = OldSchemaMarkers {
+        version_stale: version != SCAFFOLD_TOML_SCHEMA_VERSION
+            && (version.starts_with("0.1.") || version == "0.1" || version == "0.0"),
+        ..OldSchemaMarkers::default()
+    };
 
     let repos_table = doc.get("repos").and_then(Item::as_table);
     // [repos.lssa] — pre-spel-era alias for [repos.lez].

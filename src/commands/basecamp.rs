@@ -240,7 +240,7 @@ fn cmd_basecamp_setup(mut project: Project) -> DynResult<()> {
         &basecamp_repo.pin,
     );
 
-    println!("cloning basecamp at {}", &basecamp_repo.pin);
+    println!("cloning basecamp at {}", basecamp_repo.pin);
     sync_repo_to_pin_at_path_with_opts(
         &basecamp_repo_path,
         &basecamp_repo.source,
@@ -735,7 +735,7 @@ fn cmd_basecamp_launch(
         &state,
         &cache_root,
         &profiles_root,
-        &[profile.clone()],
+        std::slice::from_ref(&profile),
     )?;
 
     // Variant pre-flight: warn if any installed module is missing the
@@ -1410,6 +1410,7 @@ fn cmd_basecamp_run(project: Project, module: String, host: Option<String>) -> D
 ///      `env_file_vars` by the caller; sourced before the `env` layers.
 ///   3. `[basecamp.env]` — global plain replace.
 ///   4. `[basecamp.profiles.<profile>.env]` — per-profile plain replace (wins).
+///
 /// `inherited` is injected (real caller passes `std::env::var_os`) so the
 /// append semantics are unit-testable without touching the process environment.
 fn apply_launch_env_overrides(
@@ -4484,7 +4485,7 @@ mod tests {
         let real = root.join("real-mod");
         fs::create_dir_all(&real).unwrap();
         fs::write(real.join("flake.nix"), b"{}").unwrap();
-        let answers_owned = vec![
+        let answers_owned = [
             (
                 format!("path:{}", root.join("target").display()),
                 vec!["lgx"],
@@ -5667,7 +5668,7 @@ mod tests {
         let mut bob_env = launch_env(Path::new("/p/bob"), "bob", Path::new("/tmp/lgs-t-bob"));
         apply_launch_env_overrides(&mut bob_env, &cfg, "bob", &BTreeMap::new(), |_| None);
         assert!(
-            bob_env.get("PORT").is_none(),
+            !bob_env.contains_key("PORT"),
             "alice's profile env must not leak to bob"
         );
     }

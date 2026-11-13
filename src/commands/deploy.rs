@@ -157,7 +157,7 @@ pub(crate) fn deploy_for_project(
     }
 
     let selected_programs = resolve_selected_programs(program_name, &available_programs)?;
-    let discovered = discover_project_binaries(&project, &selected_programs);
+    let discovered = discover_project_binaries(project, &selected_programs);
     // stderr, so `--json` stdout stays a single object.
     for (_, ignored) in ignored_docker_artifacts(project, &selected_programs) {
         eprintln!(
@@ -283,7 +283,7 @@ pub(crate) fn deploy_for_project(
             // is memoized via `probe_once`, so a mid-deploy death costs one
             // probe for the whole run rather than one per remaining program.
             let connectivity_failure =
-                sequencer_connectivity_failure_with_probe(&combined, &sequencer_addr, &probe_once);
+                sequencer_connectivity_failure_with_probe(&combined, &sequencer_addr, probe_once);
             if !json {
                 println!("FAIL {program} deployment failed");
                 println!("  Error: {summary}");
