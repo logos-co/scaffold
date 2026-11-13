@@ -76,13 +76,13 @@ pub(crate) const TAIL_CALL_TARGETS: &[TailCallTarget] = &[
         caller_file: "simple_tail_call.rs",
         const_name: "HELLO_WORLD_PROGRAM_ID_HEX",
         callee: "hello_world",
-        docker_program_id: "761215837f994b739e3ed9391a90909b622d9126b9d79e380da9b06ff7a7f997",
+        docker_program_id: "5e2e8756307d9bfd79b2c9bcbd00039d28ba3bcec4cc241ae28bcb8e203d7f70",
     },
     TailCallTarget {
         caller_file: "tail_call_with_pda.rs",
         const_name: "HELLO_WORLD_WITH_AUTHORIZATION_PROGRAM_ID_HEX",
         callee: "hello_world_with_authorization",
-        docker_program_id: "115362359a96eacc0a9beab8c45239c801f7bafc0e733edd7c9040f24d5e6b3f",
+        docker_program_id: "5445207090a8dd29aa429956c3f9dd0fe631679d53f9b6036c0e330941c05a4a",
     },
 ];
 pub(crate) const DEFAULT_WALLET_PASSWORD: &str = "logos-scaffold-v0";

@@ -23,11 +23,22 @@ on:
       # build strategy. `templates/**` and `src/template/**` change the
       # manifests; `src/constants.rs` carries the pinned builder tag and the
       # LEZ/spel pins the guest depends on.
+      #
+      # `setup.rs`/`process.rs`/`repo.rs`/`circuits.rs` are what `build` runs
+      # before the guest step (it calls setup, and pins HOST_CC for the guest
+      # embed); `Cargo.lock` moves the scaffold binary itself.
       - "src/commands/build.rs"
+      - "src/commands/new.rs"
+      - "src/commands/setup.rs"
+      - "src/process.rs"
+      - "src/repo.rs"
+      - "src/circuits.rs"
       - "src/constants.rs"
       - "templates/**"
       - "src/template/**"
+      - "Cargo.lock"
       - ".github/workflows/guest-reproducibility.yml"
+      - ".github/actions/scaffold-env/**"
   # Path gating cannot catch this job's main failure mode: the guest build
   # resolves dependencies from crates.io at build time, so a newly published
   # version whose MSRV exceeds the builder image's rustc breaks it with no
@@ -37,116 +48,45 @@ on:
     - cron: "17 6 * * 1"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: guest-repro-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   rebuild-and-diff:
     runs-on: ubuntu-latest
+    timeout-minutes: 75
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+      # Rust, caches, system packages, the CLI, circuits, and the rzup
+      # components (rust, cpp, and the cargo-risczero subcommand this job
+      # needs for `cargo risczero build`).
+      - name: Prepare scaffold environment
+        uses: ./.github/actions/scaffold-env
 
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
-
-      # Same bootstrap cache shape as template-e2e: the cloned lez/spel repos
-      # with their target/ dirs, plus the extracted circuits release. Keyed on
-      # constants.rs so a pin bump rebuilds from scratch.
-      - name: Cache scaffold bootstrap (repos + circuits)
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/logos-scaffold
-            ~/.logos-blockchain-circuits
-          key: scaffold-bootstrap-${{ runner.os }}-${{ hashFiles('src/constants.rs') }}
-
-      # The guest-builder image is ~1.7 GB and the LEZ build is several more.
-      # Runners ship with preinstalled SDKs we never use; reclaiming them keeps
-      # this job off the disk-full cliff.
-      - name: Reclaim runner disk
+      # The guest-builder image is ~1.7 GB and the LEZ build several more.
+      # Current runners start with ~80 GB free, so the old unconditional
+      # cleanup (~2 min of `rm -rf`) bought nothing; keep it as a fallback for
+      # a runner image that ships with less.
+      - name: Reclaim runner disk (only if low)
         run: |
           set -euo pipefail
-          echo "before: $(df -h / | awk 'NR==2 {print $4}') free"
+          free_gb="$(df -BG --output=avail / | tail -1 | tr -dc '0-9')"
+          echo "free: ${free_gb}G"
+          if [ "$free_gb" -ge 40 ]; then
+            echo "enough free disk; skipping cleanup"
+            exit 0
+          fi
           # `${VAR:-}` because `set -u` would abort on AGENT_TOOLSDIRECTORY
           # being unset, which it is on some runner images.
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
                       /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-/nonexistent}" || true
-          echo "after:  $(df -h / | awk 'NR==2 {print $4}') free"
-
-      # The LEZ wallet links against libpcsclite (keycard support), so `setup`
-      # cannot build it on a bare runner: `Could not find a PCSC library`.
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkgconf libpcsclite-dev
-
-      - name: Build scaffold CLI
-        run: cargo build --release --bin logos-scaffold
-
-      - name: Fetch logos-blockchain-circuits release
-        run: |
-          set -euo pipefail
-          ver="$(sed -n 's/.*DEFAULT_CIRCUITS_VERSION: &str = "\([^"]*\)".*/\1/p' src/constants.rs)"
-          if [ -z "$ver" ]; then echo "could not parse DEFAULT_CIRCUITS_VERSION"; exit 1; fi
-          dest="$HOME/.logos-blockchain-circuits"
-          if [ -f "$dest/pol/verification_key.json" ]; then
-            echo "circuits already cached at $dest"
-          else
-            url="https://github.com/logos-blockchain/logos-blockchain-circuits/releases/download/v${ver}/logos-blockchain-circuits-v${ver}-linux-x86_64.tar.gz"
-            mkdir -p "$dest"
-            curl -fL --retry 3 -o /tmp/circuits.tar.gz "$url"
-            tar -xzf /tmp/circuits.tar.gz -C "$dest" --strip-components=1
-          fi
-          echo "LOGOS_BLOCKCHAIN_CIRCUITS=$dest" >> "$GITHUB_ENV"
-
-      # Three separate rzup components, all required:
-      #   rust/cpp — `lgs build` compiles the project workspace before the
-      #     guest step, and that runs the methods crate's `embed_methods()`,
-      #     which cross-compiles on the host even in docker mode.
-      #   cargo-risczero — the `cargo risczero build` subcommand itself. It is
-      #     NOT pulled in by `rzup install rust`; leaving it out is what made
-      #     the first run of this workflow fail its preflight.
-      # Retried because rzup resolves versions through api.github.com, which
-      # rate-limits by runner IP and has flaked here before.
-      - name: Install Risc Zero toolchain
-        # rzup resolves each component through the GitHub releases API, which
-        # is rate-limited per source IP for unauthenticated callers. rzup reads
-        # GITHUB_TOKEN for exactly this reason (same as template-e2e).
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          curl -fsSL --retry 3 --retry-delay 2 \
-            https://risczero.com/install -o "$RUNNER_TEMP/rzup-install.sh"
-          bash "$RUNNER_TEMP/rzup-install.sh"
-          echo "$HOME/.risc0/bin" >> "$GITHUB_PATH"
-          installed=false
-          for attempt in 1 2 3; do
-            if "$HOME/.risc0/bin/rzup" install rust \
-              && "$HOME/.risc0/bin/rzup" install cpp \
-              && "$HOME/.risc0/bin/rzup" install cargo-risczero; then
-              installed=true
-              break
-            fi
-            echo "rzup attempt $attempt failed; retrying in 30s"
-            sleep 30
-          done
-          if [ "$installed" != true ]; then
-            echo "::error::rzup install did not succeed after 3 attempts"
-            exit 1
-          fi
-          # Fail here, with the component name, rather than inside scaffold's
-          # preflight several minutes later.
-          export PATH="$HOME/.risc0/bin:$PATH"
-          command -v cargo-risczero >/dev/null || {
-            echo "::error::cargo-risczero not on PATH after rzup install"
-            ls -la "$HOME/.risc0/bin" || true
-            exit 1
-          }
-          cargo risczero --version
+          echo "after: $(df -h / | awk 'NR==2 {print $4}') free"
 
       - name: Render project and run setup
         run: |
@@ -226,12 +166,23 @@ jobs:
           echo "$count guest ELF(s) built"
           (cd "$bins" && sha256sum ./*.bin) | tee "$RUNNER_TEMP/first.sha"
 
+      # `cargo risczero build` runs `docker build`, so deleting the output
+      # tree alone is not a clean rebuild: BuildKit replays every layer from
+      # its cache and re-exports the first pass's ELFs, and the diff below
+      # compares those bytes with themselves. Drop the build cache (not the
+      # pulled image) and fail if any layer was still served from it.
       - name: Rebuild from a clean tree (second pass)
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/repro-app"
           rm -rf target/riscv-guest-docker
-          "$GITHUB_WORKSPACE/target/release/logos-scaffold" build --guest docker
+          docker builder prune --all --force
+          "$GITHUB_WORKSPACE/target/release/logos-scaffold" build --guest docker 2>&1 \
+            | tee "$RUNNER_TEMP/second-pass.log"
+          if grep -E '^#[0-9]+ CACHED' "$RUNNER_TEMP/second-pass.log"; then
+            echo "::error::the second pass reused BuildKit cache, so it is not an independent rebuild"
+            exit 1
+          fi
 
       - name: Diff the two passes
         run: |

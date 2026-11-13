@@ -729,9 +729,10 @@ cp /tmp/d8-scaffold.toml.bak scaffold.toml
 
 Steps 3 and 4 are also run in CI by
 [`.github/workflows/guest-reproducibility.yml`](.github/workflows/guest-reproducibility.yml)
-(path-gated to `src/commands/build.rs` and `src/constants.rs`, plus manual
-dispatch), which renders a project, builds the guests through the container
-twice, and diffs the digests. Run them by hand when changing the pinned tag or
+(path-gated to the build, setup and template code, plus a weekly run and
+manual dispatch), which renders a project, builds the guests through the
+container twice with the BuildKit cache cleared in between, and diffs the
+digests. Run them by hand when changing the pinned tag or
 when a host disagrees with CI; otherwise CI is the standing check.
 
 Only steps 3 and 4 run a container. On a host that cannot build containers
