@@ -1712,6 +1712,56 @@ fn wallet_topup_dry_run_planned_network_uses_localnet_port_without_wallet_sequen
         )));
 }
 
+/// LEZ v0.2.4 nests the wallet's sequencer address. Scaffold must follow it
+/// rather than fall back to `[localnet] port`, or every probe and hint names
+/// the wrong host (the D3/D4 regression).
+#[test]
+fn wallet_topup_dry_run_planned_network_follows_nested_v024_sequencer_addr() {
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), None);
+    let port = unused_local_port();
+    write_wallet_config_nested(temp.path(), &format!("http://127.0.0.1:{port}"));
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("wallet")
+        .arg("topup")
+        .arg("--address")
+        .arg(VALID_PUBLIC_ADDRESS)
+        .arg("--dry-run")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "planned network: local sequencer (http://127.0.0.1:{port})"
+        )));
+}
+
+/// The v0.2.4 wallet reports a dead sequencer only as `Failed to find
+/// leader`. With the nested address pointing at a port nobody listens on,
+/// topup must print the reachability hint naming that address — not the
+/// default `[localnet] port` one.
+#[test]
+fn wallet_topup_leader_failure_hint_names_nested_v024_sequencer_addr() {
+    let temp = tempdir().expect("tempdir");
+    setup_wallet_project(temp.path(), None);
+    let port = unused_local_port();
+    let addr = format!("http://127.0.0.1:{port}");
+    write_wallet_config_nested(temp.path(), &addr);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .env("TOPUP_FAIL_LEADER", "1")
+        .arg("wallet")
+        .arg("topup")
+        .arg("--address")
+        .arg(VALID_PUBLIC_ADDRESS)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(format!(
+            "sequencer appears unavailable at {addr}"
+        )));
+}
+
 #[test]
 fn wallet_topup_dry_run_renders_pinata_claim_command() {
     let temp = tempdir().expect("tempdir");
@@ -4034,6 +4084,22 @@ fn write_wallet_config(project_root: &Path, sequencer_addr: Option<&str>) {
     fs::write(path, text).expect("write wallet config");
 }
 
+/// The LEZ v0.2.4 wallet config shape: the address lives under
+/// `sequencers[0].sequencer_addr`, with no top-level key.
+fn write_wallet_config_nested(project_root: &Path, sequencer_addr: &str) {
+    let wallet_home = project_root.join(".scaffold/wallet");
+    fs::create_dir_all(&wallet_home).expect("create wallet home");
+    let value = serde_json::json!({
+        "sequencers": [{ "sequencer_addr": sequencer_addr }],
+        "seq_poll_timeout": "30s",
+        "initial_accounts": [
+            { "Public": { "account_id": VALID_ACCOUNT_ID } }
+        ]
+    });
+    let text = serde_json::to_string_pretty(&value).expect("wallet config json");
+    fs::write(wallet_home.join("wallet_config.json"), text).expect("write wallet config");
+}
+
 fn write_wallet_stub(lez_path: &Path) {
     let path = lez_path.join("target/release/wallet");
     fs::create_dir_all(path.parent().expect("parent")).expect("create wallet binary dir");
@@ -4097,6 +4163,10 @@ if [ "$#" -ge 2 ] && [ "$1" = "pinata" ] && [ "$2" = "claim" ]; then
   fi
   if [ "${TOPUP_FAIL_CONNECT:-0}" = "1" ]; then
     echo "connection refused" >&2
+    exit 1
+  fi
+  if [ "${TOPUP_FAIL_LEADER:-0}" = "1" ]; then
+    echo "Error: Failed to find leader" >&2
     exit 1
   fi
   if [ "${TOPUP_FAIL_TIMEOUT:-0}" = "1" ]; then

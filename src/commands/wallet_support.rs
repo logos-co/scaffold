@@ -59,16 +59,44 @@ pub(crate) fn load_wallet_runtime(project: &Project) -> DynResult<WalletRuntimeC
     }
 
     let (_, wallet_config) = read_wallet_config(&wallet_home)?;
-    let sequencer_addr = wallet_config
-        .get("sequencer_addr")
-        .and_then(Value::as_str)
-        .map(ToString::to_string);
+    let sequencer_addr = wallet_config_sequencer_addr(&wallet_config);
 
     Ok(WalletRuntimeContext {
         wallet_home,
         wallet_binary,
         sequencer_addr,
     })
+}
+
+/// The sequencer address the wallet will talk to. LEZ up to v0.2.3 keeps it
+/// at the top level (`"sequencer_addr": "…"`); from v0.2.4 the wallet takes a
+/// list and elects a leader (`"sequencers": [{"sequencer_addr": "…"}]`). Read
+/// both, so reachability probes and hints follow the wallet's real target
+/// instead of silently falling back to the `[localnet]` port.
+///
+/// The nested list wins when it names an address: the v0.2.4 wallet does not
+/// read a top-level `sequencer_addr` at all, so a stray (or empty) flat key
+/// next to a `sequencers` list must not shadow it.
+///
+/// Scaffold assumes a single-entry `sequencers` list, as a localnet has one
+/// sequencer. With several entries the first address is used, which need not
+/// be the leader the wallet elects, so a probe can find it reachable while the
+/// elected leader is down.
+pub(crate) fn wallet_config_sequencer_addr(wallet_config: &Value) -> Option<String> {
+    fn non_empty(addr: Option<&str>) -> Option<String> {
+        addr.map(str::trim)
+            .filter(|addr| !addr.is_empty())
+            .map(str::to_string)
+    }
+    let nested = wallet_config
+        .get("sequencers")
+        .and_then(Value::as_array)
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find_map(|entry| non_empty(entry.get("sequencer_addr").and_then(Value::as_str)))
+        });
+    nested.or_else(|| non_empty(wallet_config.get("sequencer_addr").and_then(Value::as_str)))
 }
 
 fn read_wallet_config(wallet_home: &Path) -> DynResult<(PathBuf, Value)> {
@@ -81,9 +109,9 @@ fn read_wallet_config(wallet_home: &Path) -> DynResult<(PathBuf, Value)> {
         // Legacy: older `setup` runs wrote "config.json" instead of
         // "wallet_config.json". Re-run `logos-scaffold setup` to migrate.
         eprintln!(
-            "warning: found legacy wallet config '{}';              re-run `logos-scaffold setup` to migrate to '{}'.",
-            WALLET_CONFIG_FALLBACK,
-            WALLET_CONFIG_PRIMARY,
+            "warning: found legacy wallet config '{}'; \
+             re-run `logos-scaffold setup` to migrate to '{}'.",
+            WALLET_CONFIG_FALLBACK, WALLET_CONFIG_PRIMARY,
         );
         fallback
     } else {
@@ -382,10 +410,15 @@ pub(crate) fn sequencer_connectivity_failure_with_probe(
         }
     }
 
-    let mentions_timeout = ["timeout", "timed out"]
+    // From LEZ v0.2.4 every wallet command first elects a sequencer leader and
+    // reports a dead sequencer as `Failed to find leader`, with no address or
+    // transport wording. Like a bare timeout, that is only a hint: corroborate
+    // it against `sequencer_addr` so a leader failure with the sequencer up
+    // keeps the raw wallet error.
+    let mentions_timeout_or_leader = ["timeout", "timed out", "failed to find leader"]
         .iter()
         .any(|needle| lower.contains(needle));
-    if !mentions_timeout {
+    if !mentions_timeout_or_leader {
         return false;
     }
     !probe(sequencer_addr)
@@ -427,7 +460,7 @@ fn sequencer_authority(sequencer_addr: &str) -> &str {
 
 /// Extract the port from a resolved sequencer URL so `http://127.0.0.1:3040/rpc`
 /// yields `3040`.
-fn sequencer_port(sequencer_addr: &str) -> Option<String> {
+pub(crate) fn sequencer_port(sequencer_addr: &str) -> Option<String> {
     let (_, port) = sequencer_authority(sequencer_addr).rsplit_once(':')?;
     if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
@@ -441,7 +474,7 @@ fn sequencer_port(sequencer_addr: &str) -> Option<String> {
 /// under the hardcoded `127.0.0.1`/`localhost` aliases, so it is only sound
 /// when the configured host is itself one of those — a remote sequencer that
 /// merely shares the port must fall through to the probe instead.
-fn sequencer_host_is_loopback(sequencer_addr: &str) -> bool {
+pub(crate) fn sequencer_host_is_loopback(sequencer_addr: &str) -> bool {
     let authority = sequencer_authority(sequencer_addr);
     // Drop any `userinfo@`, then the `:port`, leaving the bare host.
     let host_port = authority
@@ -720,7 +753,81 @@ mod tests {
     use crate::commands::test_support::drain_http_request;
     use crate::constants::WALLET_HOME_ENV_VARS;
 
+    use super::wallet_config_sequencer_addr;
     use super::{sequencer_connectivity_failure, sequencer_connectivity_failure_with_probe};
+
+    /// LEZ v0.2.4 nests the address under `sequencers`; reading only the
+    /// top-level key made every probe and hint fall back to
+    /// `127.0.0.1:<[localnet] port>`, whatever the wallet actually targets.
+    #[test]
+    fn sequencer_addr_read_from_nested_v024_config() {
+        let cfg = serde_json::json!({
+            "sequencers": [{ "sequencer_addr": "http://10.255.255.1:3040 " }],
+            "seq_poll_timeout": "30s"
+        });
+        assert_eq!(
+            wallet_config_sequencer_addr(&cfg).as_deref(),
+            Some("http://10.255.255.1:3040")
+        );
+    }
+
+    /// LEZ v0.2.4's wallet reports a dead sequencer only as
+    /// `Failed to find leader` — no address, no transport wording. It must
+    /// reach the reachability hint when the probe agrees the sequencer is down,
+    /// and stay a plain wallet error when the probe finds it up.
+    #[test]
+    fn leader_election_failure_is_connectivity_only_when_probe_agrees() {
+        let text = "Error: Failed to find leader";
+        let addr = "http://127.0.0.1:3999";
+        assert!(sequencer_connectivity_failure_with_probe(
+            text,
+            addr,
+            |_| false
+        ));
+        assert!(!sequencer_connectivity_failure_with_probe(
+            text,
+            addr,
+            |_| true
+        ));
+    }
+
+    #[test]
+    fn sequencer_addr_read_from_flat_legacy_config() {
+        let cfg = serde_json::json!({ "sequencer_addr": "http://127.0.0.1:4040" });
+        assert_eq!(
+            wallet_config_sequencer_addr(&cfg).as_deref(),
+            Some("http://127.0.0.1:4040")
+        );
+    }
+
+    /// An empty or stale top-level key next to a `sequencers` list must not
+    /// hide the nested address: the v0.2.4 wallet ignores the flat key.
+    #[test]
+    fn sequencer_addr_nested_wins_over_flat_key() {
+        let empty_flat = serde_json::json!({
+            "sequencer_addr": "",
+            "sequencers": [{ "sequencer_addr": "http://127.0.0.1:3999" }]
+        });
+        assert_eq!(
+            wallet_config_sequencer_addr(&empty_flat).as_deref(),
+            Some("http://127.0.0.1:3999")
+        );
+        let stale_flat = serde_json::json!({
+            "sequencer_addr": "http://127.0.0.1:3040",
+            "sequencers": [{ "sequencer_addr": "http://10.255.255.1:3040" }]
+        });
+        assert_eq!(
+            wallet_config_sequencer_addr(&stale_flat).as_deref(),
+            Some("http://10.255.255.1:3040")
+        );
+    }
+
+    #[test]
+    fn sequencer_addr_absent_when_config_names_none() {
+        assert_eq!(wallet_config_sequencer_addr(&serde_json::json!({})), None);
+        let empty = serde_json::json!({ "sequencers": [] });
+        assert_eq!(wallet_config_sequencer_addr(&empty), None);
+    }
 
     /// The original classification test, ported to a fake probe so it never
     /// touches real sockets. `3040`/`3050` are only ever used here as text —

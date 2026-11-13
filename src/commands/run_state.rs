@@ -179,7 +179,7 @@ fn config_digest(project: &Project) -> String {
 /// `default_sequencer_http_url_for_project` that `cmd_deploy` uses, so a
 /// custom `localnet.port` keeps the cache key and the address `cmd_deploy`
 /// actually targets in lockstep.
-fn resolved_sequencer_addr(project: &Project) -> String {
+pub(crate) fn resolved_sequencer_addr(project: &Project) -> String {
     load_wallet_runtime(project)
         .ok()
         .and_then(|w| w.sequencer_addr)

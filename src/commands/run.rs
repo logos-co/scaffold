@@ -616,7 +616,9 @@ fn collect_deployed_programs(project: &Project, skipped: bool) -> DynResult<Depl
     // causes post-deploy hooks to fail in confusing ways (issue #160).
     if !spel_bin.is_file() {
         eprintln!(
-            "warning: vendored spel binary not found at {}.              SCAFFOLD_PROGRAM_ID will be unset for all programs.              Run `lgs setup` to build spel.",
+            "warning: vendored spel binary not found at {}. \
+             SCAFFOLD_PROGRAM_ID will be unset for all programs. \
+             Run `lgs setup` to build spel.",
             spel_bin.display()
         );
     }
@@ -745,6 +747,11 @@ fn ensure_localnet(project: &Project, timeout_sec: u64) -> DynResult<()> {
 }
 
 fn print_deploy_summary(project: &Project) -> DynResult<()> {
+    write_deploy_summary(project, &mut std::io::stdout().lock())
+}
+
+/// The deploy summary `run` prints, written to `out` so tests can read it.
+fn write_deploy_summary(project: &Project, out: &mut impl std::io::Write) -> DynResult<()> {
     let programs_dir = project.root.join("methods/guest/src/bin");
     if !programs_dir.exists() {
         return Ok(());
@@ -752,29 +759,32 @@ fn print_deploy_summary(project: &Project) -> DynResult<()> {
 
     let programs = discover_deployable_programs(&project.root)?;
     if programs.is_empty() {
-        println!();
-        println!("No deployable programs found in {}", programs_dir.display());
+        writeln!(out)?;
+        writeln!(
+            out,
+            "No deployable programs found in {}",
+            programs_dir.display()
+        )?;
         return Ok(());
     }
     let binaries = discover_project_binaries(project, &programs);
 
-    println!();
-    println!("Deployed programs:");
+    writeln!(out)?;
+    writeln!(out, "Deployed programs:")?;
     for stem in &programs {
         if let Some(binary_path) = binaries.get(stem) {
-            println!("  {stem}");
-            println!("    Binary: {}", binary_path.display());
+            writeln!(out, "  {stem}")?;
+            writeln!(out, "    Binary: {}", binary_path.display())?;
         }
     }
 
-    // Use the same URL construction as build_hook_command and wallet_support
-    // so the summary always reflects the address the wallet actually targets,
-    // rather than the raw localnet.port value which may differ when
-    // wallet_config.json overrides sequencer_addr (issue #161).
-    let sequencer_url =
-        crate::commands::wallet_support::default_sequencer_http_url_for_project(project);
-    println!();
-    println!("Sequencer: {sequencer_url}");
+    // Report the address the wallet actually targets (its
+    // `wallet_config.json`, flat or v0.2.4 `sequencers[]` shape), falling back
+    // to the `[localnet] port` URL only when the wallet names none — the same
+    // resolution deploy and the run cache use (issue #161).
+    let sequencer_url = crate::commands::run_state::resolved_sequencer_addr(project);
+    writeln!(out)?;
+    writeln!(out, "Sequencer: {sequencer_url}")?;
 
     Ok(())
 }
@@ -1193,6 +1203,38 @@ mod tests {
         std::fs::write(binary_dir.join("counter.bin"), b"fake binary").expect("write binary");
 
         print_deploy_summary(&project).expect("should succeed");
+    }
+
+    /// The `Sequencer:` line names the wallet's own target (LEZ v0.2.4's
+    /// nested `sequencers[0].sequencer_addr`), not the `[localnet] port` URL.
+    #[test]
+    fn deploy_summary_names_the_wallets_nested_sequencer() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project = make_test_project(temp.path().to_path_buf());
+        std::fs::create_dir_all(temp.path().join("methods/guest/src/bin")).expect("bin dir");
+        std::fs::write(
+            temp.path().join("methods/guest/src/bin/counter.rs"),
+            "fn main() {}",
+        )
+        .expect("write source");
+        let wallet_bin = temp.path().join("lez/target/release/wallet");
+        std::fs::create_dir_all(wallet_bin.parent().unwrap()).expect("lez dir");
+        std::fs::write(&wallet_bin, "").expect("wallet stub");
+        let wallet_home = temp.path().join(".scaffold/wallet");
+        std::fs::create_dir_all(&wallet_home).expect("wallet home");
+        std::fs::write(
+            wallet_home.join("wallet_config.json"),
+            r#"{"sequencers":[{"sequencer_addr":"http://localhost:4555"}]}"#,
+        )
+        .expect("wallet config");
+
+        let mut out = Vec::new();
+        write_deploy_summary(&project, &mut out).expect("summary");
+        let out = String::from_utf8(out).expect("utf8");
+        assert!(
+            out.contains("Sequencer: http://localhost:4555"),
+            "summary must name the wallet's sequencer, got:\n{out}"
+        );
     }
 
     #[test]

@@ -4,7 +4,9 @@ use std::process::{Command, Stdio};
 use anyhow::bail;
 
 use super::wallet_support::{set_wallet_home_env, wallet_password};
-use crate::commands::wallet_support::WALLET_CONFIG_PRIMARY;
+use crate::commands::wallet_support::{
+    sequencer_host_is_loopback, sequencer_port, wallet_config_sequencer_addr, WALLET_CONFIG_PRIMARY,
+};
 use crate::constants::{
     DEFAULT_LEZ, DEFAULT_SPEL, FRAMEWORK_KIND_SPEL, SEQUENCER_BIN_REL_PATH, SPEL_BIN_REL_PATH,
     WALLET_BIN_REL_PATH,
@@ -266,25 +268,7 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
     let wallet_cfg = wallet_home.join(WALLET_CONFIG_PRIMARY);
     if wallet_cfg.exists() {
         let cfg_text = fs::read_to_string(&wallet_cfg)?;
-        let points_local = cfg_text.contains(&format!("127.0.0.1:{localnet_port}"))
-            || cfg_text.contains(&format!("localhost:{localnet_port}"));
-        if points_local {
-            rows.push(CheckRow {
-                status: CheckStatus::Pass,
-                name: "wallet network config".to_string(),
-                detail: "wallet points to local sequencer".to_string(),
-                remediation: None,
-            });
-        } else {
-            rows.push(CheckRow {
-                status: CheckStatus::Warn,
-                name: "wallet network config".to_string(),
-                detail: "wallet may point to non-local sequencer".to_string(),
-                remediation: Some(format!(
-                    "Set .scaffold/wallet/wallet_config.json sequencer_addr=http://127.0.0.1:{localnet_port}"
-                )),
-            });
-        }
+        rows.push(wallet_network_row(&cfg_text, localnet_port));
     } else {
         rows.push(CheckRow {
             status: CheckStatus::Warn,
@@ -589,10 +573,153 @@ fn derive_next_steps(rows: &[CheckRow]) -> Vec<String> {
     out
 }
 
+/// Doctor's "wallet network config" row. Judges the address the wallet will
+/// actually use (`wallet_config_sequencer_addr`, which follows the LEZ v0.2.4
+/// `sequencers[]` shape) rather than substring-matching the file, so a flat
+/// `sequencer_addr` added next to a `sequencers` list the v0.2.4 wallet reads
+/// cannot produce a false PASS. The remediation names the key that the
+/// config's own shape uses.
+fn wallet_network_row(cfg_text: &str, localnet_port: u16) -> CheckRow {
+    let name = "wallet network config".to_string();
+    let local_url = format!("http://127.0.0.1:{localnet_port}");
+    let Ok(cfg) = serde_json::from_str::<serde_json::Value>(cfg_text) else {
+        return CheckRow {
+            status: CheckStatus::Warn,
+            name,
+            detail: "could not parse .scaffold/wallet/wallet_config.json".to_string(),
+            // `setup` copies the LEZ config only when the file is missing, so
+            // it never repairs an existing corrupt one.
+            remediation: Some(
+                "Fix the JSON by hand, or delete .scaffold/wallet/wallet_config.json and run \
+                 `logos-scaffold setup` to recreate it from the pinned LEZ"
+                    .to_string(),
+            ),
+        };
+    };
+    let addr = wallet_config_sequencer_addr(&cfg);
+    // Exact host and port, not a substring: `127.0.0.1:30400` must not pass
+    // for `[localnet] port = 3040`.
+    let points_local = addr.as_deref().is_some_and(|addr| {
+        sequencer_host_is_loopback(addr)
+            && sequencer_port(addr).as_deref() == Some(localnet_port.to_string().as_str())
+    });
+    if points_local {
+        return CheckRow {
+            status: CheckStatus::Pass,
+            name,
+            detail: "wallet points to local sequencer".to_string(),
+            remediation: None,
+        };
+    }
+    let key = if cfg
+        .get("sequencers")
+        .is_some_and(serde_json::Value::is_array)
+    {
+        "sequencers[0].sequencer_addr"
+    } else {
+        "sequencer_addr"
+    };
+    let detail = match addr {
+        Some(addr) => format!("wallet points to {addr}, not the local sequencer"),
+        None => "wallet config names no sequencer address".to_string(),
+    };
+    CheckRow {
+        status: CheckStatus::Warn,
+        name,
+        detail,
+        remediation: Some(format!(
+            "Set {key} in .scaffold/wallet/wallet_config.json to {local_url}"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// LEZ v0.2.4 nests the address; the remediation must name the nested key,
+    /// or a user following it adds a flat key the wallet never reads.
+    #[test]
+    fn wallet_network_row_names_nested_key_for_v024_config() {
+        let cfg = r#"{"sequencers":[{"sequencer_addr":"http://10.255.255.1:3040"}]}"#;
+        let row = wallet_network_row(cfg, 3040);
+        assert!(matches!(row.status, CheckStatus::Warn));
+        assert_eq!(
+            row.remediation.as_deref(),
+            Some("Set sequencers[0].sequencer_addr in .scaffold/wallet/wallet_config.json to http://127.0.0.1:3040")
+        );
+        assert!(
+            row.detail.contains("http://10.255.255.1:3040"),
+            "{}",
+            row.detail
+        );
+    }
+
+    /// A flat key added next to a non-local `sequencers` list is ignored by
+    /// the v0.2.4 wallet, so it must not turn the row into a PASS.
+    #[test]
+    fn wallet_network_row_ignores_flat_key_shadowed_by_nested_list() {
+        let cfg = r#"{"sequencer_addr":"http://127.0.0.1:3040",
+                      "sequencers":[{"sequencer_addr":"http://10.255.255.1:3040"}]}"#;
+        assert!(matches!(
+            wallet_network_row(cfg, 3040).status,
+            CheckStatus::Warn
+        ));
+    }
+
+    #[test]
+    fn wallet_network_row_passes_for_local_nested_and_flat_configs() {
+        let nested = r#"{"sequencers":[{"sequencer_addr":"http://127.0.0.1:4100"}]}"#;
+        assert!(matches!(
+            wallet_network_row(nested, 4100).status,
+            CheckStatus::Pass
+        ));
+        let flat = r#"{"sequencer_addr":"http://localhost:4100"}"#;
+        assert!(matches!(
+            wallet_network_row(flat, 4100).status,
+            CheckStatus::Pass
+        ));
+    }
+
+    /// A port that merely starts with `[localnet] port` is not the localnet.
+    #[test]
+    fn wallet_network_row_matches_the_port_exactly() {
+        let cfg = r#"{"sequencers":[{"sequencer_addr":"http://127.0.0.1:30400"}]}"#;
+        assert!(matches!(
+            wallet_network_row(cfg, 3040).status,
+            CheckStatus::Warn
+        ));
+        let cfg = r#"{"sequencers":[{"sequencer_addr":"http://127.0.0.1:3040/"}]}"#;
+        assert!(matches!(
+            wallet_network_row(cfg, 3040).status,
+            CheckStatus::Pass
+        ));
+    }
+
+    /// `setup` never overwrites an existing wallet config, so the remediation
+    /// must say to delete it first.
+    #[test]
+    fn wallet_network_row_parse_failure_says_to_delete_before_setup() {
+        let row = wallet_network_row(r#"{ "sequencers": [ "#, 3040);
+        assert!(matches!(row.status, CheckStatus::Warn));
+        let remediation = row.remediation.expect("remediation");
+        assert!(remediation.contains("delete"), "{remediation}");
+        assert!(
+            remediation.contains("logos-scaffold setup"),
+            "{remediation}"
+        );
+    }
+
+    #[test]
+    fn wallet_network_row_names_flat_key_for_legacy_config() {
+        let row = wallet_network_row(r#"{"sequencer_addr":"http://10.0.0.1:3040"}"#, 3040);
+        assert!(matches!(row.status, CheckStatus::Warn));
+        assert_eq!(
+            row.remediation.as_deref(),
+            Some("Set sequencer_addr in .scaffold/wallet/wallet_config.json to http://127.0.0.1:3040")
+        );
+    }
 
     fn warn_row(name: &str, remediation: Option<&str>) -> CheckRow {
         CheckRow {
