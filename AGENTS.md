@@ -50,6 +50,7 @@ CI runs these on every PR:
 
 ```bash
 cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 cargo +1.85 check --locked   # the `rust-version` in Cargo.toml
 ```

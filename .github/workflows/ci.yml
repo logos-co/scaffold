@@ -28,7 +28,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
       # Only master writes the cache; PRs restore master's.
       - name: Cache cargo artifacts
@@ -38,6 +38,11 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --check
+
+      # Tracks stable clippy, so a new lint in a Rust release can fail this
+      # step with no change here; fix it (or `#[expect]` it with a reason).
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       # --locked: a stale Cargo.lock fails here instead of at `cargo publish
       # --locked` in publish-crate.yml.

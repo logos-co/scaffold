@@ -93,6 +93,12 @@ Formatting check:
 cargo fmt --check
 ```
 
+Lints (CI fails on any warning):
+
+```bash
+cargo clippy --locked --all-targets -- -D warnings
+```
+
 ## Working on Generated Projects vs CLI
 
 - This repository builds and tests the scaffold CLI.

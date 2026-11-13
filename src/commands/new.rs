@@ -332,7 +332,7 @@ fn cmd_new_default(
             lez_vendor
         } else {
             let lez_cached = crate::project::managed_repo_dir(
-                &bootstrap_cache,
+                bootstrap_cache,
                 "lez",
                 &lez_source,
                 DEFAULT_LEZ.sha,
