@@ -59,16 +59,33 @@ pub(crate) fn load_wallet_runtime(project: &Project) -> DynResult<WalletRuntimeC
     }
 
     let (_, wallet_config) = read_wallet_config(&wallet_home)?;
-    let sequencer_addr = wallet_config
-        .get("sequencer_addr")
-        .and_then(Value::as_str)
-        .map(ToString::to_string);
+    let sequencer_addr = wallet_config_sequencer_addr(&wallet_config);
 
     Ok(WalletRuntimeContext {
         wallet_home,
         wallet_binary,
         sequencer_addr,
     })
+}
+
+/// The sequencer address the wallet will talk to. LEZ up to v0.2.3 keeps it
+/// at the top level (`"sequencer_addr": "…"`); from v0.2.4 the wallet takes a
+/// list and elects a leader (`"sequencers": [{"sequencer_addr": "…"}]`). Read
+/// both, so reachability probes and hints follow the wallet's real target
+/// instead of silently falling back to the `[localnet]` port.
+pub(crate) fn wallet_config_sequencer_addr(wallet_config: &Value) -> Option<String> {
+    wallet_config
+        .get("sequencer_addr")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            wallet_config
+                .get("sequencers")
+                .and_then(Value::as_array)?
+                .iter()
+                .find_map(|entry| entry.get("sequencer_addr").and_then(Value::as_str))
+        })
+        .map(|addr| addr.trim().to_string())
+        .filter(|addr| !addr.is_empty())
 }
 
 fn read_wallet_config(wallet_home: &Path) -> DynResult<(PathBuf, Value)> {
@@ -81,9 +98,9 @@ fn read_wallet_config(wallet_home: &Path) -> DynResult<(PathBuf, Value)> {
         // Legacy: older `setup` runs wrote "config.json" instead of
         // "wallet_config.json". Re-run `logos-scaffold setup` to migrate.
         eprintln!(
-            "warning: found legacy wallet config '{}';              re-run `logos-scaffold setup` to migrate to '{}'.",
-            WALLET_CONFIG_FALLBACK,
-            WALLET_CONFIG_PRIMARY,
+            "warning: found legacy wallet config '{}'; \
+             re-run `logos-scaffold setup` to migrate to '{}'.",
+            WALLET_CONFIG_FALLBACK, WALLET_CONFIG_PRIMARY,
         );
         fallback
     } else {
@@ -720,7 +737,39 @@ mod tests {
     use crate::commands::test_support::drain_http_request;
     use crate::constants::WALLET_HOME_ENV_VARS;
 
+    use super::wallet_config_sequencer_addr;
     use super::{sequencer_connectivity_failure, sequencer_connectivity_failure_with_probe};
+
+    /// LEZ v0.2.4 nests the address under `sequencers`; reading only the
+    /// top-level key made every probe and hint fall back to
+    /// `127.0.0.1:<[localnet] port>`, whatever the wallet actually targets.
+    #[test]
+    fn sequencer_addr_read_from_nested_v024_config() {
+        let cfg = serde_json::json!({
+            "sequencers": [{ "sequencer_addr": "http://10.255.255.1:3040 " }],
+            "seq_poll_timeout": "30s"
+        });
+        assert_eq!(
+            wallet_config_sequencer_addr(&cfg).as_deref(),
+            Some("http://10.255.255.1:3040")
+        );
+    }
+
+    #[test]
+    fn sequencer_addr_read_from_flat_legacy_config() {
+        let cfg = serde_json::json!({ "sequencer_addr": "http://127.0.0.1:4040" });
+        assert_eq!(
+            wallet_config_sequencer_addr(&cfg).as_deref(),
+            Some("http://127.0.0.1:4040")
+        );
+    }
+
+    #[test]
+    fn sequencer_addr_absent_when_config_names_none() {
+        assert_eq!(wallet_config_sequencer_addr(&serde_json::json!({})), None);
+        let empty = serde_json::json!({ "sequencers": [] });
+        assert_eq!(wallet_config_sequencer_addr(&empty), None);
+    }
 
     /// The original classification test, ported to a fake probe so it never
     /// touches real sockets. `3040`/`3050` are only ever used here as text —
