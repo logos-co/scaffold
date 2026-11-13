@@ -38,6 +38,11 @@ scenarios:
     priority: P2
     provenance: documented
     source: DOGFOODING.md@740e5e9 E1
+  - id: CLI-008
+    title: A closed output pipe ends the command quietly
+    priority: P2
+    provenance: inferred
+    source: user 2026-11-13
 retired: []
 ---
 
@@ -164,3 +169,26 @@ An empty temporary directory.
 - Every command exits 0, and `ls -A` prints nothing.
 - `examples=0` appears only for `localnet`, `test-node`, `basecamp` and `run`. Any other
   command without examples, or a change to that list, is a finding to record.
+
+## CLI-008 — A closed output pipe ends the command quietly
+
+### Expected
+When the reader of stdout hangs up (`lgs … | head -1`), the command ends like other Unix
+tools: killed by SIGPIPE (shell status 141), with nothing on stderr. It never prints a Rust
+panic message or `error: Broken pipe`, and never exits 101. A broken pipe on a *child's* stdin
+(for example a wallet that exits before reading its password) is still reported as an error.
+
+### Preconditions
+Bash (`PIPESTATUS`). A project with BUILD-001 done for step 2.
+
+### Steps
+1. `for c in "--help" "completions zsh" "test-node start --help"; do "$SCAFFOLD_BIN" $c 2>/tmp/err.txt | head -1 >/dev/null; echo "$c: status=${PIPESTATUS[0]} stderr=[$(cat /tmp/err.txt)]"; done`
+2. In a project: `"$SCAFFOLD_BIN" doctor 2>/tmp/err.txt | head -1 >/dev/null; echo "status=${PIPESTATUS[0]} stderr=[$(cat /tmp/err.txt)]"`
+
+### Success criteria
+- Every status is 141 or 0 (0 when the whole output fit in the pipe before `head` exited),
+  never 101 or 1, and every `stderr=[...]` is empty.
+
+### Notes
+This is the failure that made `lgs --help | head` print `failed printing to stdout: Broken
+pipe` with a panic backtrace hint before it was fixed.

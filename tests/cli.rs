@@ -5734,3 +5734,39 @@ fn new_lez_framework_warns_and_maps_to_spel() {
         ))
         .stderr(predicate::str::contains("`--template spel`"));
 }
+
+/// stdout whose reader has already hung up, like `lgs … | head -1` after `head` exits.
+#[cfg(unix)]
+fn closed_pipe_stdout() -> std::process::Stdio {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: `fds` is a two-element array, and both descriptors are owned right after.
+    unsafe {
+        assert_eq!(libc::pipe(fds.as_mut_ptr()), 0, "pipe");
+        libc::close(fds[0]);
+        std::process::Stdio::from(OwnedFd::from_raw_fd(fds[1]))
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn closed_stdout_ends_by_sigpipe_without_a_panic_or_error_line() {
+    use std::os::unix::process::ExitStatusExt;
+
+    // `--help` prints through clap/println; `completions` through `write_all(...)?`.
+    for args in [&["--help"][..], &["completions", "bash"][..]] {
+        let out = std::process::Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+            .args(args)
+            .stdout(closed_pipe_stdout())
+            .output()
+            .expect("run");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(stderr, "", "{args:?} must not complain on a closed pipe");
+        assert_eq!(
+            out.status.signal(),
+            Some(libc::SIGPIPE),
+            "{args:?} should die by SIGPIPE like other Unix tools, got {:?}",
+            out.status
+        );
+    }
+}
