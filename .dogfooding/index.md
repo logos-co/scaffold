@@ -26,7 +26,7 @@ and builds and launches `.lgx` modules in isolated basecamp profiles. Details:
 | [Example runners](features/example-runners.md) | cli | 0 | 3 | 2 |
 | [spel template](features/spel-template.md) | cli | 0 | 4 | 2 |
 | [Diagnostics](features/diagnostics.md) | cli | 0 | 3 | 3 |
-| [CLI basics](features/cli-basics.md) | cli | 0 | 2 | 5 |
+| [CLI basics](features/cli-basics.md) | cli | 0 | 2 | 6 |
 | [AI skills](features/ai-skills.md) | cli | 0 | 0 | 3 |
 | [Test-node lifecycle](features/test-node-lifecycle.md) | cli | 0 | 4 | 3 |
 | [Test-node RPC](features/test-node-rpc.md) | cli | 0 | 5 | 3 |
