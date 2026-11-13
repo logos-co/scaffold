@@ -173,8 +173,11 @@ prune clears the host's whole BuildKit cache, not just this project's, but leave
 images in place. On Podman, clear its build cache with the equivalent command and apply the
 same `CACHED` check.
 
-CI also runs this (`.github/workflows/guest-reproducibility.yml`). A comparison across
-machines is only meaningful with the same `Cargo.lock`.
+CI also runs this in `.github/workflows/guest-reproducibility.yml`: path-gated to the build,
+setup and template code, plus a weekly run and manual dispatch. It renders a project, builds
+the guests through the container twice with the BuildKit cache cleared in between, and diffs
+the digests. Run the steps by hand when changing the pinned tag or when a host disagrees
+with CI. A comparison across machines is only meaningful with the same `Cargo.lock`.
 The container builds `--locked`, and cargo picks dependency versions from the host toolchain
 when it writes the lockfile. Two machines that each generated their own lockfile legitimately
 get different `program_id`s, so copy the lockfile across before concluding anything.
