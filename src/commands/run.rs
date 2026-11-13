@@ -769,12 +769,11 @@ fn print_deploy_summary(project: &Project) -> DynResult<()> {
         }
     }
 
-    // Use the same URL construction as build_hook_command and wallet_support
-    // so the summary always reflects the address the wallet actually targets,
-    // rather than the raw localnet.port value which may differ when
-    // wallet_config.json overrides sequencer_addr (issue #161).
-    let sequencer_url =
-        crate::commands::wallet_support::default_sequencer_http_url_for_project(project);
+    // Report the address the wallet actually targets (its
+    // `wallet_config.json`, flat or v0.2.4 `sequencers[]` shape), falling back
+    // to the `[localnet] port` URL only when the wallet names none — the same
+    // resolution deploy and the run cache use (issue #161).
+    let sequencer_url = crate::commands::run_state::resolved_sequencer_addr(project);
     println!();
     println!("Sequencer: {sequencer_url}");
 

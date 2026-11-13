@@ -73,19 +73,30 @@ pub(crate) fn load_wallet_runtime(project: &Project) -> DynResult<WalletRuntimeC
 /// list and elects a leader (`"sequencers": [{"sequencer_addr": "…"}]`). Read
 /// both, so reachability probes and hints follow the wallet's real target
 /// instead of silently falling back to the `[localnet]` port.
+///
+/// The nested list wins when it names an address: the v0.2.4 wallet does not
+/// read a top-level `sequencer_addr` at all, so a stray (or empty) flat key
+/// next to a `sequencers` list must not shadow it.
+///
+/// Scaffold assumes a single-entry `sequencers` list, as a localnet has one
+/// sequencer. With several entries the first address is used, which need not
+/// be the leader the wallet elects, so a probe can find it reachable while the
+/// elected leader is down.
 pub(crate) fn wallet_config_sequencer_addr(wallet_config: &Value) -> Option<String> {
-    wallet_config
-        .get("sequencer_addr")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            wallet_config
-                .get("sequencers")
-                .and_then(Value::as_array)?
+    fn non_empty(addr: Option<&str>) -> Option<String> {
+        addr.map(str::trim)
+            .filter(|addr| !addr.is_empty())
+            .map(str::to_string)
+    }
+    let nested = wallet_config
+        .get("sequencers")
+        .and_then(Value::as_array)
+        .and_then(|entries| {
+            entries
                 .iter()
-                .find_map(|entry| entry.get("sequencer_addr").and_then(Value::as_str))
-        })
-        .map(|addr| addr.trim().to_string())
-        .filter(|addr| !addr.is_empty())
+                .find_map(|entry| non_empty(entry.get("sequencer_addr").and_then(Value::as_str)))
+        });
+    nested.or_else(|| non_empty(wallet_config.get("sequencer_addr").and_then(Value::as_str)))
 }
 
 fn read_wallet_config(wallet_home: &Path) -> DynResult<(PathBuf, Value)> {
@@ -786,6 +797,28 @@ mod tests {
         assert_eq!(
             wallet_config_sequencer_addr(&cfg).as_deref(),
             Some("http://127.0.0.1:4040")
+        );
+    }
+
+    /// An empty or stale top-level key next to a `sequencers` list must not
+    /// hide the nested address: the v0.2.4 wallet ignores the flat key.
+    #[test]
+    fn sequencer_addr_nested_wins_over_flat_key() {
+        let empty_flat = serde_json::json!({
+            "sequencer_addr": "",
+            "sequencers": [{ "sequencer_addr": "http://127.0.0.1:3999" }]
+        });
+        assert_eq!(
+            wallet_config_sequencer_addr(&empty_flat).as_deref(),
+            Some("http://127.0.0.1:3999")
+        );
+        let stale_flat = serde_json::json!({
+            "sequencer_addr": "http://127.0.0.1:3040",
+            "sequencers": [{ "sequencer_addr": "http://10.255.255.1:3040" }]
+        });
+        assert_eq!(
+            wallet_config_sequencer_addr(&stale_flat).as_deref(),
+            Some("http://10.255.255.1:3040")
         );
     }
 
