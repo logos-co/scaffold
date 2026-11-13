@@ -434,42 +434,77 @@ fn preflight_docker_toolchain(needed_by: &str, alternative: Option<&str>) -> Dyn
     Ok(())
 }
 
-/// Whether `docker info` succeeds, i.e. a daemon is up and reachable. Shared
-/// with `doctor` so its `guest build` row and this preflight cannot disagree.
-///
-/// Bounded: a dead local socket fails in milliseconds, but a `DOCKER_HOST`
-/// pointing at an unreachable remote can hang for minutes, and `doctor` is
-/// what people run when things are already wrong. Timing out counts as down.
-pub(crate) fn docker_daemon_running() -> bool {
-    let mut cmd = Command::new("docker");
-    cmd.arg("info");
-    succeeds_within(cmd, DOCKER_INFO_TIMEOUT)
+/// Result of a bounded probe command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProbeOutcome {
+    /// Exited successfully within the timeout.
+    Ok,
+    /// Could not be run, or exited non-zero.
+    Failed,
+    /// Still running at the deadline; killed and reaped.
+    TimedOut,
 }
 
-const DOCKER_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long `docker info` / `podman info` may take before the daemon counts as
+/// unreachable. A dead local socket fails in milliseconds, but a `DOCKER_HOST`
+/// (or `CONTAINER_HOST`) pointing at an unreachable remote can hang for minutes,
+/// and `doctor` is what people run when things are already wrong.
+pub(crate) const CONTAINER_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Run `cmd` with stdio detached; `true` only if it exits successfully within
-/// `timeout`. A command still running at the deadline is killed and reaped.
-fn succeeds_within(mut cmd: Command, timeout: std::time::Duration) -> bool {
+/// Probe `docker info` right now. Deliberately not cached: the daemon can come
+/// and go while a process is alive (`lgs run --watch`, a `setup` that runs for
+/// minutes before a build, a library caller that outlives one command), so
+/// every caller that needs the current answer asks again.
+pub(crate) fn docker_daemon_probe() -> ProbeOutcome {
+    probe_info(
+        std::path::Path::new("docker"),
+        &["info"],
+        CONTAINER_INFO_TIMEOUT,
+    )
+}
+
+/// Run `bin args` as a bounded probe. It is the whole body of
+/// [`docker_daemon_probe`], split out so a test can point the same code at a
+/// command whose answer it controls.
+fn probe_info(bin: &std::path::Path, args: &[&str], timeout: std::time::Duration) -> ProbeOutcome {
+    let mut cmd = Command::new(bin);
+    cmd.args(args);
+    probe_within(cmd, timeout)
+}
+
+/// Whether `docker info` succeeds, i.e. a daemon is up and reachable.
+pub(crate) fn docker_daemon_running() -> bool {
+    docker_daemon_probe() == ProbeOutcome::Ok
+}
+
+/// Run `cmd` with stdio detached and report how it ended. A command still
+/// running at the deadline is killed and reaped.
+pub(crate) fn probe_within(mut cmd: Command, timeout: std::time::Duration) -> ProbeOutcome {
     let Ok(mut child) = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
     else {
-        return false;
+        return ProbeOutcome::Failed;
     };
     let deadline = std::time::Instant::now() + timeout;
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
+            Ok(Some(status)) if status.success() => return ProbeOutcome::Ok,
+            Ok(Some(_)) => return ProbeOutcome::Failed,
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(25));
             }
-            _ => {
+            Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return false;
+                return ProbeOutcome::TimedOut;
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return ProbeOutcome::Failed;
             }
         }
     }
@@ -507,29 +542,53 @@ mod tests {
     const DOCKER_TAG: &str = "r0.0.0.0";
 
     #[test]
-    fn succeeds_within_reports_exit_status_and_kills_a_hung_probe() {
-        use std::time::{Duration, Instant};
-        assert!(succeeds_within(
-            Command::new("true"),
-            Duration::from_secs(5)
-        ));
-        assert!(!succeeds_within(
-            Command::new("false"),
-            Duration::from_secs(5)
-        ));
-        assert!(!succeeds_within(
-            Command::new("/nonexistent/docker"),
-            Duration::from_secs(5)
-        ));
+    fn probe_info_answers_for_the_daemon_as_it_is_now() {
+        // `sh -c '[ -f <flag> ]'` stands in for `docker info`: the "daemon" is up
+        // while the flag file exists. Nothing may be remembered between calls.
+        let dir = tempdir().unwrap();
+        let flag = dir.path().join("up");
+        let check = format!("[ -f '{}' ]", flag.display());
+        let probe = || {
+            super::probe_info(
+                std::path::Path::new("sh"),
+                &["-c", check.as_str()],
+                std::time::Duration::from_secs(5),
+            )
+        };
+        assert_eq!(probe(), super::ProbeOutcome::Failed);
+        std::fs::write(&flag, "").unwrap();
+        assert_eq!(probe(), super::ProbeOutcome::Ok);
+        std::fs::remove_file(&flag).unwrap();
+        assert_eq!(probe(), super::ProbeOutcome::Failed);
+        std::fs::write(&flag, "").unwrap();
+        assert_eq!(probe(), super::ProbeOutcome::Ok);
+    }
 
+    #[test]
+    fn probe_within_tells_a_timeout_from_a_failure() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+        let long = Duration::from_secs(5);
+        assert_eq!(
+            super::probe_within(Command::new("true"), long),
+            super::ProbeOutcome::Ok
+        );
+        assert_eq!(
+            super::probe_within(Command::new("false"), long),
+            super::ProbeOutcome::Failed
+        );
+        assert_eq!(
+            super::probe_within(Command::new("/nonexistent/docker"), long),
+            super::ProbeOutcome::Failed
+        );
         let mut hung = Command::new("sleep");
         hung.arg("30");
         let started = Instant::now();
-        assert!(!succeeds_within(hung, Duration::from_millis(200)));
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "a hung probe must be cut off at the timeout"
+        assert_eq!(
+            super::probe_within(hung, Duration::from_millis(200)),
+            super::ProbeOutcome::TimedOut
         );
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     fn write_methods_manifest(root: &Path, body: &str) -> PathBuf {
