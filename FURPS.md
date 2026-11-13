@@ -205,3 +205,46 @@
 - `.#lgx` flake output on the project (or sub-flakes) — `.#lgx-portable`-only projects fail explicitly until they expose `.#lgx`.
 - `.#lgx-portable` flake output for any module the developer wants to test against a basecamp AppImage. Projects without it get a clear error from `build-portable`, not a silent miss.
 - Modules that bind sockets must honor external port override via env var (names chosen by each module) for multi-instance launch to be fully useful.
+
+## FURPS+ — `lgs tui`
+
+### Functionality
+
+1. `lgs tui`, run inside a project, shows in one screen: localnet state (running, starting, stopped, stale state, foreign listener) with its pid and current block height; the project's default wallet address; each guest program in `methods/guest/src/bin` with the build `deploy` would ship (`docker`, `release`, `debug`, or not built) and whether the last `lgs run` deployed exactly that build to the running localnet; and an Output pane.
+2. Each action key runs the matching CLI command as a child process in the project root and streams its output into the Output pane: `r` `run`, `w` `run --watch`, `b` `build`, `d` `deploy <selected>`, `s` `localnet start` or `stop`, `R` `localnet reset --yes`, `t` `wallet topup`, `c` `doctor`. The job's exit code is shown when it ends.
+3. `l` switches the Output pane between job output and the tail of the sequencer log.
+4. `x` stops the running job and its whole process tree.
+
+### Usability
+
+1. Every key is listed on screen; there is no mode to learn and no configuration.
+2. The empty Output pane names the one key a new project needs (`r`).
+3. A key pressed while a job runs says which job is running and how to stop it, instead of queueing or racing.
+
+### Reliability
+
+1. One job at a time, so two commands never write the same project state at once.
+2. `localnet reset` and quitting with a running job ask for confirmation; the reset keeps the wallet.
+3. Quitting stops the running job's process tree but never the localnet, which stays up as it does after `localnet start`.
+4. Status polling runs on a background thread, so a slow `lsof` or an unresponsive sequencer never freezes input or drawing.
+5. Without an interactive terminal it exits non-zero with a message instead of drawing into a pipe.
+
+### Performance
+
+1. Status refreshes once a second; the screen redraws at least every 100 ms while idle.
+2. Output is capped at the last 5,000 lines.
+
+### Supportability
+
+1. Actions are the CLI commands themselves, so their behaviour, output and documentation are the CLI's; the dashboard adds no second implementation to keep in sync.
+2. Status comes from the functions behind `localnet status`, `deploy` discovery and the `run` deploy cache.
+3. Rendering is covered by a `ratatui` `TestBackend` test; key handling and job lifecycle by unit tests; the no-project and no-terminal paths by CLI tests.
+
+### + (Privacy, Anonymity, Censorship-Resistance)
+
+- Local only: it reads project files and the localnet RPC on `127.0.0.1`, and runs the same commands a developer would.
+
+### Dependencies
+
+- `ratatui` 0.29 with its default `crossterm` backend.
+- Unix sessions (`setsid`, `kill` of the process group) for detaching a job from the terminal and stopping its process tree, consistent with the CLI's Unix-only support.

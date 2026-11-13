@@ -172,6 +172,7 @@ If any of these is missing, do not "skip the real run" — go back and fix the s
 | D6 | `default` | Core | Example runner interaction and account state verification | `cargo run --bin run_hello_world`, `cargo run --bin run_hello_world_with_move_function`, `wallet -- account get` |
 | D7 | `default` | Core | One-step `run` pipeline and post-deploy hooks | `run`, `run --post-deploy`, `run --no-post-deploy`, `[run]` config |
 | D8 | `default` | Advanced | Reproducible guest builds and the `program_id` they produce | `build`, `build --guest docker`, `[build]` config, `doctor`, `deploy --json` |
+| D9 | `default` | Core | Terminal dashboard over the inner loop | `tui` |
 | L1 | `spel` | Core | Fresh SPEL project bootstrap to ready state | `new --template spel`, `setup`, `localnet start`, `doctor`, `build` |
 | L2 | `spel` | Core | SPEL IDL regeneration | `build idl` |
 | L3 | `spel` | Advanced | SPEL FFI/client generation from current IDL | `build client` |
@@ -770,6 +771,74 @@ never clears `methods/guest/target`, so it would win every later deploy.
 
 - Steps 4 and 5 are the load-bearing ones. If time is short, run 1, 3, 4, and 5.
 - A second machine (or a CI runner) building the same commit and comparing hashes is stronger evidence than two builds on one host; do that when it is available.
+
+## D9. Terminal Dashboard (`tui`)
+
+### Goal
+
+Validate that `tui` shows the project's real state and that each key runs the command it names, with that command's output, against a real localnet.
+
+### Preconditions
+
+- A default-template project where `setup` has completed (D1).
+- `tmux`, to drive and capture the dashboard non-interactively. A human can run `"$SCAFFOLD_BIN" tui` directly instead.
+
+### Commands / Actions
+
+From the generated project root, start with localnet stopped:
+
+```bash
+"$SCAFFOLD_BIN" localnet stop
+tmux new-session -d -s d9 -x 120 -y 32 "$SCAFFOLD_BIN" tui
+cap() { sleep "${1:-2}"; tmux capture-pane -p -t d9; }
+cap 0.5                               # start-up: a large λ and `L O G O S   S C A F F O L D`
+cap                                   # stopped localnet, programs, empty Output hint, λ top right
+tmux send-keys -t d9 r; cap 5         # `lgs run` starts; Job line shows it with a timer
+# wait for `── lgs run: exit 0 ──` in the Output pane (minutes on a cold build)
+cap                                   # localnet running + block height, wallet, ✓ deployed
+tmux send-keys -t d9 r; cap 30        # second run: deploy skipped, ✓ stays
+tmux send-keys -t d9 j d; cap 20      # deploy the second program
+tmux send-keys -t d9 t; cap 20        # wallet topup
+tmux send-keys -t d9 c; cap 10        # doctor
+tmux send-keys -t d9 l; cap           # sequencer log tail; `l` again returns
+tmux send-keys -t d9 b; cap 3; tmux send-keys -t d9 x; cap 3   # stop a build mid-way
+tmux send-keys -t d9 R; cap 1; tmux send-keys -t d9 y; cap 30  # reset after confirmation
+tmux send-keys -t d9 s; cap 5         # localnet stop
+tmux send-keys -t d9 s; cap 10        # localnet start
+tmux send-keys -t d9 q; sleep 1
+"$SCAFFOLD_BIN" localnet status       # still running after the dashboard exits
+"$SCAFFOLD_BIN" tui < /dev/null       # refuses: needs an interactive terminal
+```
+
+### Expected Success Signals
+
+- Each capture agrees with the matching CLI: `localnet status` for state and pid, `wallet list`/`.scaffold/state/wallet.state` for the default address, `methods/guest/src/bin` for the program list.
+- Each key's Output starts with `$ lgs <args>` naming the command it runs and ends with `── lgs <args>: exit <code> ──`; the output in between is that command's own.
+- After the first `r`, every program shows `docker` (or `release` under `[build].guest = "local"`) and `✓ deployed`, and the block height advances between captures. After `R`, the `✓` marks clear (new chain) and the next `r` deploys again.
+- A key pressed while a job runs prints `… is still running; x stops it` and starts nothing. `x` ends the job with `: stopped` or a non-zero exit, and no `cargo`/`docker` process from it remains (`pgrep -f 'cargo build'`).
+- `R` and `q` during a job ask first; any key but `y` cancels.
+- The dashboard opens on the large λ and replaces it within three seconds. At 120×32 a small λ sits in the top-right corner; it changes shape between captures while a job runs (it spins) and is still when idle. Below 120 columns or 30 rows it is absent and the panes are unchanged.
+- After `q`, the localnet is still running; the non-terminal invocation exits non-zero with `needs an interactive terminal`.
+- The `l` pane shows the sequencer log as plain text: no `[2m`/`[0m` fragments, no shifted timestamps (`20266-11-…`), and no part of an earlier line left in the tail of a shorter one. risc0 writes ANSI colour codes into `sequencer.log`, so this only shows up against a real sequencer.
+- A line longer than the Output pane wraps onto the next row instead of ending at the border. For example, a `[build].guest = "docker"` error keeps its whole `cargo install cargo-risczero` remediation. PgUp reaches the first line of a long, wrapped output.
+- The Job line stays visible in every localnet state, including a `foreign listener` or `stale state` hint together with a long deploy label (`lgs deploy hello_world_with_authorization`). The Status pane grows taller to fit, rather than dropping the line.
+
+### Failure Signals / Common Pitfalls
+
+- A status pane that disagrees with `localnet status` or `wallet list` is the high-value finding.
+- Output lines after the `exit` line, or a job that never reports its exit, mean the output pipe handling regressed.
+- A localnet that dies on `q` or `x` means the job's process group reached the daemonized sequencer.
+- `d` deploys but does not set `✓ deployed`: expected, since only `run` records deploys (see ADR "`lgs tui` Drives Child `lgs` Processes").
+
+### Evidence to Capture
+
+- The pane captures above, especially before and after the first `r` and after `R`.
+- `localnet status` after `q`.
+
+### Execution Notes
+
+- Use a terminal at least 100 columns wide; narrower ones truncate program names.
+- Cold first `r` takes minutes (LEZ toolchain and Docker guest build). Poll the capture for the `exit` line rather than sleeping a fixed time.
 
 ## L1. SPEL Template Bootstrap
 
@@ -1982,6 +2051,7 @@ HEAD0=$("$SCAFFOLD_BIN" test-node blocks head --url "$URL" --json | jq -r .block
 - Changes to wallet flows or wallet-related defaults: rerun `D4`.
 - Changes to the wallet-home env contract (`WALLET_HOME_ENV_VARS`, `set_wallet_home_env`, or any new upstream rename), to default-wallet seeding (`ensure_default_wallet_seeded` and its storage-initialization fallback), or to the LEZ pin across the v0.2.0 boundary: rerun `D1`, `D4`, `D6`, and `D7` — `D1`/`D4` cover seeding, `D6` covers the direct-`cargo run` export, `D7` covers the hook env contract.
 - Changes to diagnostics, report contents, or redaction logic: rerun `D5`.
+- Changes to `tui` (`src/tui/`), or to anything it reads or runs — localnet status, deploy discovery, the `run` deploy cache, or the args of the commands its keys run: rerun `D9`.
 - Changes to example runner binaries or template `src/bin/*` code: rerun `D6`.
 - Changes to `run` step ordering, the `deploy = false` deploy-skip branch, the `topup = false` topup-skip branch, post-deploy env vars, post-deploy CLI override flag handling, or `[run]` config parsing: rerun `D7`.
 - Changes to guest build strategy (`[build]` config, `--guest`, `build_methods_guests`, `DEFAULT_RISC0_DOCKER_TAG`, `GUEST_DOCKER_TARGET_DIR`) or to deploy-side binary discovery/ranking (`GUEST_BIN_SEARCH_ROOTS`, `discover_program_binaries`): rerun `D8` (its container steps also run in CI — see the Guest Build Reproducibility workflow), plus `D1` and `D3` — `D1` covers the default build, `D3` covers the artefact `deploy` actually submits. Bumping `DEFAULT_RISC0_DOCKER_TAG` changes every `program_id`, so record the before/after values.

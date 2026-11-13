@@ -788,6 +788,33 @@ fn report_fails_outside_project_with_project_scoped_message() {
 }
 
 #[test]
+fn tui_fails_outside_project_with_project_scoped_message() {
+    let temp = tempdir().expect("tempdir");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("tui")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "This command must be run inside a logos-scaffold project",
+        ));
+}
+
+#[test]
+fn tui_without_a_terminal_refuses_instead_of_drawing() {
+    let temp = tempdir().expect("tempdir");
+    fs::write(temp.path().join("scaffold.toml"), MINIMAL_SCAFFOLD_TOML).expect("write config");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("tui")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("needs an interactive terminal"));
+}
+
+#[test]
 fn report_skips_unreadable_optional_file_and_keeps_succeeding() {
     let temp = tempdir().expect("tempdir");
     setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));

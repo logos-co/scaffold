@@ -144,6 +144,7 @@ semantics of each one.
 | `lgs test-node` | Manage isolated sequencers for integration tests |
 | `lgs wallet` | List accounts, top up, set the project default |
 | `lgs basecamp` | Build and launch Logos desktop profiles |
+| `lgs tui` | Terminal dashboard: localnet, wallet, and programs at a glance, with one key per command |
 | `lgs doctor` | Report what is missing or misconfigured |
 | `lgs report` | Build a redacted diagnostics bundle for a GitHub issue |
 
