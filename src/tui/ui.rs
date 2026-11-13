@@ -21,6 +21,8 @@ const BADGE_MIN_WIDTH: u16 = 120;
 const BADGE_MIN_HEIGHT: u16 = 30;
 const BADGE_WIDTH: u16 = 16;
 const STATUS_WIDTH: u16 = 48;
+/// The confirm box's key hint. `App::handle_key` confirms on `y` and `Enter`.
+const CONFIRM_KEYS: &str = " y / Enter yes · any other key no ";
 /// Status and Programs panes are at least this tall, borders included.
 const TOP_MIN_HEIGHT: u16 = 7;
 
@@ -83,7 +85,7 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
                 .block(
                     Block::bordered()
                         .title(" Confirm ")
-                        .title_bottom(" y yes · any other key no ")
+                        .title_bottom(CONFIRM_KEYS)
                         .border_style(Color::Yellow),
                 ),
             area,
@@ -567,5 +569,15 @@ mod tests {
         assert_eq!(wrap_chars("", 4), [""]);
         assert_eq!(wrap_chars("abcdefghij", 4), ["abcd", "efgh", "ij"]);
         assert_eq!(wrap_chars("  ab", 4), ["  ab"]);
+    }
+
+    /// The footer must name every key that confirms: `y` and `Enter`.
+    #[test]
+    fn confirm_box_names_both_confirm_keys() {
+        use crate::tui::app::Confirmed;
+        let mut app = App::new(PathBuf::from("/work/my-app"), PathBuf::from("lgs"));
+        app.modal = Modal::Confirm("Quit while a job runs?".into(), Confirmed::Quit);
+        let screen = render(&app);
+        assert!(screen.contains("y / Enter yes"), "{screen}");
     }
 }

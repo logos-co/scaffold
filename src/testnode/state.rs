@@ -37,7 +37,7 @@ use crate::model::Project;
 use crate::DynResult;
 
 use super::copy_dir_recursive;
-use super::pins::{resolve_test_node_pins, PinOverrides};
+use super::pins::{resolve_test_node_pins, PinOverrides, TestNodePins};
 
 /// On-disk marker of a config-seeded state directory.
 pub(crate) const SEED_FILE: &str = "seed.json";
@@ -513,27 +513,52 @@ pub fn seed_state(
     output_dir: Option<&Path>,
 ) -> DynResult<SeededState> {
     let pins = resolve_test_node_pins(project, &PinOverrides::default())?;
-    let mut warnings = Vec::new();
 
-    let state_dir = match output_dir {
+    // Validate everything before touching the filesystem, so a rejected
+    // input leaves no empty state directory behind.
+    let plan = plan_seed(input, &pins)?;
+
+    let (state_dir, created) = match output_dir {
         Some(dir) => {
+            let created = !dir.exists();
             fs::create_dir_all(dir)?;
-            dir.to_path_buf()
+            (dir.to_path_buf(), created)
         }
         None => {
             let base = project.root.join(super::TEST_NODES_REL_DIR).join("seeds");
-            fs::create_dir_all(&base)?;
             let stamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
             let dir = base.join(format!("seed-{stamp}-{}", std::process::id()));
             fs::create_dir_all(&dir)?;
-            dir
+            (dir, true)
         }
     };
 
-    // Database-directory input: validate and copy verbatim.
+    let written = write_seed(plan, &state_dir, &pins);
+    if written.is_err() && created {
+        // Best effort: don't leave a half-written directory we made ourselves.
+        // A caller-provided directory that already existed is never removed.
+        let _ = fs::remove_dir_all(&state_dir);
+    }
+    written
+}
+
+/// What a validated seed input will write.
+enum SeedPlan {
+    /// A rocksdb directory, copied verbatim.
+    Database(PathBuf),
+    /// A snapshot file, normalized and written as `seed.json`.
+    Config {
+        snapshot: StateSnapshot,
+        warnings: Vec<String>,
+    },
+}
+
+/// Validate `input` against the project's pins without writing anything.
+fn plan_seed(input: &Path, pins: &TestNodePins) -> DynResult<SeedPlan> {
+    // Database-directory input: it must look like a rocksdb directory.
     if input.is_dir() {
         let db_dir = if input.join("rocksdb").is_dir() {
             input.join("rocksdb")
@@ -547,22 +572,12 @@ pub fn seed_state(
             ))
             .into());
         }
-        copy_dir_recursive(&db_dir, &state_dir.join("rocksdb"))?;
-        return Ok(SeededState {
-            state_dir,
-            lez_commit: pins.lez_resolved_commit,
-            state_format_version: STATE_FORMAT_VERSION.to_string(),
-            public_account_count: 0,
-            private_account_count: 0,
-            seed_kind: "database".to_string(),
-            warnings: vec![
-                "database seeds are copied verbatim; account counts are not inspected".to_string(),
-            ],
-        });
+        return Ok(SeedPlan::Database(db_dir));
     }
 
-    // Snapshot-file input: validate, check pins, and write seed.json.
+    // Snapshot-file input: validate the format, the pins and the seedable shape.
     let snapshot = StateSnapshot::from_file(input)?;
+    let mut warnings = Vec::new();
 
     if let (Some(snapshot_commit), Some(project_commit)) =
         (&snapshot.lez_commit, &pins.lez_resolved_commit)
@@ -581,31 +596,53 @@ pub fn seed_state(
         );
     }
 
-    let shape = GenesisConfigShape::require_for(&pins)?;
+    let shape = GenesisConfigShape::require_for(pins)?;
     snapshot.check_seedable(shape)?;
     if shape == GenesisConfigShape::Actions && !snapshot.public_accounts.is_empty() {
         warnings.push(VAULT_CREDIT_WARNING.to_string());
     }
 
-    let normalized = StateSnapshot {
+    let snapshot = StateSnapshot {
         lez_commit: pins.lez_resolved_commit.clone().or(snapshot.lez_commit),
         ..snapshot
     };
-    let seed_path = state_dir.join(SEED_FILE);
-    fs::write(
-        &seed_path,
-        format!("{}\n", serde_json::to_string_pretty(&normalized)?),
-    )?;
+    Ok(SeedPlan::Config { snapshot, warnings })
+}
 
-    Ok(SeededState {
-        state_dir,
-        lez_commit: normalized.lez_commit.clone(),
-        state_format_version: STATE_FORMAT_VERSION.to_string(),
-        public_account_count: normalized.public_accounts.len(),
-        private_account_count: normalized.private_accounts.len(),
-        seed_kind: "config".to_string(),
-        warnings,
-    })
+/// Write a validated seed into `state_dir`.
+fn write_seed(plan: SeedPlan, state_dir: &Path, pins: &TestNodePins) -> DynResult<SeededState> {
+    match plan {
+        SeedPlan::Database(db_dir) => {
+            copy_dir_recursive(&db_dir, &state_dir.join("rocksdb"))?;
+            Ok(SeededState {
+                state_dir: state_dir.to_path_buf(),
+                lez_commit: pins.lez_resolved_commit.clone(),
+                state_format_version: STATE_FORMAT_VERSION.to_string(),
+                public_account_count: 0,
+                private_account_count: 0,
+                seed_kind: "database".to_string(),
+                warnings: vec![
+                    "database seeds are copied verbatim; account counts are not inspected"
+                        .to_string(),
+                ],
+            })
+        }
+        SeedPlan::Config { snapshot, warnings } => {
+            fs::write(
+                state_dir.join(SEED_FILE),
+                format!("{}\n", serde_json::to_string_pretty(&snapshot)?),
+            )?;
+            Ok(SeededState {
+                state_dir: state_dir.to_path_buf(),
+                lez_commit: snapshot.lez_commit.clone(),
+                state_format_version: STATE_FORMAT_VERSION.to_string(),
+                public_account_count: snapshot.public_accounts.len(),
+                private_account_count: snapshot.private_accounts.len(),
+                seed_kind: "config".to_string(),
+                warnings,
+            })
+        }
+    }
 }
 
 /// Export public accounts from a running node into a
@@ -1073,6 +1110,66 @@ mod tests {
         let err = seed_state(&project, &input, Some(&temp.path().join("out"))).unwrap_err();
         let seed_err = err.downcast_ref::<SeedError>().expect("SeedError");
         assert!(matches!(seed_err, SeedError::PinMismatch(_)), "{seed_err}");
+        assert!(
+            !temp.path().join("out").exists(),
+            "a rejected seed must not create its output dir"
+        );
+    }
+
+    /// A rejected input used to leave an empty `seeds/seed-*` dir behind,
+    /// because the dir was created before the input was validated.
+    #[test]
+    fn rejected_seed_leaves_no_default_state_dir() {
+        let temp = tempdir().unwrap();
+        let project = fixture_project(temp.path());
+        let not_a_db = temp.path().join("not-a-db");
+        fs::create_dir_all(&not_a_db).unwrap();
+
+        let err = seed_state(&project, &not_a_db, None).unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<SeedError>(),
+            Some(SeedError::FormatMismatch(_))
+        ));
+        let seeds = temp
+            .path()
+            .join(super::super::TEST_NODES_REL_DIR)
+            .join("seeds");
+        let leftovers: Vec<_> = fs::read_dir(&seeds)
+            .map(|entries| entries.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
+        assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
+    }
+
+    #[test]
+    fn rejected_seed_does_not_create_a_named_output_dir() {
+        let temp = tempdir().unwrap();
+        let project = fixture_project(temp.path());
+        let bad = temp.path().join("bad.json");
+        fs::write(&bad, r#"{"format":"bogus/1"}"#).unwrap();
+        let out = temp.path().join("seeded");
+
+        seed_state(&project, &bad, Some(&out)).unwrap_err();
+        assert!(
+            !out.exists(),
+            "a rejected seed must not create {}",
+            out.display()
+        );
+    }
+
+    /// A caller-provided output dir that already existed is never removed,
+    /// whatever happens to the seed.
+    #[test]
+    fn rejected_seed_keeps_an_existing_output_dir() {
+        let temp = tempdir().unwrap();
+        let project = fixture_project(temp.path());
+        let bad = temp.path().join("bad.json");
+        fs::write(&bad, r#"{"format":"bogus/1"}"#).unwrap();
+        let out = temp.path().join("existing");
+        fs::create_dir_all(&out).unwrap();
+        fs::write(out.join("keep.txt"), "mine").unwrap();
+
+        seed_state(&project, &bad, Some(&out)).unwrap_err();
+        assert_eq!(fs::read_to_string(out.join("keep.txt")).unwrap(), "mine");
     }
 
     #[test]
