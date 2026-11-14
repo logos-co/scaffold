@@ -174,11 +174,14 @@ one. A top-level `sequencer_addr` added next to a `sequencers` list does not cha
 verdict, because the v0.2.4 wallet never reads it.
 
 ### Preconditions
-BUILD-001. Back up `.scaffold/wallet/wallet_config.json` first.
+BUILD-001. Back up `.scaffold/wallet/wallet_config.json` first. For the `wallet usability` row to pass in
+step 1, localnet must be running.
 
 ### Steps
 1. `"$SCAFFOLD_BIN" doctor | grep -A1 'wallet network config'`
-2. Set `sequencers[0].sequencer_addr` to `http://10.255.255.1:3040` and repeat step 1.
+2. Set `sequencers[0].sequencer_addr` to `http://10.255.255.1:3040` and run
+   `time "$SCAFFOLD_BIN" doctor | grep -A1 -E 'wallet network config|wallet usability'` (check first that
+   `curl -m 3 http://10.255.255.1:3040` times out, as in DEPLOY-006).
 3. Also add a top-level `"sequencer_addr": "http://127.0.0.1:3040"` and repeat step 1.
 4. Set `sequencers[0].sequencer_addr` to `http://127.0.0.1:30400` and repeat step 1.
 5. Replace the file with the pre-v0.2.4 shape `{"sequencer_addr": "http://10.0.0.1:3040"}` and
@@ -188,6 +191,11 @@ BUILD-001. Back up `.scaffold/wallet/wallet_config.json` first.
 
 ### Success criteria
 - Step 1 is PASS on a fresh setup.
+- Step 2 finishes in a few seconds, not minutes: `wallet usability` is WARN with
+  `wallet cannot reach its configured sequencer at http://10.255.255.1:3040`, because `doctor`
+  probes the wallet's own target (bounded, like `deploy`) before calling `wallet check-health`,
+  which has no timeout and otherwise waits out the OS connect timeout. A `doctor` that hangs here is
+  the regression.
 - Steps 2 and 3 are WARN, naming `http://10.255.255.1:3040`. Their remediation reads
   `Set sequencers[0].sequencer_addr in .scaffold/wallet/wallet_config.json to
   http://127.0.0.1:<port>`. A PASS in step 3 is the regression.
