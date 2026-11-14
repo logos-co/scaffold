@@ -269,7 +269,8 @@ provisioning.
 
 ## Environments and side effects
 - **Local only:** everything runs against project-local state. The localnet sequencer
-  listens on `127.0.0.1:<[localnet].port>` (default 3040). Test nodes use their own ports
+  listens on `127.0.0.1:<[localnet].port>` (default 3040), and test nodes on `127.0.0.1` too: the sequencer RPC has no
+  caller authentication. Test nodes use their own ports
   under `.scaffold/test-nodes/`. Basecamp profiles live under `.scaffold/basecamp/`.
   Nothing deploys to a public network, and no DevNet target exists today.
 - **Shared on the machine:** the scaffold cache (`<cache_root>/repos/<name>/<pin>`) is shared

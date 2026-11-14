@@ -132,14 +132,15 @@ by a node.
 instead of `.scaffold/test-nodes/<id>`. `status --node <id> --json` reports `healthy` and the RPC
 URL, and exits non-zero when unhealthy. `stop --node <id>` stops only that node and removes
 its state unless `--preserve-work-dir` is passed. The node never uses the localnet port and
-never writes into the LEZ checkout.
+never writes into the LEZ checkout. Its RPC listens on `127.0.0.1` only.
 
 ### Preconditions
 TNODE-002.
 
 ### Steps
 1. `SJ=$("$SCAFFOLD_BIN" test-node start --project "$P" --json); echo "$SJ"`
-2. `NODE=$(echo "$SJ" | jq -r .state_dir | xargs basename); "$SCAFFOLD_BIN" test-node status --node "$NODE" --project "$P" --json`
+2. `ss -ltnp | grep sequencer`, then
+   `NODE=$(echo "$SJ" | jq -r .state_dir | xargs basename); "$SCAFFOLD_BIN" test-node status --node "$NODE" --project "$P" --json`
 3. `"$SCAFFOLD_BIN" test-node stop --node "$NODE" --project "$P"; ls "$P/.scaffold/test-nodes"`
 4. `"$SCAFFOLD_BIN" test-node status --node "$NODE" --project "$P" --json; echo "exit=$?"`
 5. `"$SCAFFOLD_BIN" test-node pins --project "$P" --json | jq -r '.lez_checkout, .circuits_path'`, then
@@ -149,6 +150,7 @@ TNODE-002.
 
 ### Success criteria
 - Every listed field is present, and the port is not 3040.
+- Step 2's `ss` shows the node's port bound to `127.0.0.1`, not `0.0.0.0`.
 - Step 5: the LEZ checkout has no new or modified files from the node, and the configured
   circuits install exists (start materialises it if it was missing).
 - Status is healthy while running. After stop, the node dir is gone and status exits

@@ -45,7 +45,9 @@ use crate::error::BlockTimingValidationError;
 use crate::model::Project;
 use crate::process::{pid_running, port_open, spawn_to_log, wait_for_pid_exit};
 use crate::project::resolve_repo_path;
-use crate::sequencer_config::{apply_common_runtime_overrides, patch_runtime_sequencer_config};
+use crate::sequencer_config::{
+    apply_common_runtime_overrides, loopback_listen_args, patch_runtime_sequencer_config,
+};
 use crate::DynResult;
 
 /// Project-relative directory holding test-node runtime directories.
@@ -288,6 +290,7 @@ impl TestNode {
             .arg(&config_path)
             .arg("--port")
             .arg(port.to_string())
+            .args(loopback_listen_args(&prepared.sequencer_binary))
             .env("RUST_LOG", "info")
             .env(
                 "RISC0_DEV_MODE",

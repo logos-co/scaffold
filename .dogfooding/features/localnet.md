@@ -59,7 +59,8 @@ a foreign listener. Related: [Setup and build](setup-and-build.md), [Deploy](dep
 
 ### Expected
 `localnet start` returns only after the sequencer PID is alive and `127.0.0.1:<port>` is
-reachable, and then reports a ready localnet, not just a spawned PID. If it does not become
+reachable, and then reports a ready localnet, not just a spawned PID. The RPC is bound to
+loopback only (the sequencer's default is every interface). If it does not become
 ready within `--timeout-sec`, it fails with diagnostics.
 
 ### Preconditions
@@ -67,10 +68,13 @@ BUILD-001, nothing listening on the configured port, and r0vm provisioned.
 
 ### Steps
 1. `"$SCAFFOLD_BIN" localnet start`
+2. `ss -ltnp | grep sequencer` (or `lsof -nP -iTCP -sTCP:LISTEN | grep sequencer`)
 
 ### Success criteria
-- Exit 0, and the output says ready.
-- `lsof -iTCP:3040 -sTCP:LISTEN` shows the sequencer.
+- Exit 0, and the output says ready. The echoed `sequencer_service` command line carries
+  `--listen-address 127.0.0.1`.
+- The sequencer listens on `127.0.0.1:<port>` and not on `0.0.0.0:<port>`: its RPC has no
+  caller authentication, so it must not be reachable from other hosts.
 
 ## LOCALNET-002 — Status in human and JSON form
 
