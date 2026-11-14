@@ -5,7 +5,8 @@ use anyhow::bail;
 
 use super::wallet_support::{set_wallet_home_env, wallet_password};
 use crate::commands::wallet_support::{
-    sequencer_host_is_loopback, sequencer_port, wallet_config_sequencer_addr, WALLET_CONFIG_PRIMARY,
+    probe_sequencer_reachable, sequencer_host_is_loopback, sequencer_port,
+    wallet_config_sequencer_addr, WALLET_CONFIG_PRIMARY,
 };
 use crate::constants::{
     DEFAULT_LEZ, DEFAULT_SPEL, FRAMEWORK_KIND_SPEL, SEQUENCER_BIN_REL_PATH, SPEL_BIN_REL_PATH,
@@ -297,15 +298,35 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
             }),
         }
 
-        let mut health_cmd = Command::new(&wallet_binary_path);
-        set_wallet_home_env(&mut health_cmd, &wallet_home);
-        health_cmd
-            .arg("check-health")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        // `wallet check-health` has no timeout of its own: against a sequencer address that
+        // answers nothing (a blackholed host in `sequencers[0].sequencer_addr`) it waits for
+        // the OS connect timeout, minutes long, and `doctor` is what people run when things
+        // are already wrong. Ask the wallet's own target first, with the bounded RPC probe
+        // `deploy` uses, and skip the call when nothing answers there.
+        let unreachable_target = fs::read_to_string(&wallet_cfg)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|cfg| wallet_config_sequencer_addr(&cfg))
+            .filter(|addr| !probe_sequencer_reachable(addr));
+        if let Some(addr) = unreachable_target {
+            rows.push(CheckRow {
+                status: CheckStatus::Warn,
+                name: "wallet usability".to_string(),
+                detail: format!("wallet cannot reach its configured sequencer at {addr}"),
+                remediation: Some(format!(
+                    "Run `logos-scaffold localnet start` if {addr} is this project's localnet, or point sequencers[0].sequencer_addr in .scaffold/wallet/wallet_config.json at it, then `logos-scaffold doctor`"
+                )),
+            });
+        } else {
+            let mut health_cmd = Command::new(&wallet_binary_path);
+            set_wallet_home_env(&mut health_cmd, &wallet_home);
+            health_cmd
+                .arg("check-health")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
 
-        match run_with_stdin(health_cmd, format!("{}\n", wallet_password())) {
+            match run_with_stdin(health_cmd, format!("{}\n", wallet_password())) {
             Ok(out) => {
                 if out.status.success() {
                     rows.push(CheckRow {
@@ -348,6 +369,7 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
                     format!("Verify wallet binary and run `{STEP_EXPORT_WALLET_HOME}`, then `logos-scaffold doctor`"),
                 ),
             }),
+        }
         }
     }
 
