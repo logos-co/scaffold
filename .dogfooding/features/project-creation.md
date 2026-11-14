@@ -134,12 +134,15 @@ cache root with a different `[repos.lez].pin` gets its own `DIR/repos/lez/<other
 the first checkout keeps its HEAD.
 
 ### Preconditions
-None. Step 3 needs an older LEZ commit SHA to pin (for example the commit of an earlier
-release tag).
+`LOGOS_SCAFFOLD_CACHE_ROOT` **unset** (`unset LOGOS_SCAFFOLD_CACHE_ROOT`): the env var outranks
+`[scaffold].cache_root` in every command after creation (`doctor` shows `cache root | … (from
+LOGOS_SCAFFOLD_CACHE_ROOT)`), so with it exported, step 3's `setup` clones into the env cache
+and this scenario tests the wrong layer. Step 3 needs an older LEZ commit SHA to pin (for
+example the commit of an earlier release tag).
 
 ### Steps
 1. `"$SCAFFOLD_BIN" new dogfood-cache --cache-root "$SCRATCH_ROOT/custom-cache"`
-2. `find "$SCRATCH_ROOT/custom-cache/repos/lez" -mindepth 1 -maxdepth 2 -type d`
+2. `find "$SCRATCH_ROOT/custom-cache/repos/lez" -mindepth 1 -maxdepth 1 -type d`
 3. `"$SCAFFOLD_BIN" new dogfood-cache2 --cache-root "$SCRATCH_ROOT/custom-cache"`, set
    `[repos.lez].pin` in `dogfood-cache2/scaffold.toml` to the older SHA, then
    `( cd dogfood-cache2 && "$SCAFFOLD_BIN" setup )`.
@@ -148,7 +151,8 @@ release tag).
 ### Success criteria
 - A directory named after the pin exists under the custom cache root.
 - After step 4 there are two pin directories, each at its own pin. The first one's HEAD is
-  unchanged.
+  unchanged, and `( cd dogfood-cache2 && "$SCAFFOLD_BIN" doctor | grep 'cache root' )` says `(from
+  scaffold.toml [scaffold].cache_root)`.
 
 ### Notes
 Step 3 clones and builds a second LEZ (about 10 minutes). Only the clone matters here, so a
@@ -216,7 +220,20 @@ A project from CREATE-001.
 
 ### Steps
 1. Edit `scaffold.toml`: set `[scaffold].version = "0.1.0"` and add `url = "https://example"`
-   under `[repos.lez]`, plus a comment line.
+   under `[repos.lez]`, plus a comment line. Also add the old basecamp shape, which the Expected
+   paragraph promises to migrate:
+   ```toml
+   [basecamp]
+   pin = "abc123"
+   source = "https://github.com/logos-co/logos-basecamp.git"
+   lgpm_flake = "github:logos-co/logos-package-manager"
+
+   [basecamp.modules.my_mod]
+   flake = "path:./mod"
+   role = "project"
+   ```
+   (a CREATE-001 project already has `[repos.basecamp]`/`[repos.lgpm]`; `init` still takes the pin
+   from the old `[basecamp]` table.)
 2. `"$SCAFFOLD_BIN" doctor --json; echo "exit=$?"`
 3. `"$SCAFFOLD_BIN" init --dry-run` then `"$SCAFFOLD_BIN" init`
 4. `diff scaffold.toml.bak scaffold.toml`, then `"$SCAFFOLD_BIN" init` a second time.
@@ -226,3 +243,6 @@ A project from CREATE-001.
   is mixed in.
 - After step 3 the version is `0.2.0`, `url` is gone, the comment survives and `.bak` exists.
 - The second `init` succeeds and leaves `scaffold.toml` byte-identical.
+- The migrated file has `[repos.basecamp]` (`pin = "abc123"`), `[repos.lgpm]` (the default pin: an
+  `lgpm_flake` without a `/<rev>` suffix cannot supply one, so `init` prints a `!` warning to
+  edit it) and `[modules.my_mod]`, and no `[basecamp]` tables.

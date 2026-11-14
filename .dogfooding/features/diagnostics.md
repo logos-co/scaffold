@@ -70,7 +70,8 @@ BUILD-001.
 2. Set `[circuits].version` to a wrong value, run `"$SCAFFOLD_BIN" doctor`, then restore it.
 3. Set `[circuits].install_dir` to an empty directory, run `"$SCAFFOLD_BIN" doctor`, then restore
    it.
-4. `time DOCKER_HOST=tcp://10.255.255.1:2375 "$SCAFFOLD_BIN" doctor | grep -A1 -E 'container runtime|guest build'`
+4. In a project without `[build].guest` (with `guest = "local"` the `guest build` row is a PASS):
+   `time DOCKER_HOST=tcp://10.255.255.1:2375 "$SCAFFOLD_BIN" doctor | grep -A1 -E 'container runtime|guest build'`
    (first check that `curl -m 3 http://10.255.255.1:2375` times out rather than being refused;
    a refused connection fails fast and does not exercise the bound)
 
