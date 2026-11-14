@@ -108,7 +108,8 @@ BUILD-001 and LOCALNET-001.
 normalized address as the project default.
 
 ### Preconditions
-WALLET-002. Take an address from its output.
+WALLET-002. A fresh wallet has only one public account, so create a second one first:
+`"$SCAFFOLD_BIN" wallet -- account new public`. Take both addresses from `wallet list`.
 
 ### Steps
 1. `"$SCAFFOLD_BIN" wallet default set Public/<id>`
@@ -182,18 +183,28 @@ BUILD-001.
 ## WALLET-007 — Wallet password override
 
 ### Expected
-Wallet-facing commands use `LOGOS_SCAFFOLD_WALLET_PASSWORD` instead of the local dev default
-when it is set.
+Wallet-facing commands (`doctor`'s health check, `topup`, `deploy`, `setup`'s seeding) send
+`LOGOS_SCAFFOLD_WALLET_PASSWORD` to the wallet's stdin instead of the local dev default when it
+is set. The dry run does not show it, and `wallet list` / `wallet --` never read it, so a wrong
+password is not an observable failure there.
 
 ### Preconditions
-WALLET-001.
+WALLET-001, and a localnet running.
 
 ### Steps
-1. `LOGOS_SCAFFOLD_WALLET_PASSWORD=custom-pw "$SCAFFOLD_BIN" wallet topup --dry-run`
+1. Wrap the wallet binary so its stdin is recorded (restore it afterwards):
+   ```bash
+   LEZ=$("$SCAFFOLD_BIN" test-node pins --json | jq -r .lez_checkout); W=$LEZ/target/release/wallet
+   mv "$W" "$W.real"
+   printf '#!/bin/bash\nIN=$(cat); echo "args=$* stdin=[$IN]" >> /tmp/wallet-stdin.log; echo "$IN" | exec %s.real "$@"\n' "$W" > "$W"; chmod +x "$W"
+   ```
+2. `LOGOS_SCAFFOLD_WALLET_PASSWORD=custom-pw "$SCAFFOLD_BIN" doctor >/dev/null; "$SCAFFOLD_BIN" doctor >/dev/null; cat /tmp/wallet-stdin.log`
+3. `mv "$W.real" "$W"`
 
 ### Success criteria
-- The command honours the override, either by showing it in the rendered command or by
-  behaving differently from the default. Record which.
+- The log has `args=check-health stdin=[custom-pw]` for the first `doctor`, and for the second
+  the password your shell exports as `LOGOS_SCAFFOLD_WALLET_PASSWORD`, or the built-in default
+  when it is unset.
 
 ## WALLET-008 — Topup follows the wallet's configured sequencer
 
@@ -224,7 +235,8 @@ WALLET-001 (topup needs a default address before it reaches the network). Back u
   regression.
 
 ### Notes
-Unlike `deploy`, topup has no reachability preflight, so against an unrouted address it first
-waits out the wallet's own timeout (about a minute). Don't treat that delay as a failure.
+Unlike `deploy`, topup has no reachability preflight. Against a *refused* port it fails at once
+(about 20 ms); against an unrouted (blackholed) address it first waits out the wallet's own
+timeout, which can be minutes. Don't treat that delay as a failure.
 As in DEPLOY-006, the probe only checks that something answered, so a foreign process on the
 configured port suppresses the hint.
