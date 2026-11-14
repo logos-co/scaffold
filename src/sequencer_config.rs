@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context};
 use serde_json::{Map, Value};
@@ -17,6 +18,27 @@ pub(crate) fn apply_common_runtime_overrides(obj: &mut Map<String, Value>, port:
         "max_block_size".to_string(),
         Value::String(WIDENED_MAX_BLOCK_SIZE.to_string()),
     );
+}
+
+/// CLI args that keep a developer sequencer's RPC on loopback.
+///
+/// The LEZ sequencer binds `0.0.0.0` unless told otherwise, and its own `--help` warns that
+/// the RPC has no caller auth (anyone who can reach the port can submit transactions).
+/// Localnet and test nodes are only ever reached through `127.0.0.1`, so ask for loopback.
+/// Older pinned LEZ revisions have no `--listen-address`; passing it there would make the
+/// sequencer exit on an unknown argument, so only pass it when `--help` advertises it.
+pub(crate) fn loopback_listen_args(sequencer_bin: &Path) -> Vec<&'static str> {
+    let help = Command::new(sequencer_bin)
+        .arg("--help")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output();
+    match help {
+        Ok(out) if String::from_utf8_lossy(&out.stdout).contains("--listen-address") => {
+            vec!["--listen-address", "127.0.0.1"]
+        }
+        _ => Vec::new(),
+    }
 }
 
 pub(crate) fn patch_runtime_sequencer_config<F, R>(
@@ -67,6 +89,40 @@ mod tests {
         fs::create_dir_all(config_path.parent().expect("parent")).expect("create config dir");
         fs::write(&config_path, r#"{"home": ".", "genesis_id": 1}"#).expect("write source config");
         lez
+    }
+
+    #[cfg(unix)]
+    fn fake_sequencer(dir: &Path, help: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("sequencer_service");
+        fs::write(&bin, format!("#!/bin/sh\ncat <<'EOF'\n{help}\nEOF\n")).expect("write fake");
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).expect("chmod");
+        bin
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn loopback_listen_args_follow_what_the_sequencer_advertises() {
+        let temp = tempdir().expect("tempdir");
+        let new = fake_sequencer(
+            temp.path(),
+            "Options:\n  -p, --port <PORT>\n      --listen-address <LISTEN_ADDRESS>",
+        );
+        assert_eq!(
+            loopback_listen_args(&new),
+            vec!["--listen-address", "127.0.0.1"]
+        );
+
+        let old = fake_sequencer(temp.path(), "Options:\n  -p, --port <PORT>");
+        assert!(
+            loopback_listen_args(&old).is_empty(),
+            "older pins have no flag"
+        );
+
+        assert!(
+            loopback_listen_args(&temp.path().join("missing")).is_empty(),
+            "an unrunnable binary must not add args (the spawn reports the real error)"
+        );
     }
 
     #[test]
