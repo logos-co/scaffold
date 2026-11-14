@@ -42,6 +42,12 @@ pub(crate) fn load_project() -> DynResult<Project> {
 /// The API layer uses this so consumers can target a project without
 /// depending on the process working directory.
 pub(crate) fn load_project_at(root: &Path) -> DynResult<Project> {
+    // Make the root absolute before anything derives paths from it. Child processes run in
+    // other directories (a test node's work dir, a cache checkout), so a root like `.` that
+    // reaches them as `./.scaffold/...` points nowhere there: `test-node start --project .`
+    // died with a bare `No such file or directory` from the sequencer.
+    let root = &std::path::absolute(root)
+        .with_context(|| format!("resolving project path {}", root.display()))?;
     let config_path = root.join("scaffold.toml");
     // `try_exists()` (not `exists()`): a permission/IO error on the path must
     // surface as a real error, not be silently reported as a missing config.

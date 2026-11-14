@@ -146,6 +146,9 @@ TNODE-002.
    `git -C <lez_checkout> status --short` and `ls <circuits_path>`.
 6. `"$SCAFFOLD_BIN" test-node start --project "$P" --work-dir "$SCRATCH_ROOT/tn-work" --json | jq -r .state_dir`,
    then `"$SCAFFOLD_BIN" test-node stop --node "$SCRATCH_ROOT/tn-work" --project "$P"`.
+7. `cd "$P" && SJ=$("$SCAFFOLD_BIN" test-node start --project . --json)`, then
+   `jq -r .home "$(echo "$SJ" | jq -r .config_path)"`, and stop the node with
+   `"$SCAFFOLD_BIN" test-node stop --node "$(echo "$SJ" | jq -r .state_dir)" --project .`.
 
 ### Success criteria
 - Every listed field is present, and the port is not 3040.
@@ -154,6 +157,9 @@ TNODE-002.
 - Status is healthy while running. After stop, the node dir is gone and status exits
   non-zero.
 - Step 6 prints `$SCRATCH_ROOT/tn-work`, and `stop` accepts that path as `--node`.
+- Step 7 starts the node although `--project` is relative (`.`), and the runtime config's `home`
+  is the absolute node directory. Before the fix the sequencer died with `No such file or
+  directory` and `start` reported `test node exited before becoming ready`.
 ### Notes
 Nodes are meant to be thrown away: use a fresh one per scenario. Pass `--preserve-work-dir`
 only to inspect a node's database or log afterwards.
