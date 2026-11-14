@@ -93,7 +93,13 @@ TNODE-003 running, with `TN_URL` set to its `rpc_url`.
 - Block 1 is classified as genesis (0 transactions before LEZ v0.2.4; on v0.2.4 its setup
   transactions with `has_clock_transaction: false` and `has_user_transactions: false`), and
   later blocks are clock-only with `fully_parsed: true`.
-- All three clock accounts decode, and `/0000001`'s `block_id` is close to the head.
+- All three clock accounts decode, and the first account's `block_id` is the head's (the other two
+  stay at `block_id: 0`).
+
+### Notes
+`clock read --json` identifies the three accounts by base58 id (`4Bdcjo…RWNU`, `…RWSs`, `…RWkX` at
+the default pin), not by their `/LEZ/ClockProgramAccount/…` names, in that order. `blocks … --json`
+reports genesis as `is_genesis: true` (a bool); there is no `classification` field.
 
 ## TRPC-002 — Transactions end in one definitive outcome
 
@@ -193,12 +199,17 @@ TNODE-002.
 4. `SJ=$("$SCAFFOLD_BIN" test-node start --project "$P" --state ./seeded --json); TN_URL=$(echo "$SJ" | jq -r .rpc_url)`
 5. `"$SCAFFOLD_BIN" test-node account get --url "$TN_URL" --account-id <vault> --json`, where
    `<vault>` is the account's vault PDA: the public PDA of the vault program with seed
-   `sha256("/LEZ/v0.3/VaultSeed/00000000000/" ‖ account_id)`. The vault program id is the
-   `vault_program_id` inside any genesis `supply_account` transaction. For the debug config's `CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r` it is
+   `sha256("/LEZ/v0.3/VaultSeed/00000000000/" ‖ account_id)`. The vault program id is the `VAULT_ID`
+   words (little-endian `u32`s) in the generated
+   `<lez>/target/release/build/programs-*/out/lez/programs/mod.rs`, equivalently the
+   `vault_program_id` inside a genesis `supply_account` transaction. The PDA is
+   `sha256("/LEE/v0.2/AccountId/PDA/" ‖ 8 zero bytes ‖ vault_program_id ‖ seed)` in base58. For the
+   debug config's `CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r` it is
    `G1u9gmu1Gb8PG59zHZYNL5WdJNNtBKEN4U5qUdx2y6sG`.
 6. Repeat step 5 for the vault of a debug-config sample account the seed left out (for example
    `2RHZhw9h534Zr3eq2RGhQete2Hh667foECzXPmSkGni2` →
-   `Ey6P7CkwXHLskqFjQzU8C1kTwb54TkZfhzv9wUijb3Wc`).
+   `BAX2jjbhmT3CgDBi9MCFMgFsCeKECtaiyj1XDwXfZGrR`). First read that vault on an unseeded node
+   (balance 20000), or the `missing` below proves nothing.
 7. `"$SCAFFOLD_BIN" test-node state export --url "$TN_URL" --account-id <vault> --output /tmp/export.json --json; jq . /tmp/export.json`
 
 ### Success criteria
@@ -228,7 +239,10 @@ TNODE-001.
 ### Steps
 1. `echo '{"format":"bogus/1"}' > bad.json && "$SCAFFOLD_BIN" test-node state seed --project "$P" --input bad.json --output ./rejected; echo "exit=$?"`
 2. Seed a snapshot whose public account has `"nonce": 3`.
-3. On a LEZ v0.2.4 pin, seed a snapshot with a non-empty `private_accounts` list.
+3. On a LEZ v0.2.4 pin, seed a snapshot with a non-empty `private_accounts` list. An entry needs
+   `npk` (32 numbers) and `account`, for example
+   `{"format":"lgs-state-snapshot/1","public_accounts":[],"private_accounts":[{"npk":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32],"account":{"balance":5}}]}`;
+   a malformed entry fails earlier with `account decode error: missing field \`npk\``.
 4. Seed a snapshot whose `lez_commit` is not the project's resolved LEZ commit.
 5. `echo '{"format":"lgs-state-snapshot/1","public_accounts":[{"account_id":"not-base58!!","balance":1}]}' > bad-id.json && "$SCAFFOLD_BIN" test-node state seed --project "$P" --input bad-id.json; echo "exit=$?"`
 6. `ls -d ./rejected "$P"/.scaffold/test-nodes/seeds/seed-* 2>&1`
@@ -254,6 +268,7 @@ Localnet stopped, so port 3040 is free.
 
 ### Steps
 1. `SJ=$("$SCAFFOLD_BIN" test-node start --project "$P" --port 3040 --json); URL=$(echo "$SJ" | jq -r .rpc_url)`
+   (add `--preserve-work-dir` if TRPC-008 will follow, and stop with the same flag in step 6)
 2. `HEAD0=$("$SCAFFOLD_BIN" test-node blocks head --url "$URL" --json | jq -r .block_id)`
 3. `( cd "$P" && "$SCAFFOLD_BIN" wallet topup )`
 4. `"$SCAFFOLD_BIN" test-node blocks wait --url "$URL" --after "$HEAD0" --count 6 --timeout-sec 90 --json > /tmp/blocks.json`,
@@ -281,10 +296,11 @@ that checks the block parser against a really executed transaction.
 ## TRPC-008 — Committed transactions are found after a database restart
 
 ### Expected
-A node resumed from a preserved database answers `getTransaction` with `null` for older
-transactions. `tx wait --hash <old> --after-block <b>` still reports `committed` with the
-original block, because scaffold scans blocks, even when `<b>` is later than the commit
-block. If a scanned block holds a privacy-preserving tx, the result is `timeout`, never a
+`tx wait --hash <old> --after-block <b>` on a node resumed from a preserved database still
+reports `committed` with the original block, because scaffold scans blocks when the node's
+`getTransaction` has no answer, even when `<b>` is later than the commit block. (A node that
+resumed from rocksdb at the default pin still answers `getTransaction` for old transactions;
+older pins forgot them. Both must give `committed`.) If a scanned block holds a privacy-preserving tx, the result is `timeout`, never a
 stateful rejection.
 
 ### Preconditions
@@ -292,7 +308,10 @@ A node that committed a known tx (TRPC-007), stopped with `--preserve-work-dir`,
 restarted with `--state <its dir>`.
 
 ### Steps
-1. `"$SCAFFOLD_BIN" test-node tx wait --url "$URL" --hash <old-hash> --after-block <later-block> --json`
+1. Stop the TRPC-007 node with `test-node stop --node <id> --project "$P" --preserve-work-dir`, then
+   `SJ=$("$SCAFFOLD_BIN" test-node start --project "$P" --state "$P/.scaffold/test-nodes/<id>" --json); URL=$(echo "$SJ" | jq -r .rpc_url)`
+   (pass `--project` as an absolute path on a build without the relative-path fix).
+2. `"$SCAFFOLD_BIN" test-node tx wait --url "$URL" --hash <old-hash> --after-block <later-block> --json`
 
 ### Success criteria
 - `committed`, with the original `block_id`.

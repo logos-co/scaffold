@@ -104,7 +104,9 @@ still go to the project's configured install dir.
 TNODE-001 and r0vm provisioned (see "Toolchain" in [product.md](../product.md)).
 
 ### Steps
-1. `"$SCAFFOLD_BIN" test-node doctor --project "$P"` (before prepare, if fresh)
+1. `"$SCAFFOLD_BIN" test-node doctor --project "$P"` in a project that has never run `setup`,
+   `prepare` or a test node (a second `new` project works). In a project that has, nothing is
+   missing and the "names `test-node prepare`" criterion cannot be exercised.
 2. `PJ=$("$SCAFFOLD_BIN" test-node prepare --project "$P" --json); echo "$PJ"`
 3. `"$SCAFFOLD_BIN" test-node doctor --project "$P" --json | jq .ok`
 4. `PIN=$(echo "$PJ" | jq -r .lez_commit)`, then
@@ -203,7 +205,9 @@ DIR`) is only validated: it must be a clean worktree at the requested commit. `p
 resets, cleans or force-checks it out. A dirty or mismatched checkout is reported, not fixed.
 
 ### Preconditions
-A local LEZ clone at the pinned commit.
+A local LEZ clone at the pinned commit with a normal `origin`, for example
+`git clone <cache>/repos/lez/<pin> /tmp/lez-src && git -C /tmp/lez-src remote set-url origin
+https://github.com/logos-blockchain/logos-execution-zone.git`.
 
 ### Steps
 1. `"$SCAFFOLD_BIN" test-node pins --project "$P" --lez-source /path/to/lez --json | jq .checkout_ownership`
