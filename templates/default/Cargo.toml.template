@@ -26,8 +26,12 @@ common = { git = "https://github.com/logos-blockchain/logos-execution-zone.git",
 sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "{{lez_pin}}", default-features = false, features = ["client"] }
 
 anyhow = "1.0.98"
-risc0-zkvm = { version = "3.0.5", features = ["std"] }
-risc0-build = "3.0.5"
+# Exact versions: the host-side proving of the private runners talks to the `r0vm` that
+# scaffold provisions for the pinned LEZ (3.0.5), and risc0 refuses a mismatch ("r0vm server
+# version … not compatible with your host's risc0-zkvm crate"). A caret range would let
+# cargo pick a newer 3.x for a project without a Cargo.lock.
+risc0-zkvm = { version = "=3.0.5", features = ["std"] }
+risc0-build = "=3.0.5"
 
 hex = "0.4.3"
 bytemuck = "1.24.0"

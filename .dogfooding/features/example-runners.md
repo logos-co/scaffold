@@ -127,7 +127,8 @@ DEPLOY-001 and a fresh private account: `"$SCAFFOLD_BIN" wallet -- account new p
 
 ### Steps
 1. Export both wallet-home names, as in RUNNER-001.
-2. `RISC0_DEV_MODE=1 cargo run --bin run_hello_world_private -- <P-base58>`
+2. `grep -A1 'name = "risc0-zkvm"' Cargo.lock` (expect the version the provisioned `r0vm` has,
+   3.0.5), then `RISC0_DEV_MODE=1 cargo run --bin run_hello_world_private -- <P-base58>`
 3. `"$SCAFFOLD_BIN" wallet -- account sync-private`, then
    `"$SCAFFOLD_BIN" wallet -- account get --account-id Private/<P-base58>`. Repeat both for up
    to about 30 seconds.
@@ -137,6 +138,11 @@ DEPLOY-001 and a fresh private account: `"$SCAFFOLD_BIN" wallet -- account new p
 - After a sync, P's `data` decodes to `Hola mundo!` and `program_owner` is non-null.
 
 ### Notes
+A host `risc0-zkvm` newer than the provisioned `r0vm` fails the runner with `Your installation
+of the r0vm server is not compatible with your host's risc0-zkvm crate` (`risc0-zkvm version:
+3.1.0`, `r0vm server version: 3.0.5`). The template pins `risc0-zkvm`/`risc0-build` with `=`
+to prevent that; projects created before the pin need `cargo update -p risc0-zkvm --precise
+3.0.5` (and `lgs build`, then `lgs deploy`, since the guests change).
 The chain holds only a commitment for P; `account get` on a `Private/` ID reads the wallet's
 local copy, which only `sync-private` updates. `Account is Uninitialized` right after the
 runner means the block had not landed when you synced, not a failure. `RISC0_DEV_MODE=1`
