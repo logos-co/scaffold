@@ -138,7 +138,9 @@ Docker daemon stopped (or `cargo-risczero` removed from `PATH`).
 
 ### Success criteria
 - Non-zero exit within seconds, with no cargo compile output.
-- The message names the missing piece and mentions `guest = "local"`.
+- The message names the missing piece and mentions `guest = "local"`. Run step 1 once more with
+  `cargo-risczero` off `PATH` (`env PATH=<PATH without the cargo bin dir> "$SCAFFOLD_BIN" build`):
+  it fails with ``needs `cargo-risczero` on PATH`` and the `rzup install cargo-risczero` hint.
 - Step 2 agrees with step 1: a `FAIL | guest build | docker (risczero/risc0-guest-builder:<tag>)`
   row ending in `… not found on PATH`, or, with both tools present and the daemon down,
   `Docker daemon not running (\`docker info\` failed)` (`\`docker info\` did not answer within
@@ -186,8 +188,9 @@ get different `program_id`s, so copy the lockfile across before concluding anyth
 
 ### Expected
 `build --guest local`, or `[build].guest = "local"`, builds guests with the host toolchain
-into `target/riscv-guest/.../release/` without needing Docker. It prints `Clearing
-deterministic guest artefacts in …` and removes `target/riscv-guest-docker`. `doctor`
+into `target/riscv-guest/.../release/` without needing Docker. When a `target/riscv-guest-docker`
+tree exists it prints `Clearing deterministic guest artefacts in …` and removes it (a fresh
+project has none, so nothing is printed). `doctor`
 reports `local — … not reproducible`. The explicit choice prints no nag during `build`.
 
 ### Preconditions
@@ -200,7 +203,8 @@ BUILD-001 and the risc0 Rust toolchain installed.
 4. With localnet up, `"$SCAFFOLD_BIN" deploy hello_world 2>&1 | grep 'deploy-program'`
 
 ### Success criteria
-- Step 2 shows no docker tree and lists the release `.bin` files.
+- Step 2 shows no docker tree and lists the release `.bin` files. To see the `Clearing …` line,
+  run a docker-mode `build` first, or create `target/riscv-guest-docker/x` by hand.
 - Step 4's echoed `wallet deploy-program <path>` names the
   `target/riscv-guest/…/release/hello_world.bin` artefact.
 - The step 3 row reads `PASS | guest build | local …` and says it is not reproducible.
@@ -221,8 +225,10 @@ A fresh project (CREATE-001).
 2. `"$SCAFFOLD_BIN" build --prebuilt` (build chains setup and passes the flag through)
 
 ### Success criteria
-- Either the download is verified and installed, or the unverified warning appears followed
-  by a source build.
+- Either the download is verified and installed, the unverified warning appears followed by a
+  source build, or (the current state of the default pin) `no prebuilt published yet for tag
+  lssa-prebuilt-<sha>-<arch>-<os>, falling back to source build` appears and the source build
+  runs. In that last case the verification path is not exercised: say so in the report.
 - An unverified binary never lands in `target/release/`.
 
 ## BUILD-007 — Docker and local builds give different, recorded program ids
