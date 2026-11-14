@@ -96,7 +96,8 @@ and r0vm provisioned.
 ### Success criteria
 - Step 1 exits 0, prints all five headers in order, and ends with the deployed-programs
   summary.
-- Step 2 builds and deploys from the project root (no "not a project" error).
+- Step 2 builds and reaches the deploy step from the project root (no "not a project" error);
+  the deploy itself is dedup-skipped there, because step 1 just deployed the same build.
 
 ## RUN-002 — Re-run reuses localnet and skips an unchanged deploy
 
@@ -257,9 +258,11 @@ RUN-001.
 ### Steps
 1. Add `[run.watch]` with `exclude = ["**/*.md"]`.
 2. Start `"$SCAFFOLD_BIN" run --watch` in the background and wait for the first pipeline to
-   finish.
+   finish: the log ends with `===> watching <root> for changes`. Count pipelines with
+   `grep -c '^\[1/' <log>`.
 3. `touch README.md`, wait 2 seconds, then edit a comment in `methods/guest/src/bin/hello_world.rs`.
-4. Stop the watcher. Run `"$SCAFFOLD_BIN" run --watch-debounce-ms 100; echo "exit=$?"`.
+4. Stop the watcher (`pgrep -x logos-scaffold | xargs kill`; `pkill -f` also matches the shell that
+   runs it). Run `"$SCAFFOLD_BIN" run --watch-debounce-ms 100; echo "exit=$?"`.
 
 ### Success criteria
 - The README touch triggers nothing, and the guest edit triggers exactly one new pipeline
@@ -296,7 +299,11 @@ A missing `spel` binary shows as `program_id: unavailable` in the deploy summary
 
 ### Preconditions
 RUN-003, in a copy of the project with every program but `hello_world` removed from
-`methods/guest/src/bin/`.
+`methods/guest/src/bin/` **and** the clients that import the removed programs deleted from
+`src/bin/` (keep `run_hello_world.rs` and `run_hello_world_private.rs`; every other `run_*.rs`
+imports another program's `*_ELF` constant, and `cargo build --workspace` fails with
+`unresolved import example_program_deployment_methods::HELLO_WORLD_WITH_MOVE_FUNCTION_ELF`
+otherwise).
 
 ### Steps
 1. `"$SCAFFOLD_BIN" run --post-deploy 'echo pid=${SCAFFOLD_PROGRAM_ID:-unset} bin=${SCAFFOLD_GUEST_BIN:-unset}'`
