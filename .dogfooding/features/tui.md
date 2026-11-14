@@ -266,7 +266,9 @@ TUI-002.
 
 ### Success criteria
 - Step 1 shows the whole remediation, including `cargo install cargo-risczero`, across rows.
-- Step 2 reaches the `$ lgs build` line.
+- Step 2 reaches the `$ lgs build` line, in a **fresh** dashboard session: the Output pane keeps
+  earlier jobs' output, so after other jobs three `PPage` presses scroll past this build into
+  the previous job's log.
 
 ## TUI-010 — Job line stays visible with a hint and a long label
 
@@ -285,4 +287,5 @@ the state reads `foreign listener`.
 
 ### Success criteria
 - Both captures show the `Job` row: the label with a timer while the job runs, then the
-  `✓`/`✗ … exit <code>` summary.
+  `✓`/`✗ … exit <code>` summary. A `deploy` against a foreign listener fails within about two
+  seconds, so the running capture needs a slower job (`b` on a project that has to compile).
