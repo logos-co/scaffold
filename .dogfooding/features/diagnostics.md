@@ -66,7 +66,10 @@ never its value, and says to fix the remote connection or unset it.
 BUILD-001.
 
 ### Steps
-1. `"$SCAFFOLD_BIN" doctor`
+1. `"$SCAFFOLD_BIN" doctor`. On a host with no working container runtime, in a project with
+   `[build].guest = "local"`, the `container runtime` row is a PASS reading `not needed with
+   [build].guest = "local" (…)`; without that setting (and in every spel project, which always
+   builds through Docker) it is the WARN `… guest builds will fail`.
 2. Set `[circuits].version` to a wrong value, run `"$SCAFFOLD_BIN" doctor`, then restore it.
 3. Set `[circuits].install_dir` to an empty directory, run `"$SCAFFOLD_BIN" doctor`, then restore
    it.
