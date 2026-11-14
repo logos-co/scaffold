@@ -163,7 +163,8 @@ only to inspect a node's database or log afterwards.
 ### Expected
 `test-node run -- <cmd>` starts a node, waits until it is healthy, and exports
 `LGS_TEST_NODE_RPC_URL`, `LGS_TEST_NODE_PORT`, `LGS_TEST_NODE_STATE_DIR` and related vars to
-the child. It forwards the child's exit status and stops the node afterwards. `--serial` caps
+the child. Stdout is exactly the child's output: scaffold adds no `$ <command>` echo lines
+to it. It forwards the child's exit status and stops the node afterwards. `--serial` caps
 concurrent node creation at one, and `--parallel N` at N.
 
 ### Preconditions
@@ -172,14 +173,18 @@ TNODE-002.
 ### Steps
 1. `"$SCAFFOLD_BIN" test-node run --project "$P" --serial -- sh -c 'echo "rpc=$LGS_TEST_NODE_RPC_URL port=$LGS_TEST_NODE_PORT"'`
 2. `"$SCAFFOLD_BIN" test-node run --project "$P" -- sh -c 'exit 7'; echo "exit=$?"`
-3. `pgrep -fl sequencer_service`
+3. `pgrep -x sequencer_servi` (the kernel truncates the process name to 15 characters, and
+   `pgrep -f sequencer_service` also matches the shell that runs this very command line)
 4. `for i in 1 2 3; do "$SCAFFOLD_BIN" test-node run --project "$P" --parallel 2 -- sh -c 'echo $LGS_TEST_NODE_PORT; sleep 5' & done; wait`
 
 ### Success criteria
-- Step 1 prints a real URL and port. Step 2 prints `exit=7`.
+- Step 1 prints a real URL and port, and nothing else: no `$ …sequencer_service…` line.
+  Step 2 prints `exit=7`.
+- `OUT=$("$SCAFFOLD_BIN" test-node run --project "$P" -- echo child-output 2>/dev/null)`
+  leaves `OUT` equal to `child-output`.
 - Step 4 prints three distinct ports and all three runs exit 0. With `--parallel 2`, the third
   node starts only after one of the first two has stopped.
-- Step 3 shows no leftover node from these runs.
+- Step 3 prints nothing (no leftover node from these runs).
 
 ## TNODE-005 — Explicit port already in use fails fast
 

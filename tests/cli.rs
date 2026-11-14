@@ -1326,6 +1326,28 @@ fn test_node_run_patches_block_timing_flags_for_child_command() {
     );
 }
 
+/// `test-node run` hands stdout to the wrapped command, so scaffold's `$ <command>` echo of
+/// the sequencer spawn must not appear in it.
+#[cfg(unix)]
+#[test]
+fn test_node_run_stdout_is_exactly_the_child_output() {
+    let temp = tempdir().expect("tempdir");
+    let fixtures = setup_test_node_project(temp.path());
+
+    let out = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .env("LOGOS_BLOCKCHAIN_CIRCUITS", &fixtures.circuits_path)
+        .args(["test-node", "run", "--timeout-sec", "5", "--"])
+        .arg(&fixtures.python_path)
+        .args(["-c", "print('child-output')"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(String::from_utf8_lossy(&out), "child-output\n");
+}
+
 #[cfg(unix)]
 #[test]
 fn test_node_run_preserves_block_timing_without_flags_for_child_command() {

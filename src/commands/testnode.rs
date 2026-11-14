@@ -514,6 +514,10 @@ pub(crate) fn cmd_test_node(action: TestNodeAction) -> DynResult<()> {
             block_timing,
             command,
         } => {
+            // stdout belongs to the wrapped command here (`OUT=$(lgs test-node run -- cmd)`,
+            // `lgs test-node run -- cmd | jq`), so scaffold's own `$ <command>` echoes (the
+            // sequencer spawn, git checks) must not be mixed into it.
+            let _echo = EchoGuard::suppress();
             let project = load_selected_project(project.as_deref())?;
 
             // --serial caps cross-process node creation at 1; --parallel <N>
