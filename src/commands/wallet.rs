@@ -38,7 +38,9 @@ pub struct WalletListReport {
     pub command: String,
     /// Exit code (`128 + signal` when killed by a signal, `-1` if unknown).
     pub exit_code: i32,
-    /// Best-effort line split of stdout (trimmed, blanks removed).
+    /// The account lines of stdout (trimmed), such as `/ Public/<id>` or
+    /// `/0 Public/<id>`. Other output (`--long` detail lines, `Stored statistics at …`) is
+    /// left out; `stdout` has it all.
     pub accounts: Vec<String>,
     /// Raw stdout from the wallet binary.
     pub stdout: String,
@@ -74,12 +76,7 @@ pub(crate) fn wallet_list_for_project(
         use std::os::unix::process::ExitStatusExt;
         output.status.signal().map(|s| 128 + s).unwrap_or(-1)
     });
-    let accounts: Vec<String> = stdout
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(ToString::to_string)
-        .collect();
+    let accounts = account_lines(&stdout);
 
     Ok(WalletListReport {
         command: rendered_command,
@@ -88,6 +85,18 @@ pub(crate) fn wallet_list_for_project(
         stdout,
         stderr,
     })
+}
+
+/// The lines of `wallet account list` output that name an account (`Public/<id>` or
+/// `Private/<id>`), trimmed. The wallet also prints bookkeeping such as `Stored statistics at
+/// <path>`, which is not an account and must not reach `WalletListReport::accounts`.
+fn account_lines(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains("Public/") || line.contains("Private/"))
+        .map(ToString::to_string)
+        .collect()
 }
 
 /// Set the project default wallet address; returns the normalized form.
@@ -487,4 +496,31 @@ fn cmd_wallet_default_set(project: &crate::model::Project, address: &str) -> Dyn
     println!("  State file: {}", state_path.display());
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::account_lines;
+
+    #[test]
+    fn account_lines_keep_accounts_and_drop_wallet_bookkeeping() {
+        let out = "/ Public/8FaqUzcLd7ju78qjHV1K8qgjJtVrESzZobs3pK6uEebk\n\
+                   /0 Public/9owMQcay9MtU4HNhiyZ9TVeiGvhArVUKVHBNsPmDUELH\n\
+                   Preconfigured Private/9r4ecVLRxUPjADxZ3yubtDa4yy9MrpK7EtQUVHp4dUKQ\n\
+                   \n\
+                   Stored statistics at /tmp/p/.scaffold/wallet/statistics.json\n";
+        assert_eq!(
+            account_lines(out),
+            vec![
+                "/ Public/8FaqUzcLd7ju78qjHV1K8qgjJtVrESzZobs3pK6uEebk",
+                "/0 Public/9owMQcay9MtU4HNhiyZ9TVeiGvhArVUKVHBNsPmDUELH",
+                "Preconfigured Private/9r4ecVLRxUPjADxZ3yubtDa4yy9MrpK7EtQUVHp4dUKQ",
+            ]
+        );
+    }
+
+    #[test]
+    fn account_lines_of_an_empty_listing_is_empty() {
+        assert!(account_lines("Stored statistics at /x\n").is_empty());
+    }
 }
