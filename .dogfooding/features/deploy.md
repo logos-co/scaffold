@@ -236,3 +236,5 @@ LOCALNET-001, in a project whose guest artefacts are removed.
 
 ### Success criteria
 - Non-zero exit, all four roots listed in that order, and `build` suggested.
+- The output has no `Note: Submission confirmed by wallet exit status …` line: nothing was submitted
+  (`Succeeded: 0`), so the note would contradict the summary.
