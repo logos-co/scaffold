@@ -117,6 +117,22 @@ pub(crate) fn check_container_runtime() -> (CheckRow, Option<ProbeOutcome>) {
     (row, docker_outcome)
 }
 
+/// A project that opted into `[build].guest = "local"` builds its guests with the host
+/// toolchain, so a missing or stopped container runtime cannot affect it. The row is still
+/// shown, with what was found, but it must not warn that "guest builds will fail".
+/// Not for spel projects: they build through `make build` (Docker) whatever `[build]` says.
+pub(crate) fn relax_container_runtime_for_local_guests(mut row: CheckRow) -> CheckRow {
+    if matches!(row.status, CheckStatus::Warn) {
+        row.status = CheckStatus::Pass;
+        row.detail = format!(
+            "not needed with [build].guest = \"local\" ({})",
+            row.detail.replace("; guest builds will fail", "")
+        );
+        row.remediation = None;
+    }
+    row
+}
+
 fn is_docker(bin: &Path) -> bool {
     bin.file_name().is_some_and(|name| name == "docker")
 }
@@ -623,7 +639,7 @@ mod tests {
 
     use super::{
         check_logos_blockchain_circuits_with, check_standalone_support, container_runtime_row,
-        guest_build_row,
+        guest_build_row, relax_container_runtime_for_local_guests,
     };
     use crate::model::{BuildConfig, GuestBuildMode};
 
@@ -747,6 +763,50 @@ mod tests {
             started.elapsed() < Duration::from_secs(5),
             "a hung probe must be cut off at the timeout"
         );
+    }
+
+    #[test]
+    fn a_stopped_daemon_is_not_a_warning_for_a_project_that_builds_guests_locally() {
+        let warn = container_runtime_row(
+            Some(PathBuf::from("/usr/bin/docker")),
+            None,
+            ProbeOutcome::Failed,
+            None,
+        );
+        assert!(matches!(warn.status, CheckStatus::Warn));
+        let row = relax_container_runtime_for_local_guests(warn);
+        assert_eq!(row.status, CheckStatus::Pass);
+        assert!(
+            row.detail
+                .starts_with("not needed with [build].guest = \"local\""),
+            "{}",
+            row.detail
+        );
+        assert!(
+            !row.detail.contains("guest builds will fail"),
+            "false for this project: {}",
+            row.detail
+        );
+        assert!(row.remediation.is_none());
+
+        let missing = relax_container_runtime_for_local_guests(container_runtime_row(
+            None,
+            None,
+            ProbeOutcome::Ok,
+            None,
+        ));
+        assert_eq!(missing.status, CheckStatus::Pass);
+        assert!(missing.detail.contains("neither docker nor podman"));
+
+        // A healthy runtime row is left exactly as it was.
+        let ok = container_runtime_row(
+            Some(PathBuf::from("/usr/bin/docker")),
+            None,
+            ProbeOutcome::Ok,
+            None,
+        );
+        let kept = relax_container_runtime_for_local_guests(ok.clone());
+        assert_eq!(kept.detail, ok.detail);
     }
 
     #[test]
