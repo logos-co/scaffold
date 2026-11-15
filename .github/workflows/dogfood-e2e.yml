@@ -13,6 +13,7 @@ on:
   pull_request:
     paths:
       - "tests/e2e/**"
+      - "!tests/e2e/**/*.md"
       - ".github/workflows/dogfood-e2e.yml"
   push:
     branches: [master]

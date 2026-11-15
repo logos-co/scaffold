@@ -7,7 +7,8 @@ the example clients and reads the chain back. Nothing is stubbed. No model is ne
 or to read its verdict.
 
 ```bash
-# Everything (hours on a cold cache, about 45 minutes on a warm one):
+# Everything. About an hour on 4 CPUs once LEZ is built in the cache; the first run on a
+# cold cache also builds LEZ (see "Long steps" in .dogfooding/product.md).
 LGS_E2E=1 cargo test --release --test e2e
 
 # Some scenarios: IDs or prefixes.
@@ -122,6 +123,10 @@ Automated with a step left out (the report's note says so each time):
   verified-download path while no prebuilt is published for the pin.
 - Steps that need the spel CLI, a Docker CLI, or the black-hole address, where the host lacks
   them.
+- `BUILD-005` step 4 (which artefact `deploy` ships after a local build) is asserted in
+  `DEPLOY-001`, on the deploy every later scenario shares.
+- `RUNNER-004` runs `run_hello_world_private`; the other private paths the scenario's notes
+  list are not run.
 
 ## Changing scenarios
 
