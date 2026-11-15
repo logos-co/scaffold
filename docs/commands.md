@@ -165,7 +165,7 @@ logos-scaffold tui
 logos-scaffold doctor [--json]
 logos-scaffold report [--out PATH] [--tail N]
 logos-scaffold completions <bash|zsh>
-logos-scaffold help
+logos-scaffold help [COMMAND]...   # same text as `[COMMAND]... --help`
 ```
 
 ## Command semantics

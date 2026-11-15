@@ -143,8 +143,9 @@ enum Commands {
     #[command(about = "Initialize scaffold.toml in the current directory")]
     #[command(after_long_help = EXAMPLES_INIT)]
     Init(InitArgs),
+    /// `lgs help [COMMAND]...`: the same text as `--help`, for the root or a subcommand.
     #[command(hide = true)]
-    Help,
+    Help(HelpArgs),
     /// Test-only hooks — hidden from `--help` output. Keeps the binary
     /// verifiable end-to-end without polluting the user-visible CLI surface.
     #[command(hide = true)]
@@ -180,6 +181,13 @@ struct SelfTestRunLoggedArgs {
     /// streamed shape instead of the captured one.
     #[arg(long)]
     print_output: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct HelpArgs {
+    /// Command path to show help for, for example `deploy` or `test-node start`.
+    #[arg(value_name = "COMMAND")]
+    command: Vec<String>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -1617,7 +1625,7 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
             cmd_completions(shell)
         }
         Some(Commands::Init(args)) => cmd_init(&bin_name, args.dry_run, args.no_backup),
-        Some(Commands::Help) => print_help(&bin_name),
+        Some(Commands::Help(args)) => print_help(&bin_name, &args.command),
         Some(Commands::SelfTest(args)) => match args.command {
             SelfTestSubcommand::RunLogged(a) => {
                 crate::commands::self_test::cmd_self_test_run_logged(
@@ -1628,7 +1636,7 @@ pub(crate) fn run(args: Vec<String>) -> DynResult<()> {
                 )
             }
         },
-        None => print_help(&bin_name),
+        None => print_help(&bin_name, &[]),
     }
 }
 
@@ -1636,11 +1644,17 @@ pub(crate) fn cli_command() -> clap::Command {
     Cli::command()
 }
 
-pub(crate) fn print_help(bin_name: &str) -> DynResult<()> {
-    let mut cmd = Cli::command().bin_name(bin_name);
-    cmd.print_help()?;
-    println!();
-    Ok(())
+/// Print exactly what `<bin> [COMMAND]... --help` prints. Used by `help [COMMAND]...`
+/// and a bare invocation. Parsing `--help` through clap keeps the long/short choice and
+/// the unknown-command error identical to the flag, instead of re-implementing them.
+pub(crate) fn print_help(bin_name: &str, path: &[String]) -> DynResult<()> {
+    let argv = std::iter::once(bin_name.to_string())
+        .chain(path.iter().cloned())
+        .chain(std::iter::once("--help".to_string()));
+    match Cli::command().bin_name(bin_name).try_get_matches_from(argv) {
+        Err(err) => err.exit(),
+        Ok(_) => Err(anyhow!("`{bin_name} --help` did not print help")),
+    }
 }
 
 fn print_spel_help(bin_name: &str) -> DynResult<()> {
@@ -1650,7 +1664,7 @@ fn print_spel_help(bin_name: &str) -> DynResult<()> {
         println!();
         Ok(())
     } else {
-        print_help(bin_name)
+        print_help(bin_name, &[])
     }
 }
 
