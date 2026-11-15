@@ -48,12 +48,14 @@ None (no setup or network needed beyond creation).
 ### Steps
 1. `"$SCAFFOLD_BIN" new dogfood-skills-default` and `"$SCAFFOLD_BIN" new dogfood-skills-spel --template spel`
 2. `find dogfood-skills-*/.claude/skills dogfood-skills-*/.cursor/rules -type f | sort`
-3. `diff dogfood-skills-default/.claude/skills/lgs-cli/SKILL.md "$REPO_ROOT/skills/lgs-cli/SKILL.md"`
-4. `head -5 dogfood-skills-default/.cursor/rules/lgs-cli.mdc; cat dogfood-skills-default/.gitignore`
+3. `for s in basecamp lez-template lgs-cli spel-template; do diff dogfood-skills-default/.claude/skills/$s/SKILL.md "$REPO_ROOT/skills/$s/SKILL.md" && echo "$s identical"; done`
+4. `head -5 dogfood-skills-default/.cursor/rules/lgs-cli.mdc; cat dogfood-skills-default/.gitignore`, then for each skill compare
+   the `.mdc` body with the SKILL.md body (both after their second `---` line):
+   `for s in basecamp lez-template lgs-cli spel-template; do body() { awk 'f{print} /^---$/{c++; if(c==2)f=1}' "$1"; }; diff <(body dogfood-skills-default/.cursor/rules/$s.mdc) <(body "$REPO_ROOT/skills/$s/SKILL.md") && echo "$s body identical"; done`
 5. `for p in dogfood-skills-default dogfood-skills-spel; do grep -F '(.claude/skills/' "$p/AGENTS.md"; ( cd "$p" && grep -o '(\.claude/skills/[^)]*)' AGENTS.md | tr -d '()' | xargs ls ); done`
 
 ### Success criteria
-- There are four SKILL.md files and four .mdc files per project, and the diff is empty.
+- There are four SKILL.md files and four .mdc files per project, and every diff is empty.
 - The .mdc frontmatter has no `name:`, and `.gitignore` has no skill paths.
 - Step 5 prints four rows per project (`basecamp`, `lez-template`, `lgs-cli`,
   `spel-template`), each with a non-empty description, and every linked SKILL.md exists.

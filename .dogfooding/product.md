@@ -255,8 +255,11 @@ ls "$P"/.scaffold/circuits/pol/verification_key.json
   and ImageMagick's `import` are enough to open an app tile and screenshot it.
 
 ### Long steps
-The first `setup` takes about 3 minutes (wallet + spel). The sequencer build takes about 6
-minutes. The first docker guest build pulls a ~1.7 GB image, and the first spel build takes
+The first `setup` takes about 3 minutes (wallet + spel) and the sequencer build about 6 minutes
+on a many-core machine; measured on 4 CPUs with `CARGO_BUILD_JOBS=2` a cold `setup` took 40
+minutes, a cold `build --guest local` of a fresh project about 9 minutes (the first build also
+installs the template's host toolchain, Rust 1.92.0, through rustup), and a spel project's first
+`build idl` 5 minutes. The first docker guest build pulls a ~1.7 GB image, and the first spel build takes
 5–15 minutes. A cold basecamp setup builds a Qt closure unless the binary cache is trusted.
 
 ### Environment variables
