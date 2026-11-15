@@ -1118,6 +1118,65 @@ fn localnet_start_fails_when_process_exits_before_ready() {
     );
 }
 
+/// The LEZ sequencer binds 0.0.0.0 by default and its RPC has no caller auth, so localnet
+/// asks for loopback, but only when the pinned sequencer advertises `--listen-address`
+/// (older pins would exit on the unknown flag).
+#[cfg(unix)]
+#[test]
+fn localnet_start_binds_loopback_only_where_the_sequencer_supports_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for supports in [true, false] {
+        let temp = tempdir().expect("tempdir");
+        let lez_path = temp.path().join("lez");
+        let sequencer_bin = lez_path.join("target/release/sequencer_service");
+        let config_path = lez_path.join("sequencer/service/configs/debug/sequencer_config.json");
+        let args_log = temp.path().join("sequencer-args.log");
+        let localnet_port = unused_local_port();
+        fs::create_dir_all(sequencer_bin.parent().expect("parent")).expect("create dirs");
+        fs::create_dir_all(config_path.parent().expect("parent")).expect("create config dir");
+        fs::write(&config_path, r#"{"port": 3040}"#).expect("write sequencer config");
+
+        let help = if supports {
+            "Options:\n  -p, --port <PORT>\n      --listen-address <LISTEN_ADDRESS>"
+        } else {
+            "Options:\n  -p, --port <PORT>"
+        };
+        fs::write(
+            &sequencer_bin,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = --help ]; then printf '%s\\n' '{}'; exit 0; fi\nprintf '%s\\n' \"$@\" > '{}'\nexec python3 -m http.server {localnet_port} --bind 127.0.0.1\n",
+                help.replace('\n', "' '"),
+                args_log.display(),
+            ),
+        )
+        .expect("write fake sequencer");
+        fs::set_permissions(&sequencer_bin, fs::Permissions::from_mode(0o755)).expect("chmod");
+        write_scaffold_toml_with_localnet(temp.path(), &lez_path, Some(localnet_port), Some(false));
+
+        let run = |sub: &str| {
+            let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"));
+            cmd.current_dir(temp.path()).arg("localnet").arg(sub);
+            if sub == "start" {
+                cmd.args(["--timeout-sec", "10"]);
+            }
+            cmd.assert().success();
+        };
+        run("start");
+        let args = fs::read_to_string(&args_log).expect("read args log");
+        run("stop");
+
+        let lines: Vec<&str> = args.lines().collect();
+        let has_pair = lines
+            .windows(2)
+            .any(|w| w == ["--listen-address", "127.0.0.1"]);
+        assert_eq!(
+            has_pair, supports,
+            "supports={supports}: sequencer args were {lines:?}"
+        );
+    }
+}
+
 #[test]
 fn localnet_start_patches_config_and_uses_configured_port() {
     let temp = tempdir().expect("tempdir");

@@ -18,7 +18,9 @@ use crate::process::{
     spawn_to_log, wait_for_pid_exit,
 };
 use crate::project::{ensure_dir_exists, find_project_root, load_project, resolve_repo_path};
-use crate::sequencer_config::{apply_common_runtime_overrides, patch_runtime_sequencer_config};
+use crate::sequencer_config::{
+    apply_common_runtime_overrides, loopback_listen_args, patch_runtime_sequencer_config,
+};
 use crate::state::{read_localnet_state, write_localnet_state};
 use crate::DynResult;
 
@@ -353,6 +355,7 @@ fn start_localnet(
     sequencer_cmd
         .current_dir(lez)
         .arg(&patched_config_path)
+        .args(loopback_listen_args(&lez.join(SEQUENCER_BIN_REL_PATH)))
         .env("RUST_LOG", "info")
         .env("RISC0_DEV_MODE", if risc0_dev_mode { "1" } else { "0" });
 
