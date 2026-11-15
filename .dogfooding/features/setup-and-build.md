@@ -22,11 +22,11 @@ scenarios:
     source: DOGFOODING.md@740e5e9 D8
     depends_on: [CREATE-001]
   - id: BUILD-004
-    title: Deterministic guest build is byte-reproducible
+    title: Docker guest builds are byte-reproducible and their ids differ from local builds
     priority: P1
     provenance: documented
     source: DOGFOODING.md@740e5e9 D8
-    depends_on: [BUILD-002]
+    depends_on: [BUILD-002, LOCALNET-001]
   - id: BUILD-005
     title: Local guest build opt-out
     priority: P1
@@ -39,13 +39,7 @@ scenarios:
     provenance: documented
     source: DOGFOODING.md@740e5e9 D1
     depends_on: [CREATE-001]
-  - id: BUILD-007
-    title: Docker and local builds give different, recorded program ids
-    priority: P1
-    provenance: documented
-    source: DOGFOODING.md@740e5e9 D8
-    depends_on: [BUILD-004, BUILD-005, LOCALNET-001]
-retired: []
+retired: [BUILD-007]
 ---
 
 # Setup and build
@@ -73,18 +67,17 @@ A project from CREATE-001. On Linux, the PCSC headers are installed.
 
 ### Steps
 1. `cd "$SCRATCH_ROOT/dogfood-default" && "$SCAFFOLD_BIN" setup`
-2. `LEZ=$("$SCAFFOLD_BIN" test-node pins --json | jq -r .lez_checkout); ls "$LEZ/target/release/"{sequencer_service,wallet}`
-3. `ls .scaffold/circuits/pol/verification_key.json`
-4. `which wallet spel sequencer_service`
+2. `LEZ=$("$SCAFFOLD_BIN" test-node pins --json | jq -r .lez_checkout); ls "$LEZ/target/release/"{sequencer_service,wallet} .scaffold/circuits/pol/verification_key.json`
+3. `which wallet spel sequencer_service`
 
 ### Success criteria
-- Exit 0 and `setup complete`.
-- Both LEZ binaries and the circuits verification key exist.
-- None of the binaries comes from the scaffold cache via `PATH`.
+- Exit 0 and `setup complete`. Both LEZ binaries and the circuits verification key exist.
+- Step 3 finds nothing from the scaffold cache.
 - The output never contains `warning: could not seed default wallet automatically`.
 
 ### Notes
-If seeding was deferred, the next `build` or `run` with localnet up prints the seeded line.
+If seeding was deferred, the next `setup`, `build` or `run` with localnet up prints the
+seeded line. Cold durations are under "Long steps" in [product.md](../product.md).
 
 ## BUILD-002 — Default build produces deterministic guest binaries
 
@@ -92,122 +85,122 @@ If seeding was deferred, the next `build` or `run` with localnet up prints the s
 With no `[build]` section, `build` runs `setup`, then `cargo build --workspace`, then prints
 `Building guest methods (deterministic, risc0-guest-builder:<tag>)...` followed by risc0's
 `ELFs ready at: ImageID: <hex> - <path>` lines. It leaves one `<program>.bin` per program
-under `target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/`.
+under `target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/`. `build [project-path]`
+builds the same project from outside it.
 
 ### Preconditions
 BUILD-001, a running Docker daemon, and `cargo-risczero` on `PATH`.
 
 ### Steps
-1. `"$SCAFFOLD_BIN" build`
+1. `"$SCAFFOLD_BIN" build 2>&1 | tee /tmp/build1.log`
 2. `ls target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/`
-3. `(cd .. && "$SCAFFOLD_BIN" build "$OLDPWD")` (the `[project-path]` form)
+3. `(cd .. && "$SCAFFOLD_BIN" build "$OLDPWD")`
 
 ### Success criteria
-- Exit 0.
-- `hello_world.bin` and the other template programs are listed.
-- Step 3 builds the same project from outside it and exits 0, without a "must be run inside a
-  logos-scaffold project" error.
+- Exit 0, and `hello_world.bin` and the other template programs are listed.
+- Step 3 exits 0 with no "must be run inside a logos-scaffold project" error.
 
 ### Notes
-The first run pulls about 1.7 GB of image and takes several minutes. Slowness is not a
-failure.
-`Cargo.lock not found in path …/methods/guest/Cargo.lock` on stderr is expected and not fatal:
-risc0 looks next to the guest manifest, and scaffold projects keep one lockfile at the
-workspace root. A fatal lockfile error is different. The container builds `--locked`, so a
-stale root `Cargo.lock` fails the build; re-run a plain `build` and report it if that does not
-clear it. An MSRV error naming `rustc 1.88.0-dev` means the build used risc0's default image
-rather than scaffold's pinned tag (`RISC0_DOCKER_CONTAINER_TAG` did not reach `cargo
-risczero`); through `lgs build` that is a regression. A build that succeeds but leaves only
-extension-less ELFs and no `.bin` means risc0's output layout moved: capture `ls -R
-target/riscv-guest-docker`. risc0 excludes only `.git`, `target`, `node_modules` and `tmp`
-from the Docker build context, so a large directory in the project root slows the build.
+The first run pulls about 1.7 GB of image. `Cargo.lock not found in path
+…/methods/guest/Cargo.lock` on stderr is expected: scaffold projects keep one lockfile at the
+workspace root. The container builds `--locked`, so a stale root `Cargo.lock` is a fatal,
+different error; re-run a plain `build` and report it if that does not clear it. Two other
+signatures to report: an MSRV error naming `rustc 1.88.0-dev` (the build used risc0's default
+image, not scaffold's pinned tag), and a build that leaves extension-less ELFs but no `.bin`
+(risc0's output layout moved; capture `ls -R target/riscv-guest-docker`).
 
 ## BUILD-003 — Missing Docker toolchain fails fast with an escape hatch
 
 ### Expected
 In default (`docker`) mode, a missing `cargo-risczero`, a missing `docker`, or a daemon that
 does not answer stops `build` before `setup` compiles anything and before any image pull. The
-message names the missing piece and offers `[build].guest = "local"`.
+message names the missing piece and offers `[build].guest = "local"`. `doctor`'s `guest
+build` row agrees.
 
 ### Preconditions
-Docker daemon stopped (or `cargo-risczero` removed from `PATH`).
+A project without `[build].guest`. Docker daemon stopped for steps 1–2 (skip them on a host
+where it must stay up; step 3 works anywhere).
 
 ### Steps
 1. `"$SCAFFOLD_BIN" build; echo "exit=$?"`
 2. `"$SCAFFOLD_BIN" doctor | grep "guest build"`
+3. `env PATH=<PATH without the dir holding cargo-risczero> "$SCAFFOLD_BIN" build; echo "exit=$?"`
 
 ### Success criteria
-- Non-zero exit within seconds, with no cargo compile output.
-- The message names the missing piece and mentions `guest = "local"`. Run step 1 once more with
-  `cargo-risczero` off `PATH` (`env PATH=<PATH without the cargo bin dir> "$SCAFFOLD_BIN" build`):
-  it fails with ``needs `cargo-risczero` on PATH`` and the `rzup install cargo-risczero` hint.
-- Step 2 agrees with step 1: a `FAIL | guest build | docker (risczero/risc0-guest-builder:<tag>)`
-  row ending in `… not found on PATH`, or, with both tools present and the daemon down,
-  `Docker daemon not running (\`docker info\` failed)` (`\`docker info\` did not answer within
-  10s` when the daemon hangs instead of refusing). A PASS row next to a refusing `build`
-  is the regression.
+- Steps 1 and 3 exit non-zero within seconds, with no cargo compile output, and mention
+  `guest = "local"`. Step 1 says the Docker daemon is not running (`docker info` failed);
+  step 3 says ``needs `cargo-risczero` on PATH`` with the `rzup install cargo-risczero` hint.
+- Step 2 is a `FAIL | guest build | docker (risczero/risc0-guest-builder:<tag>)` row with the
+  same reason (`… not found on PATH`, `Docker daemon not running`, or `did not answer within
+  10s` for a hanging daemon). A PASS row next to a refusing `build` is the regression.
 
-## BUILD-004 — Deterministic guest build is byte-reproducible
+## BUILD-004 — Docker guest builds are byte-reproducible and their ids differ from local builds
 
 ### Expected
 Two docker-mode builds of unchanged source, the second from a clean artefact tree and an
-empty container build cache, produce byte-identical `.bin` files.
+empty container build cache, produce byte-identical `.bin` files. The `program_id` that
+`deploy --json` reports for a docker build equals the `ImageID` risc0 printed for that
+program during the build, and differs from the `program_id` of a `--guest local` build of
+the same source.
 
 ### Preconditions
-BUILD-002.
+BUILD-002 and localnet up (LOCALNET-001).
 
 ### Steps
 1. `D=target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker; shasum -a 256 $D/*.bin > /tmp/first.sha`
 2. `rm -rf target/riscv-guest-docker && docker builder prune -af`
 3. `"$SCAFFOLD_BIN" build 2>&1 | tee /tmp/second.log`
 4. `grep -E '^#[0-9]+ CACHED' /tmp/second.log; shasum -a 256 -c /tmp/first.sha`
+5. `grep ImageID /tmp/second.log; "$SCAFFOLD_BIN" deploy --json | tee /tmp/ids-docker.json`
+6. `"$SCAFFOLD_BIN" build --guest local && "$SCAFFOLD_BIN" deploy --json | tee /tmp/ids-local.json`,
+   then `jq -r '.deploys[] | "\(.program) \(.program_id)"' /tmp/ids-docker.json /tmp/ids-local.json`.
+   Finish with a plain `"$SCAFFOLD_BIN" build` so later scenarios deploy the docker artefacts.
 
 ### Success criteria
-- Step 4's `grep` prints nothing: no build step of the second build came from cache.
-- Every `shasum` line of step 4 reports `OK`.
+- Step 4's `grep` prints nothing (no build step came from cache) and every `shasum` line is
+  `OK`. A run that shows `CACHED` steps has not tested reproducibility: report it as not run.
+- Step 5: each program's `program_id` equals its `ImageID`.
+- Step 6: each program's local `program_id` differs from its docker one, and the local build
+  prints `Clearing deterministic guest artefacts in …`.
 
 ### Notes
-Step 2's prune is what makes this a rebuild. `cargo risczero build` runs `docker build`, and
-deleting the output tree alone lets BuildKit replay every step from cache and re-export the
-first build's ELFs, so the digests match without proving anything. A run that shows
-`CACHED` steps has not tested reproducibility; report it as not run, not as passed. The
-prune clears the host's whole BuildKit cache, not just this project's, but leaves pulled
-images in place. On Podman, clear its build cache with the equivalent command and apply the
-same `CACHED` check.
-
-CI also runs this in `.github/workflows/guest-reproducibility.yml`: path-gated to the build,
-setup and template code, plus a weekly run and manual dispatch. It renders a project, builds
-the guests through the container twice with the BuildKit cache cleared in between, and diffs
-the digests. Run the steps by hand when changing the pinned tag or when a host disagrees
-with CI. A comparison across machines is only meaningful with the same `Cargo.lock`.
-The container builds `--locked`, and cargo picks dependency versions from the host toolchain
-when it writes the lockfile. Two machines that each generated their own lockfile legitimately
-get different `program_id`s, so copy the lockfile across before concluding anything.
+Without step 2's prune, BuildKit replays every step from cache and re-exports the first
+build's ELFs. The prune clears the host's whole BuildKit cache (pulled images stay); on
+Podman use its equivalent. CI runs the same check in
+`.github/workflows/guest-reproducibility.yml` (path-gated, weekly, and `workflow_dispatch`);
+on a host without Docker cite a run of it and say so. Compare across machines only with the
+same `Cargo.lock`: the container builds `--locked`, and two machines that generated their own
+lockfiles legitimately get different ids. The same id in both modes usually means `deploy`
+picked the same artefact twice; a `deploy <program>` without `--json` echoes the path.
 
 ## BUILD-005 — Local guest build opt-out
 
 ### Expected
 `build --guest local`, or `[build].guest = "local"`, builds guests with the host toolchain
-into `target/riscv-guest/.../release/` without needing Docker. When a `target/riscv-guest-docker`
-tree exists it prints `Clearing deterministic guest artefacts in …` and removes it (a fresh
-project has none, so nothing is printed). `doctor`
-reports `local — … not reproducible`. The explicit choice prints no nag during `build`.
+into `target/riscv-guest/.../release/` without needing Docker, and removes an existing
+`target/riscv-guest-docker` tree. `doctor` reports `local — … not reproducible`, and its
+`container runtime` row is a PASS (`not needed with [build].guest = "local"`) even with no
+container runtime. `deploy` then ships the `release/` artefact.
 
 ### Preconditions
-BUILD-001 and the risc0 Rust toolchain installed.
+BUILD-001 and the risc0 Rust toolchain installed. Localnet up for step 4.
 
 ### Steps
 1. `"$SCAFFOLD_BIN" build --guest local`
 2. `ls target/riscv-guest-docker 2>&1; find target/riscv-guest -name '*.bin' -path '*release*'`
-3. `printf '\n[build]\nguest = "local"\n' >> scaffold.toml && "$SCAFFOLD_BIN" doctor | grep "guest build"`
-4. With localnet up, `"$SCAFFOLD_BIN" deploy hello_world 2>&1 | grep 'deploy-program'`
+3. `printf '\n[build]\nguest = "local"\n' >> scaffold.toml && "$SCAFFOLD_BIN" doctor | grep -E "guest build|container runtime"`
+4. `"$SCAFFOLD_BIN" deploy hello_world 2>&1 | grep 'deploy-program'`
 
 ### Success criteria
-- Step 2 shows no docker tree and lists the release `.bin` files. To see the `Clearing …` line,
-  run a docker-mode `build` first, or create `target/riscv-guest-docker/x` by hand.
-- Step 4's echoed `wallet deploy-program <path>` names the
-  `target/riscv-guest/…/release/hello_world.bin` artefact.
-- The step 3 row reads `PASS | guest build | local …` and says it is not reproducible.
+- Step 2 shows no docker tree and lists one release `.bin` per program.
+- Step 3 reads `PASS | guest build | local …` and says it is not reproducible; the
+  `container runtime` row is not a WARN about failing guest builds.
+- Step 4's echoed `wallet deploy-program <path>` names
+  `target/riscv-guest/…/release/hello_world.bin`.
+
+### Notes
+On a host without Docker this is the build every deploying scenario uses; say so in the
+report. The first build also installs the template's host Rust toolchain through rustup.
 
 ## BUILD-006 — setup --prebuilt installs only a verified sequencer
 
@@ -215,47 +208,22 @@ BUILD-001 and the risc0 Rust toolchain installed.
 `setup --prebuilt` downloads `sequencer_service` instead of building it, and installs it only
 if it matches the published `sequencer_service.sha256`. A missing, empty or malformed
 checksum prints `not installing an unverified binary` and falls back to the source build. A
-digest mismatch is a hard error. `wallet` is always built from source.
+digest mismatch is a hard error. With no release published for the pin it prints `no prebuilt
+published yet for tag lssa-prebuilt-<sha>-<arch>-<os>, falling back to source build`.
+`wallet` is always built from source. `build --prebuilt` passes the flag to its `setup`.
 
 ### Preconditions
-A fresh project (CREATE-001).
+A fresh project on a cache root where the pin's sequencer is not built yet (a new
+`--cache-root`), so the prebuilt path is taken.
 
 ### Steps
-1. `"$SCAFFOLD_BIN" setup --prebuilt`
-2. `"$SCAFFOLD_BIN" build --prebuilt` (build chains setup and passes the flag through)
+1. `"$SCAFFOLD_BIN" setup --prebuilt` (or `"$SCAFFOLD_BIN" build --prebuilt`)
 
 ### Success criteria
-- Either the download is verified and installed, the unverified warning appears followed by a
-  source build, or (the current state of the default pin) `no prebuilt published yet for tag
-  lssa-prebuilt-<sha>-<arch>-<os>, falling back to source build` appears and the source build
-  runs. In that last case the verification path is not exercised: say so in the report.
-- An unverified binary never lands in `target/release/`.
-
-## BUILD-007 — Docker and local builds give different, recorded program ids
-
-### Expected
-The `program_id` that `deploy --json` reports for a docker-mode build equals the `ImageID`
-risc0 printed for that program during the build. It differs from the `program_id` of a
-`--guest local` build of the same source, because different toolchains produce different
-bytes. Both values are worth recording.
-
-### Preconditions
-BUILD-004 and BUILD-005 on the same project, and localnet up (LOCALNET-001).
-
-### Steps
-1. `"$SCAFFOLD_BIN" build --guest local && "$SCAFFOLD_BIN" deploy --json | tee /tmp/d8-local.json`
-2. Remove `[build].guest` from `scaffold.toml`, then
-   `"$SCAFFOLD_BIN" build 2>&1 | tee /tmp/d8-build.log | grep 'ImageID'`
-3. `"$SCAFFOLD_BIN" deploy --json | tee /tmp/d8-docker.json`
-4. `jq -r '.deploys[] | "\(.program) \(.program_id)"' /tmp/d8-local.json /tmp/d8-docker.json`
-
-### Success criteria
-- For each program, the docker `program_id` matches the `ImageID` in step 2's
-  `ELFs ready at: ImageID: <hex> - <path>` line for that program.
-- For each program, the docker and local `program_id`s differ.
+- One of the three outcomes above is printed after `Checking for prebuilt binaries (tag: …)`.
+- An unverified binary never lands in `<lez>/target/release/`.
 
 ### Notes
-Only compare across machines with the same `Cargo.lock` (see BUILD-004).
-The same `program_id` in both modes usually means `deploy` picked the same artefact twice.
-`--json` does not carry the binary path: run one `deploy <program>` without `--json` in each
-mode and read the echoed `wallet deploy-program <path>` line.
+At the current default pin no prebuilt is published, so the outcome is the fallback and the
+verification path is not exercised: say so in the report. Once the fallback line has printed
+you may stop the command; BUILD-001 already covers the source build.

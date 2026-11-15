@@ -9,17 +9,11 @@ scenarios:
     provenance: documented
     source: DOGFOODING.md@740e5e9 E3
   - id: SKILLS-002
-    title: init installs skills and re-runs idempotently
+    title: init refreshes skills idempotently and leaves team-owned ones alone
     priority: P2
     provenance: documented
     source: DOGFOODING.md@740e5e9 E3
-  - id: SKILLS-003
-    title: init leaves team-owned skills alone
-    priority: P2
-    provenance: documented
-    source: DOGFOODING.md@740e5e9 E3
-    depends_on: [SKILLS-002]
-retired: []
+retired: [SKILLS-003]
 ---
 
 # AI skills
@@ -34,62 +28,51 @@ All of it is version-controlled, never gitignored. Related:
 
 ### Expected
 Default and spel projects both contain exactly the four `.claude/skills/<name>/SKILL.md`
-files, each byte-identical to `skills/<name>/SKILL.md` in the repo. They also contain the
-same four `.cursor/rules/<name>.mdc` files: frontmatter with `description:` and
-`alwaysApply: false`, no `name:`, and a body identical to SKILL.md. `AGENTS.md` has one table
-row per skill, sorted by name. The first cell is the skill name as a link to
-`.claude/skills/<name>/SKILL.md`, and the second is the description from the SKILL.md
-frontmatter. `.gitignore`
-does not exclude `.claude/`, `.cursor/` or `AGENTS.md`.
+files, each byte-identical to `skills/<name>/SKILL.md` in the repo, and the same four
+`.cursor/rules/<name>.mdc` files: frontmatter with `description:` and `alwaysApply: false`,
+no `name:`, and a body identical to SKILL.md. `AGENTS.md` has one table row per skill, sorted
+by name: the name as a link to `.claude/skills/<name>/SKILL.md`, then the description from
+the SKILL.md frontmatter. `.gitignore` does not exclude `.claude/`, `.cursor/` or `AGENTS.md`.
 
 ### Preconditions
-None (no setup or network needed beyond creation).
+A default and a spel project that nobody edited: reuse CREATE-001's and SPEL-001's, or create
+two. Set `PROJECTS="<default-project> <spel-project>"`.
 
 ### Steps
-1. `"$SCAFFOLD_BIN" new dogfood-skills-default` and `"$SCAFFOLD_BIN" new dogfood-skills-spel --template spel`
-2. `find dogfood-skills-*/.claude/skills dogfood-skills-*/.cursor/rules -type f | sort`
-3. `for s in basecamp lez-template lgs-cli spel-template; do diff dogfood-skills-default/.claude/skills/$s/SKILL.md "$REPO_ROOT/skills/$s/SKILL.md" && echo "$s identical"; done`
-4. `head -5 dogfood-skills-default/.cursor/rules/lgs-cli.mdc; cat dogfood-skills-default/.gitignore`, then for each skill compare
-   the `.mdc` body with the SKILL.md body (both after their second `---` line):
-   `for s in basecamp lez-template lgs-cli spel-template; do body() { awk 'f{print} /^---$/{c++; if(c==2)f=1}' "$1"; }; diff <(body dogfood-skills-default/.cursor/rules/$s.mdc) <(body "$REPO_ROOT/skills/$s/SKILL.md") && echo "$s body identical"; done`
-5. `for p in dogfood-skills-default dogfood-skills-spel; do grep -F '(.claude/skills/' "$p/AGENTS.md"; ( cd "$p" && grep -o '(\.claude/skills/[^)]*)' AGENTS.md | tr -d '()' | xargs ls ); done`
+1. `for p in $PROJECTS; do find $p/.claude/skills $p/.cursor/rules -type f | sort; grep -c 'claude\|cursor\|AGENTS' $p/.gitignore; done`
+2. Compare every skill and rule with the repo copy (the `.mdc` and SKILL.md bodies both start
+   after their second `---` line):
+   ```bash
+   body() { awk 'f{print} /^---$/{c++; if(c==2)f=1}' "$1"; }
+   for p in $PROJECTS; do for s in basecamp lez-template lgs-cli spel-template; do
+     diff $p/.claude/skills/$s/SKILL.md "$REPO_ROOT/skills/$s/SKILL.md" &&
+     diff <(body $p/.cursor/rules/$s.mdc) <(body "$REPO_ROOT/skills/$s/SKILL.md") && echo "$p $s identical"
+     head -5 $p/.cursor/rules/$s.mdc | grep -c '^name:'
+   done; done
+   ```
+3. `for p in $PROJECTS; do grep -F '(.claude/skills/' "$p/AGENTS.md"; ( cd "$p" && grep -o '(\.claude/skills/[^)]*)' AGENTS.md | tr -d '()' | xargs ls ); done`
 
 ### Success criteria
-- There are four SKILL.md files and four .mdc files per project, and every diff is empty.
-- The .mdc frontmatter has no `name:`, and `.gitignore` has no skill paths.
-- Step 5 prints four rows per project (`basecamp`, `lez-template`, `lgs-cli`,
+- Step 1 lists four SKILL.md and four .mdc files per project, and the `grep -c` prints `0`.
+- Step 2 prints `identical` for all eight project/skill pairs, and `0` for every `name:` count.
+- Step 3 prints four rows per project (`basecamp`, `lez-template`, `lgs-cli`,
   `spel-template`), each with a non-empty description, and every linked SKILL.md exists.
 
-## SKILLS-002 — init installs skills and re-runs idempotently
+## SKILLS-002 — init refreshes skills idempotently and leaves team-owned ones alone
 
 ### Expected
 `init` in a bare directory installs the same skills and `AGENTS.md`. Re-running `init`
 succeeds, prints `AI skills refreshed under .claude/skills/, .cursor/rules/, AGENTS.md.`, and
-leaves the content byte-identical.
+leaves the content byte-identical. `init` owns only the four shipped skill names: other
+directories under `.claude/skills/` are not touched.
 
 ### Preconditions
-An empty directory.
+A directory adopted with `init` (CREATE-007's `adopt` works, or `mkdir d && cd d && lgs init`).
 
 ### Steps
-1. `mkdir dogfood-skills-init && cd dogfood-skills-init && "$SCAFFOLD_BIN" init`
-2. `shasum AGENTS.md .claude/skills/lgs-cli/SKILL.md .cursor/rules/lgs-cli.mdc > /tmp/s1`
-3. `"$SCAFFOLD_BIN" init && shasum AGENTS.md .claude/skills/lgs-cli/SKILL.md .cursor/rules/lgs-cli.mdc | diff /tmp/s1 -`
+1. `shasum AGENTS.md .claude/skills/lgs-cli/SKILL.md .cursor/rules/lgs-cli.mdc > /tmp/s1`
+2. `mkdir -p .claude/skills/team-notes && echo keep > .claude/skills/team-notes/SKILL.md`
+3. `"$SCAFFOLD_BIN" init && shasum -c /tmp/s1 && cat .claude/skills/team-notes/SKILL.md`
 
 ### Success criteria
-- The second `init` exits 0 with the refreshed message, and the diff is empty.
-
-## SKILLS-003 — init leaves team-owned skills alone
-
-### Expected
-`init` owns only the four shipped skill names. Other directories under `.claude/skills/` are
-not touched.
-
-### Preconditions
-SKILLS-002.
-
-### Steps
-1. `mkdir -p .claude/skills/team-notes && echo keep > .claude/skills/team-notes/SKILL.md`
-2. `"$SCAFFOLD_BIN" init && cat .claude/skills/team-notes/SKILL.md`
-
-### Success criteria
-- Step 2 prints `keep`.
+- Step 3 exits 0 with the refreshed message, every checksum is `OK`, and it prints `keep`.

@@ -272,7 +272,7 @@ marked *(Superseded …)* or *(… See R#)* above is governed by the matching en
 - **R10. Basecamp diagnostics and coverage.** Basecamp health checks are reported by
   `basecamp doctor`, not by the top-level `doctor`. Dogfooding coverage is the `BCSETUP`,
   `BCMOD` and `BCLAUNCH` scenarios in `.dogfooding/features/`. That adds artefact builds by
-  variant (`BCMOD-005`, `BCMOD-006`), the standalone run loop (`BCMOD-007`, `BCMOD-008`), and
+  variant (`BCMOD-005`), the standalone run loop (`BCMOD-007`), and
   pin-set checks that need no app build (`BCSETUP-007`).
 
 ### Added requirements

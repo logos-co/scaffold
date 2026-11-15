@@ -4,13 +4,8 @@ prefix: CLI
 surface: cli
 scenarios:
   - id: CLI-001
-    title: Help and version
+    title: Help, version and unknown commands
     priority: P1
-    provenance: documented
-    source: DOGFOODING.md@740e5e9 E1
-  - id: CLI-002
-    title: Unknown command gives a corrective hint
-    priority: P2
     provenance: documented
     source: DOGFOODING.md@740e5e9 E1
   - id: CLI-003
@@ -18,32 +13,17 @@ scenarios:
     priority: P1
     provenance: documented
     source: DOGFOODING.md@740e5e9 E1
-  - id: CLI-004
-    title: Help flags have no side effects
-    priority: P2
-    provenance: documented
-    source: DOGFOODING.md@740e5e9 E1
-  - id: CLI-005
-    title: Removed setup flag is rejected
-    priority: P2
-    provenance: documented
-    source: DOGFOODING.md@740e5e9 E1
   - id: CLI-006
     title: Quiet mode suppresses command echoes
     priority: P2
     provenance: documented
     source: docs/commands.md
-  - id: CLI-007
-    title: Every top-level command answers --help
-    priority: P2
-    provenance: documented
-    source: DOGFOODING.md@740e5e9 E1
   - id: CLI-008
     title: A closed output pipe ends the command quietly
     priority: P2
     provenance: inferred
     source: user 2026-11-13
-retired: []
+retired: [CLI-002, CLI-004, CLI-005, CLI-007]
 ---
 
 # CLI basics
@@ -52,91 +32,51 @@ The CLI is discoverable and its errors are useful. `lgs` and `logos-scaffold` ar
 binary. By default the CLI echoes the underlying commands so users can drop down a level.
 Related: [Diagnostics](diagnostics.md), [Project creation](project-creation.md).
 
-## CLI-001 — Help and version
+## CLI-001 — Help, version and unknown commands
 
 ### Expected
-`--help`, `help` and a bare invocation print the same usage listing all top-level commands.
-`help <command>` prints exactly what `<command> --help` prints, and an unknown command fails
-like any unknown subcommand. `--version` prints the version and exits 0. Most subcommands' `--help` ends with an `Examples:` block of
-copy-paste commands (see CLI-007 for the ones that do not).
+`--help`, `help` and a bare invocation print the same usage. `help <command>` prints exactly
+what `<command> --help` prints. `--version` matches `Cargo.toml` under both binary names.
+Every top-level command answers `--help` with exit 0 and touches nothing on disk, including
+`new`/`create` (no `--help/` directory) and `spel`, which scaffold intercepts before the
+passthrough. `localnet`, `test-node`, `basecamp` and `run` have no `Examples:` block in their
+`--help` (their subcommands may); every other visible command has one, or examples in its
+long description (`spel`). An unknown command fails and points to `--help`.
 
 ### Preconditions
-None.
+None. Step 3 makes its own empty directory.
 
 ### Steps
-1. `"$SCAFFOLD_BIN" --help; "$SCAFFOLD_BIN" help; "$SCAFFOLD_BIN" --version`
-2. `"$SCAFFOLD_BIN" deploy --help; lgs --version`
-3. `diff <("$SCAFFOLD_BIN" help deploy) <("$SCAFFOLD_BIN" deploy --help); "$SCAFFOLD_BIN" help test-node start | head -3; "$SCAFFOLD_BIN" help nope; echo "exit=$?"`
-4. `diff <("$SCAFFOLD_BIN" --help) <("$SCAFFOLD_BIN")`
+1. `"$SCAFFOLD_BIN" --version; "${SCAFFOLD_BIN%/*}/lgs" --version; grep -m1 '^version' "$REPO_ROOT/Cargo.toml"`
+2. `diff <("$SCAFFOLD_BIN" --help) <("$SCAFFOLD_BIN" help); diff <("$SCAFFOLD_BIN" --help) <("$SCAFFOLD_BIN"); diff <("$SCAFFOLD_BIN" help deploy) <("$SCAFFOLD_BIN" deploy --help); "$SCAFFOLD_BIN" help test-node start | head -3`
+3. `cd "$(mktemp -d)"; for c in create new init setup build deploy localnet test-node wallet spel basecamp doctor run report tui completions; do "$SCAFFOLD_BIN" $c --help > /tmp/h.txt; echo "$c exit=$? examples=$(grep -c '^Examples' /tmp/h.txt)"; done; ls -A`
+4. `"$SCAFFOLD_BIN" nonexistent-command; echo "exit=$?"; "$SCAFFOLD_BIN" help nope; echo "exit=$?"`
 
 ### Success criteria
-- All exit 0, and `help` matches `--help` (`diff` prints nothing, trailing newline included).
-- Step 3's `diff` prints nothing, `help test-node start` shows `Usage: logos-scaffold test-node start`,
-  and `help nope` exits non-zero with `unrecognized subcommand 'nope'`. Step 4's `diff` prints nothing.
-- `--version` matches `Cargo.toml`, and `lgs` prints the same version.
-
-## CLI-002 — Unknown command gives a corrective hint
-
-### Expected
-An unknown subcommand fails and points to `--help` (or suggests a similar command).
-
-### Preconditions
-None.
-
-### Steps
-1. `"$SCAFFOLD_BIN" nonexistent-command; echo "exit=$?"`
-
-### Success criteria
-- Non-zero exit and a corrective hint.
+- Step 1 prints the same version three times.
+- Every `diff` in step 2 prints nothing, and `help test-node start` shows
+  `Usage: logos-scaffold test-node start`.
+- Step 3: every command exits 0 and `ls -A` prints nothing. `examples=0` appears only for
+  `localnet`, `test-node`, `basecamp` and `run`; any change to that list is a finding.
+- Step 4: both exit non-zero with `unrecognized subcommand` and a pointer to `--help`.
 
 ## CLI-003 — Project commands outside a project fail clearly
 
 ### Expected
-Outside a project, `build`, `deploy`, `doctor`, `localnet status` and `wallet list` each fail
-with the scaffold message `This command must be run inside a logos-scaffold project`,
-followed by a next step naming `logos-scaffold create <name>` (the name follows argv[0], so
-`lgs` prints `lgs create <name>`) and `Searched from <cwd>.` None of them shows a raw
+Outside a project, project-scoped commands fail with `This command must be run inside a
+logos-scaffold project`, a next step naming `logos-scaffold create <name>` (the name follows
+argv[0], so `lgs` prints `lgs create <name>`) and `Searched from <cwd>.` None shows a raw
 file-not-found error.
-
-### Preconditions
-An empty temporary directory.
-
-### Steps
-1. `cd "$(mktemp -d)"; for c in build deploy doctor "localnet status" "wallet list"; do "$SCAFFOLD_BIN" $c; echo "exit=$?"; done`
-
-### Success criteria
-- Every command exits non-zero with `must be run inside a logos-scaffold project` and the
-  `logos-scaffold create <name>` next step.
-
-## CLI-004 — Help flags have no side effects
-
-### Expected
-`new --help` and `create --help` create no files or directories.
-
-### Preconditions
-An empty temporary directory.
-
-### Steps
-1. `cd "$(mktemp -d)" && "$SCAFFOLD_BIN" new --help && "$SCAFFOLD_BIN" create --help && ls -A`
-
-### Success criteria
-- `ls -A` prints nothing (in particular, no `--help/` directory).
-
-## CLI-005 — Removed setup flag is rejected
-
-### Expected
-`setup --help` does not mention `--wallet-install`, and `setup --wallet-install auto` is
-rejected at parse time as an unknown argument.
 
 ### Preconditions
 None.
 
 ### Steps
-1. `"$SCAFFOLD_BIN" setup --help | grep -c wallet-install`
-2. `"$SCAFFOLD_BIN" setup --wallet-install auto; echo "exit=$?"`
+1. `cd "$(mktemp -d)"; for c in build deploy doctor "localnet status" "wallet list" "basecamp doctor"; do "$SCAFFOLD_BIN" $c; echo "exit=$?"; done`
 
 ### Success criteria
-- Step 1 prints `0`. Step 2 exits non-zero with an unexpected-argument error.
+- Every command exits non-zero with `must be run inside a logos-scaffold project` and the
+  `create <name>` next step.
 
 ## CLI-006 — Quiet mode suppresses command echoes
 
@@ -145,43 +85,24 @@ Global `-q`/`--quiet`, or `LOGOS_SCAFFOLD_QUIET=1`, suppresses echoed external c
 (`$ …` lines). Results and errors still print.
 
 ### Preconditions
-A project with BUILD-001 done.
+A project with BUILD-001 done (a repeated `setup` is quick).
 
 ### Steps
 1. `"$SCAFFOLD_BIN" setup | grep -c '^\$ '`
-2. `"$SCAFFOLD_BIN" -q setup | grep -c '^\$ '`
+2. `"$SCAFFOLD_BIN" -q setup | tee /tmp/q.txt | grep -c '^\$ '; grep -c 'setup complete' /tmp/q.txt`
 3. `LOGOS_SCAFFOLD_QUIET=1 "$SCAFFOLD_BIN" setup | grep -c '^\$ '`
 
 ### Success criteria
-- Step 1 prints a positive count. Steps 2 and 3 print `0`. Run step 2 once without the pipe and confirm `setup complete` still prints.
-
-## CLI-007 — Every top-level command answers --help
-
-### Expected
-Every top-level command accepts `--help`, prints usage and exits 0 without touching the
-filesystem, including `spel --help`, which scaffold intercepts before the passthrough. At
-this revision `localnet`, `test-node`, `basecamp` and `run` have no `Examples:` block in
-their `--help` (their subcommands may). Every other visible command has one, or examples in
-its long description (`spel`).
-
-### Preconditions
-An empty temporary directory.
-
-### Steps
-1. `cd "$(mktemp -d)"; for c in create new init setup build deploy localnet test-node wallet spel basecamp doctor run report tui completions; do "$SCAFFOLD_BIN" $c --help > /tmp/h.txt; echo "$c exit=$? examples=$(grep -c '^Examples' /tmp/h.txt)"; done; ls -A`
-
-### Success criteria
-- Every command exits 0, and `ls -A` prints nothing.
-- `examples=0` appears only for `localnet`, `test-node`, `basecamp` and `run`. Any other
-  command without examples, or a change to that list, is a finding to record.
+- Step 1 prints a positive count. Steps 2 and 3 print `0` echoes, and step 2 still finds
+  `setup complete`.
 
 ## CLI-008 — A closed output pipe ends the command quietly
 
 ### Expected
 When the reader of stdout hangs up (`lgs … | head -1`), the command ends like other Unix
 tools: killed by SIGPIPE (shell status 141), with nothing on stderr. It never prints a Rust
-panic message or `error: Broken pipe`, and never exits 101. A broken pipe on a *child's* stdin
-(for example a wallet that exits before reading its password) is still reported as an error.
+panic or `error: Broken pipe`, and never exits 101. A broken pipe on a *child's* stdin (a
+wallet that exits before reading its password) is still reported as an error.
 
 ### Preconditions
 Bash (`PIPESTATUS`). A project with BUILD-001 done for step 2.
@@ -193,7 +114,3 @@ Bash (`PIPESTATUS`). A project with BUILD-001 done for step 2.
 ### Success criteria
 - Every status is 141 or 0 (0 when the whole output fit in the pipe before `head` exited),
   never 101 or 1, and every `stderr=[...]` is empty.
-
-### Notes
-This is the failure that made `lgs --help | head` print `failed printing to stdout: Broken
-pipe` with a panic backtrace hint before it was fixed.

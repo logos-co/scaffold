@@ -20,7 +20,7 @@ Generic "this would be nice" does not count.
 
 <!--
 - What friction did you (or the user you represent) hit?
-- Which `logos-scaffold` command or dogfooding scenario (an ID from `.dogfooding/features/`, e.g. `DEPLOY-003`) surfaced it?
+- Which `logos-scaffold` command or dogfooding scenario (an ID from `.dogfooding/features/`, e.g. `DEPLOY-002`) surfaced it?
 - What did you try before this fix?
 -->
 

@@ -162,7 +162,7 @@ fn cmd_basecamp_docs() -> DynResult<()> {
 /// Bail before any nix invocation if `nix` isn't on PATH. Without this,
 /// `run_logged` surfaces `os error 2` from the spawn failure with no
 /// signal that the missing executable is `nix` — a documented UX
-/// regression (dogfooding scenario BCSETUP-008).
+/// regression (dogfooding scenario BCSETUP-006).
 fn ensure_nix_present() -> DynResult<()> {
     if crate::process::which("nix").is_none() {
         bail!(

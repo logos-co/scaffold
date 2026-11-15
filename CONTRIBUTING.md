@@ -109,7 +109,7 @@ cargo clippy --locked --all-targets -- -D warnings
 
 Use [.dogfooding/](./.dogfooding/index.md) as the canonical validation guide for scaffold DX.
 [product.md](./.dogfooding/product.md) explains how to set up the environment, and each file
-in `features/` lists the scenarios for one feature, with stable IDs such as `DEPLOY-003`.
+in `features/` lists the scenarios for one feature, with stable IDs such as `DEPLOY-002`.
 
 At minimum:
 

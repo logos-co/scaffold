@@ -8,28 +8,19 @@ scenarios:
     priority: P0
     provenance: documented
     source: DOGFOODING.md@740e5e9 D1
-  - id: CREATE-002
-    title: create is an alias of new
-    priority: P2
-    provenance: documented
-    source: DOGFOODING.md@740e5e9 D1
   - id: CREATE-003
-    title: Invalid template name is rejected
+    title: Template selection and the create alias
     priority: P2
     provenance: documented
     source: DOGFOODING.md@740e5e9 E2
+    depends_on: [CREATE-001]
   - id: CREATE-004
     title: Vendor dependencies into the project
     priority: P2
     provenance: documented
     source: DOGFOODING.md@740e5e9 E2
   - id: CREATE-005
-    title: Custom cache root keeps checkouts pin-isolated
-    priority: P2
-    provenance: documented
-    source: DOGFOODING.md@740e5e9 E2
-  - id: CREATE-006
-    title: Non-default LEZ source gets its own checkout
+    title: Cache checkouts are isolated by cache root, pin and LEZ source
     priority: P2
     provenance: documented
     source: DOGFOODING.md@740e5e9 E2
@@ -43,7 +34,8 @@ scenarios:
     priority: P1
     provenance: documented
     source: ADR.md
-retired: []
+    depends_on: [CREATE-001]
+retired: [CREATE-002, CREATE-006]
 ---
 
 # Project creation
@@ -57,132 +49,112 @@ existing directory with `init`. `init` is also the single migration entry point 
 
 ### Expected
 `new <name>` creates `<name>/` from the `default` template and prints the destination path,
-the pinned LEZ commit and the cache root. The generated `scaffold.toml` is schema `0.2.0`. It
-includes `[repos.lez]` and `[repos.spel]` (with pins and an empty `path`), a `[circuits]`
-table whose install dir is `.scaffold/circuits`, and `[wallet].home_dir`. It has no wallet
-binary field. The generated `Cargo.toml` pins `risc0-zkvm` and `risc0-build` with an exact
-`=3.0.5` requirement, the version of the `r0vm` that scaffold provisions.
+the pinned LEZ commit and the cache root. The generated `scaffold.toml` is schema `0.2.0`
+with `[repos.lez]` and `[repos.spel]` (source and pin, no `path` key), `[repos.basecamp]`,
+`[repos.lgpm]`, a `[circuits]` table, and `[wallet].home_dir`. It has no wallet binary field.
+The generated `Cargo.toml` pins `risc0-zkvm` and `risc0-build` with an exact `=3.0.5`
+requirement, the version of the `r0vm` that scaffold provisions.
 
 ### Preconditions
-Freshly built `$SCAFFOLD_BIN` and a writable `$SCRATCH_ROOT`.
+Freshly built `$SCAFFOLD_BIN`, a writable `$SCRATCH_ROOT`, and network access: the first
+`new` on a cache root clones LEZ into it (about a minute).
 
 ### Steps
 1. `cd "$SCRATCH_ROOT" && "$SCAFFOLD_BIN" new dogfood-default`
-2. `grep -n '^\[' dogfood-default/scaffold.toml`
-3. `ls dogfood-default/src/bin`
-4. `grep -n 'risc0' dogfood-default/Cargo.toml`
+2. `grep -n '^\[' dogfood-default/scaffold.toml; grep -n 'binary\|home_dir' dogfood-default/scaffold.toml`
+3. `ls dogfood-default/src/bin; grep -n 'risc0' dogfood-default/Cargo.toml`
 
 ### Success criteria
 - Exit 0, and the output names the path, LEZ pin and cache root.
 - `scaffold.toml` has `[circuits]` and `[wallet]` with `home_dir`, and no `binary =` line.
-- `src/bin/` contains the `run_hello_world*.rs` example runners.
-- Step 4 shows `risc0-zkvm` and `risc0-build` with `"=3.0.5"`.
+- `src/bin/` contains the `run_hello_world*.rs` example runners, and `risc0-zkvm` and
+  `risc0-build` are pinned with `"=3.0.5"`.
 
-## CREATE-002 — create is an alias of new
-
-### Expected
-`create <name>` behaves exactly like `new <name>`.
-
-### Preconditions
-None.
-
-### Steps
-1. `"$SCAFFOLD_BIN" create dogfood-default-create` in `$SCRATCH_ROOT`.
-
-### Success criteria
-- Exit 0, and the project layout matches CREATE-001's.
-
-## CREATE-003 — Invalid template name is rejected
+## CREATE-003 — Template selection and the create alias
 
 ### Expected
-An unknown `--template` fails with an error that lists the available templates (`default`,
-`spel`) and mentions the deprecated `lez-framework` alias. It never falls back to `default`
-silently. `--template lez-framework` still works, prints a deprecation warning and produces
-a spel project.
+`create <name>` behaves exactly like `new <name>`. An unknown `--template` fails with an
+error that lists `default` and `spel` and mentions the deprecated `lez-framework` alias; it
+never falls back to `default` silently. `--template lez-framework` still works, prints a
+deprecation warning and produces a spel project.
 
 ### Preconditions
-None.
+CREATE-001. Run step 3 after SPEL-001, so the spel CLI is already built; otherwise this step
+builds it first (minutes).
 
 ### Steps
-1. `"$SCAFFOLD_BIN" new dogfood-invalid --template nonexistent-template; echo "exit=$?"`
-2. `"$SCAFFOLD_BIN" new dogfood-lez-alias --template lez-framework`
+1. `cd "$SCRATCH_ROOT" && "$SCAFFOLD_BIN" create dogfood-create`, then
+   `diff <(cd dogfood-default && find . -path ./.scaffold -prune -o -type f -print | sort) <(cd dogfood-create && find . -path ./.scaffold -prune -o -type f -print | sort)`
+   (compare before anything is built in `dogfood-default`, or prune `target` too).
+2. `"$SCAFFOLD_BIN" new dogfood-invalid --template nonexistent-template; echo "exit=$?"; ls -d dogfood-invalid`
+3. `"$SCAFFOLD_BIN" new dogfood-lez-alias --template lez-framework && ls dogfood-lez-alias/spel.toml`
 
 ### Success criteria
-- Step 1 exits non-zero, names `default` and `spel`, and does not create `dogfood-invalid/`.
-- Step 2 warns about the deprecation, and the result contains `spel.toml`.
+- Step 1 exits 0 and the `diff` is empty.
+- Step 2 exits non-zero, names `default` and `spel`, and creates no directory.
+- Step 3 warns that `lez-framework` is deprecated in favour of `--template spel`, and the
+  result contains `spel.toml`.
 
 ## CREATE-004 — Vendor dependencies into the project
 
 ### Expected
-`--vendor-deps` clones the pinned LEZ into `<project>/.scaffold/repos/lez` and records
-`path = ".scaffold/repos/lez"` in `scaffold.toml`.
+`--vendor-deps` clones the pinned dependency into the project and records its relative path
+in `scaffold.toml`. For the default template that is LEZ at creation
+(`.scaffold/repos/lez`, `[repos.lez].path`); spel is vendored there when `setup` first needs
+it. For `--template spel` it is spel too (`.scaffold/repos/spel`, `[repos.spel].path`), and
+the clone happens after `spel init` returns, so creation never fails with `Directory '<name>'
+already exists`.
 
 ### Preconditions
-None.
+For step 2, SPEL-001 has built the spel CLI (or allow minutes for it).
 
 ### Steps
-1. `"$SCAFFOLD_BIN" new dogfood-vendor --vendor-deps`
-2. `git -C dogfood-vendor/.scaffold/repos/lez rev-parse HEAD`
-3. `grep -A4 'repos.lez' dogfood-vendor/scaffold.toml`
+1. `"$SCAFFOLD_BIN" new dogfood-vendor --vendor-deps`, then
+   `git -C dogfood-vendor/.scaffold/repos/lez rev-parse HEAD; grep -A4 'repos.lez' dogfood-vendor/scaffold.toml`
+2. `"$SCAFFOLD_BIN" new dogfood-spel-vendored --template spel --vendor-deps`, then
+   `git -C dogfood-spel-vendored/.scaffold/repos/spel rev-parse HEAD; grep -A3 'repos.spel' dogfood-spel-vendored/scaffold.toml`
 
 ### Success criteria
-- The vendored HEAD equals `[repos.lez].pin`, and `path` is the relative `.scaffold/repos/lez`.
+- Each vendored HEAD equals the pin recorded in its `[repos.*]` table, and `path` is the
+  relative `.scaffold/repos/<name>`.
 
-## CREATE-005 — Custom cache root keeps checkouts pin-isolated
+## CREATE-005 — Cache checkouts are isolated by cache root, pin and LEZ source
 
 ### Expected
 `--cache-root DIR` is honoured and written to `scaffold.toml`, and non-vendored LEZ lands in
-`DIR/repos/lez/<pin>/`. Different pins never share a checkout: a second project on the same
-cache root with a different `[repos.lez].pin` gets its own `DIR/repos/lez/<other-pin>/`, and
-the first checkout keeps its HEAD.
+`DIR/repos/lez/<pin>/`. Checkouts are never shared across pins or sources: a project with a
+different `[repos.lez].pin` gets `DIR/repos/lez/<other-pin>/`, and a project created with
+`--lez-path <checkout>` (legacy alias `--lssa-path`) gets `DIR/repos/lez/<pin>-src-<hash>/`,
+which `test-node pins --json` reports with `checkout_ownership: managed_cache`. Existing
+checkouts keep their HEAD and build output. A `--lez-path` that does not exist fails with an
+error naming it.
 
 ### Preconditions
-`LOGOS_SCAFFOLD_CACHE_ROOT` **unset** (`unset LOGOS_SCAFFOLD_CACHE_ROOT`): the env var outranks
-`[scaffold].cache_root` in every command after creation (`doctor` shows `cache root | … (from
-LOGOS_SCAFFOLD_CACHE_ROOT)`), so with it exported, step 3's `setup` clones into the env cache
-and this scenario tests the wrong layer. Step 3 needs an older LEZ commit SHA to pin (for
-example the commit of an earlier release tag).
+`LOGOS_SCAFFOLD_CACHE_ROOT` **unset** for every command here (`env -u
+LOGOS_SCAFFOLD_CACHE_ROOT …`): the variable outranks `[scaffold].cache_root`, so with it
+exported this scenario tests the wrong layer. An older LEZ commit SHA for step 2 (for
+example an earlier release tag's commit). A local LEZ clone for step 3, for example
+`git clone <cache>/repos/lez/<pin> /tmp/lez-src` (TNODE-006 uses the same clone).
 
 ### Steps
 1. `"$SCAFFOLD_BIN" new dogfood-cache --cache-root "$SCRATCH_ROOT/custom-cache"`
-2. `find "$SCRATCH_ROOT/custom-cache/repos/lez" -mindepth 1 -maxdepth 1 -type d`
-3. `"$SCAFFOLD_BIN" new dogfood-cache2 --cache-root "$SCRATCH_ROOT/custom-cache"`, set
+2. `"$SCAFFOLD_BIN" new dogfood-cache2 --cache-root "$SCRATCH_ROOT/custom-cache"`, set
    `[repos.lez].pin` in `dogfood-cache2/scaffold.toml` to the older SHA, then
-   `( cd dogfood-cache2 && "$SCAFFOLD_BIN" setup )`.
-4. `for d in "$SCRATCH_ROOT"/custom-cache/repos/lez/*/; do echo "$d $(git -C "$d" rev-parse HEAD)"; done`
+   `( cd dogfood-cache2 && "$SCAFFOLD_BIN" setup )`. Only the clone matters: stop `setup` once
+   `custom-cache/repos/lez/<older-sha>/.git` exists (`pgrep -x cargo | xargs kill` afterwards).
+3. `"$SCAFFOLD_BIN" new dogfood-lezpath --cache-root "$SCRATCH_ROOT/custom-cache" --lez-path /tmp/lez-src`,
+   then `"$SCAFFOLD_BIN" test-node pins --project dogfood-lezpath --json | jq '.lez_checkout, .checkout_ownership'`
+4. `for d in "$SCRATCH_ROOT"/custom-cache/repos/lez/*/; do echo "$d $(git -C "$d" rev-parse HEAD)"; done`,
+   then `( cd dogfood-cache2 && "$SCAFFOLD_BIN" doctor | grep 'cache root' )`
+5. `"$SCAFFOLD_BIN" new dogfood-badpath --lez-path /does/not/exist; echo "exit=$?"`
 
 ### Success criteria
-- A directory named after the pin exists under the custom cache root.
-- After step 4 there are two pin directories, each at its own pin. The first one's HEAD is
-  unchanged, and `( cd dogfood-cache2 && "$SCAFFOLD_BIN" doctor | grep 'cache root' )` says `(from
-  scaffold.toml [scaffold].cache_root)`.
-
-### Notes
-Step 3 clones and builds a second LEZ (about 10 minutes). Only the clone matters here, so a
-build failure on the older pin does not fail this scenario.
-
-## CREATE-006 — Non-default LEZ source gets its own checkout
-
-### Expected
-`--lez-path <checkout>` (legacy alias `--lssa-path`) clones into
-`<cache>/repos/lez/<pin>-src-<hash>/`. It leaves the default-source `<pin>/` checkout and its
-`target/` alone. `test-node pins --json` in that project reports the same `<pin>-src-<hash>`
-directory with `checkout_ownership: managed_cache`. A path that does not exist fails with an
-error naming that path.
-
-### Preconditions
-A real LEZ checkout on disk. Skip this scenario if none is available.
-
-### Steps
-1. `"$SCAFFOLD_BIN" new dogfood-lezpath --lez-path /abs/path/to/lez`
-2. `( cd dogfood-lezpath && "$SCAFFOLD_BIN" setup )`
-3. `"$SCAFFOLD_BIN" test-node pins --project dogfood-lezpath --json | jq '.lez_checkout, .checkout_ownership'`
-4. `"$SCAFFOLD_BIN" new dogfood-badpath --lez-path /does/not/exist`
-
-### Success criteria
-- `<pin>-src-<hash>/` exists, and the mtime of `<pin>/target` is unchanged.
-- Step 3 reports that directory with `managed_cache`.
-- Step 4 fails and names `/does/not/exist`.
+- `scaffold.toml` of each project has `cache_root = "<custom-cache>"`.
+- Step 4 lists three directories: `<pin>`, `<older-sha>` and `<pin>-src-<hash>`, each at its
+  own commit; the first one's HEAD did not move. `doctor` says `(from scaffold.toml
+  [scaffold].cache_root)`.
+- Step 3 reports the `<pin>-src-<hash>` directory with `managed_cache`.
+- Step 5 exits non-zero and names `/does/not/exist`.
 
 ### Notes
 Projects created by scaffold ≤ 0.4.0 with a non-default source rebuild once into
@@ -193,20 +165,20 @@ Projects created by scaffold ≤ 0.4.0 with a non-default source rebuild once in
 ### Expected
 In a directory with no `scaffold.toml`, `init` writes a schema-0.2.0 `scaffold.toml` with
 defaults, creates `.scaffold/{state,logs}`, appends `.scaffold` to `.gitignore` and installs
-the AI skills. `--dry-run` previews without writing.
+the AI skills (`AGENTS.md`, `.claude/skills/`, `.cursor/rules/`). `--dry-run` previews
+without writing.
 
 ### Preconditions
 None.
 
 ### Steps
-1. `mkdir "$SCRATCH_ROOT/adopt" && cd "$SCRATCH_ROOT/adopt"`
-2. `"$SCAFFOLD_BIN" init --dry-run && ls -A`
-3. `"$SCAFFOLD_BIN" init && ls -A && cat .gitignore`
+1. `mkdir "$SCRATCH_ROOT/adopt" && cd "$SCRATCH_ROOT/adopt" && "$SCAFFOLD_BIN" init --dry-run && ls -A`
+2. `"$SCAFFOLD_BIN" init && ls -A . .scaffold && cat .gitignore`
 
 ### Success criteria
-- After step 2 the directory is still empty.
-- After step 3 the directory contains `scaffold.toml`, `.scaffold/state`, `.scaffold/logs`
-  and `AGENTS.md`, and `.gitignore` contains `.scaffold`.
+- After step 1 the directory is still empty.
+- After step 2 it contains `scaffold.toml`, `.scaffold/state`, `.scaffold/logs`, `AGENTS.md`,
+  `.claude` and `.cursor`, and `.gitignore` contains `.scaffold`.
 
 ## CREATE-008 — Migrate an old scaffold.toml with init
 
@@ -219,12 +191,11 @@ legacy `url` fields and bumps `[scaffold].version` to `0.2.0`. It writes `scaffo
 unless `--no-backup` is passed. Re-running `init` on a current file leaves it unchanged.
 
 ### Preconditions
-A project from CREATE-001.
+A copy of a CREATE-001 project (no build needed).
 
 ### Steps
-1. Edit `scaffold.toml`: set `[scaffold].version = "0.1.0"` and add `url = "https://example"`
-   under `[repos.lez]`, plus a comment line. Also add the old basecamp shape, which the Expected
-   paragraph promises to migrate:
+1. Edit `scaffold.toml`: set `[scaffold].version = "0.1.0"`, add `url = "https://example"`
+   under `[repos.lez]` plus a comment line, and add the old basecamp shape:
    ```toml
    [basecamp]
    pin = "abc123"
@@ -235,17 +206,15 @@ A project from CREATE-001.
    flake = "path:./mod"
    role = "project"
    ```
-   (a CREATE-001 project already has `[repos.basecamp]`/`[repos.lgpm]`; `init` still takes the pin
-   from the old `[basecamp]` table.)
 2. `"$SCAFFOLD_BIN" doctor --json; echo "exit=$?"`
-3. `"$SCAFFOLD_BIN" init --dry-run` then `"$SCAFFOLD_BIN" init`
-4. `diff scaffold.toml.bak scaffold.toml`, then `"$SCAFFOLD_BIN" init` a second time.
+3. `"$SCAFFOLD_BIN" init --dry-run && "$SCAFFOLD_BIN" init && diff scaffold.toml.bak scaffold.toml`
+4. `shasum scaffold.toml > /tmp/mig.sha && "$SCAFFOLD_BIN" init && shasum -c /tmp/mig.sha`
 
 ### Success criteria
 - Step 2 exits non-zero with the "old schema … Run `logos-scaffold init`" line, and no JSON
-  is mixed in.
+  is mixed in. The dry run writes nothing.
 - After step 3 the version is `0.2.0`, `url` is gone, the comment survives and `.bak` exists.
-- The second `init` succeeds and leaves `scaffold.toml` byte-identical.
-- The migrated file has `[repos.basecamp]` (`pin = "abc123"`), `[repos.lgpm]` (the default pin: an
-  `lgpm_flake` without a `/<rev>` suffix cannot supply one, so `init` prints a `!` warning to
-  edit it) and `[modules.my_mod]`, and no `[basecamp]` tables.
+  The file has `[repos.basecamp]` (`pin = "abc123"`), `[repos.lgpm]` and `[modules.my_mod]`,
+  and no `[basecamp]` tables. Because the old `lgpm_flake` had no `/<rev>` suffix, `init`
+  keeps the default lgpm pin and prints a `!` warning to edit it.
+- Step 4 succeeds and leaves `scaffold.toml` byte-identical.
