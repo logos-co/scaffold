@@ -231,13 +231,20 @@ RUN-001.
 2. Start `"$SCAFFOLD_BIN" run --watch --no-post-deploy > /tmp/watch.log 2>&1 &` and wait for
    `===> watching <root> for changes` in the log.
 3. `touch README.md; sleep 5; grep -c '^\[1/' /tmp/watch.log`, then add a comment line to
-   `methods/guest/src/bin/hello_world.rs`, wait for the next `===> watching`, and count again.
+   `methods/guest/src/bin/hello_world_with_move_function.rs`, wait for the second
+   `Sequencer:` summary line in the log (the re-run is done; `===> watching` is printed
+   only once), and count again.
 4. Stop the watcher with `pgrep -x logos-scaffold | xargs kill`, and revert the edit.
 
 ### Success criteria
 - Step 1 is rejected because `--watch` is missing.
 - The count is `1` after the README touch and `2` after the guest edit (`===> change
   detected, re-running pipeline` appears once).
+
+### Notes
+Edit a program that no other program calls. A change to a tail-call callee (`hello_world`,
+`hello_world_with_authorization`) changes its program id, `build` rewrites the id embedded in
+the caller's source, and the watcher reacts to that write with one more re-run.
 
 ## RUN-010 — Hooks get the program id and guest path on a single-program project
 

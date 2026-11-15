@@ -77,7 +77,7 @@ LOCALNET-001.
 ### Steps
 1. `"$SCAFFOLD_BIN" localnet status`
 2. `"$SCAFFOLD_BIN" localnet status --json | jq '{tracked_pid, listener_present, ownership, ready}'`
-3. `"$SCAFFOLD_BIN" localnet logs --tail 200 | tail -3; "$SCAFFOLD_BIN" localnet logs --tail 20 --json | jq '.tail | length'`
+3. `"$SCAFFOLD_BIN" localnet logs --tail 200 | tail -3; "$SCAFFOLD_BIN" localnet logs --tail 20 --json | jq '.lines | length'`
 
 ### Success criteria
 - All four keys are non-null, `ready` is `true` and `ownership` is `managed`; the human form
@@ -141,7 +141,8 @@ projects sharing a cache root and pin share, and reset, one chain.
 ### Expected
 A `localnet start` that fails because a **foreign process holds the port** stops before
 spawning anything and names the port, the process id and `Try: kill <pid>`; `localnet
-status` calls the listener foreign. `run` fails the same way at its localnet step. A start
+status` calls the listener foreign. `run` stops at its localnet step for the same reason, in
+its own words (`localnet port is in use by another process (pid=<pid>)`). A start
 that fails because the **sequencer dies during startup or times out** names both
 `logos-scaffold localnet status` and `localnet logs --tail 200` as next steps, even when the
 log tail is empty.
@@ -161,7 +162,8 @@ BUILD-001, localnet stopped, and a project that builds (on a host without Docker
 - Step 1: `start` fails with `cannot start localnet: port <port> is already in use
   (pid=<pid>)` and `Try: kill <pid>`. `status` shows `ownership: foreign` with that PID and
   exits 0.
-- Step 2 fails at the localnet step with the same message and deploys nothing.
+- Step 2 fails at `[3/5] Ensuring localnet...` with `localnet port is in use by another
+  process (pid=<pid>)` and the advice to `kill <pid>`, and deploys nothing.
 - Step 3 fails with `sequencer process exited before becoming ready`, the sequencer's own
   error (`Failed to open database … RocksDb error`) under `last logs:`, and `Next: run
   \`logos-scaffold localnet status\` … then \`logos-scaffold localnet logs --tail 200\``.
