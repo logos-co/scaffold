@@ -387,7 +387,11 @@ pub(crate) fn deploy_for_project(
         let value = serde_json::json!({ "deploys": entries });
         println!("{}", serde_json::to_string(&value)?);
     } else {
-        println!("Note: Submission confirmed by wallet exit status; deploy inclusion receipt is not currently exposed by LEZ wallet/RPC for scaffold. Program ID is computed locally from the submitted ELF.");
+        // The note explains how to read a "submitted" result; with nothing submitted it only
+        // contradicts the summary right below it.
+        if success_count > 0 {
+            println!("Note: Submission confirmed by wallet exit status; deploy inclusion receipt is not currently exposed by LEZ wallet/RPC for scaffold. Program ID is computed locally from the submitted ELF.");
+        }
         println!("Summary:");
         println!("  Succeeded: {success_count}");
         println!("  Failed: {failed_count}");

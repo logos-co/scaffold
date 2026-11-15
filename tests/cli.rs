@@ -2250,7 +2250,11 @@ fn deploy_missing_binary_shows_build_hint() {
         .failure()
         .stdout(
             predicate::str::contains("missing binary")
-                .and(predicate::str::contains("logos-scaffold build")),
+                .and(predicate::str::contains("logos-scaffold build"))
+                // Nothing was submitted, so the "submission confirmed by wallet exit status"
+                // note would contradict the `Succeeded: 0` summary under it.
+                .and(predicate::str::contains("Succeeded: 0"))
+                .and(predicate::str::contains("Submission confirmed").not()),
         );
 }
 
