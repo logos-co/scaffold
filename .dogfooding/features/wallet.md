@@ -99,7 +99,8 @@ BUILD-001 and LOCALNET-001.
 
 ### Success criteria
 - At least the default `Public/<id>` account is listed.
-- Step 3 is valid JSON on stdout with no command echoes, listing the same accounts.
+- Step 3 is valid JSON on stdout with no command echoes, listing the same accounts: `.accounts`
+  holds exactly the account lines (`/ Public/<id>`, …), not `Stored statistics at …`.
 
 ## WALLET-003 — Set the project default address
 
