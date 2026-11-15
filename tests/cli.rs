@@ -977,7 +977,9 @@ fn doctor_json_outputs_machine_readable_report() {
 #[test]
 fn doctor_uses_password_env_override_for_wallet_health() {
     let temp = tempdir().expect("tempdir");
-    setup_wallet_project(temp.path(), Some("http://127.0.0.1:3040"));
+    // A live sequencer: doctor skips `check-health` when the wallet's target does not answer.
+    let rpc = RpcStub::start();
+    setup_wallet_project(temp.path(), Some(&rpc.url));
 
     let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
         .current_dir(temp.path())
@@ -1006,6 +1008,40 @@ fn doctor_uses_password_env_override_for_wallet_health() {
             .get("status")
             .and_then(serde_json::Value::as_str),
         Some("pass")
+    );
+}
+
+/// `wallet check-health` has no timeout of its own, so against a sequencer address that
+/// answers nothing (a blackholed host) it kept `doctor` waiting for minutes. `doctor` asks the
+/// wallet's target with the bounded RPC probe first and skips the call when nothing answers.
+#[test]
+fn doctor_warns_without_running_check_health_when_the_wallets_sequencer_is_unreachable() {
+    let temp = tempdir().expect("tempdir");
+    let dead = format!("http://127.0.0.1:{}", unused_local_port());
+    setup_wallet_project(temp.path(), Some(&dead));
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .arg("doctor")
+        .arg("--json")
+        .assert();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    let row = value["checks"]
+        .as_array()
+        .expect("checks array")
+        .iter()
+        .find(|c| c["name"] == "wallet usability")
+        .expect("wallet usability check present");
+
+    // The wallet stub's `check-health` always succeeds, so a `pass` here would mean the
+    // unbounded call was made.
+    assert_eq!(row["status"], "warn", "{row}");
+    assert!(
+        row["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains(&format!("configured sequencer at {dead}"))),
+        "{row}"
     );
 }
 
