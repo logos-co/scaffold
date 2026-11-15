@@ -1258,6 +1258,54 @@ fn test_node_start_patches_block_timing_flags() {
     assert_vendored_test_node_timing_preserved(&fixtures);
 }
 
+/// `--project .` used to put a relative `home` into the node's sequencer config, which the
+/// sequencer resolves against its own cwd (the node's work dir) and cannot find.
+#[cfg(unix)]
+#[test]
+fn test_node_start_accepts_a_relative_project_path() {
+    let temp = tempdir().expect("tempdir");
+    let fixtures = setup_test_node_project(temp.path());
+
+    let out = Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .env("LOGOS_BLOCKCHAIN_CIRCUITS", &fixtures.circuits_path)
+        .args([
+            "test-node",
+            "start",
+            "--project",
+            ".",
+            "--timeout-sec",
+            "5",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started: serde_json::Value = serde_json::from_slice(&out).expect("start json");
+    let state_dir = PathBuf::from(started["state_dir"].as_str().expect("state_dir"));
+    let config: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(started["config_path"].as_str().expect("config_path"))
+            .expect("read runtime config"),
+    )
+    .expect("parse runtime config");
+    let home = PathBuf::from(config["home"].as_str().expect("home"));
+    assert!(
+        home.is_absolute(),
+        "sequencer home must be absolute, got {home:?}"
+    );
+    assert_eq!(home, state_dir);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("logos-scaffold"))
+        .current_dir(temp.path())
+        .args(["test-node", "stop", "--node"])
+        .arg(&state_dir)
+        .args(["--project", "."])
+        .assert()
+        .success();
+}
+
 #[cfg(unix)]
 #[test]
 fn test_node_start_preserves_block_timing_without_flags() {
