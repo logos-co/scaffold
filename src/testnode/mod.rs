@@ -825,22 +825,28 @@ impl Drop for StartGuard {
 
 // ─── cross-process run slots (--serial / --parallel) ────────────────────────
 
-/// Guard for one concurrency slot acquired via `acquire_run_slot`. Releases
-/// the slot file on drop.
+/// Guard for one concurrency slot acquired via `acquire_run_slot`.
+///
+/// The slot is an advisory lock (`flock`) on its slot file. It is released
+/// when the guard drops and, because the kernel owns the lock, also when the
+/// process dies. The file itself stays: its presence means nothing.
 pub struct RunSlot {
-    path: PathBuf,
+    _file: fs::File,
 }
 
-impl Drop for RunSlot {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-/// Cap concurrent test-node creation across processes by acquiring one of
+/// Cap concurrent test-node creation across processes by locking one of
 /// `max_parallel` slot files under the cache root. `--serial` is
-/// `max_parallel == 1`. Slots held by dead processes are reclaimed.
+/// `max_parallel == 1`.
+///
+/// Who holds a slot is decided by the lock alone. An earlier version decided
+/// it by the file's presence and the pid written into it, which could not be
+/// made atomic: the file existed for a moment before its pid did, a second
+/// process read that as a stale slot, removed it and took it as well, so
+/// runs started together could exceed the cap.
 pub fn acquire_run_slot(cache_root: &Path, max_parallel: usize) -> DynResult<RunSlot> {
+    use std::io::Write;
+    use std::os::unix::io::AsRawFd;
+
     let slots_dir = cache_root.join("test-node-slots");
     fs::create_dir_all(&slots_dir)
         .with_context(|| format!("create slot dir {}", slots_dir.display()))?;
@@ -849,32 +855,27 @@ pub fn acquire_run_slot(cache_root: &Path, max_parallel: usize) -> DynResult<Run
     loop {
         for slot in 0..max_parallel {
             let path = slots_dir.join(format!("slot-{slot}.lock"));
-
-            // Reclaim slots whose owning process is gone.
-            if let Ok(existing) = fs::read_to_string(&path) {
-                if let Ok(owner) = existing.trim().parse::<u32>() {
-                    if !pid_running(owner) {
-                        let _ = fs::remove_file(&path);
-                    }
-                } else {
-                    let _ = fs::remove_file(&path);
-                }
-            }
-
-            match fs::OpenOptions::new()
+            let mut file = fs::OpenOptions::new()
+                .read(true)
                 .write(true)
-                .create_new(true)
+                .create(true)
+                .truncate(false)
                 .open(&path)
-            {
-                Ok(mut file) => {
-                    use std::io::Write;
-                    let _ = file.write_all(my_pid.as_bytes());
-                    return Ok(RunSlot { path });
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(err) => {
-                    return Err(err).with_context(|| format!("acquire slot {}", path.display()))
-                }
+                .with_context(|| format!("open slot {}", path.display()))?;
+            // SAFETY: `flock` on a descriptor this function owns.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                // The owner's pid, for a person looking at the directory.
+                // Nothing reads it back.
+                let _ = file.set_len(0);
+                let _ = file.write_all(my_pid.as_bytes());
+                return Ok(RunSlot { _file: file });
+            }
+            let err = std::io::Error::last_os_error();
+            if !matches!(
+                err.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            ) {
+                return Err(err).with_context(|| format!("acquire slot {}", path.display()));
             }
         }
         thread::sleep(Duration::from_millis(250));
@@ -1383,10 +1384,11 @@ mod tests {
     }
 
     #[test]
-    fn run_slot_reclaims_stale_and_blocks_live() {
+    fn run_slot_ignores_leftover_files_and_is_released_on_drop() {
         let temp = tempdir().unwrap();
 
-        // A stale slot (dead pid) must be reclaimed.
+        // A slot file left by a process that is gone holds nothing: only the
+        // lock counts.
         let slots = temp.path().join("test-node-slots");
         fs::create_dir_all(&slots).unwrap();
         fs::write(slots.join("slot-0.lock"), "999999999").unwrap();
@@ -1396,8 +1398,71 @@ mod tests {
 
         // Releasing the guard frees the slot for the next acquire.
         drop(slot);
-        assert!(!slots.join("slot-0.lock").exists());
         let _slot2 = acquire_run_slot(temp.path(), 1).unwrap();
+    }
+
+    #[test]
+    fn run_slot_blocks_while_held() {
+        use std::sync::mpsc;
+
+        let temp = tempdir().unwrap();
+        let held = acquire_run_slot(temp.path(), 1).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let root = temp.path().to_path_buf();
+        let waiter = thread::spawn(move || {
+            let slot = acquire_run_slot(&root, 1).unwrap();
+            tx.send(()).unwrap();
+            drop(slot);
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_millis(700)).is_err(),
+            "a second acquire got the only slot while it was held"
+        );
+        drop(held);
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("the waiter gets the slot once it is released");
+        waiter.join().unwrap();
+    }
+
+    #[test]
+    fn run_slots_never_exceed_the_cap_under_contention() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        // Acquirers that start in the same instant are where a
+        // presence-and-pid slot file double-booked: each could see the
+        // other's file before its pid was written, and take it for stale.
+        const CAP: usize = 1;
+        const WORKERS: usize = 8;
+        for round in 0..4 {
+            let temp = tempdir().unwrap();
+            let active = Arc::new(AtomicUsize::new(0));
+            let peak = Arc::new(AtomicUsize::new(0));
+            let start = Arc::new(Barrier::new(WORKERS));
+            let workers: Vec<_> = (0..WORKERS)
+                .map(|_| {
+                    let root = temp.path().to_path_buf();
+                    let (active, peak, start) = (active.clone(), peak.clone(), start.clone());
+                    thread::spawn(move || {
+                        start.wait();
+                        let slot = acquire_run_slot(&root, CAP).unwrap();
+                        let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        thread::sleep(Duration::from_millis(2));
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        drop(slot);
+                    })
+                })
+                .collect();
+            for w in workers {
+                w.join().unwrap();
+            }
+            let peak = peak.load(Ordering::SeqCst);
+            assert!(
+                peak <= CAP,
+                "round {round}: {peak} slots were held at once with a cap of {CAP}"
+            );
+        }
     }
 
     #[test]
