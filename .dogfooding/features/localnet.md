@@ -148,29 +148,38 @@ restarts it and verifies that blocks are produced. `--reset-wallet` also deletes
 wallet home and the default-address state.
 
 ### Preconditions
-LOCALNET-001, in a scratch project.
+LOCALNET-001, in a scratch project, and a program already deployed (`"$SCAFFOLD_BIN" deploy hello_world`,
+after DEPLOY-001's setup).
 
 ### Steps
 1. `"$SCAFFOLD_BIN" localnet reset; echo "exit=$?"`
 2. `"$SCAFFOLD_BIN" localnet reset --dry-run`
 3. `"$SCAFFOLD_BIN" localnet reset --yes`
 4. `"$SCAFFOLD_BIN" localnet reset --yes --verify-timeout-sec 120`
+5. `"$SCAFFOLD_BIN" test-node blocks head --url http://127.0.0.1:3040 --json | jq .block_id` after
+   step 3, and `"$SCAFFOLD_BIN" test-node account get --url http://127.0.0.1:3040 --account-id <the
+   wallet's default account> --json | jq -r .state` (a topup or deploy before step 3 left it present).
 
 ### Success criteria
 - Step 1 exits non-zero and asks for `--yes` or `--dry-run`.
 - Step 2 changes nothing.
-- Steps 3 and 4 exit 0 with a verified, running localnet, and previously deployed programs are
-  gone. Step 4 accepts the custom verification bound.
+- Steps 3 and 4 exit 0 with `localnet reset complete; sequencer producing blocks (block_height=1)`.
+  Step 4 accepts the custom verification bound.
+- Step 5: the head is back at a low block id (the chain restarted), and the default account reads
+  `missing` (the chain, including the deployed program, was wiped; the wallet files were kept).
 
 ### Notes
 `--reset-wallet` is irrecoverable. Use it only in a scratch project.
+The sequencer database lives in the LEZ checkout (`<cache>/repos/lez/<pin>/rocksdb`, the dry run
+names it), so projects sharing a cache root and pin share, and reset, one chain.
 
 ## LOCALNET-007 — Start failure points at the next diagnostic step
 
 ### Expected
-A failing `localnet start` (port held by a foreign process, or a sequencer that dies during
-startup) names both `logos-scaffold localnet status` and `localnet logs --tail 200` as next
-steps, even when the log tail is empty.
+A `localnet start` that fails because a **foreign process holds the port** stops before spawning
+anything and names the port, the process id and `Try: kill <pid>`. One that fails because the
+**sequencer dies during startup or times out** names both `logos-scaffold localnet status` and
+`localnet logs --tail 200` as next steps, even when the log tail is empty.
 
 ### Preconditions
 BUILD-001. A foreign listener on the port, e.g. `python3 -m http.server 3040`.
@@ -178,10 +187,19 @@ BUILD-001. A foreign listener on the port, e.g. `python3 -m http.server 3040`.
 ### Steps
 1. `"$SCAFFOLD_BIN" localnet start; echo "exit=$?"`
 2. `"$SCAFFOLD_BIN" localnet status`
-3. Still with the foreign listener: `"$SCAFFOLD_BIN" run --localnet-timeout 5; echo "exit=$?"`
+3. Still with the foreign listener, in a project that builds (set `[build].guest = "local"` on a
+   host without Docker, or `run` fails earlier at `[1/5] Building...`):
+   `"$SCAFFOLD_BIN" run --localnet-timeout 5; echo "exit=$?"`
+4. Kill the foreign listener, then make the sequencer die at startup: `echo junk >
+   "$("$SCAFFOLD_BIN" test-node pins --json | jq -r .lez_checkout)/rocksdb/CURRENT"` (a corrupt
+   database; restore it, or `localnet reset --yes`, afterwards), then `"$SCAFFOLD_BIN" localnet start; echo "exit=$?"`.
 
 ### Success criteria
-- Step 1 fails and names both follow-up commands.
-- Step 2 identifies a foreign listener and its PID.
+- Step 1 fails with `cannot start localnet: port <port> is already in use (pid=<pid>)` and
+  `Try: kill <pid>`. It does not name `localnet status`: the message already names the owner.
+- Step 2 identifies a foreign listener and its PID (`ownership: foreign`) and exits 0.
 - Step 3 fails at the localnet step the same way as step 1 (`run --localnet-timeout` bounds the
   same start wait as `localnet start --timeout-sec`) and does not deploy anything.
+- Step 4 fails with `sequencer process exited before becoming ready`, the sequencer's own error
+  (`Failed to open database … RocksDb error`) in `last logs:`, and `Next: run \`logos-scaffold
+  localnet status\` … then \`logos-scaffold localnet logs --tail 200\``.
