@@ -233,6 +233,36 @@ mod tests {
     }
 
     #[test]
+    fn generated_cargo_toml_pins_risc0_exactly() {
+        // A project is generated without a Cargo.lock, so a caret range resolves to the newest
+        // 3.x on crates.io. When that was 3.1.0, the private example runners failed with "r0vm
+        // server version 3.0.5 is not compatible with your host's risc0-zkvm crate 3.1.0",
+        // because scaffold provisions the r0vm that the pinned LEZ locks.
+        let target = mk_temp_dir("risc0-exact-pin");
+        let ctx = OverlayRenderContext {
+            crate_name: "my-app",
+            lez_pin: "abc123",
+            lez_tag: "v1.2.3",
+            spel_pin: "def456",
+        };
+        apply_overlay(&target, "default", &ctx).expect("apply_overlay");
+        let cargo = fs::read_to_string(target.join("Cargo.toml")).expect("read Cargo.toml");
+        let doc = toml_edit::DocumentMut::from_str(&cargo).expect("valid TOML");
+        let deps = &doc["workspace"]["dependencies"];
+        for name in ["risc0-zkvm", "risc0-build"] {
+            let req = deps[name]
+                .as_str()
+                .or_else(|| deps[name]["version"].as_str())
+                .unwrap_or_else(|| panic!("{name} has no version in:\n{cargo}"));
+            assert!(
+                req.starts_with('='),
+                "{name} must be pinned with `=` so it matches the provisioned r0vm, got `{req}`"
+            );
+        }
+        fs::remove_dir_all(&target).expect("failed to cleanup temporary test directory");
+    }
+
+    #[test]
     fn generated_cargo_toml_does_not_self_patch_logos_blockchain() {
         // Regression guard: an earlier templates change pinned every
         // `logos-blockchain-*` crate via a `[patch."<lb-url>"]` table that

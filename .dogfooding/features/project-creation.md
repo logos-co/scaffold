@@ -60,7 +60,8 @@ existing directory with `init`. `init` is also the single migration entry point 
 the pinned LEZ commit and the cache root. The generated `scaffold.toml` is schema `0.2.0`. It
 includes `[repos.lez]` and `[repos.spel]` (with pins and an empty `path`), a `[circuits]`
 table whose install dir is `.scaffold/circuits`, and `[wallet].home_dir`. It has no wallet
-binary field.
+binary field. The generated `Cargo.toml` pins `risc0-zkvm` and `risc0-build` with an exact
+`=3.0.5` requirement, the version of the `r0vm` that scaffold provisions.
 
 ### Preconditions
 Freshly built `$SCAFFOLD_BIN` and a writable `$SCRATCH_ROOT`.
@@ -69,11 +70,13 @@ Freshly built `$SCAFFOLD_BIN` and a writable `$SCRATCH_ROOT`.
 1. `cd "$SCRATCH_ROOT" && "$SCAFFOLD_BIN" new dogfood-default`
 2. `grep -n '^\[' dogfood-default/scaffold.toml`
 3. `ls dogfood-default/src/bin`
+4. `grep -n 'risc0' dogfood-default/Cargo.toml`
 
 ### Success criteria
 - Exit 0, and the output names the path, LEZ pin and cache root.
 - `scaffold.toml` has `[circuits]` and `[wallet]` with `home_dir`, and no `binary =` line.
 - `src/bin/` contains the `run_hello_world*.rs` example runners.
+- Step 4 shows `risc0-zkvm` and `risc0-build` with `"=3.0.5"`.
 
 ## CREATE-002 — create is an alias of new
 
