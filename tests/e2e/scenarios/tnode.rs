@@ -1,11 +1,16 @@
 //! `.dogfooding/features/test-node-lifecycle.md`
 
+use std::fs;
+use std::net::{SocketAddr, TcpStream};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
 use crate::fixtures;
-use crate::harness::{check, Ctx, R};
+use crate::harness::{check, pids_named, Cmd, Ctx, Listener, Out, Project, R};
 use crate::scenarios::{toml_section, toml_value};
 
 /// `lgs -q test-node <args…>` from the work dir.
-pub fn tn<'a>(cx: &'a Ctx, args: &[&str]) -> crate::harness::Cmd<'a> {
+pub fn tn<'a>(cx: &'a Ctx, args: &[&str]) -> Cmd<'a> {
     let mut argv = vec!["-q", "test-node"];
     argv.extend_from_slice(args);
     cx.lgs(&cx.work, &argv)
@@ -82,13 +87,6 @@ pub fn pins(cx: &Ctx) -> R {
     Ok(())
 }
 
-use std::fs;
-use std::net::{SocketAddr, TcpStream};
-use std::path::{Path, PathBuf};
-use std::time::Duration;
-
-use crate::harness::{pids_named, Listener, Project};
-
 /// A running test node; stopped (and its state removed) on drop.
 pub struct Node<'a> {
     cx: &'a Ctx,
@@ -120,7 +118,7 @@ impl<'a> Node<'a> {
     }
 
     /// `test-node <args…> --url <this node>`.
-    pub fn rpc(&self, args: &[&str]) -> crate::harness::Cmd<'a> {
+    pub fn rpc(&self, args: &[&str]) -> Cmd<'a> {
         let mut argv: Vec<&str> = args.to_vec();
         argv.extend_from_slice(&["--url", &self.url]);
         tn(self.cx, &argv)
@@ -134,7 +132,7 @@ impl<'a> Node<'a> {
             .unwrap_or(0)
     }
 
-    fn stop_cmd(&self) -> crate::harness::Out {
+    fn stop_cmd(&self) -> Out {
         let mut args = vec![
             "stop",
             "--node",
@@ -149,7 +147,7 @@ impl<'a> Node<'a> {
     }
 
     /// Stop now and return the command's output.
-    pub fn stop(mut self) -> crate::harness::Out {
+    pub fn stop(mut self) -> Out {
         let out = self.stop_cmd();
         self.dir.clear();
         out

@@ -1,6 +1,11 @@
 //! `.dogfooding/features/diagnostics.md`
 
-use crate::harness::{check, Ctx, R};
+use std::fs;
+
+use crate::fixtures;
+use crate::harness::{check, Ctx, Listener, Out, Project, Restore, BLACKHOLE, R};
+use crate::scenarios::localnet::PORT;
+use crate::scenarios::wallet::set_sequencer_addr;
 
 /// DIAG-005 — Shell completions
 pub fn completions(cx: &Ctx) -> R {
@@ -28,13 +33,6 @@ pub fn completions(cx: &Ctx) -> R {
     }
     Ok(())
 }
-
-use std::fs;
-
-use crate::fixtures;
-use crate::harness::{Listener, Out, Project, Restore, BLACKHOLE};
-use crate::scenarios::localnet::PORT;
-use crate::scenarios::wallet::set_sequencer_addr;
 
 /// One row of `doctor`'s table with the remediation printed under it.
 #[derive(Debug, Default, Clone)]

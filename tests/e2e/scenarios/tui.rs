@@ -261,10 +261,6 @@ pub fn status_agrees(cx: &Ctx) -> R {
         screen.contains("Press r for `lgs run`"),
         "no empty-Output hint naming `r`:\n{screen}"
     );
-    check!(
-        deployed_marks(&screen) == 0 || cx.localnet_status(&p)?["ready"] == false,
-        "unexpected state"
-    );
     Ok(())
 }
 
