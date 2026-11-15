@@ -217,7 +217,8 @@ A fresh project on a cache root where the pin's sequencer is not built yet (a ne
 `--cache-root`), so the prebuilt path is taken.
 
 ### Steps
-1. `"$SCAFFOLD_BIN" setup --prebuilt` (or `"$SCAFFOLD_BIN" build --prebuilt`)
+1. `env PATH="$NOCARGO" "$SCAFFOLD_BIN" setup --prebuilt; echo "exit=$?"` (`NOCARGO`: see "Rules
+   for a run" in [product.md](../product.md))
 
 ### Success criteria
 - One of the three outcomes above is printed after `Checking for prebuilt binaries (tag: …)`.
@@ -225,5 +226,7 @@ A fresh project on a cache root where the pin's sequencer is not built yet (a ne
 
 ### Notes
 At the current default pin no prebuilt is published, so the outcome is the fallback and the
-verification path is not exercised: say so in the report. Once the fallback line has printed
-you may stop the command; BUILD-001 already covers the source build.
+verification path is not exercised: say so in the report. Without `cargo` the command prints
+its decision and then stops by itself at the first build (non-zero exit), which is all this
+scenario needs: BUILD-001 covers the source build. `build --prebuilt` passes the flag to the
+same code.

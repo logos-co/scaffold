@@ -4,7 +4,7 @@
 use std::fs;
 
 use crate::fixtures;
-use crate::harness::{check, Ctx, R};
+use crate::harness::{check, path_without, Ctx, R};
 use crate::scenarios::files_under;
 
 /// BCSETUP-006 — Without Nix or before setup - help, docs and one-line hints
@@ -42,14 +42,9 @@ pub fn without_nix_or_setup(cx: &Ctx) -> R {
     );
 
     // Step 2: a PATH without nix. Drop every directory that has one.
-    let path = std::env::var("PATH").unwrap_or_default();
-    let no_nix: Vec<&str> = path
-        .split(':')
-        .filter(|d| !d.is_empty() && !std::path::Path::new(d).join("nix").exists())
-        .collect();
     let setup = cx
         .lgs(&p.root, &["basecamp", "setup"])
-        .env("PATH", no_nix.join(":"))
+        .env("PATH", path_without("nix"))
         .run();
     setup
         .fails()?

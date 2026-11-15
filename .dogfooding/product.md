@@ -105,6 +105,13 @@ one uses `<project>/.scaffold/repos/lez`. The wallet under test is always
 - **Kill by process name, not by command line.** `pkill -f <text>` and `pgrep -f <text>` also
   match the shell that runs them. Use `pgrep -x logos-scaffold`, `pgrep -x sequencer_servi`
   (the kernel truncates names to 15 characters), `pgrep -x cargo`.
+- **Never kill a `setup`, `build` or `run` that is compiling** to save time. Where the Rust
+  toolchain LEZ pins is not installed yet, the kill can interrupt rustup's download and
+  leave that toolchain broken (`missing manifest in toolchain …`). When a scenario only
+  needs what happens before the first build, take `cargo` away instead and let the command
+  stop by itself:
+  `NOCARGO=$(echo "$PATH" | tr ':' '\n' | while read -r d; do [ -x "$d/cargo" ] || echo "$d"; done | paste -sd:)`,
+  then `env PATH="$NOCARGO" "$SCAFFOLD_BIN" setup`.
 - **Exit code 0 is not proof.** A runner can submit a transaction the sequencer then rejects,
   and a wallet command can silently use `~/.lee/wallet`. The scenarios say what to read back.
 

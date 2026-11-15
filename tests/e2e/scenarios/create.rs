@@ -189,6 +189,7 @@ pub fn vendor_deps(cx: &Ctx) -> R {
         Some(head.as_str()) == toml_value(&spel, "pin").as_deref(),
         "vendored spel HEAD {head} is not the recorded pin"
     );
+    cx.discard(&["vendor", "vendor-spel"]);
     Ok(())
 }
 
@@ -224,8 +225,7 @@ pub fn cache_isolation(cx: &Ctx) -> R {
     );
     let first_head = git_head(cx, &first);
 
-    // Step 2: another pin gets its own checkout. Only the clone matters, so
-    // `setup` is stopped as soon as the checkout is at its commit.
+    // Step 2: another pin gets its own checkout. Only the clone matters.
     new("cache-b", &[]).ok()?;
     let b = Project {
         root: cx.work.join("cache-b"),
@@ -236,21 +236,19 @@ pub fn cache_isolation(cx: &Ctx) -> R {
     )
     .expect("write scaffold.toml");
     let second = lez_root.join(OLDER_LEZ_PIN);
-    {
-        let mut setup = cx
-            .lgs(&b.root, &["setup"])
-            .env_remove(ENV)
-            .spawn(&cx.out.join("logs/CREATE-005-setup.log"))?;
-        let cloned = cx.poll(900, 1000, || {
-            (git_head(cx, &second) == OLDER_LEZ_PIN || !setup.running()).then_some(())
-        });
-        check!(
-            cloned.is_some() && git_head(cx, &second) == OLDER_LEZ_PIN,
-            "`setup` did not check the older pin out into {}:\n{}",
-            second.display(),
-            tail(&setup.log_text(), 1200)
-        );
-    }
+    // Without `cargo`, `setup` checks the pin out and stops at its first build.
+    let setup = cx
+        .lgs(&b.root, &["setup"])
+        .env_remove(ENV)
+        .env("PATH", crate::harness::path_without("cargo"))
+        .timeout(900)
+        .run();
+    check!(
+        git_head(cx, &second) == OLDER_LEZ_PIN,
+        "`setup` did not check the older pin out into {}:\n{}",
+        second.display(),
+        tail(&setup.all(), 1200)
+    );
 
     // Step 3: a non-default LEZ source gets `<pin>-src-<hash>`.
     let src = cx.work.join("lez-src");
@@ -318,6 +316,7 @@ pub fn cache_isolation(cx: &Ctx) -> R {
     // Step 5: a source that does not exist is named in the error.
     let bad = new("cache-bad", &["--lez-path", "/does/not/exist"]);
     bad.fails()?.has("/does/not/exist")?;
+    cx.discard(&["custom-cache", "cache-a", "cache-b", "cache-src", "lez-src"]);
     Ok(())
 }
 

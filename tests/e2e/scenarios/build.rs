@@ -36,14 +36,9 @@ pub fn missing_docker_toolchain(cx: &Ctx) -> R {
     }
 
     // Step 3: no cargo-risczero on PATH.
-    let path = std::env::var("PATH").unwrap_or_default();
-    let stripped: Vec<&str> = path
-        .split(':')
-        .filter(|d| !d.is_empty() && !std::path::Path::new(d).join("cargo-risczero").exists())
-        .collect();
     let build = cx
         .lgs(&p.root, &["build"])
-        .env("PATH", stripped.join(":"))
+        .env("PATH", crate::harness::path_without("cargo-risczero"))
         .run();
     build
         .fails()?
@@ -211,51 +206,35 @@ pub fn prebuilt_sequencer(cx: &Ctx) -> R {
         .run()
         .ok()?;
     let root = cx.work.join("prebuilt");
-    let mut setup = cx
+    // Without `cargo` the command stops by itself at its first build, so the
+    // download-or-fallback decision is seen without compiling LEZ here
+    // (BUILD-001's subject) and without killing anything.
+    let setup = cx
         .lgs(&root, &["setup", "--prebuilt"])
         .env_remove("LOGOS_SCAFFOLD_CACHE_ROOT")
-        .spawn(&cx.out.join("logs/BUILD-006-setup.log"))?;
-    const FALLBACK: &str = "falling back to source build";
-    const UNVERIFIED: &str = "not installing an unverified binary";
-    let outcome = cx.poll(600, 500, || {
-        let log = setup.log_text();
-        if log.contains(FALLBACK) || log.contains(UNVERIFIED) {
-            Some("source")
-        } else if !setup.running() {
-            Some("finished")
-        } else {
-            None
-        }
-    });
-    let log = setup.log_text();
-    check!(
-        log.contains("Checking for prebuilt binaries (tag: "),
-        "`setup --prebuilt` never checked for a prebuilt:\n{}",
-        crate::harness::tail(&log, 1200)
-    );
+        .env("PATH", crate::harness::path_without("cargo"))
+        .timeout(900)
+        .run();
+    setup.has("Checking for prebuilt binaries (tag: ")?;
     let installed = crate::scenarios::files_under(&cache.join("repos/lez"), &[])
         .iter()
         .any(|f| f.ends_with("target/release/sequencer_service"));
-    match outcome {
-        Some("source") => {
-            // Stop here: the source build is BUILD-001's subject.
-            check!(
-                !installed,
-                "a sequencer binary was installed before the source build finished"
-            );
-            cx.note("no verified prebuilt for this pin: fallback to the source build seen, verification path not exercised");
-        }
-        Some(_) => {
-            check!(
-                setup.wait(1) == Some(0) && installed,
-                "`setup --prebuilt` ended without a fallback line or an installed sequencer:\n{}",
-                crate::harness::tail(&log, 1200)
-            );
-        }
-        None => crate::harness::fail!(
-            "`setup --prebuilt` printed no outcome within 10 minutes:\n{}",
-            crate::harness::tail(&log, 1200)
-        ),
+    let text = setup.all();
+    if text.contains("falling back to source build")
+        || text.contains("not installing an unverified binary")
+    {
+        check!(
+            !installed,
+            "a sequencer binary was installed although the prebuilt was not verified"
+        );
+        cx.note("no verified prebuilt for this pin: fallback to the source build seen, verification path not exercised");
+    } else {
+        check!(
+            installed,
+            "`setup --prebuilt` printed no fallback line and installed no sequencer:\n{}",
+            crate::harness::tail(&text, 1200)
+        );
     }
+    cx.discard(&["prebuilt-cache", "prebuilt"]);
     Ok(())
 }

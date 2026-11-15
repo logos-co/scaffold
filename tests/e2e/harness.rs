@@ -471,6 +471,21 @@ impl Drop for Listener {
     }
 }
 
+/// `PATH` without the directories that hold an executable called `tool`.
+///
+/// Used to make a tool unavailable to one command. In particular a `setup`
+/// run without `cargo` clones and checks out, then stops by itself at its
+/// first build. Never get that effect by killing a `setup` that is compiling:
+/// where the Rust toolchain LEZ pins is not installed yet, the kill can land
+/// in the middle of rustup's download and leave that toolchain broken.
+pub fn path_without(tool: &str) -> OsString {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let kept: Vec<PathBuf> = std::env::split_paths(&path)
+        .filter(|d| !d.as_os_str().is_empty() && !d.join(tool).exists())
+        .collect();
+    std::env::join_paths(kept).unwrap_or(path)
+}
+
 /// True when nothing accepts connections on `127.0.0.1:port`.
 pub fn port_free(port: u16) -> bool {
     TcpStream::connect_timeout(
@@ -737,6 +752,14 @@ impl Ctx {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("create empty dir");
         dir
+    }
+
+    /// Remove directories under the work dir that only the finished scenario
+    /// used. Build trees and clones add up to tens of gigabytes otherwise.
+    pub fn discard(&self, names: &[&str]) {
+        for name in names {
+            let _ = fs::remove_dir_all(self.work.join(name));
+        }
     }
 
     /// Retry `f` every `every_ms` until it returns `Some`, for up to `secs`.
