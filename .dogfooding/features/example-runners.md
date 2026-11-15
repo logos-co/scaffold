@@ -63,6 +63,8 @@ DEPLOY-001 and a fresh account: `"$SCAFFOLD_BIN" wallet -- account new public` (
 - The account `data` decodes to `Hola mundo!`, and `program_owner` is non-null.
 
 ### Notes
+Decode `data` portably with `python3 -c 'import sys,json,re; print(bytes.fromhex(re.search(r"\"data\":\"([0-9a-f]*)\"", sys.stdin.read()).group(1)).decode())'`
+(minimal hosts have no `xxd`).
 Export both wallet-home names. With only `NSSA_…`, a v0.2.x wallet silently uses
 `~/.lee/wallet`.
 The runner takes the bare base58 id. `wallet account get` needs the full `Public/<base58>`
