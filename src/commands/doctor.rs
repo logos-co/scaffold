@@ -14,7 +14,7 @@ use crate::constants::{
 use crate::doctor_checks::{
     check_binary, check_cargo_risczero, check_container_runtime, check_guest_build,
     check_logos_blockchain_circuits, check_path, check_pcsc_library, check_port_warn, check_repo,
-    check_standalone_support, one_line, print_rows,
+    check_standalone_support, one_line, print_rows, relax_container_runtime_for_local_guests,
 };
 use crate::model::{CheckRow, CheckStatus, DoctorReport, DoctorSummary, Project};
 use crate::process::{pid_running, port_open, run_capture, run_with_stdin, set_command_echo};
@@ -92,7 +92,13 @@ pub(crate) fn build_doctor_report(project: &Project) -> DynResult<DoctorReport> 
         check_binary("kill", true),
     ];
     let (runtime_row, docker_probe) = check_container_runtime();
-    rows.push(runtime_row);
+    let local_guests = project.config.framework.kind != FRAMEWORK_KIND_SPEL
+        && !project.config.build.guest.is_deterministic();
+    rows.push(if local_guests {
+        relax_container_runtime_for_local_guests(runtime_row)
+    } else {
+        runtime_row
+    });
     rows.push(check_pcsc_library());
     rows.push(check_binary("nix", false));
     // `[build].guest` and scaffold's pinned builder image only govern the
