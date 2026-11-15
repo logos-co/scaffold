@@ -125,7 +125,7 @@ Each window opens against its own `.scaffold/basecamp/profiles/{alice,bob}/`, wi
 
 If two windows open but share identity keys / message history, that is a clean-slate regression — capture it. A non-module port collision (Qt remote objects, etc.) is an upstream finding against the colliding component, not something to patch around in scaffold. Running two `launch alice` invocations in parallel is undefined in v1.
 
-## `build` / `build-portable` (BCMOD-005, BCMOD-006)
+## `build` / `build-portable` (BCMOD-005)
 
 `build` creates `#lgx`, `#lgx-portable`, or both variants without installing them; it defaults to both and can target one captured project module with `--module`. `build-portable` is the back-compatible alias for `build --variant lgx-portable`. Portable artefacts can be hand-loaded via the AppImage's "install lgx" file picker rather than installed into scaffold-managed profiles.
 
