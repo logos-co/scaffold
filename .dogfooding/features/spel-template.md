@@ -15,29 +15,18 @@ scenarios:
     source: DOGFOODING.md@740e5e9 L1
     depends_on: [SPEL-001]
   - id: SPEL-003
-    title: Regenerate the IDL
+    title: Regenerate the IDL and the client bindings
     priority: P1
     provenance: documented
     source: DOGFOODING.md@740e5e9 L2
     depends_on: [SPEL-001]
-  - id: SPEL-004
-    title: Generate client and FFI bindings
-    priority: P2
-    provenance: documented
-    source: DOGFOODING.md@740e5e9 L3
-    depends_on: [SPEL-002]
   - id: SPEL-005
     title: Deploy and invoke instructions through spel
     priority: P1
     provenance: documented
     source: DOGFOODING.md@740e5e9 L4
     depends_on: [SPEL-002]
-  - id: SPEL-006
-    title: Vendored spel project
-    priority: P2
-    provenance: documented
-    source: DOGFOODING.md@740e5e9 L1
-retired: []
+retired: [SPEL-004, SPEL-006]
 ---
 
 # spel template
@@ -47,8 +36,12 @@ spel CLI that scaffold clones and builds at `DEFAULT_SPEL` in the cache. No glob
 needed. spel projects build their guest through their own `Makefile` (`make build` = `cargo
 risczero build` in Docker) and drive IDL and client generation through `make idl` /
 `make ffi-gen`. `lgs spel -- …` runs the vendored binary against the project wallet. Related:
-[Project creation](project-creation.md), [Run pipeline](run-pipeline.md),
-[Deploy](deploy.md).
+[Project creation](project-creation.md) (CREATE-004 covers `--vendor-deps`),
+[Run pipeline](run-pipeline.md), [Deploy](deploy.md).
+
+The spel guest has no local build mode. On a host without Docker, SPEL-001 and SPEL-003 run
+locally; run SPEL-002 and SPEL-005 on a Docker-capable host (a GitHub-hosted runner works),
+or cite the `template-e2e.yml` run for SPEL-002's build and report SPEL-005 as skipped.
 
 ## SPEL-001 — Create a spel project with pinned versions
 
@@ -60,21 +53,20 @@ v0.7.0` at the time of writing). It creates `spel.toml`, a `Makefile`, `<name>_c
 irrelevant.
 
 ### Preconditions
-None (the spel CLI is built during this step). On Linux, the PCSC headers are installed.
+None (the spel CLI is built during this step, minutes on a cold cache). On Linux, the PCSC
+headers are installed.
 
 ### Steps
 1. `cd "$SCRATCH_ROOT" && "$SCAFFOLD_BIN" new dogfood-spel --template spel`
-2. `cd dogfood-spel && ls -d spel.toml Makefile dogfood_spel_core dogfood_spel_ffi methods/guest/src/bin`
-3. `grep spel-framework methods/guest/Cargo.toml`
+2. `cd dogfood-spel && ls -d spel.toml Makefile dogfood_spel_core dogfood_spel_ffi methods/guest/src/bin; grep spel-framework methods/guest/Cargo.toml`
 
 ### Success criteria
-- Exit 0, and the pins are printed.
+- Exit 0, the pins are printed, and no `Directory '<name>' already exists` error appears.
 - All listed paths exist, and `spel-framework` uses `tag = …`, not `branch`.
-- No `Directory '<name>' already exists` error appears.
 
 ### Notes
-`branch = "main"` in the generated manifests means the pin flags did not reach `spel init`.
-Its parser stops at the first non-flag argument, so the flags must come before the project
+`branch = "main"` in the generated manifests means the pin flags did not reach `spel init`:
+its parser stops at the first non-flag argument, so the flags must come before the project
 name (logos-co/spel#286).
 
 ## SPEL-002 — Set up and build a spel project
@@ -84,84 +76,64 @@ name (logos-co/spel#286).
 `doctor` reports zero FAIL. `build` runs `make build` (the Docker guest build, whatever
 `[build].guest` says) and then IDL generation, leaving `<name>-idl.json` at the project
 root. `build --guest local` prints `Note: --guest local does not apply to spel projects` and
-still builds in Docker, so a host without Docker cannot run this scenario. Run it on a
-Docker-capable host (a GitHub-hosted runner works) instead of reporting it blocked.
+still builds in Docker.
 
 ### Preconditions
 SPEL-001, Docker, `cargo-risczero` 3.0.5, and the risc0 C++ toolchain.
 
 ### Steps
 1. `"$SCAFFOLD_BIN" setup && "$SCAFFOLD_BIN" localnet start && "$SCAFFOLD_BIN" doctor`
-2. `"$SCAFFOLD_BIN" build`
-3. `ls ./*-idl.json methods/guest/target/riscv32im-risc0-zkvm-elf/docker/`
-4. `P=$PWD; ( cd / && "$SCAFFOLD_BIN" build --guest local "$P" )`
+2. `"$SCAFFOLD_BIN" build && ls ./*-idl.json methods/guest/target/riscv32im-risc0-zkvm-elf/docker/`
+3. `P=$PWD; ( cd / && "$SCAFFOLD_BIN" build --guest local "$P" )`
 
 ### Success criteria
 - `doctor` shows 0 FAIL, `build` exits 0, and the IDL plus the docker `.bin` exist.
-- Step 4 prints the `--guest local` note, runs `make build` (Docker) and exits 0. The
+- Step 3 prints the `--guest local` note, runs `make build` (Docker) and exits 0; the
   positional project path makes it work from `/`.
 
 ### Notes
-The first build takes 5–15 minutes, which is normal.
+The first build takes 5–15 minutes.
 
-## SPEL-003 — Regenerate the IDL
+## SPEL-003 — Regenerate the IDL and the client bindings
 
 ### Expected
 `build idl` prints ``Generating IDL via `make idl` (spel project)...``, runs `make idl`, and
 the Makefile prints `✅ IDL written to <name>-idl.json`. The file named by `spel.toml`
-`[program] idl` is valid JSON matching the program. No `idl/` directory is created, and no
-IDL JSON is printed to the terminal in place of the file. `build idl [project-path]` works
-from outside the project. `--guest` is rejected with `build idl`, since it only applies to
-`build`.
+`[program] idl` is valid JSON. No `idl/` directory is created, and no IDL JSON is printed to
+the terminal in place of the file. `--guest` is rejected with `build idl`.
+
+`build client` regenerates the IDL first, then runs `make ffi-gen` with `SPEL_CLIENT_GEN` set
+to the vendored `spel-client-gen` in the scaffold cache, writing `<name>_client.rs`,
+`<name>_ffi.rs` and `<name>.h` under `<name>_ffi/generated/`. Scaffold's own echo is just
+`$ make ffi-gen`; the generator path shows in make's echoed recipe and must be the vendored
+one, not one on `PATH`.
+
+Both take `[project-path]` and work from outside the project.
 
 ### Preconditions
-SPEL-001 with a working build environment.
+SPEL-001 and `"$SCAFFOLD_BIN" setup` in the project (it builds `spel-client-gen`). No Docker
+needed. The first `build idl` compiles the project (about 5 minutes).
 
 ### Steps
-1. `"$SCAFFOLD_BIN" build idl | tee /tmp/idl.out`
-2. `jq -e . ./*-idl.json > /dev/null; ls -d idl; grep -c '^{' /tmp/idl.out`
-3. `P=$PWD; rm ./*-idl.json; ( cd / && "$SCAFFOLD_BIN" build idl "$P" ); ls "$P"/*-idl.json`
+1. `"$SCAFFOLD_BIN" build idl | tee /tmp/idl.out; jq -e . ./*-idl.json > /dev/null; ls -d idl; grep -c '^{' /tmp/idl.out`
+2. `"$SCAFFOLD_BIN" build client 2>&1 | tee /tmp/client.out | grep -n -E 'Generating IDL via|make ffi-gen|spel-client-gen'; find ./*_ffi/generated -type f | sort`
+3. `P=$PWD; rm -r ./*-idl.json ./*_ffi/generated; ( cd / && "$SCAFFOLD_BIN" build client "$P" ); ls "$P"/*-idl.json "$P"/*_ffi/generated`
 4. `"$SCAFFOLD_BIN" build --guest docker idl; echo "exit=$?"`
 
 ### Success criteria
-- The `Generating IDL via` and `IDL written` lines appear, and the file parses as JSON.
-- `ls -d idl` fails, and the `grep -c` prints `0` (no IDL JSON on the terminal).
-- Step 3 recreates the IDL file from `/`.
+- Step 1: the `Generating IDL via` and `IDL written` lines appear, the file parses, `ls -d
+  idl` fails and the `grep -c` prints `0`.
+- Step 2: `Generating IDL via` comes before `$ make ffi-gen`, the generator path is inside
+  the scaffold cache, and all three generated files exist.
+- Step 3 recreates the IDL and the three files from `/`.
 - Step 4 exits non-zero with `` `--guest` applies to `logos-scaffold build` ``.
 
 ### Notes
-A later step failing with `expected IDL file …/idl/<stem>.json is missing` means something
-still resolves the IDL by the old `<idl-dir>/<stem>.json` convention instead of `spel.toml`.
-`Skipping IDL build for framework kind …` means the command ran in a non-spel project.
-
-## SPEL-004 — Generate client and FFI bindings
-
-### Expected
-`build client` regenerates the IDL first (it prints the same `Generating IDL via` line as
-SPEL-003), then runs `make ffi-gen` with `SPEL_CLIENT_GEN` set to the vendored
-`spel-client-gen` in the scaffold cache. That writes `<name>_client.rs`, `<name>_ffi.rs` and
-`<name>.h` under `<name>_ffi/generated/`. Scaffold's own echo is just `$ make ffi-gen`; the
-generator path shows up in make's echoed recipe line and must be the vendored one, not one
-on `PATH`.
-`build client [project-path]` works from outside the project.
-
-### Preconditions
-SPEL-002 (`setup` has built `spel-client-gen`).
-
-### Steps
-1. `"$SCAFFOLD_BIN" build client 2>&1 | tee /tmp/client.out`
-2. `find ./*_ffi/generated -type f | sort`
-3. `P=$PWD; rm -r "$P"/*_ffi/generated; ( cd / && "$SCAFFOLD_BIN" build client "$P" ); find "$P"/*_ffi/generated -type f | sort`
-
-### Success criteria
-- In step 1 the `Generating IDL via` line comes before the `$ make ffi-gen` echo.
-- All three files exist, and the echoed generator path is inside the scaffold cache.
-- Step 3 regenerates the same three files from `/`.
-
-### Notes
-`no such command: ffi-gen` means something invoked `spel ffi-gen`, which does not exist:
-generation is the separate `spel-client-gen` binary. `vendored spel-client-gen binary not
-found` means `setup` has not built it.
+`expected IDL file …/idl/<stem>.json is missing` means something still resolves the IDL by
+the old `<idl-dir>/<stem>.json` convention instead of `spel.toml`. `Skipping IDL build for
+framework kind …` means the command ran in a non-spel project. `no such command: ffi-gen`
+means something invoked `spel ffi-gen`, which does not exist. `vendored spel-client-gen
+binary not found` means `setup` has not built it.
 
 ## SPEL-005 — Deploy and invoke instructions through spel
 
@@ -169,57 +141,29 @@ found` means `setup` has not built it.
 `deploy` prints a `program_id`. After the signer is initialized for auth-transfer,
 `lgs spel -- initialize --owner Public/<id>` is included in a block. `spel -- pda state` and
 `spel -- inspect <pda> --type ProgramState` then show the PDA's state. `lgs spel --` always
-uses the project wallet, whatever the shell exports.
-
-With localnet down, the LEZ v0.2.4 wallet fails with `Error: Failed to find leader`. Only some
-paths turn that into scaffold's hint. `deploy` probes the sequencer first and fails with
-`cannot deploy programs: …` plus `sequencer appears unavailable at <addr>` and
-``Run `logos-scaffold localnet start`.``. The `wallet --` and `spel --` passthroughs add no
-hint: they forward the tool's own output, and `wallet --` ends with `error: wallet
-passthrough command failed`.
+uses the project wallet, whatever the shell exports. With localnet down, the `wallet --` and
+`spel --` passthroughs forward the tool's own error (`Failed to find leader` from the LEZ
+v0.2.4 wallet) without a scaffold hint, and `wallet --` ends with `error: wallet passthrough
+command failed`; only `deploy` and `topup` add the sequencer-unavailable hint (DEPLOY-006,
+WALLET-004).
 
 ### Preconditions
 SPEL-002 with localnet running, and `"$SCAFFOLD_BIN" wallet -- check-health` succeeds.
 
 ### Steps
 1. `"$SCAFFOLD_BIN" deploy`
-2. `"$SCAFFOLD_BIN" wallet -- account new public` (note `Public/<id>`)
-3. `"$SCAFFOLD_BIN" wallet -- auth-transfer init --account-id Public/<id>`
-4. `"$SCAFFOLD_BIN" spel -- initialize --owner Public/<id>`
-5. `"$SCAFFOLD_BIN" spel -- pda state` then `"$SCAFFOLD_BIN" spel -- inspect <pda> --type ProgramState`
-6. `"$SCAFFOLD_BIN" localnet stop`, then `"$SCAFFOLD_BIN" deploy; echo "exit=$?"`
-7. `"$SCAFFOLD_BIN" wallet -- check-health; echo "exit=$?"`
-8. `"$SCAFFOLD_BIN" spel -- initialize --owner Public/<id>; echo "exit=$?"`, then
-   `"$SCAFFOLD_BIN" localnet start` to restore it.
+2. `"$SCAFFOLD_BIN" wallet -- account new public` (note `Public/<id>`), then
+   `"$SCAFFOLD_BIN" wallet -- auth-transfer init --account-id Public/<id>`
+3. `"$SCAFFOLD_BIN" spel -- initialize --owner Public/<id>`
+4. `"$SCAFFOLD_BIN" spel -- pda state` then `"$SCAFFOLD_BIN" spel -- inspect <pda> --type ProgramState`
+5. `"$SCAFFOLD_BIN" localnet stop; "$SCAFFOLD_BIN" wallet -- check-health; echo "exit=$?"; "$SCAFFOLD_BIN" spel -- initialize --owner Public/<id>; echo "exit=$?"; "$SCAFFOLD_BIN" localnet start`
 
 ### Success criteria
 - `deploy` prints `program_id:`, `initialize` reports inclusion, and `inspect` prints the
-  state.
-- No `Storage not found` or empty-wallet error appears.
-- Step 6 exits non-zero with `cannot deploy programs:` and `sequencer appears unavailable at`
-  naming the project's sequencer address.
-- Steps 7 and 8 exit non-zero. Step 7 shows `Failed to find leader` and
-  `wallet passthrough command failed`. Neither shows a scaffold hint. That is current
-  behavior: record it, don't fail it.
+  state. No `Storage not found` or empty-wallet error appears.
+- Step 5: both commands exit non-zero with the tool's own error and no scaffold hint.
 
 ### Notes
-Run step 3 before the account signs anything. An account claimed by a spel program can
-never send tokens, and this cannot be undone. CLI instruction names are kebab-case.
-
-## SPEL-006 — Vendored spel project
-
-### Expected
-`new --template spel --vendor-deps` clones spel to `.scaffold/repos/spel` at the SHA in
-`[repos.spel] pin`, with `path = ".scaffold/repos/spel"`. The clone happens after `spel init`
-returns, so creation never fails with `Directory '<name>' already exists`.
-
-### Preconditions
-None.
-
-### Steps
-1. `"$SCAFFOLD_BIN" new dogfood-spel-vendored --template spel --vendor-deps`
-2. `git -C dogfood-spel-vendored/.scaffold/repos/spel rev-parse HEAD`
-3. `grep -A3 'repos.spel' dogfood-spel-vendored/scaffold.toml`
-
-### Success criteria
-- The vendored HEAD equals the recorded pin, and `path` is the relative vendored path.
+Run the `auth-transfer init` before the account signs anything: an account claimed by a spel
+program can never send tokens, and this cannot be undone. CLI instruction names are
+kebab-case.

@@ -10,48 +10,30 @@ scenarios:
     source: DOGFOODING.md@740e5e9 D1
     depends_on: [BUILD-002, LOCALNET-001]
   - id: DEPLOY-002
-    title: Deploy one program by name
-    priority: P1
-    provenance: documented
-    source: DOGFOODING.md@740e5e9 D3
-    depends_on: [DEPLOY-001]
-  - id: DEPLOY-003
-    title: Deploy an explicit binary with JSON output
-    priority: P1
-    provenance: documented
-    source: DOGFOODING.md@740e5e9 D3
-    depends_on: [DEPLOY-001]
-  - id: DEPLOY-004
-    title: Discovery deploy with JSON output
+    title: Deploy one program by name or path, with JSON output
     priority: P1
     provenance: documented
     source: DOGFOODING.md@740e5e9 D3
     depends_on: [DEPLOY-001]
   - id: DEPLOY-005
-    title: Unknown program name lists available programs
+    title: Unknown program or missing binaries give an actionable error
     priority: P2
     provenance: documented
     source: DOGFOODING.md@740e5e9 D3
-    depends_on: [BUILD-002]
+    depends_on: [DEPLOY-001]
   - id: DEPLOY-006
     title: Unreachable sequencer fails fast with a hint
     priority: P2
     provenance: documented
     source: DOGFOODING.md@740e5e9 D3
-    depends_on: [BUILD-002]
+    depends_on: [DEPLOY-001]
   - id: DEPLOY-007
-    title: Stale docker artefacts outside the owned root are ignored
+    title: Deploy ranks only the owned docker artefact first
     priority: P2
     provenance: documented
     source: DOGFOODING.md@740e5e9 D8
     depends_on: [DEPLOY-001]
-  - id: DEPLOY-008
-    title: Missing binaries name every search root
-    priority: P2
-    provenance: documented
-    source: DOGFOODING.md@740e5e9 D3
-    depends_on: [LOCALNET-001]
-retired: []
+retired: [DEPLOY-003, DEPLOY-004, DEPLOY-008]
 ---
 
 # Deploy
@@ -64,177 +46,144 @@ debug. Multi-program deploys are paced one program per block. Related:
 [Setup and build](setup-and-build.md), [Run pipeline](run-pipeline.md),
 [Example runners](example-runners.md).
 
+BUILD-002 is the build these scenarios expect. On a host without Docker, BUILD-005's local
+build stands in: every `docker/` path below then reads `target/riscv-guest/…/release/`, and
+the report says so.
+
 ## DEPLOY-001 — Deploy all discovered programs
 
 ### Expected
 Bare `deploy` submits every discovered program and prints `OK  <program> submitted` and
-`program_id: <hex>` for each. It ends with a summary with zero failures. Between programs it
-prints `Waiting for a new block past N before the next deployment ...`. The echoed `wallet
-deploy-program <path>` names the `target/riscv-guest-docker/.../docker/` artefact after a
-default build.
+`program_id: <hex>` for each. Between programs it prints `Waiting for a new block past N
+before the next deployment ...`. It ends with a summary with zero failures. The echoed
+`wallet deploy-program <path>` names the `target/riscv-guest-docker/.../docker/` artefact
+after a default build.
 
 ### Preconditions
 BUILD-002 and LOCALNET-001.
 
 ### Steps
-1. `"$SCAFFOLD_BIN" deploy`
+1. `"$SCAFFOLD_BIN" deploy; "$SCAFFOLD_BIN" localnet status --json | jq .ready`
 
 ### Success criteria
-- Exit 0, one `OK` line and one `program_id:` line per program, and zero failures in the
-  summary.
-- localnet is still running afterwards (`localnet status --json | jq .ready` → `true`).
+- Exit 0, one `OK` line and one `program_id:` line per program, and `Failed: 0`.
+- Localnet is still ready afterwards.
 
 ### Notes
-Pacing exists because the pinned LEZ panics on blocks over about 896 KiB. Expect roughly 15
+Pacing exists because the pinned LEZ panics on blocks over about 896 KiB: expect roughly 15
 seconds per extra program. A stalled head aborts with `deploy pacing aborted …` and a
-non-zero exit.
-After an aborted pacing run, re-run `deploy` for the remaining programs once the sequencer
-recovers, or raise `LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS` for slow block intervals. A
-deploy that continues unpaced and crashes localnet is the regression. If the upstream block
-cap is lifted and pacing becomes dead weight, record that too.
+non-zero exit; re-run `deploy` once the sequencer recovers, or raise
+`LOGOS_SCAFFOLD_DEPLOY_PACING_TIMEOUT_MS` for slow block intervals. A deploy that continues
+unpaced and crashes localnet is the regression.
 
-## DEPLOY-002 — Deploy one program by name
+## DEPLOY-002 — Deploy one program by name or path, with JSON output
 
 ### Expected
-`deploy <name>` submits only that program.
+`deploy <name>` submits only that program. `deploy --program-path <bin>` prints a human `OK`
+line with the path. With `--json`, stdout is JSON only, with no command echoes: `{"deploys":
+[…]}` for discovery deploys (bare or by name) and one flat object for `--program-path`. Each
+entry is `{"status":"submitted","program":…,"program_id":…}`; absent fields (today always
+`tx`) are omitted, not `null`. A failed entry carries `error` instead of `program_id`, the
+exit code is then non-zero, and the JSON is still printed.
 
 ### Preconditions
 DEPLOY-001.
 
 ### Steps
 1. `"$SCAFFOLD_BIN" deploy hello_world`
+2. `"$SCAFFOLD_BIN" deploy hello_world --json | jq -e '.deploys | length == 1 and (.[0] | .status and .program and .program_id and (has("tx")|not))'`
+3. `BIN=$(find target/riscv-guest-docker target/riscv-guest -name hello_world.bin | head -1); "$SCAFFOLD_BIN" deploy --program-path "$BIN"`
+4. `"$SCAFFOLD_BIN" deploy --program-path "$BIN" --json | jq -e '.status and .program and (has("tx")|not)'`
 
 ### Success criteria
-- Exactly one `OK  hello_world submitted` line, plus a `program_id:`.
-- It ends with the `Summary:` block: `Succeeded: 1`, `Failed: 0` and a `hello_world: submitted`
-  result line.
+- Step 1 prints exactly one `OK  hello_world submitted` line, a `program_id:`, and a
+  `Summary:` with `Succeeded: 1`, `Failed: 0`.
+- Step 3 prints a human `OK` line naming `$BIN`.
+- Steps 2 and 4 parse as pure JSON and the `jq -e` checks exit 0. (A bare `deploy --json`
+  has the same shape with one entry per program; BUILD-004 uses it.)
 
-## DEPLOY-003 — Deploy an explicit binary with JSON output
-
-### Expected
-`deploy --program-path <bin>` prints a human `OK` line with the path. With `--json`, stdout is
-only one flat object: `{"status":"submitted","program":…,"program_id"?:…}`. It has no
-command echoes, and absent fields (today always `tx`) are omitted, not `null`.
-
-### Preconditions
-DEPLOY-001.
-
-### Steps
-1. `BIN=$(find target/riscv-guest-docker target/riscv-guest -name hello_world.bin | head -1)`
-2. `"$SCAFFOLD_BIN" deploy --program-path "$BIN"`
-3. `"$SCAFFOLD_BIN" deploy --program-path "$BIN" --json | jq -e '.status and .program and (has("tx")|not)'`
-
-### Success criteria
-- Step 2 prints a human-readable `OK` line naming `$BIN`.
-- Step 3 parses and the `jq -e` check exits 0. `program_id` is present once `setup` has built
-  spel.
-
-## DEPLOY-004 — Discovery deploy with JSON output
+## DEPLOY-005 — Unknown program or missing binaries give an actionable error
 
 ### Expected
-`deploy --json` and `deploy <name> --json` print only `{"deploys":[…]}`, with one entry per
-attempted program in the same shape as DEPLOY-003. A failed entry carries `error` instead of
-`program_id`. The exit code is non-zero if any entry failed, and the JSON is still printed.
+`deploy <unknown>` fails and lists the discovered program names. With no guest artefacts,
+`deploy` fails, points back to `logos-scaffold build`, and lists the searched roots in order:
+`target/riscv-guest-docker`, `target/riscv-guest`, `methods/target`, `methods/guest/target`.
+Nothing was submitted, so no `Note: Submission confirmed by wallet exit status …` line is
+printed.
 
 ### Preconditions
-DEPLOY-001.
-
-### Steps
-1. `"$SCAFFOLD_BIN" deploy --json | jq -e '.deploys | length > 0'`
-2. `"$SCAFFOLD_BIN" deploy hello_world --json | jq '.deploys[0]'`
-
-### Success criteria
-- Both outputs are parseable JSON on stdout, with no `null` values and no human text mixed in.
-
-## DEPLOY-005 — Unknown program name lists available programs
-
-### Expected
-`deploy <unknown>` fails and lists the discovered program names.
-
-### Preconditions
-BUILD-002.
+DEPLOY-001 with localnet up.
 
 ### Steps
 1. `"$SCAFFOLD_BIN" deploy nonexistent_program; echo "exit=$?"`
+2. Move the artefacts away instead of deleting them, so nothing has to be rebuilt:
+   `mkdir /tmp/guest-bak && mv target/riscv-guest-docker target/riscv-guest /tmp/guest-bak/ 2>/dev/null; "$SCAFFOLD_BIN" deploy; echo "exit=$?"; mv /tmp/guest-bak/* target/`
 
 ### Success criteria
-- Non-zero exit, and the output includes `hello_world`.
+- Step 1 exits non-zero, and the output lists `hello_world` among the available programs.
+- Step 2 exits non-zero with ``missing binary `hello_world.bin` (searched: …)`` naming all
+  four roots in that order, suggests `build`, and has no `Submission confirmed` note.
 
 ## DEPLOY-006 — Unreachable sequencer fails fast with a hint
 
 ### Expected
 Before submitting, `deploy` probes the sequencer over RPC (`getLastBlockId`) at the address
-the wallet itself targets. That is `sequencers[0].sequencer_addr` in the wallet config from
-LEZ v0.2.4, or the top-level `sequencer_addr` before that. With nothing listening (refused)
-and with an unrouted address (blackholed), it fails in about a second with a
+the wallet itself targets: `sequencers[0].sequencer_addr` in the wallet config from LEZ
+v0.2.4, or the top-level `sequencer_addr` before that. With nothing listening (refused) and
+with an unrouted address (blackholed), it fails in about a second with a
 sequencer-unavailable hint naming that address. It never falls through to a vague wallet
 error or a long hang.
 
 ### Preconditions
-BUILD-002.
+DEPLOY-001. Back up `.scaffold/wallet/wallet_config.json`.
 
 ### Steps
 1. `"$SCAFFOLD_BIN" localnet stop; "$SCAFFOLD_BIN" deploy; echo "exit=$?"`
-2. Check that `curl -m 3 http://10.255.255.1:3040` times out rather than reporting
-   `Connection refused`. A sandboxed container often refuses it at once, which makes step 3's
-   timing pass for the wrong reason, so note it in the report if it does.
-3. In `.scaffold/wallet/wallet_config.json` set `sequencers[0].sequencer_addr` (top-level
-   `sequencer_addr` before LEZ v0.2.4) to `http://10.255.255.1:3040`, run
-   `time "$SCAFFOLD_BIN" deploy`, then restore the address.
+2. `curl -m 3 http://10.255.255.1:3040; echo "curl=$?"`
+3. Set `sequencers[0].sequencer_addr` to `http://10.255.255.1:3040`, run
+   `time "$SCAFFOLD_BIN" deploy; echo "exit=$?"`, restore the config, and
+   `"$SCAFFOLD_BIN" localnet start`.
 
 ### Success criteria
-- Both runs exit non-zero with the sequencer-unavailable hint, step 3 in a few seconds.
-- Step 3's hint names `http://10.255.255.1:3040`. A hint naming
-  `127.0.0.1:<[localnet].port>` means scaffold probed the default port instead of the
-  wallet's target.
+- Step 1 exits non-zero at once with `cannot deploy programs: …` and `sequencer appears
+  unavailable at http://127.0.0.1:<port>` plus ``Run `logos-scaffold localnet start`.``
+- Step 3 exits non-zero in a few seconds, and its hint names `http://10.255.255.1:3040`. A
+  hint naming `127.0.0.1:<[localnet].port>` means scaffold probed the default port instead of
+  the wallet's target.
 - No `reachability probe failed …; continuing` line appears.
 
 ### Notes
-The probe tells "refused or unreachable" from "something answered". It does not verify that
-the responder is this project's sequencer, so a foreign process on the configured port still
-suppresses the hint.
+Step 2 must time out (`curl=28`). A sandbox that refuses the address at once makes step 3's
+timing pass for the wrong reason: note it in the report. The probe tells "refused or
+unreachable" from "something answered". It does not verify that the responder is this
+project's sequencer, so a foreign process on the configured port suppresses the hint.
 
-## DEPLOY-007 — Stale docker artefacts outside the owned root are ignored
+## DEPLOY-007 — Deploy ranks only the owned docker artefact first
 
 ### Expected
-In a `default` project, a `docker/` artefact under `methods/guest/target/` (a root scaffold
-does not own for this project kind) never outranks the fresh build. `deploy` ships the owned
-artefact and prints `note: ignoring …/methods/guest/target/…/docker/hello_world.bin` on
-stderr.
+A `docker/` artefact under `target/riscv-guest-docker` (the root a `default` project owns)
+outranks `release/`. One under `methods/guest/target/` (a root scaffold does not own for this
+project kind) never does: `deploy` ships the owned artefact and prints `note: ignoring
+…/methods/guest/target/…/docker/hello_world.bin` on stderr.
 
 ### Preconditions
 DEPLOY-001.
 
 ### Steps
-1. `mkdir -p methods/guest/target/riscv32im-risc0-zkvm-elf/docker`
-2. `cp <another program>.bin methods/guest/target/riscv32im-risc0-zkvm-elf/docker/hello_world.bin`
-3. `"$SCAFFOLD_BIN" deploy hello_world`, then `rm -rf methods/guest/target`
+1. `mkdir -p methods/guest/target/riscv32im-risc0-zkvm-elf/docker && cp <another program>.bin methods/guest/target/riscv32im-risc0-zkvm-elf/docker/hello_world.bin`
+2. `"$SCAFFOLD_BIN" deploy hello_world 2>&1 | grep -E 'deploy-program|note: ignoring'; rm -rf methods/guest/target`
+3. Only after a local build (no `target/riscv-guest-docker`): copy the `release/`
+   `hello_world.bin` into `target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/`, run
+   `"$SCAFFOLD_BIN" deploy hello_world 2>&1 | grep deploy-program`, then remove
+   `target/riscv-guest-docker`.
 
 ### Success criteria
-- The echoed `wallet deploy-program` path is under `target/riscv-guest-docker` (or
-  `release/`), and the `note: ignoring` line appears.
+- Step 2: the echoed `wallet deploy-program` path is the project's own build
+  (`target/riscv-guest-docker/…/docker/` or `target/riscv-guest/…/release/`), and the `note:
+  ignoring` line names the planted file.
+- Step 3: the echoed path is the `docker/` copy.
 
 ### Notes
-`lgs build` never clears `methods/guest/target`, so a planted or left-over ELF there would win
-every later deploy if it were ranked. On a host that cannot build containers, check the
-ranking the other way round as well: copy a `release/` `.bin` into
-`target/riscv-guest-docker/riscv32im-risc0-zkvm-elf/docker/` and confirm that `deploy` echoes
-the `docker/` path.
-
-## DEPLOY-008 — Missing binaries name every search root
-
-### Expected
-With no guest artefacts and localnet up, `deploy` fails, points back to `logos-scaffold
-build`, and lists the searched roots in order: `target/riscv-guest-docker`,
-`target/riscv-guest`, `methods/target`, `methods/guest/target`.
-
-### Preconditions
-LOCALNET-001, in a project whose guest artefacts are removed.
-
-### Steps
-1. `rm -rf target/riscv-guest-docker target/riscv-guest && "$SCAFFOLD_BIN" deploy; echo "exit=$?"`
-
-### Success criteria
-- Non-zero exit, all four roots listed in that order, and `build` suggested.
-- The output has no `Note: Submission confirmed by wallet exit status …` line: nothing was submitted
-  (`Succeeded: 0`), so the note would contradict the summary.
+`lgs build` never clears `methods/guest/target`, so a planted or left-over ELF there would
+win every later deploy if it were ranked. After a docker build, DEPLOY-001's echoed path
+already shows the `docker/` ranking and step 3 is redundant.
