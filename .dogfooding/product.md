@@ -94,8 +94,52 @@ one uses `<project>/.scaffold/repos/lez`. The wallet under test is always
   evidence so repeated runs stay traceable.
 - **Capture a contradiction before fixing it.** If tracked PID, listener and readiness
   disagree, save `localnet status` first and restart afterwards.
+- **Mutate configs one guarded command at a time.** Several scenarios edit `scaffold.toml`
+  or `wallet_config.json`. Back the file up, restore it in a `trap`, and never chain the
+  mutations in one loop: when a step hangs and is killed, the loop carries on with the wrong
+  config.
+- **Mind what your shell exports.** `LOGOS_SCAFFOLD_CACHE_ROOT` outranks `[scaffold].cache_root`
+  and `--cache-root` for every command after creation, and `LOGOS_SCAFFOLD_WALLET_PASSWORD`
+  replaces the default password. A private cache root per run is good practice (a shared one
+  can be reset or rebuilt under you); scenarios that test these layers say to unset them.
+- **Kill by process name, not by command line.** `pkill -f <text>` and `pgrep -f <text>` also
+  match the shell that runs them. Use `pgrep -x logos-scaffold`, `pgrep -x sequencer_servi`
+  (the kernel truncates names to 15 characters), `pgrep -x cargo`.
 - **Exit code 0 is not proof.** A runner can submit a transaction the sequencer then rejects,
   and a wallet command can silently use `~/.lee/wallet`. The scenarios say what to read back.
+
+### Run plan
+A full run is dominated by a handful of long builds, so share them. One order that builds
+everything once:
+
+1. **No project needed:** CLI-001, CLI-003, DIAG-005, API-002.
+2. **Create:** CREATE-001 (`dogfood-default`), then CREATE-003, CREATE-007, CREATE-008,
+   SKILLS-002. Start SPEL-001 early: it builds the spel CLI that CREATE-003 step 3,
+   CREATE-004 step 2 and SKILLS-001 reuse.
+3. **Main project (`dogfood-default`):** BUILD-001 → LOCALNET → BUILD-002/004 (or BUILD-005
+   without Docker) → WALLET → DEPLOY → RUNNER → DIAG → TUI. CLI-006, CLI-008 step 2 and the
+   test-node and API features use this project too. Stop localnet before TRPC-007 and
+   TNODE-004 step 4.
+4. **A second, fresh project (`dogfood-run`):** RUN-001 onward; RUN-010 in a copy.
+5. **Cheap side projects:** CREATE-004, CREATE-005, BUILD-003, BUILD-006 and TNODE-002 step 1
+   only create a project or stop early; none needs a full build.
+6. **spel project:** SPEL-002, SPEL-003, SPEL-005.
+7. **Basecamp:** BCSETUP-006, BCLAUNCH-005 and BCSETUP-007 anywhere; the rest after
+   BCSETUP-001.
+
+Only one localnet (and one `--port 3040` test node) fits on port 3040 at a time, and
+projects that share a cache root and LEZ pin share one chain database, so run the scenarios
+that reset or stop localnet one at a time.
+
+What a host cannot provide changes the run like this. Say which rows applied in the report.
+
+| Host lacks | Do instead | Report as |
+|---|---|---|
+| Docker daemon | Build with `[build].guest = "local"` (BUILD-005). DEPLOY, RUN, RUNNER and TUI run on that build; DEPLOY-007 step 3 checks the docker ranking by hand. | BUILD-002, BUILD-004, SPEL-002: skipped, citing the `guest-reproducibility.yml` and `template-e2e.yml` runs (both take `workflow_dispatch`). SPEL-005: skipped, or run on a Docker-capable host. |
+| A published prebuilt for the pin | Stop BUILD-006 after the fallback line. | BUILD-006: passed for the fallback, verification path not exercised. |
+| Nix, or GitHub access for Nix | BCSETUP-006, BCLAUNCH-005. | Every other basecamp scenario: blocked. |
+| RAM for the basecamp flake, and `cache.nix.logos.co` | BCSETUP-006, BCLAUNCH-005, BCSETUP-007. | BCSETUP-001 and its dependants: blocked. |
+| A graphical session | Start `Xvfb` (see "Basecamp environment"). | — |
 
 ### Toolchain
 - **All areas:** Unix (Linux or macOS), `git`, `rustc`/`cargo` ≥ 1.85, `lsof`, `ps`, `kill`,
@@ -105,12 +149,7 @@ one uses `<project>/.scaffold/repos/lez`. The wallet under test is always
   and `new --template spel` fail minutes in with a raw `pcsc-sys` error.
 - **Guest builds (default `docker` mode):** a running Docker or Podman daemon and
   `cargo-risczero` (`rzup install cargo-risczero 3.0.5`; `rzup install rust` does not provide
-  it). Without Docker, use `build --guest local` or `[build].guest = "local"`, say so in the
-  report, and cover the container steps of BUILD-002 and BUILD-004 through the
-  `guest-reproducibility.yml` workflow (`workflow_dispatch`). The spel guest has no local
-  mode. On such a host only SPEL-001, SPEL-003, SPEL-004 and SPEL-006 run locally; run
-  SPEL-002 and SPEL-005 on a Docker-capable host, such as a GitHub-hosted runner, rather than
-  reporting them blocked.
+  it). Without Docker, see "Run plan" below for what replaces what.
 - **Guest compilation (`build`):** the risc0 Rust toolchain (step 3 below), and for the spel
   template also the risc0 C++ toolchain (step 4).
 - **Real sequencer (localnet, deploy, run, test-node):** `r0vm` at the exact risc0 version in
@@ -218,7 +257,7 @@ ls "$P"/.scaffold/circuits/pol/verification_key.json
   `curl -sS -o /dev/null -w '%{http_code}\n' https://api.github.com/repos/NixOS/nixpkgs/commits/HEAD`
   must print `200`. Rewriting the project's input to `git+https://` does not help, because
   the transitive inputs are locked as `github:`. If the probe fails, run BCSETUP-006 and
-  BCSETUP-008 and report the blocker.
+  BCLAUNCH-005 and report the blocker.
 - **Memory.** Evaluating the basecamp 0.3.0 flake (about 3.3k lock nodes) peaks above about
   4.8 GB of RAM before any build starts, and running out shows as a bare `SIGKILL` with no
   error text. `nix build .#app --dry-run` only evaluates, so a `SIGKILL` there confirms it.
@@ -235,8 +274,11 @@ ls "$P"/.scaffold/circuits/pol/verification_key.json
 
   `basecamp setup` reuses an existing build for an unchanged commit pin, so everything after
   the basecamp build (clone, `lgpm`, seeding, state, install, launch) still runs for real.
-  Record that setup ran in this mode. Where even that is out of reach, BCSETUP-007 covers the
-  `lgpm` pin and the `.lgx` contract without an app build.
+  Record that setup ran in this mode. This route needs `cache.nix.logos.co`: if
+  `curl -m 15 https://cache.nix.logos.co/nix-cache-info` times out, `nix-store -r` fails after
+  minutes with `there is no substituter that can build it`. Where neither route works, report
+  BCSETUP-001 and its dependants as blocked (do not seed state by hand to get past it), and
+  run BCSETUP-007, which covers the `lgpm` pin and the `.lgx` contract without an app build.
 - **Binary cache.** The pinned flake declares `extra-substituters =
   https://cache.nix.logos.co/public`, but scaffold runs a plain `nix build`, which honours it
   only for a trusted user. Without it a cold `basecamp setup` builds a Qt closure from source.
@@ -244,9 +286,13 @@ ls "$P"/.scaffold/circuits/pol/verification_key.json
   and say which mode any reported duration was measured in.
 - **A module project.** Its `flake.nix` exposes `packages.<system>.lgx`, built with
   `logos-module-builder` 0.3.0. That repo's `templates/minimal-module` (a core module) is the
-  smallest one; add `templates/ui-qml` as a second sub-flake to cover a UI plugin. Pin the
-  template's `logos-module-builder` input to `github:logos-co/logos-module-builder/0.3.0`,
-  since the templates track `main`. Packages from older tooling do not install. The contract
+  smallest one; add `templates/ui-qml` as a second sub-flake to cover a UI plugin (it has
+  an icon, which BCSETUP-007 needs). Copy them out of a clone of that repo at tag `0.3.0`:
+  `nix flake init -t github:logos-co/logos-module-builder/0.3.0#minimal-module` fails, because
+  the flake exports no templates. Pin the copied template's `logos-module-builder` input to
+  `github:logos-co/logos-module-builder/0.3.0`, since the templates track `main`. Without
+  the Logos binary cache the first `nix build .#lgx` compiles the Logos libraries (about 35
+  minutes on 4 CPUs). Packages from older tooling do not install. The contract
   is `docs/basecamp-module-requirements.md` (`"$SCAFFOLD_BIN" basecamp docs`).
 - **A graphical session for launch.** With `QT_QPA_PLATFORM=xcb` and no reachable X display,
   basecamp 0.3.0 aborts at startup (SIGABRT, empty log, no `launch.state`). In a headless
@@ -255,12 +301,22 @@ ls "$P"/.scaffold/circuits/pol/verification_key.json
   and ImageMagick's `import` are enough to open an app tile and screenshot it.
 
 ### Long steps
-The first `setup` takes about 3 minutes (wallet + spel) and the sequencer build about 6 minutes
-on a many-core machine; measured on 4 CPUs with `CARGO_BUILD_JOBS=2` a cold `setup` took 40
-minutes, a cold `build --guest local` of a fresh project about 9 minutes (the first build also
-installs the template's host toolchain, Rust 1.92.0, through rustup), and a spel project's first
-`build idl` 5 minutes. The first docker guest build pulls a ~1.7 GB image, and the first spel build takes
-5–15 minutes. A cold basecamp setup builds a Qt closure unless the binary cache is trusted.
+Measured cold on 4 CPUs with `CARGO_BUILD_JOBS=2` (a 16-core machine is several times
+faster):
+
+| Step | Time |
+|---|---|
+| First `setup` on a cache root (sequencer + wallet + spel) | 40 min |
+| `test-node prepare` alone (sequencer only) | 20–25 min |
+| First `build --guest local` of a project (also installs the template's Rust 1.92.0 through rustup) | 9 min |
+| First docker guest build | pulls a ~1.7 GB image, then several minutes |
+| First `build idl` of a spel project | 5 min |
+| First spel `build` | 5–15 min |
+| `deploy` of the default template (five programs, one per block) | 3 min |
+| Cold `basecamp setup` without the trusted binary cache | builds a Qt closure |
+
+Everything after the first build on a cache root is seconds to a few minutes, which is why
+the run plan keeps one cache root.
 
 ### Environment variables
 `LOGOS_SCAFFOLD_CACHE_ROOT`, `LOGOS_SCAFFOLD_WALLET_PASSWORD`, `LOGOS_BLOCKCHAIN_CIRCUITS`
@@ -285,7 +341,8 @@ provisioning.
 - **Never upload without asking the user:** `report` archives. Redaction is best-effort, so
   list the archive's contents first.
 - **Network:** the code fetches from GitHub (LEZ, spel, circuits, Nix inputs) and from
-  Docker Hub (`risczero/risc0-guest-builder`). It does no other outbound calls and has no
+  Docker Hub (`risczero/risc0-guest-builder`). `new` clones LEZ on first use of a cache root,
+  and `setup`, `build` and `run` fetch the pinned repos every time. It does no other outbound calls and has no
   telemetry.
 
 ## Out of scope
