@@ -35,7 +35,7 @@ If your task is to *use* scaffold rather than change it, read the skills in
 | `src/cli.rs` | clap definitions. The source of truth for flags. |
 | `templates/` | The `default` (bare LEZ) project template. The `spel` template lives in the spel repo; `lgs new --template spel` shells out to `spel init`. |
 | `skills/` | Agent skills, shipped into scaffolded projects. |
-| `tests/` | Integration tests driven through `assert_cmd`. |
+| `tests/` | Integration tests driven through `assert_cmd`. `tests/e2e/` is the end-to-end suite: the dogfooding scenarios against a real sequencer. |
 | `docs/` | User documentation. |
 
 ## Before you change anything
@@ -98,3 +98,8 @@ commit reviewed.
 
 "What to rerun after a change" in `.dogfooding/index.md` maps a change area to the scenarios
 to rerun.
+
+`tests/e2e/` is the same scenarios as a program (`LGS_E2E=1 cargo test --release --test e2e`,
+see `tests/e2e/README.md`). When you change, add or retire a scenario, change its function in
+`tests/e2e/scenarios/` and its entry in `tests/e2e/registry.rs` in the same change: `cargo
+test` fails when the two sides name different scenarios.

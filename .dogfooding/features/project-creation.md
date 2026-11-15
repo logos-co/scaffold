@@ -133,15 +133,16 @@ error naming it.
 `LOGOS_SCAFFOLD_CACHE_ROOT` **unset** for every command here (`env -u
 LOGOS_SCAFFOLD_CACHE_ROOT …`): the variable outranks `[scaffold].cache_root`, so with it
 exported this scenario tests the wrong layer. An older LEZ commit SHA for step 2 (for
-example an earlier release tag's commit). A local LEZ clone for step 3, for example
+example an earlier release tag's commit), and `NOCARGO`, a `PATH` without `cargo` ("Rules
+for a run" in [product.md](../product.md)). A local LEZ clone for step 3, for example
 `git clone <cache>/repos/lez/<pin> /tmp/lez-src` (TNODE-006 uses the same clone).
 
 ### Steps
 1. `"$SCAFFOLD_BIN" new dogfood-cache --cache-root "$SCRATCH_ROOT/custom-cache"`
 2. `"$SCAFFOLD_BIN" new dogfood-cache2 --cache-root "$SCRATCH_ROOT/custom-cache"`, set
    `[repos.lez].pin` in `dogfood-cache2/scaffold.toml` to the older SHA, then
-   `( cd dogfood-cache2 && "$SCAFFOLD_BIN" setup )`. Only the clone matters: stop `setup` once
-   `custom-cache/repos/lez/<older-sha>/.git` exists (`pgrep -x cargo | xargs kill` afterwards).
+   `( cd dogfood-cache2 && env PATH="$NOCARGO" "$SCAFFOLD_BIN" setup )`. Only the clone matters:
+   without `cargo` on `PATH`, `setup` checks the pin out and stops at its first build.
 3. `"$SCAFFOLD_BIN" new dogfood-lezpath --cache-root "$SCRATCH_ROOT/custom-cache" --lez-path /tmp/lez-src`,
    then `"$SCAFFOLD_BIN" test-node pins --project dogfood-lezpath --json | jq '.lez_checkout, .checkout_ownership'`
 4. `for d in "$SCRATCH_ROOT"/custom-cache/repos/lez/*/; do echo "$d $(git -C "$d" rev-parse HEAD)"; done`,

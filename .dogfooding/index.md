@@ -64,6 +64,18 @@ here: they go in `runs/`, which is gitignored.
 - A `source:` of the form `DOGFOODING.md@740e5e9 <section>` cites the runbook this folder
   replaced. It is no longer in the tree; read it with `git show 740e5e9:DOGFOODING.md`.
 
+## Running the scenarios without a person or a model
+
+`tests/e2e/` holds the scenarios as a program: the same steps and success criteria, run
+against a real sequencer by `LGS_E2E=1 cargo test --release --test e2e` and by the "Dogfood
+E2E" workflow. It reports per scenario ID. See [tests/e2e/README.md](../tests/e2e/README.md)
+for what it needs and which scenarios it leaves to a manual run (the basecamp ones that need
+the app and a window).
+
+A plain `cargo test` fails when a scenario ID here is neither automated nor listed as manual
+there. So change a scenario and its function together, and after adding or retiring one,
+update `tests/e2e/registry.rs`.
+
 ## What to rerun after a change
 
 The minimum for a change in each area. A feature name means all of its scenarios. When in

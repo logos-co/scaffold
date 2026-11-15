@@ -124,6 +124,15 @@ At minimum:
 
 The full mapping is in [.dogfooding/index.md](./.dogfooding/index.md#what-to-rerun-after-a-change).
 
+Most scenarios can be rerun as a program instead of by hand:
+
+```bash
+LGS_E2E=1 cargo test --release --test e2e -- DEPLOY WALLET-001   # IDs or prefixes; none = all
+```
+
+[tests/e2e/README.md](./tests/e2e/README.md) says what it needs and what it covers. The
+"Dogfood E2E" workflow runs all of it after merges, weekly and on demand.
+
 ```bash
 cargo build
 cargo run --bin logos-scaffold -- new dogfood-app --lez-path /absolute/path/to/logos-execution-zone

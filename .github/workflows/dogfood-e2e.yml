@@ -1,0 +1,97 @@
+name: Dogfood E2E
+
+# Runs the dogfooding scenarios of `.dogfooding/features/` as a program
+# (tests/e2e): a real LEZ sequencer, real wallet transactions, real guest
+# builds. `cargo test` in ci.yml only checks that the suite and the scenario
+# files name the same scenarios; this job executes them.
+#
+# Heavy (a LEZ build on a cold cache, several template builds, a Docker guest
+# build), so it does not run on every PR: only when the suite itself changes,
+# after merges that touch the product, weekly, and on demand.
+
+on:
+  pull_request:
+    paths:
+      - "tests/e2e/**"
+      - "!tests/e2e/**/*.md"
+      - ".github/workflows/dogfood-e2e.yml"
+  push:
+    branches: [master]
+    paths:
+      - "src/**"
+      - "templates/**"
+      - "tests/e2e/**"
+      - "Cargo.lock"
+  # Pins float (the rendered project has no Cargo.lock, crates.io moves): a
+  # weekly run turns a silent break into a dated failure.
+  schedule:
+    - cron: "17 3 * * 3"
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: "Scenario IDs or prefixes to run, space-separated (empty = all)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dogfood-e2e-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  scenarios:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare scaffold environment
+        uses: ./.github/actions/scaffold-env
+
+      - name: Install tmux (drives the dashboard scenarios)
+        run: sudo apt-get install -y tmux
+
+      # The generated projects' build trees do not fit next to the LEZ cache
+      # on the root disk; /mnt is the runner's large scratch disk.
+      - name: Prepare work directory
+        run: |
+          sudo mkdir -p /mnt/e2e
+          sudo chown "$USER" /mnt/e2e
+          df -h / /mnt
+
+      - name: Run the scenarios
+        env:
+          LGS_E2E: "1"
+          LGS_E2E_WORKDIR: /mnt/e2e/work
+          LGS_E2E_OUT: /mnt/e2e/report
+          # The cache the scaffold-env action restores and saves.
+          LGS_E2E_CACHE_ROOT: /home/runner/.cache/logos-scaffold
+          SCENARIOS: ${{ github.event.inputs.scenarios }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086
+          cargo test --release --locked --test e2e -- $SCENARIOS
+
+      - name: Summarize
+        if: always()
+        run: |
+          if [ -f /mnt/e2e/report/report.md ]; then
+            cat /mnt/e2e/report/report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No report was written." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload report and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dogfood-e2e-report
+          path: |
+            /mnt/e2e/report/report.md
+            /mnt/e2e/report/report.json
+            /mnt/e2e/report/logs
+          if-no-files-found: warn
+          retention-days: 14
