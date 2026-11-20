@@ -133,7 +133,8 @@ block height rises within seconds. The RPC listens on `127.0.0.1` only. `status 
 --json` reports `healthy` and the RPC URL, and exits non-zero when unhealthy or unknown.
 `stop --node <id>` stops only that node and removes its state unless `--preserve-work-dir`
 is passed. `--work-dir DIR` uses `DIR` as the runtime directory instead of
-`.scaffold/test-nodes/<id>`, and `--node` accepts that path. A relative `--project` works.
+`.scaffold/test-nodes/<id>`, and `--node` accepts that path. `--work-dir` refuses a
+directory that already holds files and leaves it untouched. A relative `--project` works.
 The node never uses the localnet port and never writes into the LEZ checkout.
 
 ### Preconditions
@@ -145,6 +146,7 @@ TNODE-002.
 3. `tn stop --node "$NODE" --project "$P"; ls "$P/.scaffold/test-nodes"; tn status --node "$NODE" --project "$P" --json; echo "exit=$?"`
 4. `git -C "$(tn pins --project "$P" --json | jq -r .lez_checkout)" status --short; ls "$(tn pins --project "$P" --json | jq -r .circuits_path)"`
 5. `cd "$P" && SJ=$(tn start --project . --work-dir "$SCRATCH_ROOT/tn-work" --json) && echo "$SJ" | jq -r .state_dir && jq -r .home "$(echo "$SJ" | jq -r .config_path)" && tn stop --node "$SCRATCH_ROOT/tn-work" --project .`
+6. `mkdir -p "$SCRATCH_ROOT/tn-keep" && echo '{}' > "$SCRATCH_ROOT/tn-keep/important.json" && tn start --project "$P" --work-dir "$SCRATCH_ROOT/tn-keep"; echo "exit=$?"; ls "$SCRATCH_ROOT/tn-keep"`
 
 ### Success criteria
 - Step 1 has every listed field, and the port is not 3040.
@@ -155,6 +157,7 @@ TNODE-002.
   (start materialises it if it was missing).
 - Step 5 starts although `--project` is relative, prints `$SCRATCH_ROOT/tn-work` as the
   state dir and an absolute `home`, and `stop` accepts the path as `--node`.
+- Step 6 exits non-zero with `is not empty`, starts no node, and `important.json` is still there.
 
 ## TNODE-004 — Wrap a command with a throwaway node
 

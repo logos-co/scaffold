@@ -253,7 +253,7 @@ impl TestNode {
             Some(dir) => {
                 fs::create_dir_all(dir)
                     .with_context(|| format!("create work dir {}", dir.display()))?;
-                ensure_dir_empty_enough(dir)?;
+                ensure_work_dir_empty(dir)?;
                 dir.clone()
             }
             None => allocate_work_dir(&project.root)?,
@@ -614,14 +614,25 @@ fn allocate_work_dir(project_root: &Path) -> DynResult<PathBuf> {
     )
 }
 
-/// A caller-supplied work dir must not already contain another node's state.
-fn ensure_dir_empty_enough(dir: &Path) -> DynResult<()> {
+/// A caller-supplied work dir must be empty: the node deletes it on a failed start
+/// and on stop (unless `preserve_work_dir`), so it must not hold anything else.
+fn ensure_work_dir_empty(dir: &Path) -> DynResult<()> {
     if dir.join(NODE_META_FILE).exists() {
         bail!(
             "work dir {} already contains a test node (found {}). \
              Stop it first or pass a fresh directory.",
             dir.display(),
             NODE_META_FILE
+        );
+    }
+    let mut entries =
+        fs::read_dir(dir).with_context(|| format!("read work dir {}", dir.display()))?;
+    if entries.next().is_some() {
+        bail!(
+            "work dir {} is not empty. A test node deletes its work dir when start fails \
+             and on stop (unless --preserve-work-dir is passed), so pass an empty or new \
+             directory.",
+            dir.display()
         );
     }
     Ok(())
@@ -1466,10 +1477,34 @@ mod tests {
     }
 
     #[test]
-    fn ensure_dir_empty_enough_rejects_existing_node() {
+    fn ensure_work_dir_empty_rejects_existing_node() {
         let temp = tempdir().unwrap();
         fs::write(temp.path().join(NODE_META_FILE), "{}").unwrap();
-        let err = ensure_dir_empty_enough(temp.path()).unwrap_err();
+        let err = ensure_work_dir_empty(temp.path()).unwrap_err();
         assert!(err.to_string().contains("already contains"), "{err}");
+    }
+
+    #[test]
+    fn ensure_work_dir_empty_rejects_a_dir_with_other_files() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join("important.json");
+        fs::write(&file, "{}").unwrap();
+        let err = ensure_work_dir_empty(temp.path()).unwrap_err();
+        assert!(err.to_string().contains("is not empty"), "{err}");
+        assert!(file.exists());
+
+        let nested = tempdir().unwrap();
+        fs::create_dir(nested.path().join("fixtures")).unwrap();
+        let err = ensure_work_dir_empty(nested.path()).unwrap_err();
+        assert!(err.to_string().contains("is not empty"), "{err}");
+    }
+
+    #[test]
+    fn ensure_work_dir_empty_accepts_an_empty_dir() {
+        let temp = tempdir().unwrap();
+        ensure_work_dir_empty(temp.path()).unwrap();
+        let fresh = temp.path().join("new-work-dir");
+        fs::create_dir_all(&fresh).unwrap();
+        ensure_work_dir_empty(&fresh).unwrap();
     }
 }
