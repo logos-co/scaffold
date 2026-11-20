@@ -851,7 +851,9 @@ struct TestNodeStartArgs {
     /// RPC port. 0 (the default) picks an unused localhost port.
     #[arg(long, default_value_t = 0)]
     port: u16,
-    /// Runtime directory for this node (default: .scaffold/test-nodes/<id>).
+    /// Runtime directory for this node (default: .scaffold/test-nodes/<id>). Must be
+    /// empty or not exist yet: it is deleted if start fails, and on stop unless
+    /// --preserve-work-dir is passed.
     #[arg(long, value_name = "DIR")]
     work_dir: Option<PathBuf>,
     /// Keep the runtime directory when the node is stopped.
